@@ -19,6 +19,17 @@ pub enum DocumentIssue {
     Recovery,
 }
 
+/// 关闭与退出放行的依据：最新正文至少有一份已经落盘的副本。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum DocumentPersistence {
+    /// 正文已写入笔记文件，且没有未保存的输入。
+    Persisted,
+    /// 最新正文写在恢复稿里（笔记处于冲突、只读、缺失或组合输入等状态）。
+    RecoveryDraft,
+    /// 最新正文只存在于内存，放弃退出或关闭会丢失。
+    Unsaved,
+}
+
 const FULL_READING_MODEL: u64 = u64::MAX;
 const EMPTY_READING_DELTA: u64 = u64::MAX - 1;
 
@@ -218,6 +229,7 @@ pub struct DocumentUpdate {
     pub message: String,
     pub copy_path: Option<String>,
     pub save_micros: u64,
+    pub persistence: DocumentPersistence,
 }
 #[derive(uniffi::Record)]
 pub struct DocumentBlockRange {
@@ -294,6 +306,8 @@ pub(crate) struct State {
     permissions: Option<fs::Permissions>,
     recovery: Recovery,
     pending_recovery: Option<(String, Format)>,
+    /// 恢复稿里保存的是哪个修订号的完整正文；编辑后修订号变化即自动失效。
+    recovery_revision: Option<u64>,
     pending_external: Option<PendingExternal>,
     pub(crate) reading_snapshot: Option<(u64, Model)>,
     pub(crate) image_resolver: hortus_document::media::ImageResolver,
@@ -345,7 +359,27 @@ impl State {
             message: self.message.clone(),
             copy_path: None,
             save_micros: 0,
+            persistence: self.persistence(),
         }
+    }
+    /// 最新正文是否已安全持久化。恢复稿存在时它是用户输入的权威副本；
+    /// 其余情况只有修订号匹配的恢复稿或干净的笔记文件才算已持久化。
+    fn persistence(&self) -> DocumentPersistence {
+        if self.pending_recovery.is_some() && !self.dirty {
+            return DocumentPersistence::RecoveryDraft;
+        }
+        if self.recovery_revision == Some(self.document.revision()) {
+            return DocumentPersistence::RecoveryDraft;
+        }
+        if !self.dirty
+            && !matches!(
+                self.issue,
+                DocumentIssue::Conflict | DocumentIssue::Missing | DocumentIssue::SaveFailed
+            )
+        {
+            return DocumentPersistence::Persisted;
+        }
+        DocumentPersistence::Unsaved
     }
     fn checkpoint(&mut self) -> Result<(), CoreError> {
         // 待恢复的草稿已经写在恢复文件里；活动文档只是磁盘正文，不能再覆盖它。
@@ -355,6 +389,7 @@ impl State {
         if self.dirty || matches!(self.issue, DocumentIssue::Conflict | DocumentIssue::Missing) {
             self.recovery
                 .write_note(&self.document.text()?, &self.format)?;
+            self.recovery_revision = Some(self.document.revision());
         }
         Ok(())
     }
@@ -374,6 +409,7 @@ impl State {
         self.message.clear();
         self.pending_recovery = None;
         self.recovery.clear()?;
+        self.recovery_revision = None;
         Ok(self.update(return_text.then_some(text)))
     }
     fn conflict(&mut self, missing: bool) -> Result<DocumentUpdate, CoreError> {
@@ -391,6 +427,115 @@ impl State {
         .into();
         self.checkpoint()?;
         Ok(self.update(None))
+    }
+    /// 保存状态机本体；`DocumentSession::save` 与关闭前持久化共用，避免两条路径分叉。
+    fn save_body(&mut self, temporary: &Path, choice: SaveChoice) -> DocumentUpdate {
+        let started = Instant::now();
+        let result = (|| {
+            if self.read_only.is_some() || self.pending_recovery.is_some() {
+                return Ok(self.update(None));
+            }
+            if matches!(choice, SaveChoice::Normal)
+                && matches!(self.issue, DocumentIssue::Conflict | DocumentIssue::Missing)
+            {
+                self.checkpoint()?;
+                return Ok(self.update(None));
+            }
+            if !self.dirty && self.issue != DocumentIssue::Missing {
+                return Ok(self.update(None));
+            }
+            // 恢复稿只是主文件保存失败时的降级保障；缓存故障不应阻止可写的笔记先落盘。
+            let _ = self.checkpoint();
+            let _ = note::note_path(&self.root, &self.relative)?;
+            let text = self.document.text()?;
+            let bytes = self.format.encode(&text);
+            let temp = temporary.to_path_buf();
+            if matches!(choice, SaveChoice::ConflictCopy) {
+                let stem = self.path.file_stem().unwrap().to_string_lossy();
+                let ext = self.path.extension().unwrap_or_default().to_string_lossy();
+                for index in 1..=10000 {
+                    let suffix = if index == 1 {
+                        String::new()
+                    } else {
+                        format!(" {index}")
+                    };
+                    let filename = format!("{stem} (conflict copy){suffix}.{ext}");
+                    let path = self.path.with_file_name(filename);
+                    match note::atomic_replace(
+                        &path,
+                        &bytes,
+                        None,
+                        &temp,
+                        &self.root,
+                        self.permissions.clone(),
+                    ) {
+                        Ok(_) => {
+                            let relative = path
+                                .strip_prefix(&self.root)
+                                .unwrap()
+                                .to_string_lossy()
+                                .into_owned();
+                            let disk = note::read(&self.path)?;
+                            let mut update = if let Some(disk) = disk {
+                                self.propose(disk)
+                            } else {
+                                self.dirty = false;
+                                self.issue = DocumentIssue::Missing;
+                                self.recovery.clear()?;
+                                self.recovery_revision = None;
+                                self.update(None)
+                            };
+                            update.copy_path = Some(relative);
+                            return Ok(update);
+                        }
+                        Err(WriteFailure::Changed) => continue,
+                        Err(WriteFailure::Missing) => return self.conflict(true),
+                        Err(WriteFailure::Io(error)) => return Err(error.into()),
+                    }
+                }
+                return Err(CoreError::failure("document.conflict_copy_exhausted"));
+            }
+            let baseline = match choice {
+                SaveChoice::Normal => self.baseline.clone(),
+                SaveChoice::KeepMine => note::read(&self.path)?,
+                SaveChoice::Recreate => None,
+                SaveChoice::ConflictCopy => unreachable!(),
+            };
+            match note::atomic_replace(
+                &self.path,
+                &bytes,
+                baseline.as_ref(),
+                &temp,
+                &self.root,
+                self.permissions.clone(),
+            ) {
+                Ok(version) => {
+                    self.baseline = Some(version);
+                    self.dirty = false;
+                    self.issue = DocumentIssue::None;
+                    self.message.clear();
+                    // 主文件已保存，清理恢复稿失败不足以把保存降级为失败。
+                    let _ = self.recovery.clear();
+                    self.recovery_revision = None;
+                    Ok(self.update(None))
+                }
+                Err(WriteFailure::Changed) => self.conflict(false),
+                Err(WriteFailure::Missing) => self.conflict(true),
+                Err(WriteFailure::Io(error)) => Err(error.into()),
+            }
+        })();
+        let mut update = match result {
+            Ok(update) => update,
+            Err(error) => {
+                self.issue = DocumentIssue::SaveFailed;
+                let _ = error;
+                self.message = "document.save_failed".into();
+                let _ = self.checkpoint();
+                self.update(None)
+            }
+        };
+        update.save_micros = started.elapsed().as_micros() as u64;
+        update
     }
 }
 
@@ -443,6 +588,7 @@ impl WorkspaceCore {
                 permissions: fs::metadata(absolute).ok().map(|m| m.permissions()),
                 recovery,
                 pending_recovery,
+                recovery_revision: None,
                 pending_external: None,
                 reading_snapshot: None,
                 image_resolver: Default::default(),
@@ -624,6 +770,8 @@ impl DocumentSession {
             if let Some((text, format)) = state.pending_recovery.take() {
                 state.format = format;
                 state.document.reset(&text);
+                // 恢复文件里仍是同一份正文，用户不保存直接关闭也不会丢。
+                state.recovery_revision = Some(state.document.revision());
                 state.dirty = true;
                 state.issue = DocumentIssue::None;
                 state.message.clear();
@@ -632,120 +780,32 @@ impl DocumentSession {
         } else {
             state.pending_recovery = None;
             state.recovery.clear()?;
+            state.recovery_revision = None;
         }
         state.issue = DocumentIssue::None;
         state.message.clear();
         Ok(state.update(None))
     }
     pub fn save(&self, temporary: String, choice: SaveChoice) -> Result<DocumentUpdate, CoreError> {
-        let started = Instant::now();
         let mut state = self.state.lock().unwrap();
-        let result = (|| {
-            if state.read_only.is_some() || state.pending_recovery.is_some() {
-                return Ok(state.update(None));
-            }
-            if matches!(choice, SaveChoice::Normal)
-                && matches!(
-                    state.issue,
-                    DocumentIssue::Conflict | DocumentIssue::Missing
-                )
-            {
-                state.checkpoint()?;
-                return Ok(state.update(None));
-            }
-            if !state.dirty && state.issue != DocumentIssue::Missing {
-                return Ok(state.update(None));
-            }
-            // 恢复稿只是主文件保存失败时的降级保障；缓存故障不应阻止可写的笔记先落盘。
-            let _ = state.checkpoint();
-            let _ = note::note_path(&state.root, &state.relative)?;
-            let text = state.document.text()?;
-            let bytes = state.format.encode(&text);
-            let temp = PathBuf::from(temporary);
-            if matches!(choice, SaveChoice::ConflictCopy) {
-                let stem = state.path.file_stem().unwrap().to_string_lossy();
-                let ext = state.path.extension().unwrap_or_default().to_string_lossy();
-                for index in 1..=10000 {
-                    let suffix = if index == 1 {
-                        String::new()
-                    } else {
-                        format!(" {index}")
-                    };
-                    let filename = format!("{stem} (conflict copy){suffix}.{ext}");
-                    let path = state.path.with_file_name(filename);
-                    match note::atomic_replace(
-                        &path,
-                        &bytes,
-                        None,
-                        &temp,
-                        &state.root,
-                        state.permissions.clone(),
-                    ) {
-                        Ok(_) => {
-                            let relative = path
-                                .strip_prefix(&state.root)
-                                .unwrap()
-                                .to_string_lossy()
-                                .into_owned();
-                            let disk = note::read(&state.path)?;
-                            let mut update = if let Some(disk) = disk {
-                                state.propose(disk)
-                            } else {
-                                state.dirty = false;
-                                state.issue = DocumentIssue::Missing;
-                                state.recovery.clear()?;
-                                state.update(None)
-                            };
-                            update.copy_path = Some(relative);
-                            return Ok(update);
-                        }
-                        Err(WriteFailure::Changed) => continue,
-                        Err(WriteFailure::Missing) => return state.conflict(true),
-                        Err(WriteFailure::Io(error)) => return Err(error.into()),
-                    }
-                }
-                return Err(CoreError::failure("document.conflict_copy_exhausted"));
-            }
-            let baseline = match choice {
-                SaveChoice::Normal => state.baseline.clone(),
-                SaveChoice::KeepMine => note::read(&state.path)?,
-                SaveChoice::Recreate => None,
-                SaveChoice::ConflictCopy => unreachable!(),
-            };
-            match note::atomic_replace(
-                &state.path,
-                &bytes,
-                baseline.as_ref(),
-                &temp,
-                &state.root,
-                state.permissions.clone(),
-            ) {
-                Ok(version) => {
-                    state.baseline = Some(version);
-                    state.dirty = false;
-                    state.issue = DocumentIssue::None;
-                    state.message.clear();
-                    // 主文件已保存，清理恢复稿失败不足以把保存降级为失败。
-                    let _ = state.recovery.clear();
-                    Ok(state.update(None))
-                }
-                Err(WriteFailure::Changed) => state.conflict(false),
-                Err(WriteFailure::Missing) => state.conflict(true),
-                Err(WriteFailure::Io(error)) => Err(error.into()),
-            }
-        })();
-        let mut update = match result {
-            Ok(update) => update,
-            Err(error) => {
-                state.issue = DocumentIssue::SaveFailed;
-                let _ = error;
-                state.message = "document.save_failed".into();
-                let _ = state.checkpoint();
-                state.update(None)
-            }
-        };
-        update.save_micros = started.elapsed().as_micros() as u64;
-        Ok(update)
+        Ok(state.save_body(Path::new(&temporary), choice))
+    }
+    /// 关闭、退出前调用：组合输入只写恢复稿，其余情况先写恢复稿再尝试保存笔记。
+    /// 返回的 `persistence` 说明最新正文是否至少有一份已落盘。
+    pub fn prepare_close(&self, temporary: String, write_note: bool) -> DocumentUpdate {
+        let mut state = self.state.lock().unwrap();
+        if write_note {
+            return state.save_body(Path::new(&temporary), SaveChoice::Normal);
+        }
+        if state.checkpoint().is_err() {
+            state.issue = DocumentIssue::SaveFailed;
+            state.message = "document.save_failed".into();
+        }
+        state.update(None)
+    }
+    /// 最新正文是否已安全持久化（笔记文件或恢复稿）。
+    pub fn persistence(&self) -> DocumentPersistence {
+        self.state.lock().unwrap().persistence()
     }
 }
 
@@ -1044,5 +1104,105 @@ mod tests {
             DocumentIssue::None
         );
         assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn persistence_tracks_note_saves_and_recovery_drafts() {
+        let f = Fixture::new();
+        let path = f.root.join("note.md");
+        fs::write(&path, "原文\n").unwrap();
+        let s = f.open("note.md");
+        assert_eq!(s.persistence(), DocumentPersistence::Persisted);
+
+        // 只在内存里的编辑还没有任何落盘副本。
+        s.replace(0, 0, "草稿".into()).unwrap();
+        assert_eq!(s.persistence(), DocumentPersistence::Unsaved);
+        s.checkpoint().unwrap();
+        assert_eq!(s.persistence(), DocumentPersistence::RecoveryDraft);
+
+        // 笔记写入成功后恢复稿被清理，状态回到已保存。
+        assert_eq!(f.save(&s, SaveChoice::Normal).issue, DocumentIssue::None);
+        assert_eq!(s.persistence(), DocumentPersistence::Persisted);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "草稿原文\n");
+
+        // 冲突时最新正文由恢复稿承载，关闭标签或退出仍然安全。
+        s.replace(0, 0, "冲突".into()).unwrap();
+        fs::write(&path, "外部\n").unwrap();
+        let update = f.save(&s, SaveChoice::Normal);
+        assert_eq!(update.issue, DocumentIssue::Conflict);
+        assert_eq!(update.persistence, DocumentPersistence::RecoveryDraft);
+        assert_eq!(
+            f.open("note.md").persistence(),
+            DocumentPersistence::RecoveryDraft
+        );
+    }
+
+    #[test]
+    fn persistence_reports_unsaved_when_note_and_recovery_both_fail() {
+        let f = Fixture::new();
+        let path = f.root.join("note.md");
+        fs::write(&path, "原文\n").unwrap();
+        let s = f.open("note.md");
+        s.replace(0, 0, "草稿".into()).unwrap();
+        let recovery = f._directory.path().join("cache").join("recovery");
+        fs::create_dir_all(&recovery).unwrap();
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        fs::set_permissions(&f.root, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let update = f.save(&s, SaveChoice::Normal);
+        assert_eq!(update.issue, DocumentIssue::SaveFailed);
+        assert!(update.dirty);
+        assert_eq!(update.persistence, DocumentPersistence::Unsaved);
+        assert_eq!(s.persistence(), DocumentPersistence::Unsaved);
+
+        // 组合输入期间不写笔记，只把镜像正文写进恢复稿。
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o755)).unwrap();
+        let update = s.prepare_close(String::new(), false);
+        assert_eq!(update.persistence, DocumentPersistence::RecoveryDraft);
+        assert!(update.text.is_none());
+
+        fs::set_permissions(&f.root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn pending_recovery_is_persisted_until_edited_again() {
+        let f = Fixture::new();
+        let path = f.root.join("note.md");
+        fs::write(&path, "磁盘原文\n").unwrap();
+        let s = f.open("note.md");
+        s.replace(0, 0, "未存草稿".into()).unwrap();
+        s.checkpoint().unwrap();
+        let reopened = f.open("note.md");
+        assert_eq!(
+            reopened.initial().unwrap().persistence,
+            DocumentPersistence::RecoveryDraft
+        );
+        assert_eq!(reopened.persistence(), DocumentPersistence::RecoveryDraft);
+
+        // 恢复稿归用户所有：在它之上继续编辑后，恢复文件不再包含最新正文。
+        reopened.replace(0, 0, "新输入".into()).unwrap();
+        assert_eq!(reopened.persistence(), DocumentPersistence::Unsaved);
+    }
+
+    #[test]
+    fn restored_draft_stays_persisted_until_next_edit_or_save() {
+        let f = Fixture::new();
+        let path = f.root.join("note.md");
+        fs::write(&path, "磁盘原文\n").unwrap();
+        let s = f.open("note.md");
+        s.replace(0, 0, "未存草稿".into()).unwrap();
+        s.checkpoint().unwrap();
+        let reopened = f.open("note.md");
+        reopened.recover(true).unwrap();
+        // 恢复文件里仍是同一份正文，尚未保存也不算未持久化。
+        assert_eq!(reopened.persistence(), DocumentPersistence::RecoveryDraft);
+        assert_eq!(
+            f.save(&reopened, SaveChoice::Normal).issue,
+            DocumentIssue::None
+        );
+        assert_eq!(reopened.persistence(), DocumentPersistence::Persisted);
+        assert!(!reopened.initial().unwrap().dirty);
     }
 }

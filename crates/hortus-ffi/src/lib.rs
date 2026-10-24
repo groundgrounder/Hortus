@@ -217,11 +217,50 @@ impl WorkspaceCore {
     ) -> Result<(), CoreError> {
         let store = self.store.lock().unwrap();
         store.validate_vault(std::path::Path::new(&path))?;
+        // 只改标签与选择时保留已存的视图模式，避免覆盖成空表。
+        let views = store
+            .session()?
+            .recent
+            .into_iter()
+            .find(|state| state.path == path)
+            .map(|state| state.views)
+            .unwrap_or_default();
         store.remember(VaultState {
             path,
             tabs,
             selected,
-            views: Default::default(),
+            views,
+        })?;
+        Ok(())
+    }
+
+    /// 标签、选择与视图模式一次完整写入；常规会话保存和退出共用这个入口。
+    pub fn remember_session(
+        &self,
+        path: String,
+        tabs: Vec<String>,
+        selected: Option<String>,
+        views: std::collections::HashMap<String, String>,
+    ) -> Result<(), CoreError> {
+        let store = self.store.lock().unwrap();
+        store.validate_vault(std::path::Path::new(&path))?;
+        store.remember(VaultState {
+            path,
+            tabs,
+            selected,
+            views: views
+                .into_iter()
+                .map(|(note, mode)| {
+                    (
+                        note,
+                        if mode == "editing" {
+                            hortus_config::ViewMode::Editing
+                        } else {
+                            hortus_config::ViewMode::Reading
+                        },
+                    )
+                })
+                .collect(),
         })?;
         Ok(())
     }

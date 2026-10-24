@@ -89,3 +89,40 @@ fn migration_child() {
         assert_eq!(document.snapshot().unwrap().text, "Draft Original\n");
     }
 }
+
+#[test]
+fn complete_session_snapshot_keeps_views_across_exit_and_restart() {
+    let temporary = tempfile::tempdir().unwrap();
+    let vault = temporary.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    let root = vault.to_string_lossy().into_owned();
+    let core = WorkspaceCore::in_directories(
+        temporary.path().join("config").to_string_lossy().into(),
+        temporary.path().join("cache").to_string_lossy().into(),
+    )
+    .unwrap();
+    let views = std::collections::HashMap::from([
+        ("a.md".to_string(), "editing".to_string()),
+        ("b.md".to_string(), "reading".to_string()),
+    ]);
+    core.remember_session(
+        root.clone(),
+        vec!["a.md".into(), "b.md".into()],
+        Some("b.md".into()),
+        views,
+    )
+    .unwrap();
+
+    // 退出时使用同一入口，重启读取到的视图模式保持不变。
+    let session: serde_json::Value = serde_json::from_str(&core.session_json().unwrap()).unwrap();
+    assert_eq!(session["recent"][0]["views"]["a.md"], "editing");
+    assert_eq!(session["recent"][0]["views"]["b.md"], "reading");
+    assert_eq!(session["last_vault"], root);
+
+    // 只更新标签与选择的旧入口也不再清空已存视图模式。
+    core.remember(root.clone(), vec!["b.md".into()], Some("b.md".into()))
+        .unwrap();
+    let session: serde_json::Value = serde_json::from_str(&core.session_json().unwrap()).unwrap();
+    assert_eq!(session["recent"][0]["views"]["a.md"], "editing");
+    assert_eq!(session["recent"][0]["tabs"], serde_json::json!(["b.md"]));
+}
