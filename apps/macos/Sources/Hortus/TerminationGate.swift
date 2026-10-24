@@ -19,7 +19,8 @@ final class TerminationGate {
     private var reply: ((Outcome) -> Void)?
     private var cleanup: ((@escaping @Sendable () -> Void) -> Void)?
     private var documentTitles: [String] = []
-    private var finished = false
+    /// 退出被拦截后可以再次尝试；上一轮迟到的回调按代次丢弃。
+    private var generation = 0
 
     /// `documents` 回调尚未持久化的笔记路径（空数组表示全部安全）；只有全部安全才会执行 `cleanup`。
     func begin(documentTitles: [String],
@@ -27,45 +28,46 @@ final class TerminationGate {
                cleanup: @escaping (@escaping @Sendable () -> Void) -> Void,
                reply: @escaping (Outcome) -> Void) {
         guard self.reply == nil else { return }
+        generation += 1
+        let current = generation
         self.reply = reply
         self.cleanup = cleanup
         self.documentTitles = documentTitles
         let timer = Timer(timeInterval: documentTimeout, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.finish(.blocked(unsaved: self?.documentTitles ?? [])) }
+            MainActor.assumeIsolated { self?.finish(.blocked(unsaved: self?.documentTitles ?? []), current) }
         }
         documentTimer = timer
         RunLoop.main.add(timer, forMode: .common)
         documents { [weak self] unsaved in
             RunLoop.main.perform(inModes: [.common]) {
-                MainActor.assumeIsolated { self?.documentsFinished(unsaved) }
+                MainActor.assumeIsolated { self?.documentsFinished(unsaved, current) }
             }
         }
     }
 
-    private func documentsFinished(_ unsaved: [String]) {
-        guard !finished, reply != nil else { return }
+    private func documentsFinished(_ unsaved: [String], _ current: Int) {
+        guard current == generation, reply != nil, cleanupTimer == nil else { return }
         guard unsaved.isEmpty else {
-            finish(.blocked(unsaved: unsaved))
+            finish(.blocked(unsaved: unsaved), current)
             return
         }
         documentTimer?.invalidate()
         documentTimer = nil
         // 文档已安全落盘，才开始终端、监听与会话的不可逆清理。
         let timer = Timer(timeInterval: shortTimeout, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.finish(.allowed) }
+            MainActor.assumeIsolated { self?.finish(.allowed, current) }
         }
         cleanupTimer = timer
         RunLoop.main.add(timer, forMode: .common)
         cleanup? { [weak self] in
             RunLoop.main.perform(inModes: [.common]) {
-                MainActor.assumeIsolated { self?.finish(.allowed) }
+                MainActor.assumeIsolated { self?.finish(.allowed, current) }
             }
         }
     }
 
-    private func finish(_ outcome: Outcome) {
-        guard !finished, let reply else { return }
-        finished = true
+    private func finish(_ outcome: Outcome, _ current: Int) {
+        guard current == generation, let reply else { return }
         self.reply = nil
         cleanup = nil
         documentTimer?.invalidate(); documentTimer = nil

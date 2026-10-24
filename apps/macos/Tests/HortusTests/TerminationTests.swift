@@ -44,6 +44,34 @@ struct TerminationTests {
         #expect(!cleaned)
     }
 
+    @Test func retryAfterBlockedExitCanStillQuit() async throws {
+        let gate = TerminationGate()
+        gate.shortTimeout = 1
+        gate.documentTimeout = 0.05
+        var first: TerminationGate.Outcome?
+        var late: (@Sendable ([String]) -> Void)?
+        gate.begin(documentTitles: ["a.md"], documents: { done in late = done }, cleanup: { done in done() }) {
+            first = $0
+        }
+        for _ in 0..<200 where first == nil { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(first == .blocked(unsaved: ["a.md"]))
+
+        // 用户选择重试：新一轮必须能放行，上一轮迟到的完成回调不能串到新一轮。
+        gate.documentTimeout = 1
+        var second: TerminationGate.Outcome?
+        var cleaned = false
+        gate.begin(documentTitles: ["a.md"], documents: { done in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { done([]) }
+        }, cleanup: { done in
+            cleaned = true
+            done()
+        }) { second = $0 }
+        late?(["a.md"])
+        for _ in 0..<200 where second == nil { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(second == .allowed)
+        #expect(cleaned)
+    }
+
     @Test func unsavedDocumentsBlockExitWithoutCleanup() async throws {
         let gate = TerminationGate()
         gate.shortTimeout = 1

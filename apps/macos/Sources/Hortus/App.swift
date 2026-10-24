@@ -188,10 +188,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let workspace else { return .terminateNow }
-        if allowTermination { return .terminateNow }
+        // 用户已放弃未保存的正文时跳过文档阶段，但终端、监听与会话仍照常清理。
+        let abandoned = allowTermination
         termination.begin(
             documentTitles: workspace.tabs.map(\.path),
-            documents: { completion in workspace.prepareShutdown(completion: completion) },
+            documents: { completion in
+                if abandoned { completion([]) } else { workspace.prepareShutdown(completion: completion) }
+            },
             cleanup: { completion in workspace.beginShutdownCleanup(completion: completion) }
         ) { [weak self] outcome in
             switch outcome {
@@ -214,8 +217,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
         case .discard:
             // 用户明确放弃：清理这些文档的恢复稿，然后不再拦截后续 terminate。
-            workspace.abandonDocuments(unsaved) { NSApp.terminate(nil) }
             allowTermination = true
+            workspace.abandonDocuments(unsaved) { NSApp.terminate(nil) }
         case .cancel:
             break
         }
