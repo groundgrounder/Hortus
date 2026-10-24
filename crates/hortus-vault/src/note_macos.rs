@@ -167,7 +167,15 @@ pub(super) fn copy_metadata(source: &File, staged: &File) -> io::Result<()> {
     let staged_metadata = staged.metadata()?;
     if (metadata.uid(), metadata.gid()) != (staged_metadata.uid(), staged_metadata.gid()) {
         // 所有者和组也影响权限语义；无法保留时让保存失败，避免悄悄改变文件归属。
-        checked(unsafe { fchown(staged.as_raw_fd(), metadata.uid(), metadata.gid()) })?;
+        let result = checked(unsafe { fchown(staged.as_raw_fd(), metadata.uid(), metadata.gid()) });
+        // 例外：/Users/Shared 等目录里的文件继承目录的属组（如 wheel），普通用户无法把它设回去。
+        // 文件归自己、只有属组不同，且组权限与其他人权限相同时，换组不改变任何人的访问能力。
+        let group_irrelevant = metadata.uid() == staged_metadata.uid()
+            && (metadata.mode() >> 3) & 0o7 == metadata.mode() & 0o7;
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && group_irrelevant => {}
+            other => other?,
+        }
     }
     staged.set_permissions(metadata.permissions())?;
     let attrs = AttrList {

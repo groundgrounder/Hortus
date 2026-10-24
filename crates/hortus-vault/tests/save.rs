@@ -208,6 +208,52 @@ fn replacement_preserves_birthtime_all_xattrs_acl_and_mode() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn inherited_group_that_cannot_be_restored_only_blocks_saves_when_it_matters() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // /private/tmp 与 /Users/Shared 一样是 root:wheel 的粘滞目录，新文件继承 wheel 组。
+    let shared = tempfile::tempdir_in("/private/tmp").unwrap();
+    let staging = tempdir().unwrap();
+    let vault = shared.path().join("vault");
+    let temporary = staging.path().join("replacement");
+    fs::create_dir(&vault).unwrap();
+    fs::create_dir(&temporary).unwrap();
+    let path = vault.join("note.md");
+    fs::write(&path, "old").unwrap();
+    let gid = fs::metadata(&path).unwrap().gid();
+    if gid == fs::metadata(&temporary).unwrap().gid()
+        || std::process::Command::new("id")
+            .args(["-G"])
+            .output()
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .any(|g| g == gid.to_string())
+            })
+    {
+        eprintln!("跳过：当前用户属于组 {gid}，或暂存目录与笔记同组，无法复现换组失败");
+        return;
+    }
+    // 组与其他人权限相同：属组无法保留也不改变任何人的访问能力，保存成功。
+    let baseline = read(&path).unwrap().unwrap();
+    atomic_replace(&path, b"new", Some(&baseline), &temporary, &vault, None).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"new");
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o644);
+    assert_eq!(fs::read_dir(&temporary).unwrap().count(), 0);
+
+    // 组权限与其他人不同：换组会改变访问能力，仍然拒绝保存并保留原文件。
+    let path = vault.join("group.md");
+    fs::write(&path, "old").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+    let baseline = read(&path).unwrap().unwrap();
+    let result = atomic_replace(&path, b"new", Some(&baseline), &temporary, &vault, None);
+    assert!(matches!(result, Err(WriteFailure::Io(_))));
+    assert_eq!(fs::read(&path).unwrap(), b"old");
+    assert_eq!(fs::metadata(&path).unwrap().gid(), gid);
+    assert_eq!(fs::read_dir(&temporary).unwrap().count(), 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn readonly_acl_is_detected_even_when_mode_bits_allow_writing() {
     let base = tempdir().unwrap();
     let path = base.path().join("note.md");
