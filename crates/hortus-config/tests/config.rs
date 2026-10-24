@@ -120,6 +120,14 @@ fn directory_overrides_and_defaults_do_not_require_process_environment_mutation(
     }
     assert!(Directories::from_lookup(|_| None).is_err());
     assert!(Directories::from_lookup(|_| Some("relative".into())).is_err());
+    // launchctl setenv 留下的空覆盖值视同未设置，回退到默认目录。
+    let empty = Directories::from_lookup(|key| match key {
+        "HOME" => Some(root.path().to_owned()),
+        _ => Some(std::path::PathBuf::new()),
+    })
+    .unwrap();
+    assert_eq!(empty.config, defaults.config);
+    assert_eq!(empty.cache, defaults.cache);
 }
 
 #[test]
@@ -150,6 +158,12 @@ fn environment_child() {
         return;
     }
     let dirs = Directories::from_env().unwrap();
+    if std::env::var_os("HORTUS_TEST_EXPECT_DEFAULTS").is_some() {
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(dirs.config, home.join(".config/hortus"));
+        Store::open(dirs).unwrap();
+        return;
+    }
     assert_eq!(
         dirs.config,
         std::path::PathBuf::from(std::env::var_os("HORTUS_CONFIG_DIR").unwrap())
@@ -172,6 +186,49 @@ fn isolated_environment(root: &TempDir) -> Command {
         .env_remove(LEGACY_CONFIG_ENV)
         .env_remove(LEGACY_CACHE_ENV);
     command
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_or_empty_home_environment_does_not_prevent_startup() {
+    for home in [None, Some("")] {
+        let root = TempDir::new().unwrap();
+        let mut command = isolated_environment(&root);
+        command.env_remove("HOME");
+        if let Some(home) = home {
+            command.env("HOME", home);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(root.path().join("config/config.toml").exists());
+        assert!(root.path().join("cache").is_dir());
+        assert!(!root.path().join("home").exists());
+    }
+}
+
+#[test]
+fn empty_override_environment_falls_back_to_default_directories() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("home");
+    let output = isolated_environment(&root)
+        .env("HOME", &home)
+        .env("HORTUS_CONFIG_DIR", "")
+        .env("HORTUS_CACHE_DIR", "")
+        .env_remove("XDG_CACHE_HOME")
+        .env("HORTUS_TEST_EXPECT_DEFAULTS", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(home.join(".config/hortus/config.toml").exists());
+    assert!(!root.path().join("config").exists());
 }
 
 #[test]

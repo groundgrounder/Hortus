@@ -15,11 +15,20 @@ pub struct Directories {
 
 impl Directories {
     pub fn from_env() -> io::Result<Self> {
-        Self::from_lookup(|key| std::env::var_os(key).map(PathBuf::from))
+        Self::from_lookup(|key| {
+            if key == "HOME" {
+                // 图形界面启动可能没有 HOME；由标准库回退到系统账户的主目录。
+                std::env::home_dir()
+            } else {
+                std::env::var_os(key).map(PathBuf::from)
+            }
+        })
     }
 
     /// 注入环境查询，测试无需修改进程级环境变量。
-    pub fn from_lookup(get: impl Fn(&str) -> Option<PathBuf>) -> io::Result<Self> {
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<PathBuf>) -> io::Result<Self> {
+        // 空值视同未设置：launchctl setenv 留下的空字符串不能变成相对路径而阻止启动。
+        let get = |key: &str| lookup(key).filter(|path| !path.as_os_str().is_empty());
         let home = get("HOME").ok_or_else(|| io::Error::other("config.home_missing"))?;
         let config_override = get("HORTUS_CONFIG_DIR");
         let cache_override = get("HORTUS_CACHE_DIR");
