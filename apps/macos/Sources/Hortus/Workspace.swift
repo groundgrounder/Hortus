@@ -26,6 +26,27 @@ struct NoteTab: Identifiable {
     var title: String { URL(fileURLWithPath: path).lastPathComponent }
 }
 
+/// 未持久化文档的原生提示决策；测试注入回调代替真实弹窗。
+enum UnsavedDecision {
+    case retry
+    case discard
+    case cancel
+}
+
+/// 多份文档的关闭结果只在主线程使用；批量准备时由队列写入。
+private final class UnsavedNotes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paths: [String] = []
+    func append(_ path: String) {
+        lock.lock(); defer { lock.unlock() }
+        paths.append(path)
+    }
+    var values: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return paths
+    }
+}
+
 /// 每个库只有一个阻塞消费者；关闭后等待它真正退出，避免切库积累线程。
 private final class VaultSubscription: Sendable {
     let handle: VaultHandle
@@ -58,6 +79,8 @@ private final class VaultSubscription: Sendable {
 final class Workspace {
     @ObservationIgnored let diagrams = DiagramService()
     @ObservationIgnored var shutdownDelayForInspection = 0.0
+    /// 测试注入的未保存提示；生产环境使用原生 NSAlert。
+    @ObservationIgnored var promptUnsaved: (([String], Bool) -> UnsavedDecision)?
     @ObservationIgnored var noteOpenStartedAt = 0.0
     @ObservationIgnored var noteOpenPhases: [String: Double] = [:]
     var diagramCore: WorkspaceCore? { core }
@@ -151,6 +174,8 @@ final class Workspace {
 
     func openFolder(_ path: String) async {
         guard let core else { return }
+        // 切换知识库前先把当前库的文档持久化；任一失败就保持当前界面。
+        if root != nil, await prepareDocumentsForClose() == .cancelled { return }
         let request = UUID()
         openingRequest = request
         opening = true
@@ -165,9 +190,10 @@ final class Workspace {
             let handle = try await Task.detached { try core.openVault(path: path) }.value
             guard openingRequest == request else { await Task.detached { handle.close() }.value; return }
             await persistSession()
-            await saveAllDocuments(closing: true)
             guard openingRequest == request else { await Task.detached { handle.close() }.value; return }
             epoch = request
+            // 旧文档已经确认持久化；进入新库后不再接收它们的自动保存。
+            for tab in tabs { tab.document?.stopForShutdown() }
             await terminal.setRootAndWait(nil)
             // 切换状态期间不挂起主线程任务，避免后来的打开请求留下已关闭的旧库。
             if let old = subscription { Task.detached { old.close() } }
@@ -218,7 +244,9 @@ final class Workspace {
     }
 
     func closeFolder() async {
-        await saveAllDocuments(closing: true)
+        // 任一文档没有持久化就中止关闭，界面保持原状。
+        guard await prepareDocumentsForClose() == .ready else { return }
+        for tab in tabs { tab.document?.stopForShutdown() }
         await terminal.setRootAndWait(nil)
         let request = UUID()
         openingRequest = request
@@ -485,12 +513,78 @@ final class Workspace {
 
     func closeTab(_ path: String? = nil) {
         guard let target = path ?? selected, let index = tabs.firstIndex(where: { $0.path == target }) else { return }
-        if let document = tabs[index].document {
-            Task { [weak self] in
-                await document.prepareToClose()
-                self?.removeTab(target)
+        guard let document = tabs[index].document else { removeTab(target); return }
+        closeTabWhenPersisted(target, document, epoch: epoch)
+    }
+
+    /// 只有最新正文至少落盘一处后才移除标签；失败时保留标签和可编辑状态。
+    private func closeTabWhenPersisted(_ target: String, _ document: NoteDocument, epoch: UUID) {
+        Task { [weak self] in
+            let persistence = await document.prepareToClose()
+            guard let self, self.epoch == epoch,
+                  let index = self.tabs.firstIndex(where: { $0.path == target && $0.document === document })
+            else { return }
+            if persistence != .unsaved {
+                self.tabs[index].document?.stopForShutdown()
+                self.removeTab(target)
+                return
             }
-        } else { removeTab(target) }
+            switch self.decideUnsaved([target], quitting: false) {
+            case .retry: self.closeTabWhenPersisted(target, document, epoch: epoch)
+            case .discard: document.abandon(); self.removeTab(target)
+            case .cancel: break
+            }
+        }
+    }
+
+    /// 批量准备关闭或切换知识库；全部文档都持久化后才返回 `.ready`。
+    private enum DocumentsCloseResult: Equatable { case ready, cancelled }
+    private func prepareDocumentsForClose() async -> DocumentsCloseResult {
+        let requestEpoch = epoch
+        while true {
+            var unsaved: [(String, NoteDocument)] = []
+            for tab in tabs {
+                guard let document = tab.document else { continue }
+                let persistence = await document.prepareToClose()
+                guard self.epoch == requestEpoch,
+                      tabs.contains(where: { $0.path == tab.path && $0.document === document })
+                else { return .cancelled }
+                if persistence == .unsaved { unsaved.append((tab.path, document)) }
+            }
+            if unsaved.isEmpty { return .ready }
+            switch decideUnsaved(unsaved.map(\.0), quitting: false) {
+            case .retry: continue
+            case .discard:
+                for (_, document) in unsaved { document.abandon() }
+                return .ready
+            case .cancel: return .cancelled
+            }
+        }
+    }
+
+    /// 未保存文档的原生提示。测试通过 promptUnsaved 注入决策，避免弹窗阻塞。
+    func decideUnsaved(_ notes: [String], quitting: Bool) -> UnsavedDecision {
+        if let promptUnsaved { return promptUnsaved(notes, quitting) }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.string("Some notes could not be saved")
+        alert.informativeText = L10n.string("These notes could not be written to the note file or to a recovery draft. Retry after fixing the problem, or discard their changes.")
+            + "\n\n" + Self.noteList(notes)
+        alert.addButton(withTitle: L10n.string("Retry Save"))
+        alert.addButton(withTitle: L10n.string(quitting ? "Discard Changes and Quit" : "Discard Changes and Close"))
+        alert.buttons[1].hasDestructiveAction = true
+        alert.addButton(withTitle: L10n.string("Cancel"))
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .retry
+        case .alertSecondButtonReturn: return .discard
+        default: return .cancel
+        }
+    }
+    private static func noteList(_ notes: [String]) -> String {
+        let limit = 5
+        var lines = notes.prefix(limit).map { "• \($0)" }
+        if notes.count > limit { lines.append(L10n.string("…and %@ more", notes.count - limit)) }
+        return lines.joined(separator: "\n")
     }
 
     private func removeTab(_ target: String) {
@@ -517,11 +611,8 @@ final class Workspace {
         document.reading.toggle(); scheduleSessionSave()
     }
     func saveCurrent() { if let document = current?.document { Task { await document.saveNow() } } }
-    func saveAllDocuments(closing: Bool = false) async {
-        let documents = tabs.compactMap(\.document)
-        for document in documents {
-            if closing { await document.prepareToClose() } else { await document.saveNow() }
-        }
+    func saveAllDocuments() async {
+        for document in tabs.compactMap(\.document) { await document.saveNow() }
     }
 
     func rememberDiagram(note: String, block: UInt32, collapsed: [String]) {
@@ -557,15 +648,20 @@ final class Workspace {
         guard let core, let root else { return }
         let paths = tabs.map(\.path)
         let selection = selected
+        let views = sessionViews()
         do {
-            let views = Dictionary(uniqueKeysWithValues: tabs.compactMap { tab in tab.document.map { (tab.path, $0.reading ? "reading" : "editing") } })
             let json = try await save {
-                try core.remember(path: root, tabs: paths, selected: selection)
-                try core.rememberViews(vault: root, views: views)
+                try core.rememberSession(path: root, tabs: paths, selected: selection, views: views)
                 return try core.sessionJson()
             }
             recent = try JSONDecoder().decode(SessionState.self, from: Data(json.utf8)).recent
         } catch { self.error = L10n.error(error) }
+    }
+
+    private func sessionViews() -> [String: String] {
+        Dictionary(uniqueKeysWithValues: tabs.compactMap { tab in
+            tab.document.map { (tab.path, $0.reading ? "reading" : "editing") }
+        })
     }
 
     /// 同一队列串行写入，退出保存也排在所有已提交的后台保存之后。
@@ -575,8 +671,42 @@ final class Workspace {
         }
     }
 
-    /// 退出前等待保存与关闭完成；文件 I/O 和线程回收都在后台执行。
-    func shutdown(completion: @escaping @Sendable () -> Void) {
+    /// 退出第一阶段：等待所有文档把最新正文写到笔记或恢复稿。
+    /// 只报告未持久化的路径，不停止文档；取消退出后界面仍可继续工作。
+    func prepareShutdown(completion: @escaping @Sendable ([String]) -> Void) {
+        let documents = tabs.compactMap { tab in tab.document.map { (path: tab.path, io: $0.io, noteWrite: !$0.marked) } }
+        guard !documents.isEmpty else { completion([]); return }
+        Self.settleDocuments(documents, completion: completion)
+    }
+
+    /// 在非 MainActor 上下文收集结果：块本身带隔离信息时，进入保存队列就会触发运行时检查。
+    nonisolated private static func settleDocuments(
+        _ documents: [(path: String, io: DocumentIO, noteWrite: Bool)],
+        completion: @escaping @Sendable ([String]) -> Void
+    ) {
+        let unsaved = UnsavedNotes()
+        let group = DispatchGroup()
+        for document in documents {
+            group.enter()
+            document.io.queue.async {
+                if document.io.prepareForCloseOnQueue(noteWrite: document.noteWrite).persistence == .unsaved {
+                    unsaved.append(document.path)
+                }
+                group.leave()
+            }
+        }
+        // terminateLater 的嵌套循环不调度 MainActor 任务；RunLoop 源仍会执行。
+        group.notify(queue: .global(qos: .userInitiated)) {
+            let paths = unsaved.values
+            RunLoop.main.perform(inModes: [.common]) {
+                MainActor.assumeIsolated { completion(paths) }
+            }
+        }
+    }
+
+    /// 退出第二阶段：文档已确认持久化后才做不可逆清理。
+    /// 布局与会话用与常规保存相同的完整入口一次写入。
+    func beginShutdownCleanup(completion: @escaping @Sendable () -> Void) {
         openingRequest = UUID()
         epoch = UUID()
         layoutTask?.cancel(); sessionTask?.cancel()
@@ -585,33 +715,54 @@ final class Workspace {
         let root = root
         let paths = tabs.map(\.path)
         let selection = selected
+        let views = sessionViews()
         let old = subscription
         subscription = nil
         let delay = shutdownDelayForInspection
+        for document in tabs.compactMap(\.document) { document.stopForShutdown() }
         let group = DispatchGroup()
         group.enter()
         terminal.stopForShutdown { group.leave() }
-        for document in tabs.compactMap(\.document) {
-            let io = document.io, marked = document.marked
-            document.stopForShutdown()
-            group.enter()
-            // terminateLater 的嵌套循环不调度 MainActor 任务，必须立即提交后台工作。
-            io.queue.async {
-                defer { group.leave() }
-                do { try io.session.checkpoint() }
-                catch { fputs("Hortus recovery draft write failed: \(error)\n", stderr) }
-                if !marked { _ = io.saveOnQueue() }
-            }
-        }
-        let finish: @Sendable () -> Void = {
+        Self.finishShutdown(group: group, queue: saves, core: core, state: state, root: root,
+                            paths: paths, selection: selection, views: views, old: old,
+                            delay: delay, completion: completion)
+    }
+
+    nonisolated private static func finishShutdown(
+        group: DispatchGroup, queue: DispatchQueue, core: WorkspaceCore?, state: LayoutState?,
+        root: String?, paths: [String], selection: String?, views: [String: String],
+        old: VaultSubscription?, delay: TimeInterval,
+        completion: @escaping @Sendable () -> Void
+    ) {
+        queue.async {
+            group.wait()
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
             do {
                 if let core, let state { try core.saveLayout(json: String(decoding: JSONEncoder().encode(state), as: UTF8.self)) }
-                if let core, let root { try core.remember(path: root, tabs: paths, selected: selection) }
+                if let core, let root { try core.rememberSession(path: root, tabs: paths, selected: selection, views: views) }
             } catch { fputs("Hortus session save failed: \(error)\n", stderr) }
-            old?.close(); completion()
+            old?.close()
+            RunLoop.main.perform(inModes: [.common]) {
+                MainActor.assumeIsolated { completion() }
+            }
         }
-        group.notify(queue: saves, execute: finish)
+    }
+
+    /// 用户明确放弃退出：清理这些文档的恢复稿后再让进程结束。
+    func abandonDocuments(_ paths: [String], completion: @escaping @MainActor @Sendable () -> Void) {
+        let documents = tabs.filter { paths.contains($0.path) }.compactMap(\.document)
+        guard !documents.isEmpty else { completion(); return }
+        let group = DispatchGroup()
+        for document in documents {
+            document.stopForShutdown()
+            let session = document.io.session
+            group.enter()
+            document.io.queue.async {
+                _ = try? session.recover(restore: false)
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { MainActor.assumeIsolated { completion() } }
     }
 
     func treeDidDraw() {

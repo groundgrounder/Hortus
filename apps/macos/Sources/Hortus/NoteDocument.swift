@@ -31,6 +31,23 @@ final class DocumentIO: Sendable {
             return try session.save(temporary: directory.path, choice: choice)
         } catch { return session.failedSave(message: String(describing: error)) }
     }
+    /// 关闭与退出共用：先写恢复稿，允许时再保存笔记；返回最新正文的持久化状态。
+    func prepareForCloseOnQueue(noteWrite: Bool) -> DocumentUpdate {
+        guard noteWrite else { return session.prepareClose(temporary: "", writeNote: false) }
+        do {
+            let directory = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                                        appropriateFor: url, create: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            return session.prepareClose(temporary: directory.path, writeNote: true)
+        } catch { return session.failedSave(message: String(describing: error)) }
+    }
+    func prepareForClose(noteWrite: Bool) async -> DocumentUpdate {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                continuation.resume(returning: self.prepareForCloseOnQueue(noteWrite: noteWrite))
+            }
+        }
+    }
     func edit(range: NSRange, replacement: String, failed: @escaping @Sendable (String) -> Void) {
         queue.async {
             do { _ = try self.session.replace(start: UInt64(range.location), length: UInt64(range.length), replacement: replacement) }
@@ -51,6 +68,8 @@ final class NoteDocument {
     @ObservationIgnored var outlineDisplayedAt = 0.0
     @ObservationIgnored var outlineMilliseconds = 0.0
     var dirty: Bool
+    /// 最新正文是否已安全落盘（笔记文件或恢复稿）。
+    var persistence: DocumentPersistence
     var readOnlyReason: String?
     var issue: DocumentIssue
     var message: String
@@ -75,7 +94,7 @@ final class NoteDocument {
 
     init(io: DocumentIO, initial: DocumentUpdate) {
         self.io = io; text = initial.text ?? ""; revision = initial.revision
-        dirty = initial.dirty; readOnlyReason = initial.readOnlyReason
+        dirty = initial.dirty; persistence = initial.persistence; readOnlyReason = initial.readOnlyReason
         issue = initial.issue; message = initial.message
         scheduleOutline(delay: .zero)
     }
@@ -168,16 +187,24 @@ final class NoteDocument {
         do { try await io.perform { try $0.checkpoint() } }
         catch { message = "document.save_failed"; issue = .saveFailed }
     }
-    func prepareToClose() async {
-        closed = true; autoSave?.cancel(); outlineTask?.cancel()
-        onClosing?()
-        // 组合文本同样留在恢复稿中，但未提交的组合不写进用户笔记。
-        await checkpoint()
-        await saveNow()
+    /// 关闭与退出前的持久化。不先置为 closed：返回 `.unsaved` 时文档必须继续自动保存、可编辑。
+    func prepareToClose() async -> DocumentPersistence {
+        // 组合输入同样留在恢复稿中，但未提交的组合不写进用户笔记。
+        let update = await io.prepareForClose(noteWrite: !marked)
+        apply(update)
+        if update.persistence == .unsaved, dirty, !marked { scheduleSave(delay: .seconds(2)) }
+        return update.persistence
+    }
+    /// 用户明确选择放弃后：停止自动保存并删除该文档的恢复稿，不留垃圾。
+    func abandon() {
+        stopForShutdown()
+        let session = io.session
+        io.queue.async { _ = try? session.recover(restore: false) }
     }
     func stopForShutdown() { closed = true; autoSave?.cancel(); outlineTask?.cancel(); onClosing?() }
     private func apply(_ update: DocumentUpdate, external: Bool = false) {
         saveMilliseconds = Double(update.saveMicros) / 1000
+        persistence = update.persistence
         guard let text = update.text else {
             // 权限独立于正文版本：即使刷新后又有输入使修订号过时，也要采用最新只读状态。
             readOnlyReason = update.readOnlyReason

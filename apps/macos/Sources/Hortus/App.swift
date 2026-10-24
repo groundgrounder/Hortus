@@ -124,6 +124,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var layout: Layout?
     var ready = false
     private let termination = TerminationGate()
+    /// 用户已明确放弃未保存的正文；之后的 terminate 不再拦截。
+    private var allowTermination = false
     private var inspectionDeadline: DispatchWorkItem?
     private var inspectionStarted = false
     private var launchTime = ContinuousClock.now
@@ -186,10 +188,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let workspace else { return .terminateNow }
-        termination.begin(work: { completion in workspace.shutdown(completion: completion) }) {
-            sender.reply(toApplicationShouldTerminate: true)
+        if allowTermination { return .terminateNow }
+        termination.begin(
+            documentTitles: workspace.tabs.map(\.path),
+            documents: { completion in workspace.prepareShutdown(completion: completion) },
+            cleanup: { completion in workspace.beginShutdownCleanup(completion: completion) }
+        ) { [weak self] outcome in
+            switch outcome {
+            case .allowed:
+                sender.reply(toApplicationShouldTerminate: true)
+            case .blocked(let unsaved):
+                sender.reply(toApplicationShouldTerminate: false)
+                // 必须先答复 false；terminateLater 的嵌套事件循环不调度 MainActor 任务。
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleBlockedTermination(unsaved, workspace: workspace)
+                }
+            }
         }
         return .terminateLater
+    }
+
+    private func handleBlockedTermination(_ unsaved: [String], workspace: Workspace) {
+        switch workspace.decideUnsaved(unsaved, quitting: true) {
+        case .retry:
+            NSApp.terminate(nil)
+        case .discard:
+            // 用户明确放弃：清理这些文档的恢复稿，然后不再拦截后续 terminate。
+            workspace.abandonDocuments(unsaved) { NSApp.terminate(nil) }
+            allowTermination = true
+        case .cancel:
+            break
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

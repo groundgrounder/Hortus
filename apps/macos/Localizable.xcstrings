@@ -1,6 +1,12 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Some notes could not be saved" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Some notes could not be saved" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "有笔记未能保存" } } } },
+    "These notes could not be written to the note file or to a recovery draft. Retry after fixing the problem, or discard their changes." : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "These notes could not be written to the note file or to a recovery draft. Retry after fixing the problem, or discard their changes." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "这些笔记的最新正文既没能写入笔记文件，也没能写入恢复稿。解决问题后可以重试，或放弃这些更改。" } } } },
+    "Discard Changes and Close" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Discard Changes and Close" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "放弃更改并关闭" } } } },
+    "Discard Changes and Quit" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Discard Changes and Quit" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "放弃更改并退出" } } } },
+    "Cancel" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } } } },
+    "…and %@ more" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "…and %@ more" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "…等 %@ 篇" } } } },
     "No headings" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "No headings" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "没有标题" } } } },
     "No note open" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "No note open" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未打开笔记" } } } },
     "Hortus" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Hortus" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Hortus" } } } },

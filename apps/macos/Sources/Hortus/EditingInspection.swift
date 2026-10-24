@@ -30,9 +30,20 @@ enum EditingInspection {
         }
         if mode == "shutdown-failure" {
             view.insertText("退出恢复😀", replacementRange: NSRange(location: 0, length: 0))
+            // 笔记写入失败，但恢复稿可写：退出应快速放行。
             try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: document.io.url.path)
-            workspace.shutdownDelayForInspection = 10
             return ["dirty_before_exit": document.dirty]
+        }
+        if mode == "shutdown-blocked" {
+            view.insertText("退出被拦😀", replacementRange: NSRange(location: 0, length: 0))
+            // 笔记与恢复稿都写不进去：退出必须被拦下并等待用户决定。
+            try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: document.io.url.path)
+            if let cache = ProcessInfo.processInfo.environment["HORTUS_CACHE_DIR"] {
+                let recovery = URL(fileURLWithPath: cache).appendingPathComponent("recovery")
+                try FileManager.default.createDirectory(at: recovery, withIntermediateDirectories: true)
+                try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: recovery.path)
+            }
+            return ["dirty_before_exit": document.dirty, "blocked_exit": true]
         }
         if mode == "metadata-failure" {
             view.insertText("替换应失败", replacementRange: NSRange(location: 0, length: 0))

@@ -41,7 +41,7 @@ struct EditingTests {
             try await eventually { !self.view.diagramPending && self.view.isEditable }
         }
         func close() async {
-            await document.prepareToClose()
+            _ = await document.prepareToClose()
             coordinator.task?.cancel(); document.onReload = nil
             view.delegate = nil; view.textStorage?.delegate = nil
             window.close()
