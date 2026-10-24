@@ -23,7 +23,7 @@ Requires **macOS 27 or later and an Apple Silicon Mac**. Version 0.1.0 uses ad-h
 1. Download `Hortus-0.1.0-arm64.dmg` from [Releases](https://github.com/groundgrounder/Hortus/releases), open it, and drag Hortus into Applications.
 2. Open Hortus. macOS may block the first launch because it cannot verify the developer. Choose either of the following ways to allow this copy:
 
-**System Settings:** After the blocked attempt, open **System Settings → Privacy & Security**, find the message about Hortus, and click **Open Anyway**. Authenticate and confirm **Open** if asked, then launch Hortus again if needed.
+**System Settings:** After the blocked attempt, click **Done**, open **System Settings → Privacy & Security**, find the message about Hortus, and click **Open Anyway**. Follow the confirmation and authentication prompts, then launch Hortus again if needed.
 
 **Terminal:** After copying the app into Applications, run:
 
