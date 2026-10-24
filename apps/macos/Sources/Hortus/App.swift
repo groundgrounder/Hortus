@@ -130,6 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var inspectionStarted = false
     private var launchTime = ContinuousClock.now
     private var focusObserver: NSObjectProtocol?
+    private var toolbarFocusObserver: NSObjectProtocol?
+    private var toolbarFocusGuard: ToolbarFocusGuard?
 
     func showAboutPanel() {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -177,6 +179,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
         focusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in await self?.workspace?.saveAllDocuments() }
+        }
+        toolbarFocusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] note in
+            // 观察者在主队列上回调；窗口对象只在主线程使用。
+            nonisolated(unsafe) let object = note.object
+            MainActor.assumeIsolated {
+                guard let self, self.toolbarFocusGuard == nil, let window = object as? NSWindow, window.toolbar != nil else { return }
+                self.toolbarFocusGuard = ToolbarFocusGuard(window: window)
+            }
         }
         guard args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
         // 自检只设置两次一次性唤醒，其余等待由界面状态变更触发。

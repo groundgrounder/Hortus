@@ -100,6 +100,12 @@ enum ToolbarInspection {
             "window_width": window.frame.width,
             "window_height": window.frame.height,
             "presentation_options": NSApp.currentSystemPresentationOptions.rawValue,
+            "first_responder": window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil",
+            "first_responder_in_content": (window.firstResponder as? NSView)?.isDescendant(of: content) ?? false,
+            // 工具栏按钮的焦点环属于工具栏视图层级，不在内容视图中。
+            "first_responder_in_toolbar": (window.firstResponder as? NSView).map { view in
+                window.toolbar?.items.contains { item in item.view.map { view.isDescendant(of: $0) } ?? false } ?? false
+            } ?? false,
             "mouse": NSStringFromPoint(NSEvent.mouseLocation),
         ]
         guard let item = window.toolbar?.items.first(where: { $0.itemIdentifier.rawValue == "editor-tabs" }),
