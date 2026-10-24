@@ -240,6 +240,90 @@ struct EditingTests {
             }
         }
     }
+    @Test func externalRefreshInterleavedWithEditingConflictsInsteadOfLosingInput() async throws {
+        let fixture = try Fixture("OLD\n")
+        try await fixture.ready()
+        var reloaded: [String] = []
+        fixture.document.onReload = { reloaded.append($0) }
+        try Data("EXTERNAL\n".utf8).write(to: fixture.document.io.url)
+
+        fixture.document.refresh()
+        waitForQueuedWork(fixture.document.io.queue)
+        // 刷新只完成读取提议，主线程回调尚未执行时提交一次原生编辑。
+        fixture.view.insertText("LOCAL ", replacementRange: NSRange(location: 0, length: 0))
+        let edited = fixture.view.string
+        try await eventually { fixture.document.issue == .conflict }
+        #expect(fixture.document.text == "OLD\n")
+        #expect(!reloaded.contains("EXTERNAL\n"))
+        #expect(try await fixture.text() == edited)
+        #expect(try String(contentsOf: fixture.document.io.url, encoding: .utf8) == "EXTERNAL\n")
+        fixture.document.onReload = nil
+        await fixture.close()
+    }
+
+    @Test func externalRefreshDuringCompositionWaitsForCommit() async throws {
+        let fixture = try Fixture("OLD\n")
+        try await fixture.ready()
+        var reloaded: [String] = []
+        fixture.document.onReload = { reloaded.append($0) }
+        try Data("EXTERNAL\n".utf8).write(to: fixture.document.io.url)
+
+        fixture.document.refresh()
+        waitForQueuedWork(fixture.document.io.queue)
+        fixture.document.compositionChanged(true)
+        #expect(try await fixture.text() == "OLD\n")
+        #expect(fixture.document.text == "OLD\n")
+        #expect(!reloaded.contains("EXTERNAL\n"))
+
+        fixture.document.compositionChanged(false)
+        try await eventually { fixture.document.text == "EXTERNAL\n" }
+        #expect(try await fixture.text() == "EXTERNAL\n")
+        #expect(reloaded.contains("EXTERNAL\n"))
+        fixture.document.onReload = nil
+        await fixture.close()
+    }
+
+    @Test func discardRecoveryLoadsLatestDiskText() async throws {
+        let fixture = try Fixture("磁盘\n")
+        try await fixture.ready()
+        fixture.document.edited(range: NSRange(location: 0, length: 0), replacement: "草稿")
+        await fixture.document.checkpoint()
+        let session = try fixture.core.openDocument(vault: fixture.vault.path, path: "note.md")
+        let reopened = NoteDocument(io: DocumentIO(session: session, url: fixture.document.io.url),
+                                    initial: try session.initial())
+        #expect(reopened.issue == .recovery)
+        try Data("外部\n".utf8).write(to: fixture.document.io.url)
+        await reopened.recover(false)
+        try await eventually { reopened.text == "外部\n" && reopened.issue == .none }
+        reopened.stopForShutdown()
+        await fixture.close()
+    }
+
+    @Test func permissionAndDeletionRefreshDriveReadOnlyAndRecreate() async throws {
+        let fixture = try Fixture("权限\n")
+        try await fixture.ready()
+        let url = fixture.document.io.url
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: url.path)
+        fixture.document.refresh()
+        try await eventually { fixture.document.readOnlyReason != nil }
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        fixture.document.refresh()
+        try await eventually { fixture.document.readOnlyReason == nil }
+        try FileManager.default.removeItem(at: url)
+        fixture.document.refresh()
+        try await eventually { fixture.document.issue == .missing && fixture.document.readOnlyReason == nil }
+        await fixture.document.saveNow(.recreate)
+        try await eventually { fixture.document.issue == .none && !fixture.document.dirty }
+        #expect(try String(contentsOf: url, encoding: .utf8) == fixture.view.string)
+        await fixture.close()
+    }
+}
+
+/// 在测试中阻塞主线程，直到文档队列处理完当前已排队的操作，用于制造外部刷新与输入交错。
+@MainActor private func waitForQueuedWork(_ queue: DispatchQueue) {
+    let gate = DispatchSemaphore(value: 0)
+    queue.async { gate.signal() }
+    _ = gate.wait(timeout: .now() + 5)
 }
 
 @MainActor private func eventually(_ predicate: () -> Bool) async throws {

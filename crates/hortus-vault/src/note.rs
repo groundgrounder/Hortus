@@ -107,21 +107,27 @@ pub fn read(path: &Path) -> io::Result<Option<DiskVersion>> {
     }
 }
 
+fn metadata_writable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|m| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            m.permissions().mode() & 0o222 != 0 && access_write(path)
+        }
+        #[cfg(not(unix))]
+        {
+            !m.permissions().readonly()
+        }
+    })
+}
+
 pub fn writable(path: &Path) -> bool {
-    let check = |p: &Path| {
-        fs::metadata(p).is_ok_and(|m| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                m.permissions().mode() & 0o222 != 0 && access_write(p)
-            }
-            #[cfg(not(unix))]
-            {
-                !m.permissions().readonly()
-            }
-        })
-    };
-    check(path) && path.parent().is_some_and(check)
+    metadata_writable(path) && path.parent().is_some_and(metadata_writable)
+}
+
+/// 目标文件尚不存在时，能否在它所在的目录中新建文件。
+pub fn writable_directory(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.is_dir()) && metadata_writable(path)
 }
 
 #[cfg(unix)]

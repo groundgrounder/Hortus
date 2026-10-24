@@ -131,23 +131,13 @@ final class NoteDocument {
         if marked || refreshing { refreshAgain = true; return }
         refreshing = true; refreshAgain = false
         refreshStartedAt = ProcessInfo.processInfo.systemUptime
-        io.submit({ try $0.refreshAndAccept() }, completion: { [weak self] result in
+        // 只读取外部版本并提议；接受在 MainActor 确认没有新输入和组合后由 apply 排队。
+        io.submit({ try $0.refresh() }, completion: { [weak self] result in
             guard let self else { return }
             switch result {
-            case let .success(update):
+            case .success(let update):
                 refreshIOMilliseconds = (ProcessInfo.processInfo.systemUptime - refreshStartedAt) * 1000
-                if let text = update.text, !marked {
-                    revision = update.revision
-                    dirty = update.dirty; readOnlyReason = update.readOnlyReason
-                    issue = update.issue; message = update.message
-                    self.text = text
-                    onReload?(text)
-                    onStateChange?()
-                } else if update.text != nil {
-                    refreshAgain = true
-                } else {
-                    apply(update, external: true)
-                }
+                apply(update, external: true)
             case .failure:
                 message = "document.save_failed"; issue = .saveFailed
             }
@@ -170,6 +160,8 @@ final class NoteDocument {
             let update = try await io.perform { try $0.recover(restore: restore) }
             apply(update)
             if restore { scheduleSave() }
+            // 丢弃草稿后载入磁盘上的最新正文；若磁盘已删除，刷新会进入 Missing。
+            else { refresh() }
         } catch { message = "document.save_failed" }
     }
     func checkpoint() async {
@@ -185,37 +177,45 @@ final class NoteDocument {
     }
     func stopForShutdown() { closed = true; autoSave?.cancel(); outlineTask?.cancel(); onClosing?() }
     private func apply(_ update: DocumentUpdate, external: Bool = false) {
-        if update.revision != revision, update.issue == .none, update.text == nil { return }
         saveMilliseconds = Double(update.saveMicros) / 1000
-        if let text = update.text {
-            if external || update.copyPath != nil {
-                guard update.revision == revision, !marked else { refresh(); return }
-                let expected = revision
-                let io = io
-                // 主线程确认没有新输入后，先入队接受，再允许后续编辑进入队列。
-                io.queue.async { [weak self] in
-                    do {
-                        let started = ProcessInfo.processInfo.systemUptime
-                        var accepted = try io.session.acceptExternal(revision: expected)
-                        let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                        accepted.text = nil
-                        let status = accepted
-                        Task { @MainActor in
-                            self?.externalAcceptMilliseconds = elapsed
-                            self?.apply(status)
-                        }
-                    } catch {
-                        Task { @MainActor in self?.issue = .saveFailed; self?.message = "document.save_failed" }
+        guard let text = update.text else {
+            // 权限独立于正文版本：即使刷新后又有输入使修订号过时，也要采用最新只读状态。
+            readOnlyReason = update.readOnlyReason
+            if update.revision == revision { dirty = update.dirty }
+            if update.issue != .none || update.revision == revision {
+                issue = update.issue; message = update.message
+            }
+            onStateChange?()
+            return
+        }
+        if external || update.copyPath != nil {
+            readOnlyReason = update.readOnlyReason
+            guard update.revision == revision, !marked else { refresh(); return }
+            let expected = revision
+            let io = io
+            // 主线程确认没有新输入后，先入队接受，再允许后续编辑进入队列。
+            io.queue.async { [weak self] in
+                do {
+                    let started = ProcessInfo.processInfo.systemUptime
+                    var accepted = try io.session.acceptExternal(revision: expected)
+                    let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                    accepted.text = nil
+                    let status = accepted
+                    Task { @MainActor in
+                        self?.externalAcceptMilliseconds = elapsed
+                        self?.apply(status)
                     }
+                } catch {
+                    Task { @MainActor in self?.issue = .saveFailed; self?.message = "document.save_failed" }
                 }
-                revision += 1; dirty = false; issue = .none; message = ""
-            } else { revision = update.revision; dirty = update.dirty; issue = update.issue; message = update.message }
-            self.text = text; readOnlyReason = update.readOnlyReason
-            onReload?(text)
+            }
+            revision += 1; dirty = false; issue = .none; message = ""
         } else {
-            if update.revision == revision { dirty = update.dirty; readOnlyReason = update.readOnlyReason }
+            revision = update.revision; dirty = update.dirty; readOnlyReason = update.readOnlyReason
             issue = update.issue; message = update.message
         }
+        self.text = text
+        onReload?(text)
         if let copy = update.copyPath { onCopy?(copy) }
         onStateChange?()
     }

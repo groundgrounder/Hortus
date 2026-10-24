@@ -6,7 +6,7 @@ use hortus_document::{
 };
 use hortus_vault::note::{self, DiskVersion, Format, Recovery, WriteFailure};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -306,25 +306,33 @@ struct PendingExternal {
     disk: DiskVersion,
     format: Format,
     text: String,
-    valid: bool,
 }
 impl State {
-    fn propose(&mut self, disk: DiskVersion) -> DocumentUpdate {
-        let (format, text, valid) = Format::decode(&disk.bytes);
-        let mut update = self.update(Some(text.clone()));
-        update.read_only_reason = if !valid {
-            Some("readonly.invalid_utf8".into())
-        } else if self.path.exists() && !note::writable(&self.path) {
-            Some("readonly.no_write_permission".into())
-        } else {
-            None
-        };
-        self.pending_external = Some(PendingExternal {
-            disk,
-            format,
-            text,
-            valid,
+    /// 只读状态只取决于当前文件（或缺失时的父目录）权限和编码，与正文版本无关。
+    fn read_only_reason(path: &Path, disk: Option<&DiskVersion>) -> Option<String> {
+        // 只做有效性检查，避免为了权限再解码一次正文。
+        let valid = disk.is_none_or(|disk| {
+            let bytes = disk
+                .bytes
+                .strip_prefix(&[0xef, 0xbb, 0xbf][..])
+                .unwrap_or(&disk.bytes);
+            std::str::from_utf8(bytes).is_ok()
         });
+        if !valid {
+            return Some("readonly.invalid_utf8".into());
+        }
+        let writable = if path.exists() {
+            note::writable(path)
+        } else {
+            path.parent().is_some_and(note::writable_directory)
+        };
+        (!writable).then(|| "readonly.no_write_permission".into())
+    }
+    fn propose(&mut self, disk: DiskVersion) -> DocumentUpdate {
+        let (format, text, _) = Format::decode(&disk.bytes);
+        self.read_only = Self::read_only_reason(&self.path, Some(&disk));
+        let update = self.update(Some(text.clone()));
+        self.pending_external = Some(PendingExternal { disk, format, text });
         update
     }
     fn update(&self, text: Option<String>) -> DocumentUpdate {
@@ -340,6 +348,10 @@ impl State {
         }
     }
     fn checkpoint(&mut self) -> Result<(), CoreError> {
+        // 待恢复的草稿已经写在恢复文件里；活动文档只是磁盘正文，不能再覆盖它。
+        if self.pending_recovery.is_some() {
+            return Ok(());
+        }
         if self.dirty || matches!(self.issue, DocumentIssue::Conflict | DocumentIssue::Missing) {
             self.recovery
                 .write_note(&self.document.text()?, &self.format)?;
@@ -351,22 +363,11 @@ impl State {
         pending: PendingExternal,
         return_text: bool,
     ) -> Result<DocumentUpdate, CoreError> {
-        let PendingExternal {
-            disk,
-            format,
-            text,
-            valid,
-        } = pending;
+        let PendingExternal { disk, format, text } = pending;
         self.format = format;
         self.baseline = Some(disk);
         self.permissions = fs::metadata(&self.path).ok().map(|m| m.permissions());
-        self.read_only = if !valid {
-            Some("readonly.invalid_utf8".into())
-        } else if !note::writable(&self.path) {
-            Some("readonly.no_write_permission".into())
-        } else {
-            None
-        };
+        self.read_only = Self::read_only_reason(&self.path, self.baseline.as_ref());
         self.document.reset(&text);
         self.dirty = false;
         self.issue = DocumentIssue::None;
@@ -376,6 +377,7 @@ impl State {
         Ok(self.update(return_text.then_some(text)))
     }
     fn conflict(&mut self, missing: bool) -> Result<DocumentUpdate, CoreError> {
+        self.pending_external = None;
         self.issue = if missing {
             DocumentIssue::Missing
         } else {
@@ -414,19 +416,13 @@ impl WorkspaceCore {
         if baseline.is_none() && recovered.is_none() {
             return Err(CoreError::failure("document.missing"));
         }
-        let (format, text, valid) = Format::decode(
+        let (format, text, _) = Format::decode(
             baseline
                 .as_ref()
                 .map(|b| b.bytes.as_slice())
                 .unwrap_or_default(),
         );
-        let read_only = if !valid {
-            Some("readonly.invalid_utf8".into())
-        } else if baseline.is_some() && !note::writable(&absolute) {
-            Some("readonly.no_write_permission".into())
-        } else {
-            None
-        };
+        let read_only = State::read_only_reason(&absolute, baseline.as_ref());
         let pending_recovery = recovered.filter(|(saved, _)| saved != &text || baseline.is_none());
         if pending_recovery.is_none() {
             recovery.clear()?;
@@ -583,41 +579,23 @@ impl DocumentSession {
         let mut state = self.state.lock().unwrap();
         let _ = note::note_path(&state.root, &state.relative)?;
         let disk = note::read(&state.path)?;
+        // 权限独立于正文版本，即使字节未变也要重新派生。
+        state.read_only = State::read_only_reason(&state.path, disk.as_ref());
         if note::same_version(state.baseline.as_ref(), disk.as_ref()) {
             return Ok(state.update(None));
         }
-        if state.dirty || state.pending_recovery.is_some() {
+        // 待恢复草稿归用户所有：磁盘变化只更新只读状态，不进入冲突流程，
+        // 也不接受外部正文或改写恢复文件。用户恢复后的保存会按旧基线进入 Conflict/Missing。
+        if state.pending_recovery.is_some() {
+            return Ok(state.update(None));
+        }
+        if state.dirty {
             return state.conflict(disk.is_none());
         }
         match disk {
             Some(disk) => Ok(state.propose(disk)),
             None => state.conflict(true),
         }
-    }
-    /// 监听到外部改动后，在同一条文档队列中完成读取、冲突判断和载入，避免阅读视图再排一次队。
-    pub fn refresh_and_accept(&self) -> Result<DocumentUpdate, CoreError> {
-        let mut state = self.state.lock().unwrap();
-        let _ = note::note_path(&state.root, &state.relative)?;
-        let disk = note::read(&state.path)?;
-        if note::same_version(state.baseline.as_ref(), disk.as_ref()) {
-            return Ok(state.update(None));
-        }
-        if state.dirty || state.pending_recovery.is_some() {
-            return state.conflict(disk.is_none());
-        }
-        let Some(disk) = disk else {
-            return state.conflict(true);
-        };
-        let (format, text, valid) = Format::decode(&disk.bytes);
-        state.reload(
-            PendingExternal {
-                disk,
-                format,
-                text,
-                valid,
-            },
-            true,
-        )
     }
     pub fn use_disk(&self) -> Result<DocumentUpdate, CoreError> {
         let mut state = self.state.lock().unwrap();
@@ -678,7 +656,8 @@ impl DocumentSession {
             if !state.dirty && state.issue != DocumentIssue::Missing {
                 return Ok(state.update(None));
             }
-            state.checkpoint()?;
+            // 恢复稿只是主文件保存失败时的降级保障；缓存故障不应阻止可写的笔记先落盘。
+            let _ = state.checkpoint();
             let _ = note::note_path(&state.root, &state.relative)?;
             let text = state.document.text()?;
             let bytes = state.format.encode(&text);
@@ -746,7 +725,8 @@ impl DocumentSession {
                     state.dirty = false;
                     state.issue = DocumentIssue::None;
                     state.message.clear();
-                    state.recovery.clear()?;
+                    // 主文件已保存，清理恢复稿失败不足以把保存降级为失败。
+                    let _ = state.recovery.clear();
                     Ok(state.update(None))
                 }
                 Err(WriteFailure::Changed) => state.conflict(false),
@@ -916,6 +896,135 @@ mod tests {
             f.open("note.md").initial().unwrap().issue,
             DocumentIssue::None
         );
+    }
+
+    #[test]
+    fn refresh_only_proposes_until_the_ui_accepts() {
+        let f = Fixture::new();
+        let path = f.root.join("note.md");
+        fs::write(&path, "原文\n").unwrap();
+        let s = f.open("note.md");
+        fs::write(&path, "外部\n").unwrap();
+        let proposal = s.refresh().unwrap();
+        assert_eq!(proposal.text.as_deref(), Some("外部\n"));
+        // 提议阶段不能改动核心镜像；接受前原生控件仍可安全提交旧正文上的编辑。
+        assert_eq!(s.snapshot().unwrap().text, "原文\n");
+        let accepted = s.accept_external(proposal.revision).unwrap();
+        assert!(accepted.text.is_none());
+        assert_eq!(s.snapshot().unwrap().text, "外部\n");
+        assert!(!s.initial().unwrap().dirty);
+    }
+
+    #[test]
+    fn pending_recovery_survives_external_change_and_delete() {
+        let f = Fixture::new();
+        let path = f.root.join("note.md");
+        fs::write(&path, "磁盘原文\n").unwrap();
+        let s = f.open("note.md");
+        s.replace(0, 0, "未存草稿".into()).unwrap();
+        s.checkpoint().unwrap();
+        let reopened = f.open("note.md");
+        assert_eq!(reopened.initial().unwrap().issue, DocumentIssue::Recovery);
+        assert_eq!(reopened.snapshot().unwrap().text, "磁盘原文\n");
+
+        // 外部修改不改变待恢复状态，也不接受外部正文或改写恢复文件。
+        fs::write(&path, "外部版本\n").unwrap();
+        let update = reopened.refresh().unwrap();
+        assert_eq!(update.issue, DocumentIssue::Recovery);
+        assert!(update.text.is_none());
+        assert_eq!(reopened.snapshot().unwrap().text, "磁盘原文\n");
+
+        // 用户在外部修改后恢复草稿：基线仍是打开时的旧版本，保存进入冲突而不是覆盖。
+        reopened.recover(true).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().text, "未存草稿磁盘原文\n");
+        assert_eq!(
+            f.save(&reopened, SaveChoice::Normal).issue,
+            DocumentIssue::Conflict
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "外部版本\n");
+
+        // 二次重启仍能恢复原草稿。
+        let second = f.open("note.md");
+        assert_eq!(second.initial().unwrap().issue, DocumentIssue::Recovery);
+        second.recover(true).unwrap();
+        assert_eq!(second.snapshot().unwrap().text, "未存草稿磁盘原文\n");
+
+        // 磁盘在待恢复期间被删除：先进入 Missing，再按 Recreate 重建。
+        let deleted = Fixture::new();
+        let deleted_path = deleted.root.join("gone.md");
+        fs::write(&deleted_path, "删除前\n").unwrap();
+        let draft = deleted.open("gone.md");
+        draft.replace(0, 0, "草稿".into()).unwrap();
+        draft.checkpoint().unwrap();
+        let pending = deleted.open("gone.md");
+        fs::remove_file(&deleted_path).unwrap();
+        let update = pending.refresh().unwrap();
+        assert_eq!(update.issue, DocumentIssue::Recovery);
+        assert!(update.text.is_none());
+        pending.recover(true).unwrap();
+        assert_eq!(
+            deleted.save(&pending, SaveChoice::Normal).issue,
+            DocumentIssue::Missing
+        );
+        assert_eq!(
+            deleted.save(&pending, SaveChoice::Recreate).issue,
+            DocumentIssue::None
+        );
+        assert_eq!(fs::read_to_string(&deleted_path).unwrap(), "草稿删除前\n");
+    }
+
+    #[test]
+    fn refresh_rederives_permissions_and_missing_note_recreates() {
+        let f = Fixture::new();
+        let path = f.root.join("note.md");
+        fs::write(&path, "权限\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        let s = f.open("note.md");
+        assert!(s.initial().unwrap().read_only_reason.is_some());
+        assert!(s.replace(0, 0, "拒绝".into()).is_err());
+
+        // 正文未变，仅权限变为可写：刷新后立即可编辑。
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let update = s.refresh().unwrap();
+        assert!(update.text.is_none());
+        assert_eq!(update.read_only_reason, None);
+        s.replace(0, 0, "改".into()).unwrap();
+        assert_eq!(f.save(&s, SaveChoice::Normal).issue, DocumentIssue::None);
+
+        // 删除后按父目录权限判断可重建，而不是沿用旧的只读状态。
+        fs::remove_file(&path).unwrap();
+        let update = s.refresh().unwrap();
+        assert_eq!(update.issue, DocumentIssue::Missing);
+        assert_eq!(update.read_only_reason, None);
+        assert_eq!(f.save(&s, SaveChoice::Recreate).issue, DocumentIssue::None);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "改权限\n");
+    }
+
+    #[test]
+    fn recovery_cache_failure_does_not_block_note_save() {
+        let f = Fixture::new();
+        let path = f.root.join("note.md");
+        fs::write(&path, "原文\n").unwrap();
+        let s = f.open("note.md");
+        s.replace(0, 0, "草稿".into()).unwrap();
+        let recovery = f._directory.path().join("cache").join("recovery");
+        fs::create_dir_all(&recovery).unwrap();
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o555)).unwrap();
+
+        // 恢复缓存不可写不能阻止可写笔记的主文件保存。
+        let update = f.save(&s, SaveChoice::Normal);
+        assert_eq!(update.issue, DocumentIssue::None);
+        assert!(!update.dirty);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "草稿原文\n");
+
+        // Conflict 分支仍把恢复稿写入失败作为错误报告。
+        fs::write(&path, "外部\n").unwrap();
+        s.replace(0, 0, "冲突".into()).unwrap();
+        let update = f.save(&s, SaveChoice::Normal);
+        assert_eq!(update.issue, DocumentIssue::SaveFailed);
+        assert!(update.dirty);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "外部\n");
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
