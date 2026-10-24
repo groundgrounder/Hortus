@@ -315,6 +315,7 @@ impl VaultHandle {
     }
 
     pub fn update_search_index(&self, upserted: Vec<String>, removed: Vec<String>) {
+        // 首次扫描与监听增量都经过这里；read_note 返回与 DocumentSession 相同的规范化正文。
         let updates = upserted
             .into_iter()
             .map(|path| {

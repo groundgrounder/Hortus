@@ -224,6 +224,21 @@ fn scan_watch_read_and_close_never_write_into_the_vault() {
 }
 
 #[test]
+fn note_reads_match_the_editor_text_projection() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("bom-crlf.md"),
+        b"\xef\xbb\xbf# \xe6\xa0\x87\xe9\xa2\x98\r\n\xe6\xad\xa3\xe6\x96\x87\r\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("invalid.md"), b"# \xff\n").unwrap();
+    let vault = Vault::open(dir.path()).unwrap();
+    assert_eq!(vault.read_note("bom-crlf.md").unwrap(), "# 标题\n正文\n");
+    // 无效 UTF-8 与 DocumentSession 一样以替换符继续读取。
+    assert_eq!(vault.read_note("invalid.md").unwrap(), "# \u{fffd}\n");
+}
+
+#[test]
 fn note_reads_cannot_escape_the_vault_or_follow_symlink_cycles() {
     let dir = TempDir::new().unwrap();
     let outside = TempDir::new().unwrap();

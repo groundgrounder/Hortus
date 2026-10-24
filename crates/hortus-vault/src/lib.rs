@@ -230,6 +230,7 @@ impl Vault {
         std::iter::once(first).chain(batches.try_iter()).collect()
     }
 
+    /// 返回与编辑器相同的正文投影：去除 BOM、CRLF 统一为 LF，无效 UTF-8 以替换符表示。
     pub fn read_note(&self, relative: &str) -> io::Result<String> {
         let path = Path::new(relative);
         if !allowed(path) {
@@ -242,7 +243,8 @@ impl Vault {
         {
             return Err(io::Error::other("vault.outside_root"));
         }
-        fs::read_to_string(resolved)
+        // 搜索索引必须和 DocumentSession 看到同一份正文，否则 UTF-16 范围会偏移。
+        Ok(note::Format::decode(&fs::read(resolved)?).1)
     }
 
     pub fn close(&self) {
