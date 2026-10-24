@@ -40,7 +40,7 @@ pub struct Model {
 }
 type Semantics = Vec<(Kind, Range<usize>)>;
 type Footnotes = Vec<(usize, usize, String)>;
-type CachedBlock = (String, Semantics, Footnotes, u64, Arc<Content>);
+type CachedBlock = (String, bool, Semantics, Footnotes, u64, Arc<Content>);
 
 #[derive(Default)]
 pub struct Cache {
@@ -50,6 +50,7 @@ pub struct Cache {
     previous_source: Option<String>,
     previous_mmd: bool,
     previous_context_safe: bool,
+    previous_container_fences: bool,
     cached_blocks: Vec<Block>,
 }
 
@@ -200,6 +201,64 @@ fn has_single_top_level_block(text: &str) -> bool {
     blocks == 1 && first_start == Some(0)
 }
 
+/// 把包含容器围栏的顶层块按围栏边界拆开；返回的标记与范围一一对应。
+/// 围栏两侧只有空白时并入围栏，避免多出空白块。
+fn split_container_fences(
+    ranges: Vec<Range<usize>>,
+    text: &str,
+    fences: &[Range<usize>],
+) -> (Vec<Range<usize>>, Vec<bool>) {
+    let mut output = Vec::with_capacity(ranges.len() + fences.len());
+    let mut diagrams = Vec::with_capacity(output.capacity());
+    for range in ranges {
+        let mut parts = Vec::new();
+        let mut start = range.start;
+        let mut found = false;
+        for fence in fences {
+            if fence.start < range.start || fence.end > range.end {
+                continue;
+            }
+            found = true;
+            if fence.start > start {
+                parts.push((start..fence.start, false));
+            }
+            parts.push((fence.clone(), true));
+            start = fence.end;
+        }
+        if !found {
+            output.push(range);
+            diagrams.push(false);
+            continue;
+        }
+        if start < range.end {
+            parts.push((start..range.end, false));
+        }
+        let mut index = 0;
+        while index < parts.len() {
+            if !parts[index].1 && text[parts[index].0.clone()].trim().is_empty() {
+                if index + 1 < parts.len() && parts[index + 1].1 {
+                    parts[index + 1].0.start = parts[index].0.start;
+                    parts.remove(index);
+                    continue;
+                }
+                if index > 0 && parts[index - 1].1 {
+                    parts[index - 1].0.end = parts[index].0.end;
+                    parts.remove(index);
+                    continue;
+                }
+            }
+            index += 1;
+        }
+        for (range, diagram) in parts {
+            if range.start < range.end {
+                output.push(range);
+                diagrams.push(diagram);
+            }
+        }
+    }
+    (output, diagrams)
+}
+
 impl Cache {
     pub fn model(&mut self, text: &str, mmd: bool) -> Model {
         if self.previous_mmd == mmd && self.previous_source.as_deref() == Some(text) {
@@ -220,10 +279,29 @@ impl Cache {
                 }
             }
         }
+        // 引用块和列表里的围栏由 pulldown 拆出正文，阅读块也要按围栏切开，
+        // 才能与 mermaid_blocks 的序号一一对应。
+        let fences = if mmd
+            || !text.contains("mermaid")
+            || !(text.contains("```") || text.contains("~~~"))
+        {
+            Vec::new()
+        } else {
+            hortus_diagram::mermaid_blocks(text)
+                .into_iter()
+                .filter(|block| block.container)
+                .map(|block| block.fence_range)
+                .collect::<Vec<_>>()
+        };
         let incremental = self
             .previous_source
             .as_deref()
-            .filter(|_| self.previous_mmd == mmd && front == 0)
+            .filter(|_| {
+                self.previous_mmd == mmd
+                    && front == 0
+                    && fences.is_empty()
+                    && !self.previous_container_fences
+            })
             .and_then(|previous| {
                 incremental_ranges(
                     previous,
@@ -278,6 +356,7 @@ impl Cache {
             }
             ranges
         };
+        let (ranges, diagrams) = split_container_fences(ranges, text, &fences);
         let incremental_index = incremental.as_ref().map(|(_, index)| *index);
         let mut old_blocks: Vec<Option<CachedBlock>> = std::mem::take(&mut self.previous)
             .into_iter()
@@ -297,10 +376,9 @@ impl Cache {
         } else if fast_update {
             let mut changed = 0;
             for (index, (previous, range)) in old_blocks.iter().zip(&ranges).enumerate() {
-                if previous
-                    .as_ref()
-                    .is_some_and(|block| block.0 == text[range.clone()])
-                {
+                if previous.as_ref().is_some_and(|block| {
+                    block.0 == text[range.clone()] && block.1 == diagrams[index]
+                }) {
                     reused_blocks[index] = Some(index);
                 } else {
                     changed += 1;
@@ -343,8 +421,8 @@ impl Cache {
         }
         let mut old: HashMap<_, VecDeque<_>> = HashMap::new();
         if !fast_update {
-            for (source, spans, refs, id, content) in old_blocks.drain(..).flatten() {
-                old.entry((source, spans, refs))
+            for (source, diagram, spans, refs, id, content) in old_blocks.drain(..).flatten() {
+                old.entry((source, diagram, spans, refs))
                     .or_default()
                     .push_back((id, content));
             }
@@ -359,35 +437,38 @@ impl Cache {
                 source_offset += text[byte_offset..r.start].encode_utf16().count();
             }
             let source = &text[r.clone()];
+            let diagram = diagrams[i];
             let reused = reused_blocks[i].and_then(|index| old_blocks[index].take());
-            let (key, id, content) = if let Some((cached_source, spans, refs, id, content)) = reused
-            {
-                ((cached_source, spans, refs), id, content)
-            } else {
-                let key = (
-                    source.to_owned(),
-                    std::mem::take(&mut semantics[i]),
-                    std::mem::take(&mut replacements[i]),
-                );
-                let (id, content) =
-                    if let Some(cached) = old.get_mut(&key).and_then(VecDeque::pop_front) {
-                        cached
-                    } else {
-                        self.next_id += 1;
-                        result.rebuilt += 1;
-                        (
-                            self.next_id,
-                            Arc::new(render(
-                                source,
-                                mmd,
-                                r.start == 0 && front > 0,
-                                &key.1,
-                                &key.2,
-                            )),
-                        )
-                    };
-                (key, id, content)
-            };
+            let (key, id, content) =
+                if let Some((cached_source, cached_diagram, spans, refs, id, content)) = reused {
+                    ((cached_source, cached_diagram, spans, refs), id, content)
+                } else {
+                    let key = (
+                        source.to_owned(),
+                        diagram,
+                        std::mem::take(&mut semantics[i]),
+                        std::mem::take(&mut replacements[i]),
+                    );
+                    let (id, content) =
+                        if let Some(cached) = old.get_mut(&key).and_then(VecDeque::pop_front) {
+                            cached
+                        } else {
+                            self.next_id += 1;
+                            result.rebuilt += 1;
+                            (
+                                self.next_id,
+                                Arc::new(render(
+                                    source,
+                                    mmd,
+                                    r.start == 0 && front > 0,
+                                    diagram,
+                                    &key.2,
+                                    &key.3,
+                                )),
+                            )
+                        };
+                    (key, id, content)
+                };
             let length = source.encode_utf16().count();
             result.blocks.push(Block {
                 id,
@@ -396,12 +477,14 @@ impl Cache {
             });
             source_offset += length;
             byte_offset = r.end;
-            self.previous.push((key.0, key.1, key.2, id, content));
+            self.previous
+                .push((key.0, key.1, key.2, key.3, id, content));
         }
         self.previous_ranges = next_ranges;
         self.previous_source = Some(text.to_owned());
         self.previous_mmd = mmd;
         self.previous_context_safe = incremental.is_some() || context_is_safe(text);
+        self.previous_container_fences = !fences.is_empty();
         self.cached_blocks.clone_from(&result.blocks);
         result
     }
@@ -437,7 +520,7 @@ pub(crate) fn heading_text(
     spans: &[(Kind, Range<usize>)],
     refs: &[(usize, usize, String)],
 ) -> String {
-    render(text, false, false, spans, refs)
+    render(text, false, false, false, spans, refs)
         .text
         .trim()
         .replace(['\r', '\n'], " ")
@@ -447,11 +530,13 @@ fn render(
     text: &str,
     mmd: bool,
     front: bool,
+    diagram: bool,
     spans: &[(Kind, Range<usize>)],
     refs: &[(usize, usize, String)],
 ) -> Content {
     let full_render = front
         || mmd
+        || diagram
         || mermaid_fence(text)
         || !refs.is_empty()
         || text.contains("![")
@@ -474,7 +559,7 @@ fn render(
     if !full_render {
         return render_simple(text, spans);
     }
-    render_full(text, mmd, front, spans, refs)
+    render_full(text, mmd, front, diagram, spans, refs)
 }
 
 fn render_simple(text: &str, spans: &[(Kind, Range<usize>)]) -> Content {
@@ -539,13 +624,14 @@ pub(crate) fn inline(text: &str) -> Content {
         }
     }
     spans.sort_by_key(|(_, range)| (range.start, range.end));
-    render_full(text, false, false, &spans, &[])
+    render_full(text, false, false, false, &spans, &[])
 }
 
 fn render_full(
     text: &str,
     mmd: bool,
     front: bool,
+    diagram: bool,
     spans: &[(Kind, Range<usize>)],
     refs: &[(usize, usize, String)],
 ) -> Content {
@@ -609,7 +695,7 @@ fn render_full(
                 16384,
             ),
         );
-    } else if mmd || mermaid_fence(text) {
+    } else if mmd || diagram || mermaid_fence(text) {
         result.diagram = true;
         // 成功的图由平台以单个占位段落绘制；失败时平台放回该块的完整源码。
         replacements.insert(0, (text.len(), "\u{fffc}\n".into(), 0));
@@ -820,7 +906,7 @@ mod tests {
         let source = "# 标题😀\n\n正文 **加粗** *斜体* ~~删除~~ ==高亮== `代码` [链接](https://example.org) #标签\n\n> 引用\n\n```text\n代码块\n```\n";
         let spans = markdown::analyze_bytes(source);
         let simple = render_simple(source, &spans);
-        let full = render_full(source, false, false, &spans, &[]);
+        let full = render_full(source, false, false, false, &spans, &[]);
         assert_eq!(simple.text, full.text);
         assert_eq!(simple.diagram, full.diagram);
         assert_eq!(simple.runs.len(), full.runs.len());

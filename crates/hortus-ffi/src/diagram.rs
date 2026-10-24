@@ -108,7 +108,7 @@ impl DiagramEngine {
             } else {
                 mermaid_blocks(&source)
                     .into_iter()
-                    .map(|b| parse_at(b.source, b.source_range.start))
+                    .map(|b| b.parse())
                     .collect()
             };
             state.source = source;
@@ -174,6 +174,25 @@ mod tests {
             assert!(block.source_end <= block.fence_end);
         }
         assert_eq!(blocks[1].fence_end as usize, source.len());
+    }
+
+    #[test]
+    fn container_fences_are_exposed_and_rendered_by_ordinal() {
+        let source = "> ```mermaid\n> flowchart TB\n> A --> B\n> ```\n\n```mermaid\nflowchart TB\nC --> D\n```\n";
+        let blocks = diagram_blocks(source.into());
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].fence_start < blocks[0].source_start);
+        assert!(blocks[0].source_end < blocks[0].fence_end);
+        assert_eq!(blocks[0].diagram_type, "flowchart");
+        let engine = DiagramEngine::new().unwrap();
+        let first = engine
+            .render(source.into(), false, 1, 700.0, false, vec![])
+            .unwrap();
+        let second = engine
+            .render(source.into(), false, 2, 700.0, false, vec![])
+            .unwrap();
+        assert_eq!(first.hit_regions.len(), 2);
+        assert_eq!(second.hit_regions.len(), 2);
     }
 
     #[test]

@@ -222,10 +222,12 @@ fn subgraphs_are_reported_as_unsupported_and_unknown_syntax_keeps_byte_ranges() 
 fn markdown_fences_and_absolute_source_mapping() {
     let markdown = "# Note\r\n````text\r\n```mermaid\r\nignored\r\n````\r\n  ~~~mermaid\r\nflowchart TB\r\nA[Root] --> B[Leaf]\r\n  ~~~~\r\n```mermaid\nmindmap\n  Root\n    Child\n";
     let first = mermaid_block(markdown, 1).unwrap();
-    let tree = parse_at(first.source, first.source_range.start).unwrap();
+    let tree = first.parse().unwrap();
     assert_eq!(&markdown[tree.nodes[0].source_range.clone()], "A[Root] ");
     assert_eq!(
-        parse(mermaid_block(markdown, 2).unwrap().source)
+        mermaid_block(markdown, 2)
+            .unwrap()
+            .parse()
             .unwrap()
             .nodes
             .len(),
@@ -236,6 +238,244 @@ fn markdown_fences_and_absolute_source_mapping() {
         Err(DiagramError::MissingBlock { .. })
     ));
     assert!(mermaid_block(markdown, 0).is_err());
+}
+
+#[test]
+fn container_fences_keep_absolute_utf8_ranges_and_stripped_bodies() {
+    let markdown = concat!(
+        "# Note\n\n",
+        "> quoted\n",
+        "> ```mermaid\n",
+        "> flowchart TB\n",
+        "> A[Quote root] --> B\n",
+        "> ```\n\n",
+        "> > nested\n",
+        "> > ~~~mermaid\n",
+        "> > mindmap\n",
+        "> >   Root\n",
+        "> >     Child\n",
+        "> > ~~~\n\n",
+        "> [!note]\n",
+        "> callout\n",
+        "> ```mermaid\n",
+        "> graph LR\n",
+        "> C --> D\n",
+        "> ```\n\n",
+        "```mermaid\n",
+        "flowchart TB\n",
+        "Top --> Level\n",
+        "```\n\n",
+        "- item\n\n",
+        "    ```mermaid\n",
+        "    flowchart TB\n",
+        "    E --> F\n",
+        "    ```\n\n",
+        "    ```text\n",
+        "    not a diagram\n",
+        "    ```\n\n",
+        "    ```mermaid\n",
+        "    flowchart TB\n",
+        "    G --> H\n",
+        "    ```\n",
+    );
+    let blocks = mermaid_blocks(markdown);
+    let expected = [
+        ("flowchart TB\nA[Quote root] --> B\n", true),
+        ("mindmap\n  Root\n    Child\n", true),
+        ("graph LR\nC --> D\n", true),
+        ("flowchart TB\nTop --> Level\n", false),
+        ("flowchart TB\nE --> F\n", true),
+        ("flowchart TB\nG --> H\n", true),
+    ];
+    assert_eq!(blocks.len(), expected.len());
+    for (block, (source, container)) in blocks.iter().zip(expected) {
+        assert_eq!(block.source, source);
+        assert_eq!(block.container, container);
+        assert!(markdown.is_char_boundary(block.fence_range.start));
+        assert!(markdown.is_char_boundary(block.fence_range.end));
+        assert!(block.fence_range.start <= block.source_range.start);
+        assert!(block.source_range.end <= block.fence_range.end);
+        let tree = block.parse().unwrap();
+        assert!(!tree.nodes.is_empty());
+        for node in &tree.nodes {
+            assert!(block.fence_range.contains(&node.source_range.start));
+            assert!(node.source_range.end <= block.fence_range.end);
+            let raw = &markdown[node.source_range.clone()];
+            if node.id.starts_with("mindmap-") {
+                assert!(
+                    raw.contains(&node.label),
+                    "节点 {:?} 的范围没有指向原文",
+                    node.id
+                );
+            } else {
+                assert!(
+                    raw.starts_with(&node.id),
+                    "节点 {:?} 的范围没有指向原文",
+                    node.id
+                );
+            }
+        }
+    }
+    let quote = &blocks[0];
+    assert!(markdown[quote.fence_range.clone()].starts_with("> ```mermaid"));
+    assert!(markdown[quote.fence_range.clone()].ends_with("> ```\n"));
+    let nested = &blocks[1];
+    assert!(markdown[nested.fence_range.clone()].starts_with("> > ~~~mermaid"));
+    assert_eq!(blocks[4].parse().unwrap().nodes[1].label, "F");
+
+    let indented = "    ```mermaid\n    flowchart TB\n    A --> B\n    ```\n";
+    assert!(mermaid_blocks(indented).is_empty());
+    let quoted_after_paragraph = "正文\n\n    ```mermaid\n    flowchart TB\n    A --> B\n    ```\n";
+    assert!(mermaid_blocks(quoted_after_paragraph).is_empty());
+
+    let invalid = "> ```mermaid\n> flowchart TB\n> A ??? B\n> ```\n";
+    let block = &mermaid_blocks(invalid)[0];
+    let DiagramError::Syntax { range, .. } = block.parse().unwrap_err() else {
+        panic!("应返回带源码范围的 Syntax")
+    };
+    assert!(invalid.is_char_boundary(range.start));
+    assert!(invalid.is_char_boundary(range.end));
+    assert_eq!(&invalid[range], "??? B");
+}
+
+#[test]
+fn mindmap_auto_ids_avoid_all_explicit_ids_including_later_ones() {
+    let report = "mindmap\n  Root\n    mindmap-2[Explicit]\n      Child";
+    let tree = parse(report).unwrap();
+    assert_eq!(tree.nodes.len(), 3);
+    assert_eq!(tree.nodes[1].id, "mindmap-2");
+    assert_eq!(tree.nodes[2].id, "mindmap-3");
+
+    let later = "mindmap\n  Root\n    Child\n      mindmap-1[Later]\n        Grandchild";
+    let tree = parse(later).unwrap();
+    let ids = tree
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), tree.nodes.len());
+    assert!(ids.contains("mindmap-1"));
+    assert_eq!(tree.nodes[1].id, "mindmap-2");
+    assert_eq!(tree.nodes[3].id, "mindmap-3");
+
+    let duplicate = "mindmap\n  Root\n    A[One]\n    A[Two]";
+    assert!(matches!(
+        parse(duplicate),
+        Err(DiagramError::Syntax { kind, .. }) if kind == "duplicate_mindmap_id"
+    ));
+}
+
+fn layout_chain(depth: usize) -> String {
+    let mut source = "flowchart TB\nA0".to_string();
+    for i in 1..=depth {
+        source.push_str(&format!(" --> A{i}"));
+    }
+    source.push('\n');
+    source
+}
+
+fn layout_mindmap_chain(depth: usize) -> String {
+    let mut source = "mindmap\n".to_string();
+    for level in 0..depth {
+        source.push_str(&format!("{}Level {level}\n", " ".repeat(level)));
+    }
+    source
+}
+
+fn digest(source: &str, width: f64, collapsed: &[&str]) -> u64 {
+    let mut scene = layout(
+        &parse(source).unwrap(),
+        &LayoutOptions {
+            width,
+            collapsed: collapsed.iter().map(|s| s.to_string()).collect(),
+            ..LayoutOptions::default()
+        },
+        &mut DeterministicMetrics,
+    )
+    .unwrap();
+    // 排版耗时不参与比较，其余字段与旧实现逐字节一致。
+    scene.metrics.layout_ms = 0.0;
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in format!("{scene:?}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+#[test]
+fn iterative_layout_matches_the_previous_recursive_output() {
+    for (source, expected) in [
+        (layout_chain(64), 0x927e3b9690aa815fu64),
+        (layout_chain(200), 0xe4003fef25ced52b),
+        (layout_chain(512), 0x7751cdc05d652d14),
+        (layout_mindmap_chain(200), 0xcd6976ae246192e1),
+    ] {
+        let width = if source.starts_with("mindmap") {
+            380.0
+        } else {
+            700.0
+        };
+        assert_eq!(digest(&source, width, &[]), expected);
+    }
+    let branching = "flowchart TB\nR[Root] --> A[Alpha section] --> A1[Leaf one]\nA --> A2[Second leaf]\nR --> B[Beta section]:::hot --> B1[Leaf three]\nB --> B2[Leaf four]\nR --> C[Gamma]\nclassDef hot fill:#fde9d9,stroke:#c33";
+    for (width, expected) in [
+        (380.0, 0x3f313746a6e0d075u64),
+        (700.0, 0x6c8c5ba9350b90d6),
+        (1100.0, 0xd103e3a095eb5957),
+    ] {
+        assert_eq!(digest(branching, width, &[]), expected);
+    }
+    assert_eq!(digest(branching, 700.0, &["A", "B"]), 0x4ca0e0e9d9eab8c3);
+    let labelled =
+        "flowchart LR\nA[开始] -->|是| B{判断}\nB -- 否 --> C[结束]\nA --> D((圆)) --> E[[子程序]]";
+    assert_eq!(digest(labelled, 380.0, &[]), 0xec46a1b1cbb3f259);
+}
+
+#[test]
+fn deep_chain_layout_does_not_overflow_the_stack() {
+    const CHILD: &str = "HORTUS_DIAGRAM_DEEP_CHAIN_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let tree = parse(&layout_chain(50_000)).unwrap();
+        // 递归实现会在几百 KB 的线程栈上中止；显式栈应正常返回。
+        let scene = std::thread::Builder::new()
+            .name("deep-layout".into())
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                layout(
+                    &tree,
+                    &LayoutOptions {
+                        width: 700.0,
+                        ..LayoutOptions::default()
+                    },
+                    &mut DeterministicMetrics,
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!(scene.hit_regions.len(), 50_001);
+        assert_eq!(scene.metrics.node_overlaps, 0);
+        assert!(!scene.metrics.horizontal_overflow);
+        assert!(scene.to_svg().starts_with("<svg"));
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "deep_chain_layout_does_not_overflow_the_stack",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "深链子进程失败：{:?}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -456,7 +696,7 @@ fn private_samples_structural_acceptance() {
             eprintln!("跳过 {prefix}：本机私人样本不存在");
             continue;
         };
-        let tree = parse(mermaid_block(&markdown, 1).unwrap().source).unwrap();
+        let tree = mermaid_block(&markdown, 1).unwrap().parse().unwrap();
         assert_eq!(tree.nodes.len(), nodes);
         for (width, columns) in [(380.0, 1), (700.0, 2), (1100.0, 3)] {
             let scene = layout(
@@ -503,7 +743,7 @@ fn private_samples_real_font_height_acceptance() {
             eprintln!("跳过 {prefix}：本机私人样本不存在");
             continue;
         };
-        let tree = parse(mermaid_block(&markdown, 1).unwrap().source).unwrap();
+        let tree = mermaid_block(&markdown, 1).unwrap().parse().unwrap();
         for ((width, target), previous) in [380.0, 700.0, 1100.0]
             .into_iter()
             .zip(targets)

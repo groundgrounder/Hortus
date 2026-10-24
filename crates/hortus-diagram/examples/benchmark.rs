@@ -1,4 +1,4 @@
-use hortus_diagram::{FontMetrics, LayoutOptions, SystemFonts, layout, mermaid_block, parse};
+use hortus_diagram::{FontMetrics, LayoutOptions, SystemFonts, layout, mermaid_block};
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("次数必须大于零".into());
     }
     let markdown = std::fs::read_to_string(path)?;
-    let tree = parse(mermaid_block(&markdown, 1)?.source)?;
+    let tree = mermaid_block(&markdown, 1)?.parse()?;
     let mut fonts = SystemFonts::new()?;
     let options = LayoutOptions {
         width,

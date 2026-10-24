@@ -1,3 +1,5 @@
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
@@ -65,57 +67,138 @@ impl Tree {
 #[derive(Clone, Debug)]
 pub struct MermaidBlock<'a> {
     pub fence_range: Range<usize>,
-    pub source: &'a str,
-    /// 范围相对整篇 Markdown，解析时用作偏移量。
+    /// 图表正文；引用块和列表容器中的围栏会去掉每行的容器前缀。
+    pub source: Cow<'a, str>,
+    /// 正文在原文中的绝对范围；容器内的正文不是连续切片，节点范围见 [`MermaidBlock::parse`]。
     pub source_range: Range<usize>,
+    /// 围栏位于引用块、列表等容器内，`source` 已去掉容器前缀。
+    pub container: bool,
+    projection: Projection,
+}
+
+/// 把去掉容器前缀后的正文偏移映射回原文的绝对 UTF-8 偏移。
+#[derive(Clone, Debug, Default)]
+struct Projection {
+    /// (正文起点, 原文起点, 原文中可一一对应的字节数)
+    segments: Vec<(usize, usize, usize)>,
+    length: usize,
+    end: usize,
+}
+
+impl Projection {
+    fn map(&self, offset: usize) -> usize {
+        if offset >= self.length {
+            return self.end;
+        }
+        let index = self
+            .segments
+            .partition_point(|(start, _, _)| *start <= offset)
+            .saturating_sub(1);
+        let (start, raw, length) = self.segments[index];
+        raw + (offset - start).min(length)
+    }
+
+    fn map_range(&self, range: Range<usize>) -> Range<usize> {
+        self.map(range.start)..self.map(range.end)
+    }
+}
+
+impl MermaidBlock<'_> {
+    /// 解析图表，返回的节点范围指向整篇原文。
+    pub fn parse(&self) -> Result<Tree, DiagramError> {
+        let map = |range| self.projection.map_range(range);
+        match parse_relative(&self.source) {
+            Ok(mut tree) => {
+                tree.map_ranges(map);
+                Ok(tree)
+            }
+            Err(error) => Err(error.map_ranges(map)),
+        }
+    }
+}
+
+struct FenceBuilder {
+    fence_start: usize,
+    body_start: usize,
+    body: String,
+    segments: Vec<(usize, usize, usize)>,
+    last_text_end: usize,
+    container: bool,
+}
+
+fn line_start(text: &str, offset: usize) -> usize {
+    text[..offset].rfind('\n').map_or(0, |index| index + 1)
+}
+
+fn line_end(text: &str, offset: usize) -> usize {
+    text[offset..]
+        .find('\n')
+        .map_or(text.len(), |index| offset + index + 1)
 }
 
 /// 识别全部围栏；保留完整围栏范围，供原生文本布局直接映射。
+/// 围栏可位于引用块、Obsidian callout 或列表项内，正文按 CommonMark 去掉容器前缀。
 pub fn mermaid_blocks(markdown: &str) -> Vec<MermaidBlock<'_>> {
-    let mut fence: Option<(char, usize, bool, usize, usize)> = None;
     let mut blocks = Vec::new();
-    let mut offset = 0;
-    for line in markdown.split_inclusive('\n') {
-        let raw = line.trim_end_matches(['\r', '\n']);
-        let indent = raw.len() - raw.trim_start_matches(' ').len();
-        let text = &raw[indent..];
-        if indent <= 3 {
-            if let Some((ch, len, is_mermaid, start, fence_start)) = fence {
-                let n = text.chars().take_while(|c| *c == ch).count();
-                if n >= len && text[n..].trim().is_empty() {
-                    if is_mermaid {
-                        blocks.push(MermaidBlock {
-                            source: &markdown[start..offset],
-                            source_range: start..offset,
-                            fence_range: fence_start..offset + line.len(),
-                        });
-                    }
-                    fence = None;
+    let mut depth = 0usize;
+    let mut fence: Option<FenceBuilder> = None;
+    for (event, range) in Parser::new_ext(markdown, Options::empty()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                if info.split_whitespace().next() == Some("mermaid") {
+                    let body_start = line_end(markdown, range.start);
+                    fence = Some(FenceBuilder {
+                        fence_start: line_start(markdown, range.start),
+                        body_start,
+                        body: String::new(),
+                        segments: Vec::new(),
+                        last_text_end: body_start,
+                        container: depth > 0,
+                    });
                 }
-            } else if let Some(ch @ ('`' | '~')) = text.chars().next() {
-                let n = text.chars().take_while(|c| *c == ch).count();
-                if n >= 3 {
-                    let info = text[n..].trim();
-                    if ch != '`' || !info.contains('`') {
-                        fence = Some((
-                            ch,
-                            n,
-                            info.split_whitespace().next() == Some("mermaid"),
-                            offset + line.len(),
-                            offset,
-                        ));
-                    }
+                depth += 1;
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                depth = depth.saturating_sub(1);
+                if let Some(builder) = fence.take() {
+                    // 关闭围栏之后还有内容；未闭合的围栏 End 就落在正文末尾。
+                    let closed = range.end > builder.last_text_end;
+                    let fence_end = if closed {
+                        line_end(markdown, range.end)
+                    } else {
+                        markdown.len()
+                    };
+                    let source_range = builder.body_start..builder.last_text_end;
+                    let length = builder.body.len();
+                    let source = match markdown.get(source_range.clone()) {
+                        Some(raw) if raw == builder.body => Cow::Borrowed(raw),
+                        _ => Cow::Owned(builder.body),
+                    };
+                    blocks.push(MermaidBlock {
+                        fence_range: builder.fence_start..fence_end,
+                        source,
+                        source_range,
+                        container: builder.container,
+                        projection: Projection {
+                            segments: builder.segments,
+                            length,
+                            end: builder.last_text_end,
+                        },
+                    });
                 }
             }
+            Event::Text(text) if fence.is_some() => {
+                let builder = fence.as_mut().unwrap();
+                builder
+                    .segments
+                    .push((builder.body.len(), range.start, range.len()));
+                builder.body.push_str(&text);
+                builder.last_text_end = range.end;
+            }
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
         }
-        offset += line.len();
-    }
-    if let Some((_, _, true, start, fence_start)) = fence {
-        blocks.push(MermaidBlock {
-            source: &markdown[start..],
-            source_range: start..markdown.len(),
-            fence_range: fence_start..markdown.len(),
-        });
     }
     blocks
 }
@@ -128,13 +211,25 @@ pub fn mermaid_block(markdown: &str, requested: usize) -> Result<MermaidBlock<'_
 }
 
 pub fn parse(source: &str) -> Result<Tree, DiagramError> {
-    parse_at(source, 0)
+    parse_relative(source)
 }
 
+/// 解析相对 `offset` 的图表源码；返回的节点与错误范围都加上 `offset`。
 pub fn parse_at(source: &str, offset: usize) -> Result<Tree, DiagramError> {
+    let shift = |range: Range<usize>| range.start + offset..range.end + offset;
+    match parse_relative(source) {
+        Ok(mut tree) => {
+            tree.map_ranges(shift);
+            Ok(tree)
+        }
+        Err(error) => Err(error.map_ranges(shift)),
+    }
+}
+
+fn parse_relative(source: &str) -> Result<Tree, DiagramError> {
     let statements = statements(source);
     let Some((header_at, header)) = statements.first().copied() else {
-        return Err(syntax(offset..offset, "missing_type"));
+        return Err(syntax(0..0, "missing_type"));
     };
     let kind = header.split_whitespace().next().unwrap_or("");
     if !matches!(kind, "flowchart" | "graph" | "mindmap") {
@@ -146,22 +241,42 @@ pub fn parse_at(source: &str, offset: usize) -> Result<Tree, DiagramError> {
     if kind == "mindmap" {
         parse_mindmap(
             &source[header_at + header.len()..],
-            offset + header_at + header.len(),
+            header_at + header.len(),
             &mut builder,
         )?;
     } else {
         let direction = header.strip_prefix(kind).unwrap().trim();
         if !matches!(direction, "TB" | "TD" | "BT" | "LR" | "RL") {
             return Err(syntax(
-                offset + header_at..offset + header_at + header.len(),
+                header_at..header_at + header.len(),
                 "invalid_direction",
             ));
         }
         for (at, statement) in statements.into_iter().skip(1) {
-            parse_flow_statement(statement, offset + at, &mut builder)?;
+            parse_flow_statement(statement, at, &mut builder)?;
         }
     }
     builder.finish()
+}
+
+impl Tree {
+    fn map_ranges(&mut self, map: impl Fn(Range<usize>) -> Range<usize>) {
+        for node in &mut self.nodes {
+            node.source_range = map(node.source_range.clone());
+        }
+    }
+}
+
+impl DiagramError {
+    fn map_ranges(self, map: impl Fn(Range<usize>) -> Range<usize>) -> Self {
+        match self {
+            Self::Syntax { range, kind } => Self::Syntax {
+                range: map(range),
+                kind,
+            },
+            other => other,
+        }
+    }
 }
 
 fn syntax(range: Range<usize>, kind: &str) -> DiagramError {
@@ -669,7 +784,34 @@ fn parse_class(text: &str, cursor: &mut usize) -> Option<String> {
     Some(text[start..*cursor].into())
 }
 
+fn mindmap_explicit_ids(source: &str) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for line in source.split_inclusive('\n') {
+        let raw = line.trim_end_matches(['\r', '\n']);
+        let text = without_comment(raw.trim());
+        if text.is_empty() || text.starts_with(":::") || text.starts_with("::icon(") {
+            continue;
+        }
+        let mut cursor = 0;
+        while let Some(ch) = text[cursor..].chars().next() {
+            if !(ch.is_alphanumeric() || ch == '_' || ch == '-') {
+                break;
+            }
+            cursor += ch.len_utf8();
+        }
+        if cursor > 0
+            && SHAPES
+                .iter()
+                .any(|(open, _)| text[cursor..].starts_with(open))
+        {
+            ids.insert(text[..cursor].into());
+        }
+    }
+    ids
+}
+
 fn parse_mindmap(source: &str, at: usize, builder: &mut Builder) -> Result<(), DiagramError> {
+    let explicit = mindmap_explicit_ids(source);
     let mut offset = 0;
     let mut stack: Vec<(usize, usize)> = Vec::new();
     for line in source.split_inclusive('\n') {
@@ -702,22 +844,23 @@ fn parse_mindmap(source: &str, at: usize, builder: &mut Builder) -> Result<(), D
         }
         let prefix = &text[..cursor];
         let shape = parse_shape(text, &mut cursor, start)?;
+        let explicit_id = shape.is_some() && !prefix.is_empty();
         let (id, label) = if let Some(label) = shape {
-            let id = if prefix.is_empty() {
-                format!("mindmap-{}", builder.nodes.len())
-            } else {
+            let id = if explicit_id {
                 prefix.into()
+            } else {
+                auto_mindmap_id(&explicit, builder)
             };
             (id, label)
         } else {
             cursor = annotation_start(text);
             (
-                format!("mindmap-{}", builder.nodes.len()),
+                auto_mindmap_id(&explicit, builder),
                 unquote(&text[..cursor]),
             )
         };
         let class = mindmap_annotations(text, &mut cursor, start)?;
-        if builder.ids.contains_key(&id) {
+        if explicit_id && builder.ids.contains_key(&id) {
             return Err(syntax(start..start + text.len(), "duplicate_mindmap_id"));
         }
         let node = builder.node(&id, Some(label), class, start..start + text.len());
@@ -730,6 +873,19 @@ fn parse_mindmap(source: &str, at: usize, builder: &mut Builder) -> Result<(), D
         stack.push((indent, node));
     }
     Ok(())
+}
+
+fn auto_mindmap_id(explicit: &HashSet<String>, builder: &Builder) -> String {
+    // 先沿用按当前节点数生成的历史 ID，只有与显式 ID 冲突时才递增，
+    // 这样普通笔记的折叠状态键保持不变。
+    let mut candidate = builder.nodes.len();
+    loop {
+        let id = format!("mindmap-{candidate}");
+        candidate += 1;
+        if !explicit.contains(&id) && !builder.ids.contains_key(&id) {
+            return id;
+        }
+    }
 }
 
 // 注释和附加标记只在引号外识别，不能吞掉标签里的字面文字。

@@ -25,6 +25,51 @@ fn assert_same_rendering(
 }
 
 #[test]
+fn container_fences_keep_diagram_ordinals_aligned_with_mermaid_blocks() {
+    let source = concat!(
+        "> intro\n",
+        "> ```mermaid\n",
+        "> flowchart TB\n",
+        "> A --> B\n",
+        "> ```\n",
+        "\n",
+        "```mermaid\n",
+        "mindmap\n  Root\n    Child\n```\n",
+        "\n",
+        "- item\n\n",
+        "    ```mermaid\n",
+        "    flowchart TB\n",
+        "    C --> D\n",
+        "    ```\n",
+    );
+    let fences = hortus_diagram::mermaid_blocks(source);
+    assert_eq!(fences.len(), 3);
+    let mut document = Document::new(source);
+    let model = document.reading(false).unwrap();
+    let diagrams = model
+        .blocks
+        .iter()
+        .filter(|block| block.content.diagram)
+        .collect::<Vec<_>>();
+    assert_eq!(diagrams.len(), fences.len());
+    for (block, fence) in diagrams.iter().zip(&fences) {
+        let start = source[..fence.fence_range.start].encode_utf16().count();
+        let end = source[..fence.fence_range.end].encode_utf16().count();
+        assert_eq!(block.source.start, start);
+        // 围栏后的空白可并入图块，避免多出空白阅读块。
+        assert!(block.source.end >= end);
+        assert!(block.source.end <= source.encode_utf16().count());
+    }
+    let text: String = model
+        .blocks
+        .iter()
+        .map(|block| block.content.text.as_str())
+        .collect();
+    assert!(text.contains("intro"));
+    assert!(text.contains("item"));
+}
+
+#[test]
 fn rendered_text_and_source_mapping_cover_unicode_and_syntax() {
     let mut cache = Cache::default();
     let source = "# 标题😀\n\n正文 **加粗** *斜体* ~~删除~~ ==高亮== `代码` [[目标|别名]] #标签 %%隐藏%%。\n\n- [ ] 任务\n- 普通\n\n> [!note] 标题\n> 连续内容\n";

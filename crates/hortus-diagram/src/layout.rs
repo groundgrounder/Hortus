@@ -141,8 +141,18 @@ struct PanelLayout<'a> {
     panel: Panel,
 }
 
+struct Frame {
+    index: usize,
+    depth: usize,
+    bottom: f64,
+    top: f64,
+    next_child: usize,
+    guide: bool,
+}
+
 impl PanelLayout<'_> {
-    fn node(&mut self, index: usize, depth: usize, y: f64) -> f64 {
+    /// 单层排版：递归会让极深单链耗尽线程栈，这里改为显式栈。
+    fn enter(&mut self, index: usize, depth: usize, y: f64) -> Frame {
         let node = &self.tree.nodes[index];
         let head = depth == 0;
         // 极深树仍保留可读文字宽度，正常深度完全按样稿的 17.5px 缩进。
@@ -197,25 +207,57 @@ impl PanelLayout<'_> {
             collapsed,
             source_range: node.source_range.clone(),
         });
-        let mut bottom = y + height;
-        if has_children && !collapsed {
-            let top = bottom;
-            for &child in &node.children {
-                bottom = self.node(child, depth + 1, bottom);
-            }
-            let guide_x = ((depth as f64 * 17.5) + 2.75).min(self.width - 44.0);
-            self.panel.primitives.push(Primitive::Line {
-                from: Point { x: guide_x, y: top },
-                to: Point {
-                    x: guide_x,
-                    y: bottom,
-                },
-                width: 1.5,
-                color: self.palette.guide(self.hue),
-            });
-            bottom += 2.0;
+        let bottom = y + height;
+        Frame {
+            index,
+            depth,
+            bottom,
+            top: bottom,
+            next_child: 0,
+            guide: has_children && !collapsed,
         }
-        bottom
+    }
+
+    fn node(&mut self, index: usize, depth: usize, y: f64) -> f64 {
+        let mut stack = vec![self.enter(index, depth, y)];
+        loop {
+            let next = {
+                let frame = stack.last_mut().unwrap();
+                let children = &self.tree.nodes[frame.index].children;
+                if frame.guide && frame.next_child < children.len() {
+                    let child = children[frame.next_child];
+                    frame.next_child += 1;
+                    Some((child, frame.depth + 1, frame.bottom))
+                } else {
+                    None
+                }
+            };
+            if let Some((child, child_depth, child_y)) = next {
+                stack.push(self.enter(child, child_depth, child_y));
+                continue;
+            }
+            let mut frame = stack.pop().unwrap();
+            if frame.guide {
+                let guide_x = ((frame.depth as f64 * 17.5) + 2.75).min(self.width - 44.0);
+                self.panel.primitives.push(Primitive::Line {
+                    from: Point {
+                        x: guide_x,
+                        y: frame.top,
+                    },
+                    to: Point {
+                        x: guide_x,
+                        y: frame.bottom,
+                    },
+                    width: 1.5,
+                    color: self.palette.guide(self.hue),
+                });
+                frame.bottom += 2.0;
+            }
+            match stack.last_mut() {
+                Some(parent) => parent.bottom = frame.bottom,
+                None => return frame.bottom,
+            }
+        }
     }
 }
 
@@ -435,16 +477,23 @@ pub fn layout(
                 || from.x.max(to.x) + width / 2.0 > options.width + 0.001
         }
     });
-    let node_overlaps = hits
-        .iter()
-        .enumerate()
-        .map(|(i, a)| {
-            hits[i + 1..]
-                .iter()
-                .filter(|b| a.rect.intersects(b.rect))
-                .count()
-        })
-        .sum();
+    // 命中区域按纵向起点扫描，只在仍可能相交的范围内比较，避免深链的 O(n²) 检查。
+    let mut ordered = (0..hits.len()).collect::<Vec<_>>();
+    ordered.sort_by(|&a, &b| hits[a].rect.y.total_cmp(&hits[b].rect.y));
+    let mut active: Vec<usize> = Vec::new();
+    let mut node_overlaps = 0;
+    for index in ordered {
+        let rect = hits[index].rect;
+        active.retain(|&other| rect.y < hits[other].rect.y + hits[other].rect.height - 0.001);
+        node_overlaps += active
+            .iter()
+            .filter(|&&other| {
+                let other = hits[other].rect;
+                rect.x < other.x + other.width - 0.001 && other.x < rect.x + rect.width - 0.001
+            })
+            .count();
+        active.push(index);
+    }
     let fonts_used = fonts.used_fonts().into_iter().filter(|f| primitives.iter().any(|p| matches!(p, Primitive::Text(t) if t.font_family == f.family && (t.font_weight == f.weight || f.family == "Deterministic")))).collect();
     Ok(Scene {
         width: options.width,

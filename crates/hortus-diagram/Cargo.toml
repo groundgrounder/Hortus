@@ -10,3 +10,4 @@ fontdb.workspace = true
 rustybuzz.workspace = true
 unicode-segmentation.workspace = true
 csscolorparser.workspace = true
+pulldown-cmark = { version = "=0.13.4", default-features = false }
