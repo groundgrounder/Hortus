@@ -1,0 +1,53 @@
+{
+  "fill": {
+    "solid": "extended-srgb:0.11765,0.24706,0.18824,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "3-veins.svg",
+          "name": "3-veins",
+          "glass": false,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "image-name": "2-leaf.svg",
+          "name": "2-leaf",
+          "glass": false,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "image-name": "1-background.svg",
+          "name": "1-background",
+          "glass": false,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "name": "Leaf page"
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+[package]
+name = "hortus-document"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hortus-diagram = { path = "../hortus-diagram" }
+pulldown-cmark = { version = "=0.13.4", default-features = false }

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="240" viewBox="0 0 640 240">
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<rect width="640" height="240" fill="#e7efea"/>
+<circle cx="496" cy="59" r="27" fill="#e0b266"/>
+<path d="M0 210 300 69 520 240H0Z" fill="#79998d"/>
+<path d="M100 240 400 75 640 178V240Z" fill="#457165"/>
+<path d="M0 200H640V240H0Z" fill="#32584e"/>
+</svg>

@@ -1,0 +1,4 @@
+[crates.hortus_ffi.bindings.swift]
+module_name = "HortusCore"
+ffi_module_name = "HortusFFI"
+generate_module_map = true

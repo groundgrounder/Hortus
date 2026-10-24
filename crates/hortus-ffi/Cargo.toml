@@ -1,0 +1,28 @@
+[package]
+name = "hortus-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "hortus-bindgen"
+path = "src/bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+hortus-document = { path = "../hortus-document" }
+hortus-diagram = { path = "../hortus-diagram" }
+hortus-vault = { path = "../hortus-vault" }
+hortus-config = { path = "../hortus-config" }
+hortus-search = { path = "../hortus-search" }
+serde_json.workspace = true
+uniffi = { version = "=0.32.2", default-features = false }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

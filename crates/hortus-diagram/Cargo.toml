@@ -1,0 +1,12 @@
+[package]
+name = "hortus-diagram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+fontdb.workspace = true
+rustybuzz.workspace = true
+unicode-segmentation.workspace = true
+csscolorparser.workspace = true

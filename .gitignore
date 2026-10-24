@@ -1,0 +1,36 @@
+# 构建产物
+.gradle/
+.kotlin/
+build/
+*/build/
+.build/
+target/
+**/src/main/jniLibs/
+node_modules/
+
+# 本机配置（含本机 SDK 路径，勿上传）
+local.properties
+
+# IDE
+.idea/
+*.iml
+.cxx/
+
+# 系统文件
+.DS_Store
+
+# 本项目的工作区数据（截图、记忆等），不进版本库
+.workbuddy/
+
+# 可重建的性能夹具
+**/fixtures/benchmarks/generated/
+
+# 用户的私人样本笔记，以及由它们生成的文件：只在本机，不进版本库
+fixtures/mermaid/tree/
+
+# 打包签名（如有）
+*.jks
+*.keystore
+
+# macOS 构建命令生成的 UniFFI 绑定
+apps/macos/Generated/
