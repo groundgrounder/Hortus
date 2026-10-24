@@ -263,10 +263,14 @@ final class HortusTerminalView: LocalProcessTerminalView {
     private func applyNativeColors() {
         // SwiftTerm converts the foreground to RGB outside AppKit drawing.
         // Resolve it with this view's appearance, which can differ from the OS.
+        // The background must be the real panel color too: SwiftTerm reports it for OSC 11,
+        // uses it for reverse video and derives the 256-color ramp from it. `.clear` is
+        // black with zero alpha, so programs saw a black terminal. Only the alpha keeps
+        // the view transparent over the glass panel.
         effectiveAppearance.performAsCurrentDrawingAppearance {
             nativeForegroundColor = NSColor.labelColor.usingColorSpace(.sRGB) ?? .labelColor
+            nativeBackgroundColor = NSColor.textBackgroundColor.usingColorSpace(.sRGB) ?? .textBackgroundColor
         }
-        nativeBackgroundColor = .clear
         backgroundOpacity = 0
     }
 

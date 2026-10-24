@@ -1,6 +1,19 @@
 import AppKit
+import SwiftTerm
 import Testing
 @testable import Hortus
+
+/// 截获终端回给程序的字节，不启动 shell。
+@MainActor
+private final class ReplyRecorder: TerminalViewDelegate {
+    var replies: [[UInt8]] = []
+    func send(source: TerminalView, data: ArraySlice<UInt8>) { replies.append(Array(data)) }
+    func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) { }
+    func setTerminalTitle(source: TerminalView, title: String) { }
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) { }
+    func scrolled(source: TerminalView, position: Double) { }
+    func rangeChanged(source: TerminalView, startY: Int, endY: Int) { }
+}
 
 @MainActor
 struct TerminalTests {
@@ -20,6 +33,31 @@ struct TerminalTests {
                 #expect(((foreground?.greenComponent ?? 0) > 0.5) == isDark)
                 #expect(((foreground?.blueComponent ?? 0) > 0.5) == isDark)
             }
+        }
+    }
+
+    /// 视图透明，但程序通过 OSC 11 查询到的背景必须是面板实际的颜色，否则会按黑底配色。
+    @Test func backgroundStaysTransparentButReportsPanelColor() async throws {
+        let session = TerminalSession()
+        let view = HortusTerminalView(session: session)
+        let recorder = ReplyRecorder()
+        view.terminalDelegate = recorder
+        let dark = try #require(NSAppearance(named: .darkAqua))
+        let light = try #require(NSAppearance(named: .aqua))
+        for (appearance, isDark) in [(light, false), (dark, true)] {
+            view.appearance = appearance
+            view.viewDidChangeEffectiveAppearance()
+            #expect(view.backgroundOpacity == 0)
+            let background = try #require(view.nativeBackgroundColor.usingColorSpace(.sRGB))
+            #expect((background.redComponent > 0.5) == !isDark)
+            #expect((background.blueComponent > 0.5) == !isDark)
+
+            recorder.replies = []
+            view.feed(text: "\u{1b}]11;?\u{07}")
+            for _ in 0..<100 where recorder.replies.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+            let reply = String(decoding: recorder.replies.joined(), as: UTF8.self)
+            let red = try #require(reply.firstRange(of: "rgb:").map { reply[$0.upperBound...].prefix(4) })
+            #expect(((Int(red, radix: 16) ?? 0) > 0x8000) == !isDark, "\(reply.debugDescription)")
         }
     }
 
