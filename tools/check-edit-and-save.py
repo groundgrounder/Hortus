@@ -45,6 +45,38 @@ def run(state, output, name, vault, mode):
                 process.wait(timeout=6)
 
 
+def run_blocked(state, output, name, vault, mode):
+    """笔记与恢复稿都写不进去时，退出必须被拦下；进程保持运行并等待用户决定。"""
+    target = output / f'{name}.json'
+    target.unlink(missing_ok=True)
+    before = (vault / 'note.md').read_text()
+    arguments = [str(APP), f'--vault={vault}', '--note=note.md', '--light',
+                 f'--edit-inspection={target}', f'--edit-mode={mode}']
+    recovery = state / 'cache/recovery'
+    with subprocess.Popen(arguments, env=HELPERS.environment(state)) as process:
+        try:
+            deadline = time.monotonic() + 30
+            while not target.exists():
+                assert process.poll() is None and time.monotonic() < deadline, f'{name} 自检失败'
+                time.sleep(.005)
+            result = json.loads(target.read_text())
+            assert result['dirty_before_exit'] and result['blocked_exit'], result
+            time.sleep(2)
+            assert process.poll() is None, '笔记与恢复稿都未持久化时不应退出'
+            assert (vault / 'note.md').read_text() == before, '未持久化的正文不能写进笔记'
+            result['exit_blocked'] = True
+            target.write_text(json.dumps(result, indent=2) + '\n')
+            print(name, json.dumps(result, indent=2), flush=True)
+            return result
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=6)
+            for path, mode_bits in ((recovery, 0o755), (vault / 'note.md', 0o644)):
+                if path.exists():
+                    path.chmod(mode_bits)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/edit-and-save')
@@ -71,7 +103,8 @@ def main():
             assert lifecycle['external_delay_seconds'] <= 1, lifecycle
             assert (vault / 'note.md').read_text().startswith('退出保存'), '退出时没有保存'
             failed = run(base / 'recovery', output, 'shutdown-failure', vault, 'shutdown-failure')
-            assert 2.7 <= failed['exit_seconds_after_result'] <= 3.7, failed
+            # 笔记写入失败但恢复稿成功：最新正文已落盘，退出不必等待也很难被拖慢。
+            assert 0 <= failed['exit_seconds_after_result'] <= 2, failed
             recovery = list((base / 'recovery/cache/recovery').glob('*.json'))
             assert len(recovery) == 1
             assert json.loads(recovery[0].read_text())['text'].startswith('退出恢复😀')
@@ -79,6 +112,9 @@ def main():
             restored = run(base / 'recovery', output, 'restart-recovery', vault, 'recovery')
             assert restored['recovery_prompt'] and restored['recovered'] and restored['saved'], restored
             assert not list((base / 'recovery/cache/recovery').glob('*.json'))
+            # 笔记与恢复稿都失败：不能放行退出；进程留在提示界面等待用户决定。
+            blocked = run_blocked(base / 'blocked', output, 'shutdown-blocked', vault, 'shutdown-blocked')
+            assert blocked['exit_blocked']
             block = '\n```mermaid\nmindmap\n  Root\n    One\n    Two\n    Three\n```\n'
             chunk = 'Ordinary Markdown source text for incremental editing.\n' * 3300
             large = '\n'.join(chunk + block for _ in range(6))
