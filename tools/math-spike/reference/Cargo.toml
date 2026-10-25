@@ -1,0 +1,15 @@
+[package]
+name = "math-reference"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Control renderer only; not a dependency of math-spike or Hortus.
+[workspace]
+
+[dependencies]
+ratex-render = "=0.1.15"
+ratex-types = "=0.1.15"
+ratex-katex-fonts = "=0.1.15"
+serde_json = "=1.0.149"

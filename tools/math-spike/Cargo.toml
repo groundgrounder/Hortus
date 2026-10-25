@@ -1,0 +1,32 @@
+[package]
+name = "math-spike"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone experiment: never participate in the product workspace.
+[workspace]
+
+[dependencies]
+ratex-parser = "=0.1.15"
+ratex-layout = "=0.1.15"
+ratex-types = "=0.1.15"
+ratex-font = "=0.1.15"
+pulldown-cmark = "=0.13.4"
+serde_json = "=1.0.149"
+
+[[bin]]
+name = "math-spike"
+path = "src/main.rs"
+
+[[bin]]
+name = "size-ratex"
+path = "src/size.rs"
+
+[[bin]]
+name = "size-empty"
+path = "src/empty.rs"
+
+[profile.release]
+strip = true
