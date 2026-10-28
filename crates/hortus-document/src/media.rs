@@ -1,5 +1,5 @@
 //! 表格的语义、统一列宽和显式源码对齐；图片只解析库内本地路径。
-use crate::{markdown, reading};
+use crate::reading;
 use hortus_diagram::FontMetrics;
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use std::{ops::Range, path::Path};
@@ -455,8 +455,4 @@ pub fn align_table(text: &str, caret: usize) -> Option<Patch> {
         }
     }
     None
-}
-
-pub(crate) fn inline_spans(text: &str) -> Vec<(markdown::Kind, Range<usize>)> {
-    markdown::analyze_bytes(text)
 }

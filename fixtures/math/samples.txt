@@ -1,0 +1,209 @@
+# 基础
+x
+x+y=z
+x^2+y^2=z^2
+x_i
+x_i^2
+x_{i_j}^{n+1}
+a^{b^c}
+2^{-3}
+\frac{a}{b}
+\dfrac{1}{1+x}
+\tfrac{a+b}{c+d}
+\frac{\frac{1}{2}}{\frac{3}{4}}
+\sqrt{x}
+\sqrt[3]{x^2+1}
+\sqrt{\frac{a+b}{c}}
+\sum_{i=1}^{n}i
+\sum\limits_{k=0}^{\infty}x^k
+\prod_{k=1}^{n}k
+\int_0^1 x^2\,dx
+\int_{-\infty}^{\infty}e^{-x^2}\,dx
+\iint_D f(x,y)\,dx\,dy
+\oint_C \mathbf{F}\cdot d\mathbf{r}
+\lim_{x\to0}\frac{\sin x}{x}
+\limsup_{n\to\infty}a_n
+\alpha+\beta+\gamma+\delta
+\Gamma+\Delta+\Theta+\Omega
+\epsilon+\varepsilon+\phi+\varphi
+\pi\approx3.14159
+\mathbb{R}\subset\mathbb{C}
+\mathbb{N}\cup\mathbb{Z}
+\mathcal{F}(x)
+\mathcal{L}\{f\}
+\mathbf{A}\mathbf{x}=\mathbf{b}
+\boldsymbol{\alpha}+\boldsymbol{\beta}
+\operatorname{rank}(A)=n
+\operatorname*{arg\,min}_{x} f(x)
+\sin^2 x+\cos^2 x=1
+\log_2 x=\frac{\ln x}{\ln2}
+\exp(i\pi)+1=0
+\partial_x f=\frac{\partial f}{\partial x}
+\nabla\cdot\mathbf{E}=\rho/\epsilon_0
+\infty+\aleph_0
+\forall x\in\mathbb{R},\;x^2\ge0
+A\cap B\ne\varnothing
+p\implies q\iff\neg p\lor q
+\langle u,v\rangle=\sum_i u_i v_i
+\binom{n}{k}=\frac{n!}{k!(n-k)!}
+\dbinom{n}{2}
+{n\choose k}
+\frac{d^2y}{dx^2}+y=0
+# 括号
+\left(\frac{a}{b}\right)
+\left[\sum_i x_i\right]
+\left\{\frac{x}{1+x}\right\}
+\left|\frac{a}{b}\right|
+\left\lVert\mathbf{x}\right\rVert
+\left\langle\frac{a}{b},c\right\rangle
+\left.\frac{dy}{dx}\right|_{x=0}
+\left\{x\in\mathbb{R}\middle|x>0\right\}
+\left(\frac{a}{b}\middle|\frac{c}{d}\right)
+\bigl(x\bigr)
+\Bigl[x\Bigr]
+\biggl\{x\biggr\}
+\Biggl\langle x\Biggr\rangle
+\big|\Big|\bigg|\Bigg|
+\left(\sqrt{\frac{1}{1+x}}\right)
+\left(\left[\frac{x}{y}\right]\right)
+\left\lfloor\frac{n}{2}\right\rfloor
+\left\lceil x\right\rceil
+\left\{\begin{matrix}a\\b\\c\\d\\e\end{matrix}\right.
+\left\Vert\begin{matrix}a&b\\c&d\end{matrix}\right\Vert
+# 环境
+\begin{matrix}a&b\\c&d\end{matrix}
+\begin{pmatrix}1&0\\0&1\end{pmatrix}
+\begin{bmatrix}1&2&3\\4&5&6\end{bmatrix}
+\begin{Bmatrix}a&b\\c&d\end{Bmatrix}
+\begin{vmatrix}a&b\\c&d\end{vmatrix}
+\begin{Vmatrix}a&b\\c&d\end{Vmatrix}
+\begin{matrix}1&2&3\\4&5&6\\7&8&9\end{matrix}
+f(x)=\begin{cases}x^2&x\ge0\\-x&x<0\end{cases}
+\begin{cases}x+y=1\\x-y=0\end{cases}
+\begin{aligned}a&=b+c\\&=d+e\end{aligned}
+\begin{aligned}x+y&=3\\2x-y&=0\end{aligned}
+\begin{align}a&=b\\c&=d\end{align}
+\begin{align*}a&=b+c\\d&=e\end{align*}
+\begin{gather}a=b\\c=d\end{gather}
+\begin{gather*}x=1\\y=2\end{gather*}
+\begin{gathered}a=b\\c=d\end{gathered}
+\begin{array}{cc}a&b\\c&d\end{array}
+\begin{array}{lcr}a&b&c\\d&e&f\end{array}
+\begin{array}{c|c}x&y\\\hline1&2\end{array}
+\begin{array}{rcl}a&=&b+c\\d&=&e\end{array}
+\begin{matrix}a&b&c\\d\end{matrix}
+\begin{pmatrix}\frac12&\sqrt2\\0&x^2\end{pmatrix}
+\begin{smallmatrix}a&b\\c&d\end{smallmatrix}
+\begin{alignedat}{2}a&=b&\quad c&=d\\e&=f&g&=h\end{alignedat}
+\begin{split}a&=b+c\\&=d\end{split}
+\begin{equation}E=mc^2\end{equation}
+\begin{equation*}a=b\end{equation*}
+\begin{array}{|c|c|}\hline a&b\\\hline c&d\\\hline\end{array}
+\begin{array}{c:c}a&b\\\hdashline c&d\end{array}
+\begin{aligned}a&=b\tag{A}\\c&=d\end{aligned}
+# 装饰
+\hat{x}
+\widehat{ABC}
+\bar{x}
+\vec{v}
+\overline{AB}
+\underline{x+y}
+\underbrace{a+\cdots+a}_{n\text{ times}}
+\overbrace{x+\cdots+x}^{n}
+A\xrightarrow{f}B
+A\xrightarrow[below]{above}B
+A\xleftarrow{g}B
+\stackrel{!}{=} 
+\overset{\text{def}}{=} 
+\underset{x\to0}{\lim}f(x)
+\dot{x}+\ddot{x}
+\tilde{x}+\widetilde{xyz}
+\breve{a}+\check{b}+\acute{c}+\grave{d}
+\boxed{E=mc^2}
+\cancel{x}+\bcancel{y}+\xcancel{z}
+\overrightarrow{AB}+\overleftarrow{CD}
+# 文字
+\text{velocity}=\frac{\Delta s}{\Delta t}
+\text{速度}=\frac{\Delta s}{\Delta t}
+x=1\quad\text{if }y>0
+\text{hello world}
+\text{中文和 English}
+\text{概率}=\frac{\text{成功次数}}{\text{总次数}}
+\text{能量 }E=mc^2
+\text{温度}=25\,\mathrm{K}
+\textbf{bold text}
+\textit{italic text}
+\textrm{Roman}+\textsf{Sans}+\texttt{Mono}
+\text{百分比}\;50\%
+\text{a\{b\}\$c}
+\text{🙂}
+\text{中文下标}_{\text{测试}}
+# 化学
+\ce{H2O}
+\ce{CO2 + H2O -> H2CO3}
+\ce{2 H2 + O2 -> 2 H2O}
+\ce{SO4^2-}
+\ce{^{14}_6C}
+\ce{Na+ + Cl- -> NaCl}
+\ce{A <=> B}
+\ce{A ->[heat] B}
+\pu{1.23e-4 mol L-1}
+\pu{25 degC}
+# 宏
+\newcommand{\R}{\mathbb{R}}\R^2
+\newcommand{\sq}[1]{#1^2}\sq{x}
+\newcommand{\pair}[2]{\langle#1,#2\rangle}\pair{x}{y}
+\def\R{\mathbb{R}}\R
+\def\sq#1{#1^2}\sq{x}
+\def\f#1#2{\frac{#1}{#2}}\f{a}{b}
+\newcommand{\foo}{x}\renewcommand{\foo}{y}\foo
+\providecommand{\foo}{x}\foo
+\newcommand{\vect}[1]{\mathbf{#1}}\vect{x}
+{\def\local{x}\local}+y
+# 常用补充
+\color{red}{x}+\color{blue}{y}
+\textcolor{#336699}{x^2}
+\colorbox{yellow}{hello}
+\fcolorbox{red}{white}{x}
+\displaystyle\sum_{i=1}^n i
+\textstyle\sum_{i=1}^n i
+\mathsf{ABC}+\mathtt{xyz}
+\mathfrak{g}+\mathscr{F}
+x\equiv y\pmod{n}
+\lvert x\rvert+\lVert v\rVert
+\hspace{1em}x\qquad y\!z
+\phantom{x}y+\vphantom{\frac12}z
+\rule{1em}{0.1em}
+\mathop{\rm Res}_{z=0}f(z)
+\tag{1}a=b
+\notin\;\nsubseteq\;\neq
+\uparrow\downarrow\leftrightarrow\mapsto
+\dots\cdots\vdots\ddots
+\mathrm{d}x\wedge\mathrm{d}y
+\frac{1}{1+\frac{1}{1+\frac{1}{x}}}
+\cfrac{1}{1+\cfrac{1}{x}}
+\substack{i<n\\j<m}
+\sum_{\substack{i<n\\j<m}}a_{ij}
+\mathrel{\overset{?}{=}}
+\begin{CD}A@>>>B\\@VVV@VVV\\C@>>>D\end{CD}
+\htmlClass{test}{x}
+\href{https://example.org}{x}
+\smash{\frac{a}{b}}+x
+\mathclap{x+y}+z
+\raisebox{0.5em}{x}
+# 错误
+\frac{a}{b
+\left(x
+\right)
+\unknowncommand{x}
+x^{2
+\begin{matrix}a&b\end{pmatrix}
+\frac
+x^^2
+\sqrt[3{x}
+\begin{unknown}x\end{unknown}
+\newcommand{\foo}[1]{#1}\foo
+\def\loop{\loop}\loop
+\left(x\right]
+{}
+

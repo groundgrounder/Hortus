@@ -154,7 +154,7 @@ pub(crate) fn body_start(text: &str) -> usize {
     0
 }
 
-fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<bool>) {
+fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<bool>, math: bool) {
     if protected.capacity() < text.len() {
         protected.reserve(text.len() - protected.len() + (text.len() / 8).max(4096));
     }
@@ -177,8 +177,11 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
         );
         protected[..body_start].fill(true);
     }
-    let options =
+    let mut options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_FOOTNOTES;
+    if math {
+        options |= Options::ENABLE_MATH;
+    }
     for (event, local) in Parser::new_ext(&text[body_start..], options).into_offset_iter() {
         let r = local.start + body_start..local.end + body_start;
         let source = &text[r.clone()];
@@ -338,6 +341,9 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
                     push(spans, Kind::Marker, r.start + end..r.start + end + 2);
                 }
             }
+            Event::InlineMath(_) | Event::DisplayMath(_) => {
+                protected[r].fill(true);
+            }
             Event::Rule => {
                 push(spans, Kind::Rule, r.clone());
                 push(spans, Kind::Marker, r);
@@ -468,8 +474,12 @@ pub fn analyze(text: &str) -> Vec<Span> {
 }
 
 pub(crate) fn analyze_bytes(text: &str) -> Vec<(Kind, Range<usize>)> {
+    analyze_bytes_with_math(text, false)
+}
+
+pub(crate) fn analyze_bytes_with_math(text: &str, math: bool) -> Vec<(Kind, Range<usize>)> {
     let mut spans = Vec::new();
-    analyze_into(text, &mut spans, &mut Vec::new());
+    analyze_into(text, &mut spans, &mut Vec::new(), math);
     sort_spans(&mut spans);
     spans
 }
@@ -507,7 +517,7 @@ impl Analyzer {
             coverage: 0,
             exceeded: false,
         };
-        analyze_into(text, &mut sink, &mut self.protected);
+        analyze_into(text, &mut sink, &mut self.protected, false);
         let exceeded = sink.exceeded;
         let mut result = std::mem::take(&mut self.spare_runs);
         // 常见笔记的叠加深度很小，按字节合并后线性压缩，省去排序和事件堆。
@@ -530,7 +540,7 @@ impl Analyzer {
         }
         // 超过预算时再收集片段；首轮直接叠加的工作量始终不超过正文的 8 倍。
         self.spans.clear();
-        analyze_into(text, &mut self.spans, &mut self.protected);
+        analyze_into(text, &mut self.spans, &mut self.protected, false);
         sort_spans(&mut self.spans);
         let mut spans = self
             .spans

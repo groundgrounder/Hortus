@@ -1,5 +1,6 @@
 //! 阅读文本、语义类别和源码映射；缓存只保留当前文档的块，不持有平台视图。
 use crate::markdown::{self, Kind};
+use crate::math::{self, Style};
 use crate::media::{self, Image, Media, Table};
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use std::{
@@ -20,6 +21,7 @@ pub struct Content {
     pub runs: Vec<Run>,
     pub diagram: bool,
     pub media: Vec<Media>,
+    pub math: Vec<Math>,
 }
 impl Content {
     /// 显示片段连续覆盖正文，末尾边界即 UTF-16 长度，不必重复扫描长文。
@@ -27,6 +29,15 @@ impl Content {
         self.runs.last().map_or(0, |run| run.display.end)
     }
 }
+#[derive(Clone, Debug)]
+pub struct Math {
+    pub source: Range<usize>,
+    pub display: Range<usize>,
+    pub latex: String,
+    pub style: Style,
+    pub block: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub id: u64,
@@ -59,6 +70,7 @@ fn options() -> Options {
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_TABLES
+        | Options::ENABLE_MATH
 }
 
 fn has_reference_use(text: &str) -> bool {
@@ -393,12 +405,13 @@ impl Cache {
         if fast_update {
             for (index, range) in ranges.iter().enumerate() {
                 if reused_blocks[index].is_none() {
-                    semantics[index] = markdown::analyze_bytes(&text[range.clone()]);
+                    semantics[index] =
+                        markdown::analyze_bytes_with_math(&text[range.clone()], !mmd);
                 }
             }
         } else {
             // 全文扫描处理可能跨块的注释、脚注、引用式链接和 HTML 语境。
-            for (kind, span) in markdown::analyze_bytes(text) {
+            for (kind, span) in markdown::analyze_bytes_with_math(text, !mmd) {
                 let first = ranges.partition_point(|r| r.end <= span.start);
                 for i in first..ranges.len() {
                     if ranges[i].start >= span.end {
@@ -538,6 +551,7 @@ fn render(
         || mmd
         || diagram
         || mermaid_fence(text)
+        || text.contains('$')
         || !refs.is_empty()
         || text.contains("![")
         || text.lines().any(|line| line.contains('|'))
@@ -563,6 +577,9 @@ fn render(
 }
 
 fn render_simple(text: &str, spans: &[(Kind, Range<usize>)]) -> Content {
+    if text.contains('$') {
+        return render_full(text, false, false, false, spans, &[]);
+    }
     let mut result = Content::default();
     let mut byte = 0;
     let mut source16 = 0;
@@ -610,7 +627,7 @@ fn render_simple(text: &str, spans: &[(Kind, Range<usize>)]) -> Content {
 }
 
 pub(crate) fn inline(text: &str) -> Content {
-    let mut spans = media::inline_spans(text);
+    let mut spans = markdown::analyze_bytes_with_math(text, true);
     for (index, _) in text.match_indices("\\|") {
         if text[..index]
             .bytes()
@@ -829,6 +846,41 @@ fn render_full(
             }
         }
     }
+    let mut formulas = HashMap::new();
+    let mut table_formulas = Vec::new();
+    if !mmd && !front && !result.diagram && text.contains('$') {
+        for formula in math::scan(text) {
+            if suppress[formula.source.start] || masks[formula.source.start] & (16 | 32) != 0 {
+                continue;
+            }
+            if attachments
+                .values()
+                .any(|(r, _)| r.contains(&formula.source.start))
+            {
+                table_formulas.push(formula);
+                continue;
+            }
+            let value = if formula.block && !formula.latex.trim().is_empty() {
+                if text[formula.source.end..]
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .any(|c| c == '\n')
+                    || formula.source.end == text.len()
+                {
+                    "\u{fffc}".into()
+                } else {
+                    "\u{fffc}\n".into()
+                }
+            } else {
+                text[formula.source.clone()].to_owned()
+            };
+            replacements.insert(
+                formula.source.start,
+                (formula.source.end, value, masks[formula.source.start] & !1),
+            );
+            formulas.insert(formula.source.start, formula);
+        }
+    }
     let mut byte = 0;
     let mut source16 = 0;
     let mut display16 = 0;
@@ -847,8 +899,35 @@ fn render_full(
         };
         let source_end = source16 + text[byte..end].encode_utf16().count();
         let display_end = display16 + value.encode_utf16().count();
+        if let Some(formula) = formulas.remove(&byte) {
+            let length = if formula.block && !formula.latex.trim().is_empty() {
+                1
+            } else {
+                display_end - display16
+            };
+            result.math.push(Math {
+                source: source16..source_end,
+                display: display16..display16 + length,
+                latex: formula.latex,
+                style: formula.style,
+                block: formula.block,
+            });
+        }
         if let Some((span, kind)) = attachments.remove(&byte) {
             let leading = value.encode_utf16().take_while(|c| *c == 10).count();
+            for formula in table_formulas
+                .iter()
+                .filter(|f| span.contains(&f.source.start))
+            {
+                result.math.push(Math {
+                    source: text[..formula.source.start].encode_utf16().count()
+                        ..text[..formula.source.end].encode_utf16().count(),
+                    display: display16 + leading..display16 + leading + 1,
+                    latex: formula.latex.clone(),
+                    style: formula.style,
+                    block: false,
+                });
+            }
             result.media.push(Media {
                 source: source16..source16 + text[span].encode_utf16().count(),
                 display: display16 + leading..display16 + leading + 1,
@@ -914,6 +993,21 @@ mod tests {
             assert_eq!(simple.display, full.display);
             assert_eq!(simple.source, full.source);
             assert_eq!(simple.mask, full.mask);
+        }
+    }
+    #[test]
+    fn math_uses_full_rendering_even_when_entering_the_simple_path() {
+        for source in [
+            "$a_1 b_1$",
+            "$$x^2$$",
+            "text $$x$$ text",
+            "$$$$",
+            "> [!note]\n> $$x$$\n",
+        ] {
+            let spans = markdown::analyze_bytes_with_math(source, true);
+            let simple = render_simple(source, &spans);
+            let full = render_full(source, false, false, false, &spans, &[]);
+            assert_eq!(format!("{simple:?}"), format!("{full:?}"));
         }
     }
 }

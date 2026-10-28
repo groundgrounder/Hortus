@@ -7,10 +7,12 @@ use std::sync::{Arc, Mutex};
 
 mod diagram;
 mod document;
+mod math;
 mod media;
 mod scene;
 pub use diagram::*;
 pub use document::*;
+pub use math::*;
 pub use scene::*;
 
 uniffi::setup_scaffolding!();

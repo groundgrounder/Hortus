@@ -16,6 +16,7 @@ path = "src/bindgen.rs"
 required-features = ["bindgen"]
 
 [dependencies]
+hortus-math = { path = "../hortus-math" }
 hortus-document = { path = "../hortus-document" }
 hortus-diagram = { path = "../hortus-diagram" }
 hortus-vault = { path = "../hortus-vault" }

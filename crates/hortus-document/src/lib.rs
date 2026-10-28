@@ -2,6 +2,7 @@
 use std::io;
 mod attachments;
 pub mod markdown;
+pub mod math;
 pub mod media;
 pub mod outline;
 pub mod reading;
