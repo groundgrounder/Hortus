@@ -105,9 +105,12 @@ def check_bundle(bundle):
         violations.append((str(notices), 1, 'third-party notices missing from bundle'))
     else:
         text = notices.read_text(errors='replace')
-        for component in ('swiftterm', 'uniffi ', 'pulldown-cmark ', 'Rust standard library'):
+        for component in ('swiftterm', 'uniffi ', 'pulldown-cmark ', 'Rust standard library', 'ratex-layout ', 'KaTeX fonts', 'SIL OPEN FONT LICENSE'):
             if component not in text:
                 violations.append((str(notices), 1, f'third-party notices do not mention {component.strip()}'))
+    fonts = resources / 'Fonts/KaTeX'
+    if len(list(fonts.glob('KaTeX_*.ttf'))) != 20 or not (fonts / 'OFL.txt').is_file():
+        violations.append((str(fonts), 1, 'expected 20 KaTeX TTF fonts and OFL.txt'))
     return violations
 
 

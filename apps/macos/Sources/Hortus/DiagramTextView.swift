@@ -319,6 +319,7 @@ final class NoteLayoutFragment: NSTextLayoutFragment {
         return Array(lines.dropLast()) + [extraLine!]
     }
     var replacement: CGSize?
+    var replacementPrefix: NSAttributedString?
     var previewHeight: CGFloat = 0
     var reason: String?
     var noticeWidth = 0.0
@@ -378,6 +379,8 @@ final class NoteLayoutFragment: NSTextLayoutFragment {
 @MainActor
 final class DiagramTextView: NSTextView {
     let editorActions = EditorActions()
+    var mathViews: [MathBlockView] = [] { didSet { mathParagraphs.removeAll(keepingCapacity: true) } }
+    var mathParagraphs: [Int: MathBlockView] = [:]
     var isReading = false
     weak var readingCoordinator: ReadingText.Coordinator?
     weak var editingCoordinator: NoteText.Coordinator?
@@ -399,7 +402,7 @@ final class DiagramTextView: NSTextView {
         setSelectedRange(NSRange(location: position, length: 0))
         guard let manager = textLayoutManager, let content = manager.textContentManager,
               let location = content.location(content.documentRange.location, offsetBy: position) else { return }
-        if sourceUTF16Length < 65536 { manager.ensureLayout(for: content.documentRange) }
+        if sourceUTF16Length < 65536 && mathViews.isEmpty { manager.ensureLayout(for: content.documentRange) }
         else if let end = content.location(location, offsetBy: min(1, sourceUTF16Length - position)),
            let range = NSTextRange(location: location, end: end) { manager.ensureLayout(for: range) }
         scrollRangeToVisible(selectedRange())
@@ -596,6 +599,7 @@ final class DiagramTextView: NSTextView {
     }
     func configure(_ fragment: NoteLayoutFragment, at offset: Int) {
         fragment.replacement = nil
+        fragment.replacementPrefix = nil
         fragment.previewHeight = 0
         fragment.reason = nil
         fragment.noticeWidth = bounds.width - 2 * textContainerInset.width
@@ -627,6 +631,17 @@ final class DiagramTextView: NSTextView {
             fragment.quoteHead = !quote(line.location - 1)
             fragment.quoteTail = !quote(NSMaxRange(line))
         }
+        if let math = mathView(at: offset) {
+            fragment.replacement = math.preferredSize
+            if let storage = textStorage, math.item.range.location > offset {
+                let prefix = (storage.string as NSString).substring(with: NSRange(location: offset, length: math.item.range.location - offset))
+                if !prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    fragment.replacementPrefix = NSAttributedString(string: prefix,
+                        attributes: [.font: bodyFont, .foregroundColor: NSColor.labelColor])
+                }
+            }
+            return
+        }
         guard let block = blocks.first(where: { NSLocationInRange(offset, $0.range) }) else { return }
         let head = offset == block.range.location
         if let prepared = block.prepared {
@@ -657,7 +672,7 @@ final class DiagramTextView: NSTextView {
         }
     }
     override func accessibilityChildren() -> [Any]? {
-        (super.accessibilityChildren() ?? []) + diagramViews.keys.sorted().compactMap { diagramViews[$0] }
+        (super.accessibilityChildren() ?? []) + diagramViews.keys.sorted().compactMap { diagramViews[$0] } + mathViews
     }
     override func layout() {
         let started = ProcessInfo.processInfo.systemUptime
@@ -669,11 +684,22 @@ final class DiagramTextView: NSTextView {
         defer { placing = false }
         for view in diagramViews.values { view.isHidden = true }
         for view in mediaViews { view.isHidden = true }
+        for view in mathViews { view.isHidden = true }
         let ensured = ProcessInfo.processInfo.systemUptime
         // 由原生视口控制器排版可见内容，不为放置叠加视图强制排完整篇笔记。
         enumerateVisibleFragments { fragment in
             let offset = content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location)
             if let fragment = fragment as? NoteLayoutFragment { self.configure(fragment, at: offset) }
+            if let math = self.mathView(at: offset) {
+                if let fragment = fragment as? NoteLayoutFragment {
+                    math.containerPrefix = fragment.replacementPrefix
+                    math.quote = fragment.sourceMask & (64 | 4096) != 0
+                    math.quoteHead = fragment.quoteHead; math.quoteTail = fragment.quoteTail
+                    math.needsDisplay = true
+                }
+                math.frame.origin = CGPoint(x: self.textContainerInset.width - 12, y: fragment.layoutFragmentFrame.minY + self.textContainerInset.height)
+                math.isHidden = false
+            }
             let indices = self.mediaIndices(at: offset)
             var mediaY = fragment.layoutFragmentFrame.minY
             if let index = indices.first, !self.mediaReplacesParagraph(self.mediaBlocks[index].range) {

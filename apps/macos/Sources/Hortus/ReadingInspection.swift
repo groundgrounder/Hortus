@@ -57,6 +57,10 @@ enum ReadingInspection {
             "diagrams": view.diagramViews.count, "rebuilt": view.readingCoordinator?.model?.rebuilt ?? 0]
         result["reading_phases"] = view.readingCoordinator?.phaseMilliseconds ?? [:]
         result["media"] = view.mediaBlocks.count
+        if mode.hasPrefix("math") {
+            return try await MathInspection.run(workspace: workspace, document: document, view: view,
+                source: source, mode: mode, arguments: arguments, initial: result)
+        }
         for _ in 0..<1000 {
             if document.outlineRevision == document.revision { break }
             try await Task.sleep(for: .milliseconds(1))

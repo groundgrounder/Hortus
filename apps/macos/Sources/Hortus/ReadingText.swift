@@ -169,10 +169,12 @@ private struct ReadingRefreshResult: Sendable {
     let model: ReadingViewModel
     let snapshot: DocumentSnapshot?
     let media: [PreparedMedia]
+    var math: [PreparedMathBlock] = []
     var phases: [String: Double]
 }
 
 struct ReadingText: NSViewRepresentable {
+    var mathService = MathService.shared
     let document: NoteDocument
     let path, vault: String
     let fontSize: Double
@@ -201,6 +203,7 @@ struct ReadingText: NSViewRepresentable {
         for diagram in view.diagramViews.values { diagram.detach() }
         for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
         view.mediaViews = []; view.mediaBlocks = []
+        view.mathViews.forEach { $0.removeFromSuperview() }; view.mathViews = []
         view.diagramViews = [:]; view.string = ""; view.textLayoutManager?.delegate = nil
         if let manager = view.textLayoutManager { manager.textContentManager?.removeTextLayoutManager(manager) }
         view.diagramStorage = nil; scroll.documentView = nil
@@ -279,6 +282,7 @@ struct ReadingText: NSViewRepresentable {
             styling.reset()
             view?.mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
             view?.mediaViews = []; view?.mediaBlocks = []; view?.mediaProjection = []
+            view?.mathViews.forEach { $0.removeFromSuperview() }; view?.mathViews = []
             if input?.document.viewOwner === self {
                 input?.document.onReload = nil; input?.document.onClosing = nil
                 input?.document.onStateChange = nil; input?.document.viewOwner = nil
@@ -328,11 +332,12 @@ struct ReadingText: NSViewRepresentable {
                     }
                     let modelTime = (ProcessInfo.processInfo.systemUptime - modelStart) * 1000
                     let snapshotStart = ProcessInfo.processInfo.systemUptime
-                    let snapshot = model.blocks.contains(where: \.diagram) ? try session.snapshot() : nil
+                    let math = try session.mathBlocks()
+                    let snapshot = model.blocks.contains(where: \.diagram) || !math.isEmpty ? try session.snapshot() : nil
                     let workerEnd = ProcessInfo.processInfo.systemUptime
                     let media = try session.mediaBlocks(width: width, size: input.fontSize)
                     return (model, snapshot, modelTime, (workerEnd - snapshotStart) * 1000,
-                            modelStart, workerEnd, media)
+                            modelStart, workerEnd, media, math)
                 }, completion: { [weak self, weak view] result in
                     guard let self, self.inFlightToken == token else { return }
                     guard let view, let input = self.input else { self.finishRefresh(token); return }
@@ -346,7 +351,7 @@ struct ReadingText: NSViewRepresentable {
                             "io_resume_ms": (ProcessInfo.processInfo.systemUptime - reading.5) * 1000,
                         ]
                         let value = ReadingRefreshResult(model: reading.0, snapshot: reading.1, media: [], phases: phases)
-                        if !reading.6.isEmpty || reading.1?.blocks.isEmpty == false {
+                        if !reading.6.isEmpty || !reading.7.isEmpty || reading.1?.blocks.isEmpty == false {
                             self.task = Task { [weak self, weak view, oldRendered] in
                                 do {
                                     let diagramStart = ProcessInfo.processInfo.systemUptime
@@ -365,6 +370,9 @@ struct ReadingText: NSViewRepresentable {
                                     }
                                     let media = await LocalImageCache.shared.prepare(reading.6, vault: input.vault)
                                     var completed = ReadingRefreshResult(model: value.model, snapshot: value.snapshot, media: media, phases: value.phases)
+                                    if !reading.7.isEmpty {
+                                        completed.math = await input.mathService.prepare(reading.7, source: reading.1?.text ?? "", size: input.fontSize, width: width)
+                                    }
                                     completed.phases["diagrams_ms"] = (ProcessInfo.processInfo.systemUptime - diagramStart) * 1000
                                     guard let self else { return }
                                     guard !Task.isCancelled, token == self.generation else {
@@ -397,6 +405,14 @@ struct ReadingText: NSViewRepresentable {
         }
         private func install(_ result: ReadingRefreshResult, diagrams: [NoteDiagram], width: Double,
                              dark: Bool, themeChanged: Bool, token: Int, began: Double) {
+            // 后台回调并非原生输入事件；及时释放 TextKit 生成的 autoreleased 视口片段。
+            autoreleasepool {
+                installPrepared(result, diagrams: diagrams, width: width, dark: dark,
+                                themeChanged: themeChanged, token: token, began: began)
+            }
+        }
+        private func installPrepared(_ result: ReadingRefreshResult, diagrams: [NoteDiagram], width: Double,
+                                     dark: Bool, themeChanged: Bool, token: Int, began: Double) {
             guard let view, let input = self.input else { finishRefresh(token); return }
             guard token == generation, result.model.revision == input.document.revision else {
                 finishRefresh(token)
@@ -413,6 +429,13 @@ struct ReadingText: NSViewRepresentable {
                 return NoteMedia(range: NSRange(location: ranges[index].location + local, length: Int(item.block.displayLength)), prepared: item)
             }
             view.installMedia(items, width: width, size: input.fontSize, vault: input.vault, refresh: { [weak self] in self?.refresh(force: true) })
+            let formulas = result.math.compactMap { item -> NoteMath? in
+                guard let index = result.model.blocks.firstIndex(where: { $0.id == item.block.blockId }), index < ranges.count else { return nil }
+                let block = result.model.blocks[index]
+                return NoteMath(range: NSRange(location: ranges[index].location + Int(item.block.displayStart - block.displayStart),
+                                               length: Int(item.block.displayLength)), prepared: item)
+            }
+            view.installMath(formulas, width: width, size: input.fontSize)
             phaseMilliseconds = result.phases
             phaseMilliseconds["install_ms"] = (ProcessInfo.processInfo.systemUptime - installStart) * 1000
             rendered = diagrams; pending = false; view.diagramPending = false
@@ -430,6 +453,7 @@ struct ReadingText: NSViewRepresentable {
             let displayStart = ProcessInfo.processInfo.systemUptime
             view.displayIfNeeded()
             phaseMilliseconds["display_ms"] = (ProcessInfo.processInfo.systemUptime - displayStart) * 1000
+            phaseMilliseconds["main_block_ms"] = (ProcessInfo.processInfo.systemUptime - installStart) * 1000
             displayedAt = ProcessInfo.processInfo.systemUptime
             latencyMilliseconds = (displayedAt - began) * 1000
             (NSApp.delegate as? AppDelegate)?.inspectWhenReady()
@@ -635,6 +659,11 @@ struct ReadingText: NSViewRepresentable {
         func copyMarkdown() {
             guard let view else { return }
             let selected = view.selectedRange()
+            if let math = view.mathViews.first(where: { $0.item.range == selected }) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(math.item.prepared.source, forType: .string)
+                return
+            }
             guard selected.length > 0, let model,
                   let first = ranges.firstIndex(where: { NSIntersectionRange($0, selected).length > 0 }),
                   let last = ranges.lastIndex(where: { NSIntersectionRange($0, selected).length > 0 }) else { return }

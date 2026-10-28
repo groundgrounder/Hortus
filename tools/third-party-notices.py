@@ -62,6 +62,9 @@ def classify(text):
 def license_text(directory, spdx, name):
     """在包目录里找这个许可证的原文；文件名有提示时按文件名，否则按内容认"""
     base = spdx.split(' WITH ')[0]
+    # 0.1.15 的发布包漏带根许可证；保留同一发布提交的上游原文。
+    if name in {'ratex-font', 'ratex-layout', 'ratex-lexer', 'ratex-parser', 'ratex-types'} and base == 'MIT':
+        return (ROOT / 'tools/licenses/RaTeX-MIT.txt').read_text()
     files = sorted(path for path in directory.iterdir() if path.is_file() and LICENSE_FILE.match(path.name))
     hint = {'Apache-2.0': 'apache', 'Unicode-3.0': 'unicode', 'CC0-1.0': 'cc0', 'Unlicense': 'unlicense'}.get(base, base.lower())
     by_name = [path for path in files if hint in path.name.lower()]
@@ -107,6 +110,14 @@ def rust_crates():
                            'expression': package['license'], 'source': package.get('repository') or '',
                            'text': license_text(directory, spdx, package['name']), 'notices': notices(directory)})
     return crates
+
+
+def katex_fonts():
+    directory = ROOT / 'apps/macos/Resources/Fonts/KaTeX'
+    return {'name': 'KaTeX fonts', 'version': '0.1.15', 'license': 'OFL-1.1',
+            'expression': 'OFL-1.1', 'source': 'https://github.com/KaTeX/KaTeX',
+            'text': (directory / 'OFL.txt').read_text(),
+            'notices': [(directory / 'FONT_NOTICE.txt').read_text()]}
 
 
 def rust_std():
@@ -173,7 +184,7 @@ def main():
     parser.add_argument('--checkouts', type=Path, default=ROOT / 'apps/macos/.build/checkouts')
     parser.add_argument('--rust-only', action='store_true', help='skip Swift packages (for checking the Rust part)')
     args = parser.parse_args()
-    items = rust_crates() + [rust_std()]
+    items = rust_crates() + [rust_std(), katex_fonts()]
     if not args.rust_only:
         items += swift_packages(args.package_resolved, args.checkouts)
     args.output.parent.mkdir(parents=True, exist_ok=True)

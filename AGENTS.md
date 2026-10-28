@@ -29,6 +29,7 @@ The macOS app requires Apple Silicon, macOS 27.0, Xcode 27.1 and Swift 6.4. Buil
 - Store configuration in `~/.config/hortus/`; store indexes, sessions, caches and recovery drafts in the system cache directory (`~/Library/Caches/Hortus/` on macOS).
 - Native text controls own key handling, input methods, the cursor and undo. The Rust core receives edits and returns semantic structure.
 - Rust lays out Mermaid diagrams; each platform only draws them. Layout results must match across platforms and the CLI.
+- Keep RaTeX types inside `hortus-math`; platform formula renderers consume Hortus scenes. Register bundled KaTeX fonts and prepare formula drawing off the main thread. Preserve font attribution and OFL text when updating resources.
 - Keep the interface restrained: few color blocks, borders or lines. Establish hierarchy with color, weight and indentation.
 - The whole application must avoid WebView. Do not link WebKit or JavaScriptCore, import HTML through `NSAttributedString`, or bundle HTML or JavaScript assets.
 - No runtime networking or telemetry.
