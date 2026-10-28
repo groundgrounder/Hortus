@@ -5,7 +5,7 @@ struct SourceStyleRun: Sendable {
     var start, length: UInt64
     var mask: UInt32
 }
-private struct StyleBatch: Sendable {
+struct StyleBatch: Sendable {
     let revision: UInt64
     let runs: [SourceStyleRun]
     let coreMilliseconds, ffiMilliseconds: Double
@@ -33,6 +33,7 @@ final class SourceStyling {
     var openDisplayedAt = 0.0
     var openCoreMilliseconds = 0.0
     var openFFIMilliseconds = 0.0
+    var openPhases: [String: Double] = [:]
     var lastCoreMilliseconds = 0.0
     var lastFFIMilliseconds = 0.0
     var lastPhases: [String: Double] = [:]
@@ -50,6 +51,7 @@ final class SourceStyling {
         openedAt = ProcessInfo.processInfo.systemUptime
         openMilliseconds = 0
         openDisplayedAt = 0
+        openPhases = [:]
     }
     func schedule(view: DiagramTextView, document: NoteDocument?, size: Double, force: Bool = false) {
         guard let document, !view.compositionActive else { return }
@@ -65,7 +67,8 @@ final class SourceStyling {
         pending = true; again = true; requestedAt = ProcessInfo.processInfo.systemUptime
         guard task == nil else { return }
         let token = generation
-        let first = Self.request(document.io, since: revision, force: self.force)
+        let first = document.initialSourceStyles ?? Self.request(document.io, since: revision, force: self.force)
+        document.initialSourceStyles = nil
         self.force = false; again = false
         task = Task { [weak self, weak view, weak document] in
             guard let self, let view, let document else { return }
@@ -91,6 +94,7 @@ final class SourceStyling {
                             openDisplayedAt = ProcessInfo.processInfo.systemUptime
                             openMilliseconds = (openDisplayedAt - openedAt) * 1000
                             openCoreMilliseconds = lastCoreMilliseconds; openFFIMilliseconds = lastFFIMilliseconds
+                            openPhases = lastPhases
                         }
                     } else { again = true }
                 } catch { view.diagramIssue = L10n.string("Diagram analysis failed"); return }
@@ -101,7 +105,7 @@ final class SourceStyling {
             }
         }
     }
-    private nonisolated static func request(_ io: DocumentIO, since: UInt64, force: Bool) -> Task<StyleBatch, Error> {
+    nonisolated static func request(_ io: DocumentIO, since: UInt64, force: Bool) -> Task<StyleBatch, Error> {
         // 在字符通知里立即启动后台分析，与原生编辑事务余下的主线程工作并行。
         let queuedAt = ProcessInfo.processInfo.systemUptime
         return Task.detached(priority: .userInitiated) {

@@ -35,6 +35,10 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
                  f'--diagram-inspection={target}', *extra]
     if screenshot:
         arguments += [f'--snapshot={output / (name + ".png")}']
+    # 图表源码投影的检查直接进入编辑视图，重开标签也保持同一模式。
+    config = base / 'config'
+    config.mkdir(parents=True, exist_ok=True)
+    (config / 'config.toml').write_text('font_size = 15.0\ndefault_view = "editing"\n')
     with subprocess.Popen(arguments, env=HELPERS.environment(base), stdout=subprocess.DEVNULL) as process:
         try:
             HELPERS.wait_for(target, process)

@@ -494,12 +494,13 @@ final class Workspace {
             self.tabs[index].loading = false
             switch result {
             case .success(let loaded):
-                let document = NoteDocument(io: loaded.0, initial: loaded.1)
+                let reading = (recent.first(where: { $0.path == root })?.views?[path] ?? defaultView) != "editing"
+                let document = NoteDocument(io: loaded.0, initial: loaded.1, prepareSourceStyles: !reading)
                 if let reveal = pendingSearchReveals.removeValue(forKey: path) {
                     document.sourceAnchor = reveal.start
                     document.sourceSelectionLength = reveal.length
                 }
-                document.reading = (recent.first(where: { $0.path == root })?.views?[path] ?? defaultView) != "editing"
+                document.reading = reading
                 document.onCopy = { [weak self] copy in self?.openNote(copy) }
                 self.tabs[index].document = document; self.tabs[index].error = nil
                 self.noteOpenPhases = ["load_task_wait_ms": max(0, loaded.4 - queuedAt - loaded.2 - loaded.3) * 1000,

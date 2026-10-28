@@ -23,7 +23,8 @@ enum ReadingInspection {
                reading ? view.readingCoordinator?.pending == false && view.readingCoordinator?.revealPending == false
                     && view.readingCoordinator?.model?.revision == document.revision
                     : view.sourceStyling?.pending == false {
-                view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
+                // 自检从异步任务直接驱动 AppKit，像原生事件一样结束临时对象池。
+                autoreleasepool { view.layoutSubtreeIfNeeded(); view.displayIfNeeded() }
                 if view.mediaViews.contains(where: { !$0.isHidden && $0.imagePending }) {
                     try await Task.sleep(for: .milliseconds(1)); continue
                 }

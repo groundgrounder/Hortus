@@ -101,6 +101,7 @@ enum EditingInspection {
                     "saved": !document.dirty, "blocks": view.blocks.count,
                     "open_styles_ms": openStyle, "open_style_pipeline_ms": openPipeline,
                     "open_core_ms": view.sourceStyling?.openCoreMilliseconds ?? 0,
+                    "open_phases": view.sourceStyling?.openPhases ?? [:], "open_note_phases": workspace.noteOpenPhases,
                     "open_ffi_ms": view.sourceStyling?.openFFIMilliseconds ?? 0, "style_latencies_ms": styleLatencies,
                     "style_update_max_ms": styleLatencies.max() ?? 0, "style_patch_characters": patchSizes,
                     "style_phases": stylePhases]

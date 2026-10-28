@@ -17,13 +17,21 @@ HELPERS = module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPERS)
 
 
+def editing_environment(state):
+    # 编辑检查直接打开源码视图，不把检查器启动后的视图切换计入打开耗时。
+    config = state / 'config'
+    config.mkdir(parents=True, exist_ok=True)
+    (config / 'config.toml').write_text('font_size = 15.0\ndefault_view = "editing"\n')
+    return HELPERS.environment(state)
+
+
 def run(state, output, name, vault, mode):
     target = output / f'{name}.json'
     target.unlink(missing_ok=True)
     allowed = {str(p.relative_to(vault)) for p in vault.rglob('*')}
     arguments = [str(APP), f'--vault={vault}', '--note=note.md', '--light',
                  f'--edit-inspection={target}', f'--edit-mode={mode}']
-    with subprocess.Popen(arguments, env=HELPERS.environment(state)) as process:
+    with subprocess.Popen(arguments, env=editing_environment(state)) as process:
         try:
             deadline = time.monotonic() + 30
             while not target.exists():
@@ -53,7 +61,7 @@ def run_blocked(state, output, name, vault, mode):
     arguments = [str(APP), f'--vault={vault}', '--note=note.md', '--light',
                  f'--edit-inspection={target}', f'--edit-mode={mode}']
     recovery = state / 'cache/recovery'
-    with subprocess.Popen(arguments, env=HELPERS.environment(state)) as process:
+    with subprocess.Popen(arguments, env=editing_environment(state)) as process:
         try:
             deadline = time.monotonic() + 30
             while not target.exists():

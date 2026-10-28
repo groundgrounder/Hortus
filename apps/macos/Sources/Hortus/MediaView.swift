@@ -348,6 +348,7 @@ extension DiagramTextView {
     }
     func mediaReplacesParagraph(_ range: NSRange) -> Bool {
         guard !isReading, let text = textStorage?.string as NSString? else { return true }
+        guard range.location <= text.length, range.length <= text.length - range.location else { return false }
         let paragraph = paragraphRange(range)
         let before = NSRange(location: paragraph.location, length: range.location - paragraph.location)
         let after = NSRange(location: NSMaxRange(range), length: NSMaxRange(paragraph) - NSMaxRange(range))

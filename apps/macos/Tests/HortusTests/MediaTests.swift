@@ -25,6 +25,19 @@ struct MediaTests {
         #expect(CGImageDestinationFinalize(destination))
     }
 
+    @Test func closingMediaClearsProjectionBeforeReusingTextView() async throws {
+        let f = try EditingTests.Fixture("前文\n\n" + Self.table)
+        try await f.ready()
+        #expect(!f.view.mediaProjection.isEmpty)
+        let old = try #require(f.view.mediaProjection.first)
+        f.coordinator.detach()
+        #expect(f.view.mediaProjection.isEmpty)
+        f.view.string = ""
+        #expect(!f.view.mediaReplacesParagraph(old))
+        f.view.install([])
+        await f.close()
+    }
+
     @Test func sourceProjectionSelectionCompositionAndSingleUndo() async throws {
         let source = "前文😀\n\n" + Self.table + "\n![说明](a.png)\n\n结尾\n"
         let f = try EditingTests.Fixture(source)

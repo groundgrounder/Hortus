@@ -23,7 +23,7 @@ struct EditingTests {
             core = try WorkspaceCore.inDirectories(config: directory.appendingPathComponent("config").path,
                                                    cache: directory.appendingPathComponent("cache").path)
             let session = try core.openDocument(vault: vault.path, path: "note.md")
-            document = NoteDocument(io: DocumentIO(session: session, url: url), initial: try session.initial())
+            document = NoteDocument(io: DocumentIO(session: session, url: url), initial: try session.initial(), prepareSourceStyles: true)
             let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 540))
             view = DiagramTextView(diagramLayout: true)
             view.frame = scroll.bounds; view.allowsUndo = true; view.isRichText = false
@@ -50,6 +50,22 @@ struct EditingTests {
         func text() async throws -> String { try await document.io.perform { try $0.snapshot().text } }
     }
     static let source = "前文😀\n\n```mermaid\nflowchart TB\nR[Root] --> A[Branch]\nA --> B[Leaf]\n```\n\n末尾\n"
+
+    @Test func reattachingAfterEditsLoadsCurrentRevisionInsteadOfInitialText() async throws {
+        let fixture = try Fixture(Self.source)
+        try await fixture.ready()
+        #expect(fixture.document.textRevision == fixture.document.revision)
+        #expect(fixture.document.initialSourceStyles == nil)
+        fixture.view.insertText("新内容😀", replacementRange: NSRange(location: 0, length: 0))
+        #expect(fixture.document.textRevision != fixture.document.revision)
+        fixture.coordinator.detach()
+        fixture.coordinator.update(NoteText(text: Self.source, path: "note.md", vault: fixture.vault.path, fontSize: 15,
+            service: fixture.service, core: nil, document: fixture.document) { _, _ in })
+        try await fixture.ready()
+        #expect(fixture.view.string == "新内容😀" + Self.source)
+        #expect(try await fixture.text() == fixture.view.string)
+        await fixture.close()
+    }
 
     @Test func seededNativeEditsStayEqualToCoreAndDiskFor1200Steps() async throws {
         let fixture = try Fixture(Self.source)

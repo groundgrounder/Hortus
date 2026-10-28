@@ -15,10 +15,18 @@ enum DiagramInspection {
     static func current() -> DiagramTextView? {
         NSApp.windows.compactMap(\.contentView).flatMap { textViews(in: $0) }.first
     }
+    static func finishEvent() {
+        // 自动循环没有原生输入事件；结束 AppKit 的事件临时对象池。
+        if let event = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [],
+                                         timestamp: 0, windowNumber: 0, context: nil, subtype: 0,
+                                         data1: 0, data2: 0) {
+            NSApp.postEvent(event, atStart: false)
+        }
+    }
     static func settled(source: String? = nil) async throws -> DiagramTextView {
         for _ in 0..<500 {
             if let view = current(), !view.diagramPending, source == nil || view.string == source {
-                view.layoutSubtreeIfNeeded()
+                autoreleasepool { view.layoutSubtreeIfNeeded() }
                 return view
             }
             try await Task.sleep(for: .milliseconds(10))
@@ -27,6 +35,7 @@ enum DiagramInspection {
     }
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         if workspace.current?.document?.reading == true { await workspace.toggleCurrentView() }
+        let memory = arguments.contains("--diagram-memory") ? try await memorySamples(workspace: workspace) : []
         var view = try await settled(source: workspace.current?.text)
         let firstMain = view.maximumMainWorkMilliseconds
         var beforeClick = 0
@@ -66,36 +75,6 @@ enum DiagramInspection {
             try await Task.sleep(for: .milliseconds(20))
             view = try await settled()
         }
-        var memory: [[String: Any]] = []
-        var oldText: [WeakView] = []
-        var textIdentities: Set<ObjectIdentifier> = []
-        var oldDiagrams: [WeakView] = []
-        if arguments.contains("--diagram-memory"), let path = workspace.selected {
-            for index in 0..<20 {
-                if textIdentities.insert(ObjectIdentifier(view)).inserted { oldText.append(WeakView(view)) }
-                oldDiagrams += view.diagramViews.values.map { WeakView($0) }
-                workspace.closeTab(path)
-                try await Task.sleep(for: .milliseconds(200))
-                let closed = try residentBytes()
-                workspace.openNote(path)
-                for _ in 0..<500 {
-                    if workspace.current?.loading == false, current() != nil { break }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                view = try await settled(source: workspace.current?.text)
-                try await Task.sleep(for: .milliseconds(200))
-                // 把实际显示纳入内存测量，而不只创建场景。
-                view.displayIfNeeded()
-                for diagram in view.diagramViews.values { diagram.displayIfNeeded() }
-                var usage = rusage()
-                getrusage(RUSAGE_SELF, &usage)
-                memory.append(["cycle": index + 1, "opened_bytes": try residentBytes(), "closed_bytes": closed,
-                               "peak_bytes": usage.ru_maxrss,
-                               "text_view_instances": textIdentities.count,
-                               "retained_old_text_views": oldText.filter { $0.value != nil && $0.value !== view }.count,
-                               "retained_old_diagram_views": oldDiagrams.filter { $0.value != nil }.count])
-            }
-        }
         var errors: [Double] = []
         let diagrams = view.diagramViews.values.sorted { $0.frame.minY < $1.frame.minY }
         var accessible = 0
@@ -132,6 +111,53 @@ enum DiagramInspection {
                 "spans": errors.count, "first_main_work_max_ms": firstMain,
                 "payload_bytes": diagrams.map { $0.prepared.payloadBytes },
                 "resize": resize, "memory": memory]
+    }
+    private static func memorySamples(workspace: Workspace) async throws -> [[String: Any]] {
+        guard let path = workspace.selected else { throw CocoaError(.coderValueNotFound) }
+        var memory: [[String: Any]] = [], oldText: [WeakView] = [], oldDiagrams: [WeakView] = []
+        var textIdentities: Set<ObjectIdentifier> = []
+        for index in 0..<20 {
+            autoreleasepool {
+                if let view = current() {
+                    textIdentities.insert(ObjectIdentifier(view))
+                    oldText.append(WeakView(view))
+                    oldDiagrams += view.diagramViews.values.map { WeakView($0) }
+                }
+            }
+            // 每轮任务结束后再采样，避免自检异步栈持有上轮的原生视图。
+            let closed = try await Task { @MainActor in
+                workspace.closeTab(path)
+                for _ in 0..<500 {
+                    if !workspace.tabs.contains(where: { $0.path == path }) { break }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                guard !workspace.tabs.contains(where: { $0.path == path }) else { throw CocoaError(.coderValueNotFound) }
+                finishEvent()
+                try await Task.sleep(for: .milliseconds(200))
+                let closed = try residentBytes()
+                workspace.openNote(path)
+                for _ in 0..<500 {
+                    if workspace.current?.loading == false, current() != nil { break }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                if workspace.current?.document?.reading == true { await workspace.toggleCurrentView() }
+                let view = try await settled(source: workspace.current?.text)
+                autoreleasepool {
+                    view.displayIfNeeded()
+                    for diagram in view.diagramViews.values { diagram.displayIfNeeded() }
+                }
+                return closed
+            }.value
+            finishEvent()
+            try await Task.sleep(for: .milliseconds(200))
+            var usage = rusage()
+            getrusage(RUSAGE_SELF, &usage)
+            memory.append(["cycle": index + 1, "opened_bytes": try residentBytes(), "closed_bytes": closed,
+                           "peak_bytes": usage.ru_maxrss, "text_view_instances": textIdentities.count,
+                           "retained_old_text_views": oldText.filter { $0.value != nil && $0.value !== current() }.count,
+                           "retained_old_diagram_views": oldDiagrams.filter { $0.value != nil }.count])
+        }
+        return memory
     }
     private static func drawMilliseconds(_ prepared: PreparedScene, visible: CGRect, scale: CGFloat) throws -> Double {
         guard !visible.isEmpty else { return 0 }

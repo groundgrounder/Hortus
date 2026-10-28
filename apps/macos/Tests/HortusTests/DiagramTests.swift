@@ -143,6 +143,22 @@ struct DiagramTests {
         #expect(second.frame.minY > 400)
         #expect(second.frame.intersects(view.visibleRect))
         #expect(view.string == source)
+        // 图尺寸改变只失效后文；结果仍须与强制整篇重排相同。
+        for width in [420.0, 800.0] {
+            scroll.setFrameSize(NSSize(width: width, height: 400))
+            view.setFrameSize(NSSize(width: width, height: view.frame.height))
+            try await wait(view)
+            let manager = try #require(view.textLayoutManager)
+            let content = try #require(manager.textContentManager)
+            manager.ensureLayout(for: content.documentRange)
+            view.needsLayout = true; view.layoutSubtreeIfNeeded()
+            let projected = second.frame
+            manager.invalidateLayout(for: content.documentRange)
+            manager.ensureLayout(for: content.documentRange)
+            view.needsLayout = true; view.layoutSubtreeIfNeeded()
+            #expect(abs(projected.minY - second.frame.minY) <= 0.5)
+            #expect(abs(projected.height - second.frame.height) <= 0.5)
+        }
         coordinator.update(input(""))
         try await wait(view)
         #expect(view.string.isEmpty)

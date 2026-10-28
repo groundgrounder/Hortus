@@ -29,7 +29,7 @@ def main():
                 ('contrast-simulated', '--simulate-high-contrast', []), ('light-end', '--light', ['--snapshot-end']),
                 ('dark-end', '--dark', ['--snapshot-end'])]:
             subprocess.run([str(EDIT.APP), f'--vault={source}', '--note=样式化源码.md', appearance, *extra,
-                f'--snapshot={output / (name + ".png")}'], env=EDIT.HELPERS.environment(base / name), check=True, timeout=30)
+                f'--snapshot={output / (name + ".png")}'], env=EDIT.editing_environment(base / name), check=True, timeout=30)
         assert all(hashlib.sha256(p.read_bytes()).hexdigest() == value for p, value in before.items())
         if args.screenshots_only:
             return

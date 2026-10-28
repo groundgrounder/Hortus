@@ -48,7 +48,7 @@ struct NoteText: NSViewRepresentable {
         view.delegate = nil; view.textStorage?.delegate = nil
         for diagram in view.diagramViews.values { diagram.detach() }
         for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
-        view.mediaViews = []; view.mediaBlocks = []
+        view.mediaViews = []; view.mediaBlocks = []; view.mediaProjection = []
         view.diagramViews = [:]
         view.string = ""
         view.textLayoutManager?.delegate = nil
@@ -86,7 +86,7 @@ struct NoteText: NSViewRepresentable {
             }
             view?.editingCoordinator = nil
             view?.mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
-            view?.mediaViews = []; view?.mediaBlocks = []
+            view?.mediaViews = []; view?.mediaBlocks = []; view?.mediaProjection = []
             input = nil; blocks = []
         }
 
@@ -127,10 +127,13 @@ struct NoteText: NSViewRepresentable {
                     let token = generation
                     task = Task { [weak self] in
                         do {
-                            let snapshot = try await document.io.perform { try $0.snapshot() }
+                            // 同一修订号的初始正文已加载；避免等待大纲队列后重复复制全文。
+                            let text: String
+                            if document.textRevision == document.revision { text = document.text }
+                            else { text = try await document.io.perform { try $0.snapshot().text } }
                             guard let self, !Task.isCancelled, token == generation else { return }
                             loading = false
-                            reload(snapshot.text, preserve: false)
+                            reload(text, preserve: false)
                         } catch { self?.view?.diagramIssue = String(describing: error); self?.view?.diagramPending = false }
                     }
                 } else { reload(input.text, preserve: false) }
@@ -540,6 +543,11 @@ final class DiagramTextView: NSTextView {
         let onlyTailHeightChanged = !projectionChanged && installedExpanded == expanded && expanded.isEmpty && self.blocks.count == blocks.count
             && blocks.last.map { $0.prepared != nil && NSMaxRange($0.range) == sourceUTF16Length } == true
             && zip(self.blocks.dropLast(), blocks.dropLast()).allSatisfy { $0.prepared?.scene.height == $1.prepared?.scene.height && $0.reason == $1.reason }
+        // 源码投影未变时，只让尺寸变化的图及其后文失效，保留前文的原生布局。
+        let invalidationStart: Int? = !projectionChanged && installedExpanded == expanded && self.blocks.count == blocks.count
+            ? zip(self.blocks, blocks).first(where: { old, new in
+                old.range != new.range || old.prepared?.scene.height != new.prepared?.scene.height || old.reason != new.reason
+            }).map { min($0.0.range.location, $0.1.range.location) } : nil
         self.blocks = blocks
         installedExpanded = expanded
         diagramStorage?.diagrams = nextProjection
@@ -587,7 +595,10 @@ final class DiagramTextView: NSTextView {
             }
         }
         let enumerated = ProcessInfo.processInfo.systemUptime
-        manager.invalidateLayout(for: content.documentRange)
+        if let invalidationStart, let start = content.location(content.documentRange.location, offsetBy: invalidationStart),
+           let range = NSTextRange(location: start, end: content.documentRange.endLocation) {
+            manager.invalidateLayout(for: range)
+        } else { manager.invalidateLayout(for: content.documentRange) }
         let invalidated = ProcessInfo.processInfo.systemUptime
         needsLayout = true
         needsDisplay = true

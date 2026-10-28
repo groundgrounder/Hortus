@@ -61,6 +61,7 @@ final class NoteDocument {
     let io: DocumentIO
     // 只在打开、外部载入和恢复时改变；日常输入保留在原生存储与 Rust 镜像中。
     var text: String
+    private(set) var textRevision: UInt64
     var revision: UInt64 { didSet { if revision != oldValue { scheduleOutline() } } }
     var headings: [DocumentHeading] = []
     var outlineRevision: UInt64?
@@ -88,14 +89,17 @@ final class NoteDocument {
     @ObservationIgnored var onCopy: ((String) -> Void)?
     @ObservationIgnored private var autoSave: Task<Void, Never>?
     @ObservationIgnored private var outlineTask: Task<Void, Never>?
+    @ObservationIgnored var initialSourceStyles: Task<StyleBatch, Error>?
     @ObservationIgnored private var refreshing = false
     @ObservationIgnored private var refreshAgain = false
     @ObservationIgnored private var closed = false
 
-    init(io: DocumentIO, initial: DocumentUpdate) {
-        self.io = io; text = initial.text ?? ""; revision = initial.revision
+    init(io: DocumentIO, initial: DocumentUpdate, prepareSourceStyles: Bool = false) {
+        self.io = io; text = initial.text ?? ""; revision = initial.revision; textRevision = initial.revision
         dirty = initial.dirty; persistence = initial.persistence; readOnlyReason = initial.readOnlyReason
         issue = initial.issue; message = initial.message
+        // 已确定以编辑模式打开时，先启动样式分析，与原生视图创建重叠。
+        if prepareSourceStyles { initialSourceStyles = SourceStyling.request(io, since: .max, force: true) }
         scheduleOutline(delay: .zero)
     }
     /// 输入只重置一次性防抖任务；解析与 FFI 都在文档原有队列上运行。
@@ -201,7 +205,10 @@ final class NoteDocument {
         let session = io.session
         io.queue.async { _ = try? session.recover(restore: false) }
     }
-    func stopForShutdown() { closed = true; autoSave?.cancel(); outlineTask?.cancel(); onClosing?() }
+    func stopForShutdown() {
+        closed = true; autoSave?.cancel(); outlineTask?.cancel()
+        initialSourceStyles?.cancel(); initialSourceStyles = nil; onClosing?()
+    }
     private func apply(_ update: DocumentUpdate, external: Bool = false) {
         saveMilliseconds = Double(update.saveMicros) / 1000
         persistence = update.persistence
@@ -242,6 +249,7 @@ final class NoteDocument {
             issue = update.issue; message = update.message
         }
         self.text = text
+        textRevision = revision
         onReload?(text)
         if let copy = update.copyPath { onCopy?(copy) }
         onStateChange?()
