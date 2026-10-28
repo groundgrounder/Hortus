@@ -192,6 +192,38 @@ fn incremental_ranges(
             }
         });
     }
+    // 单独解析被改块无法发现删掉容器标记后与相邻段落合并。
+    // 连同两侧块重查边界；普通行内编辑只需扫描这个局部窗口。
+    let first = index.saturating_sub(1);
+    let end = (index + 2).min(ranges.len());
+    let window = ranges[first].start..ranges[end - 1].end;
+    let mut depth = 0usize;
+    let mut starts = Vec::new();
+    for (event, range) in
+        Parser::new_ext(current.get(window.clone())?, options()).into_offset_iter()
+    {
+        match event {
+            Event::Start(_) => {
+                if depth == 0 {
+                    starts.push(window.start + range.start);
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Rule | Event::Html(_) if depth == 0 => starts.push(window.start + range.start),
+            _ => {}
+        }
+    }
+    if starts.first().is_some_and(|start| *start > window.start) {
+        starts.insert(0, window.start);
+    }
+    if !starts
+        .iter()
+        .copied()
+        .eq(ranges[first..end].iter().map(|range| range.start))
+    {
+        return None;
+    }
     Some((ranges, index))
 }
 

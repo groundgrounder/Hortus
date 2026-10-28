@@ -15,6 +15,14 @@ fn assert_same_rendering(
             actual.content.text.encode_utf16().count()
         );
         assert_eq!(actual.content.diagram, expected.content.diagram);
+        assert_eq!(actual.content.math.len(), expected.content.math.len());
+        for (actual, expected) in actual.content.math.iter().zip(&expected.content.math) {
+            assert_eq!(actual.source, expected.source);
+            assert_eq!(actual.display, expected.display);
+            assert_eq!(actual.latex, expected.latex);
+            assert_eq!(actual.style, expected.style);
+            assert_eq!(actual.block, expected.block);
+        }
         assert_eq!(actual.content.runs.len(), expected.content.runs.len());
         for (actual, expected) in actual.content.runs.iter().zip(&expected.content.runs) {
             assert_eq!(actual.display, expected.display);
@@ -231,6 +239,66 @@ fn inserting_a_block_boundary_falls_back_to_full_analysis() {
                 .map(|math| math.block)
                 .collect::<Vec<_>>()
         );
+    }
+}
+
+#[test]
+fn removing_block_markers_rechecks_neighbor_boundaries() {
+    for (before, after) in [
+        ("A\n> $$x$$\n", "A\n$$x$$\n"),
+        ("A\n- B\n", "A\nB\n"),
+        ("# A\nB\n", "A\nB\n"),
+        ("A\n---\nB\n", "A\n...\nB\n"),
+    ] {
+        let mut cache = Cache::default();
+        cache.model(before, false);
+        assert_same_rendering(
+            &cache.model(after, false),
+            &Cache::default().model(after, false),
+        );
+    }
+}
+
+#[test]
+fn randomized_container_edits_match_full_reading_models() {
+    let mut seed = 0x21c_u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed as usize
+    };
+    let tokens = ["\n", "> ", "- ", "# ", "---", "$$"];
+    for initial in [
+        "A\n> $$x$$\n",
+        "A\n- B\n",
+        "# A\nB\n",
+        "A\n---\nB\n",
+        "- 解方程\n  $$x$$\n",
+        "> [!note] Title\n> $$x$$\n",
+    ] {
+        let mut text = initial.to_owned();
+        let mut cache = Cache::default();
+        cache.model(&text, false);
+        for step in 0..300 {
+            let boundaries: Vec<_> = text
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain([text.len()])
+                .collect();
+            let start_index = next() % boundaries.len();
+            let start = boundaries[start_index];
+            if next() % 2 == 0 || text.is_empty() {
+                text.insert_str(start, tokens[next() % tokens.len()]);
+            } else {
+                let end_index = (start_index + 1 + next() % 5).min(boundaries.len() - 1);
+                text.replace_range(start..boundaries[end_index], "");
+            }
+            let actual = cache.model(&text, false);
+            let expected = Cache::default().model(&text, false);
+            println!("step {step}: {text:?}");
+            assert_same_rendering(&actual, &expected);
+        }
     }
 }
 
