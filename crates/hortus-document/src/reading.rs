@@ -149,6 +149,17 @@ fn incremental_ranges(
         return None;
     }
     let (prefix, previous_end, current_end) = byte_diff(previous, current);
+    if previous.as_bytes()[prefix..previous_end]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        != current.as_bytes()[prefix..current_end]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+    {
+        return None;
+    }
     let index = previous_ranges
         .iter()
         .position(|range| range.start <= prefix && prefix < range.end && previous_end <= range.end)

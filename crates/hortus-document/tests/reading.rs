@@ -183,6 +183,44 @@ fn adding_a_block_boundary_falls_back_to_full_analysis() {
 }
 
 #[test]
+fn removing_a_block_boundary_falls_back_to_full_analysis() {
+    for (before, after) in [
+        ("A\n\nB\n", "A\nB\n"),
+        ("A\n\n$$x$$\n", "A\n$$x$$\n"),
+    ] {
+        let mut cache = Cache::default();
+        cache.model(before, false);
+        let actual = cache.model(after, false);
+        let expected = Cache::default().model(after, false);
+        assert_same_rendering(&actual, &expected);
+        assert_eq!(actual.blocks.len(), expected.blocks.len());
+        assert_eq!(
+            actual.blocks.iter().flat_map(|block| &block.content.math).map(|math| math.block).collect::<Vec<_>>(),
+            expected.blocks.iter().flat_map(|block| &block.content.math).map(|math| math.block).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn inserting_a_block_boundary_falls_back_to_full_analysis() {
+    for (before, after) in [
+        ("A\nB\n", "A\n\nB\n"),
+        ("A\n$$x$$\n", "A\n\n$$x$$\n"),
+    ] {
+        let mut cache = Cache::default();
+        cache.model(before, false);
+        let actual = cache.model(after, false);
+        let expected = Cache::default().model(after, false);
+        assert_same_rendering(&actual, &expected);
+        assert_eq!(actual.blocks.len(), expected.blocks.len());
+        assert_eq!(
+            actual.blocks.iter().flat_map(|block| &block.content.math).map(|math| math.block).collect::<Vec<_>>(),
+            expected.blocks.iter().flat_map(|block| &block.content.math).map(|math| math.block).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
 fn opaque_code_images_tables_and_comments() {
     let mut cache = Cache::default();
     let model = cache.model("```text\n**literal** [[literal]] #literal\n```\n\n![alt](image.png)\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n%%hidden\nline%%\n", false);
