@@ -87,3 +87,45 @@ fn metadata_uses_reading_revision_unicode_ranges_and_file_type() {
         assert_eq!(std::fs::read_to_string(vault.join(path)).unwrap(), source);
     }
 }
+
+#[test]
+fn error_display_source_removes_containers_but_original_ranges_preserve_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = WorkspaceCore::in_directories(
+        temp.path().join("config").to_string_lossy().into(),
+        temp.path().join("cache").to_string_lossy().into(),
+    )
+    .unwrap();
+    let vault = temp.path().join("vault");
+    std::fs::create_dir(&vault).unwrap();
+    for (index, source) in [
+        "> $$\n> \\frac{1}\n> $$\n",
+        "- $$\n  \\frac{1}\n  $$\n",
+        "100. $$\n     \\frac{1}\n     $$\n",
+        "- > $$\n  > \\frac{1}\n  > $$\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("error-{index}.md");
+        std::fs::write(vault.join(&name), source).unwrap();
+        let session = core
+            .open_document(vault.to_string_lossy().into(), name)
+            .unwrap();
+        let blocks = session.math_blocks().unwrap();
+        assert_eq!(blocks.len(), 1);
+        let block = &blocks[0];
+        assert_eq!(block.display_source, "$$\n\\frac{1}\n$$");
+        let units: Vec<_> = source.encode_utf16().collect();
+        let raw = String::from_utf16(
+            &units
+                [block.source_start as usize..(block.source_start + block.source_length) as usize],
+        )
+        .unwrap();
+        assert!(raw.contains(if index == 0 || index == 3 { "> " } else { "  " }));
+        assert!(matches!(
+            MathEngine::new().render(block.latex.clone(), MathStyle::Display),
+            Err(MathFailure::Parse { .. })
+        ));
+    }
+}

@@ -255,29 +255,38 @@ fn layout_inner(
     let ast = ratex_parser::parse(source).map_err(|e| {
         if e.message == "Recursion limit exceeded"
             || e.message.starts_with("Too many expansions")
-            || e.message
-                .contains("Macro expansion resource limit exceeded")
+            || e.message.to_ascii_lowercase().contains("resource limit")
         {
             Error::ResourceLimit(e.to_string())
         } else {
             Error::Parse(e.to_string())
         }
     })?;
-    let fallback = Arc::new(
-        metrics
-            .iter()
-            .map(|(ch, m)| {
-                (
-                    *ch,
-                    FallbackGlyphMetrics {
-                        width: m.width,
-                        height: m.height,
-                        depth: m.depth,
-                    },
-                )
-            })
-            .collect(),
-    );
+    let mut fallback: HashMap<_, _> = metrics
+        .iter()
+        .map(|(ch, m)| {
+            (
+                *ch,
+                FallbackGlyphMetrics {
+                    width: m.width,
+                    height: m.height,
+                    depth: m.depth,
+                },
+            )
+        })
+        .collect();
+    // 不绘制的连接符和变体选择符也必须在排版阶段按零宽处理。
+    for ch in ['\u{200d}', '\u{fe0e}', '\u{fe0f}'] {
+        fallback.insert(
+            ch,
+            FallbackGlyphMetrics {
+                width: 0.0,
+                height: 0.0,
+                depth: 0.0,
+            },
+        );
+    }
+    let fallback = Arc::new(fallback);
     let options = LayoutOptions::default().with_style(match style {
         Style::Display => MathStyle::Display,
         Style::Text => MathStyle::Text,

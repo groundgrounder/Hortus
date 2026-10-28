@@ -19,6 +19,7 @@ fn assert_same_rendering(
         for (actual, expected) in actual.content.math.iter().zip(&expected.content.math) {
             assert_eq!(actual.source, expected.source);
             assert_eq!(actual.display, expected.display);
+            assert_eq!(actual.display_source, expected.display_source);
             assert_eq!(actual.latex, expected.latex);
             assert_eq!(actual.style, expected.style);
             assert_eq!(actual.block, expected.block);
@@ -188,6 +189,33 @@ fn adding_a_block_boundary_falls_back_to_full_analysis() {
     let expected = Cache::default().model(after, false);
     assert_same_rendering(&actual, &expected);
     assert_eq!(actual.blocks.len(), 3);
+}
+
+#[test]
+fn replacing_table_image_separator_matches_full_analysis() {
+    let before = "前文😀\n\n| 中文 | Description              |\n| ---- | -----------------------: |\n| 短   | **Long text** and `code` |\n\n![说明](a.png)\n\n结尾\n";
+    let after = before.replace("\n\n![", "\n中\n![");
+    let mut cache = Cache::default();
+    assert_eq!(
+        cache
+            .model(before, false)
+            .blocks
+            .iter()
+            .map(|b| b.content.media.len())
+            .sum::<usize>(),
+        2
+    );
+    let actual = cache.model(&after, false);
+    let expected = Cache::default().model(&after, false);
+    assert_same_rendering(&actual, &expected);
+    assert_eq!(
+        expected
+            .blocks
+            .iter()
+            .map(|b| b.content.media.len())
+            .sum::<usize>(),
+        1
+    );
 }
 
 #[test]

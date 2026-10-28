@@ -62,12 +62,16 @@ struct MediaTests {
         f.view.undoManager?.redo()
         try await waitForMedia { f.view.string == aligned }
         try await f.ready()
+        // 原生重做可能选中替换后的范围；组合输入放在正文，保留表格与图片间的空行。
+        f.view.setSelectedRange(NSRange(location: 0, length: 0))
+        f.coordinator.mediaSelectionChanged()
         let originalProjection = f.view.mediaProjection
         f.view.setMarkedText("zhong", selectedRange: NSRange(location: 5, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
         #expect(f.view.hasMarkedText())
         #expect(f.view.mediaProjection.count == originalProjection.count)
         f.view.insertText("中", replacementRange: NSRange(location: NSNotFound, length: 0))
         #expect(!f.view.hasMarkedText())
+        #expect(f.view.string == "中" + aligned)
         #expect(try await f.text() == f.view.string)
         f.view.setSelectedRange(NSRange(location: f.view.sourceUTF16Length, length: 0))
         try await f.ready()

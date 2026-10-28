@@ -71,9 +71,6 @@ pub fn scan(text: &str) -> Vec<Formula> {
                 if headers.iter().any(|header| {
                     header.start <= range.start + front && range.end + front <= header.end
                 }) {
-                    if let Some(paragraph) = paragraphs.last_mut() {
-                        paragraph.other = true;
-                    }
                     continue;
                 }
                 let style = if matches!(event, Event::DisplayMath(_)) {

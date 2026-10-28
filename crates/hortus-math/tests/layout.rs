@@ -184,6 +184,36 @@ fn missing_katex_glyphs_request_system_fallback_metrics() {
 }
 
 #[test]
+fn invisible_joiners_and_selectors_have_zero_layout_width() {
+    for (plain, decorated) in [
+        (r"\text{a❤b}", "\\text{a❤\u{fe0f}b}"),
+        (r"\text{a❤b}", "\\text{a❤\u{fe0e}b}"),
+        (r"\text{ab}", "\\text{a\u{200d}b}"),
+    ] {
+        let plain = layout(plain, Style::Display, &HashMap::new()).unwrap();
+        let decorated = layout(decorated, Style::Display, &HashMap::new()).unwrap();
+        assert!(
+            (plain.width - decorated.width).abs() < 1e-10,
+            "{} != {}",
+            plain.width,
+            decorated.width
+        );
+        assert_eq!(plain.items, decorated.items);
+    }
+}
+
+#[test]
+fn parser_layout_work_limit_is_a_resource_limit() {
+    let source = format!("{}x{}", "\\pmb{".repeat(16), "}".repeat(16));
+    let error = layout(&source, Style::Display, &HashMap::new()).unwrap_err();
+    assert!(
+        error.to_string().contains("Layout resource limit exceeded"),
+        "{error:?}"
+    );
+    assert!(matches!(error, Error::ResourceLimit(_)), "{error:?}");
+}
+
+#[test]
 fn reserved_noncharacters_are_not_mapped_by_bundled_katex_fonts() {
     use ratex_font::FontId;
 

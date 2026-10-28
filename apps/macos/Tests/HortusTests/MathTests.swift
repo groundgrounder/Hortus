@@ -12,6 +12,73 @@ struct MathTests {
         MathService(resourceDirectory: root.appendingPathComponent("apps/macos/Resources/Fonts/KaTeX"))
     }
 
+    @Test func dashedArrayBitmapUsesThemeAndExplicitStrokeColors() async throws {
+        let service = Self.service()
+        let array = "\\begin{array}{c:c}a&b\\\\\\hdashline c&d\\end{array}"
+        for (source, foreground, expected) in [
+            (array, [0.92, 0.94, 0.96, 1.0], [0.92, 0.94, 0.96]),
+            ("\\color{red}" + array, [0.92, 0.94, 0.96, 1.0], [1.0, 0.0, 0.0]),
+            ("\\color{black}" + array, [0.92, 0.94, 0.96, 1.0], [0.0, 0.0, 0.0])
+        ] {
+            let math = try await service.render(source, style: .display, bodySize: 30)
+            var sampled = 0
+            for drawing in math.drawing {
+                guard case let .line(point, width, thickness, true, _) = drawing else { continue }
+                let context = try #require(CGContext(data: nil, width: 256, height: 64, bitsPerComponent: 8,
+                    bytesPerRow: 256 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.setAllowsAntialiasing(false)
+                // 让描边状态残留一种无关颜色，验证每条虚线都设置自己的颜色。
+                context.setStrokeColor(CGColor(red: 0, green: 1, blue: 0, alpha: 1))
+                MathRenderer.draw(math, in: context, origin: CGPoint(x: 8 - point.x, y: 32 - point.y),
+                    foreground: CGColor(colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, components: foreground.map { CGFloat($0) })!, deviceScale: 2)
+                let pixels = try #require(context.data).assumingMemoryBound(to: UInt8.self)
+                let x = Int(8 + min(width / 2, max(thickness, 0.5))), y = 32
+                let offset = y * context.bytesPerRow + x * 4
+                #expect(pixels[offset + 3] == 255)
+                for channel in 0..<3 { #expect(abs(Double(pixels[offset + channel]) / 255 - expected[channel]) <= 0.01) }
+                sampled += 1
+            }
+            #expect(sampled > 0)
+        }
+    }
+
+    @Test func containerErrorDisplayHidesPrefixesAndPreservesMarkdownCopy() async throws {
+        for source in ["> $$\n> \\frac{1}\n> $$\n", "100. $$\n     \\frac{1}\n     $$\n"] {
+            let fixture = try ReadingTests.Fixture(source)
+            try await fixture.start(mathService: Self.service())
+            let view = try #require(fixture.view.mathViews.first)
+            #expect(view.item.prepared.block.displaySource == "$$\n\\frac{1}\n$$")
+            let lines = view.item.prepared.fallbackLines
+            let displayed = lines.compactMap { CTLineGetGlyphRuns($0) as? [CTRun] }.flatMap { $0 }
+                .compactMap { (CTRunGetAttributes($0) as NSDictionary)[kCTFontAttributeName] }
+            #expect(!displayed.isEmpty)
+            let expected = "$$\n\\frac{1}\n$$"
+            #expect(lines.reduce(0) { $0 + CTLineGetStringRange($1).length } == (expected as NSString).length)
+            let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
+                timestamp: 0, windowNumber: fixture.editing.window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            let menu = try #require(view.menu(for: event)), copy = try #require(menu.items.first)
+            #expect(NSApp.sendAction(try #require(copy.action), to: copy.target, from: copy))
+            let raw = (source as NSString).substring(with: NSRange(location: Int(view.item.prepared.block.sourceStart), length: Int(view.item.prepared.block.sourceLength)))
+            #expect(NSPasteboard.general.string(forType: .string) == raw)
+            await fixture.close()
+        }
+    }
+
+    @Test func numberedListErrorLinesFitInsideTheirActualCanvas() async throws {
+        let source = "10. $$\\" + String(repeating: "unknowncommand", count: 300) + "$$\n"
+        let fixture = try ReadingTests.Fixture(source)
+        fixture.editing.window.setContentSize(NSSize(width: 472, height: 540))
+        try await fixture.start(mathService: Self.service())
+        let view = try #require(fixture.view.mathViews.first)
+        #expect(view.reservedPrefixWidth > 0)
+        let width = try #require(view.scroll.documentView).bounds.width
+        for line in view.item.prepared.fallbackLines + view.item.prepared.reasonLines {
+            #expect(8 + CTLineGetTypographicBounds(line, nil, nil, nil) <= width - 8 + 0.5)
+        }
+        await fixture.close()
+    }
+
     @Test func corpusGlyphAuditAndFallbackMetricsRunInBackground() async throws {
         let service = Self.service()
         let samples = try String(contentsOf: Self.root.appendingPathComponent("fixtures/math/samples.txt"), encoding: .utf8)
@@ -116,15 +183,21 @@ struct MathTests {
             catch { }
         }
         #expect(await service.registrationCount == 0)
+        let source = "$$x$$"
+        let block = MathBlock(blockId: 1, sourceStart: 0, sourceLength: 5, displayStart: 0,
+                              displayLength: 1, displaySource: source, latex: "x", style: .display, block: true)
+        let prepared = try #require(await service.prepare([block], source: source, size: 15, width: 100).first)
+        #expect(prepared.reason?.hasPrefix(L10n.string("Formula fonts could not be loaded: %@; showing source", "").components(separatedBy: ":")[0]) == true)
     }
 
     @Test func longFormulaErrorsWrapSourceAndReasonByCharacterClusters() async throws {
         let latex = "\\" + String(repeating: "unknowncommand", count: 300)
         let source = "$$\(latex)$$"
         let block = MathBlock(blockId: 1, sourceStart: 0, sourceLength: UInt64((source as NSString).length),
-                              displayStart: 0, displayLength: 1, latex: latex, style: .display, block: true)
+                              displayStart: 0, displayLength: 1, displaySource: source, latex: latex, style: .display, block: true)
         let prepared = try #require(await Self.service().prepare([block], source: source, size: 15, width: 100).first)
         #expect(prepared.math == nil)
+        #expect(prepared.reason?.hasPrefix(L10n.string("Formula error: %@; showing source", "").components(separatedBy: ":")[0]) == true)
         #expect(prepared.fallbackLines.count > 1)
         #expect(prepared.reasonLines.count > 1)
         func assertWrapped(_ lines: [CTLine], text: String) {
@@ -156,16 +229,47 @@ struct MathTests {
         await fixture.close()
     }
 
+    @Test func listFormulasStartAfterTheirPrefixAndUseOnlyBodyWidthForCentering() async throws {
+        let wide = Array(repeating: "x", count: 120).joined(separator: "+")
+        for marker in ["- ", "100. "] {
+            for latex in ["x", wide] {
+                let fixture = try ReadingTests.Fixture("\(marker)$$\(latex)$$\n")
+                try await fixture.start(mathService: Self.service())
+                let view = try #require(fixture.view.mathViews.first)
+                let canvas = try #require(view.scroll.documentView)
+                let math = try #require(view.item.prepared.math)
+                #expect(view.reservedPrefixWidth > 0)
+                #expect(view.scroll.frame.minX >= 12 + view.reservedPrefixWidth)
+                let origin = max(0, (canvas.bounds.width - math.size.width) / 2)
+                #expect(view.scroll.frame.minX + origin >= 12 + view.reservedPrefixWidth)
+                if latex == "x" {
+                    #expect(!view.scroll.hasHorizontalScroller)
+                    #expect(abs(origin + math.size.width / 2 - view.scroll.bounds.width / 2) <= 0.5)
+                } else {
+                    #expect(view.scroll.hasHorizontalScroller && origin == 0)
+                }
+                await fixture.close()
+            }
+        }
+    }
+
     @Test func duplicateFormulasKeepDistinctViewsAcrossThemeAndExternalRefresh() async throws {
         let source = "> intro\n>\n> $$x^2$$\n>\n> $$x^2$$\n"
         let fixture = try ReadingTests.Fixture(source)
         try await fixture.start(mathService: Self.service())
         #expect(fixture.view.mathViews.count == 2)
         #expect(Set(fixture.view.mathViews.map(ObjectIdentifier.init)).count == 2)
+        func assertUniqueAccessibility() {
+            let elements = (fixture.view.accessibilityChildren() ?? []).compactMap { $0 as? MathBlockView }
+            #expect(elements.count == 2)
+            #expect(Set(elements.map(ObjectIdentifier.init)).count == 2)
+        }
+        assertUniqueAccessibility()
         fixture.view.appearance = NSAppearance(named: .darkAqua)
         fixture.coordinator.refresh(force: true)
         try await fixture.ready()
         #expect(Set(fixture.view.mathViews.map(ObjectIdentifier.init)).count == 2)
+        assertUniqueAccessibility()
         let changed = source.replacingOccurrences(of: "intro", with: "introduction")
         try Data(changed.utf8).write(to: fixture.document.io.url)
         fixture.document.refresh()
@@ -176,6 +280,7 @@ struct MathTests {
         #expect(fixture.document.text == changed && !fixture.coordinator.pending)
         #expect(fixture.view.mathViews.count == 2)
         #expect(Set(fixture.view.mathViews.map(ObjectIdentifier.init)).count == 2)
+        assertUniqueAccessibility()
         await fixture.close()
     }
 

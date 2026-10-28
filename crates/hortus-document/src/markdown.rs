@@ -182,6 +182,8 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
     if math {
         options |= Options::ENABLE_MATH;
     }
+    let mut list_prefixes = Vec::new();
+    let mut math_ranges = Vec::new();
     for (event, local) in Parser::new_ext(&text[body_start..], options).into_offset_iter() {
         let r = local.start + body_start..local.end + body_start;
         let source = &text[r.clone()];
@@ -312,6 +314,39 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
                     r.start + prefix..r.end,
                 );
                 push(spans, Kind::Marker, r.start..r.start + prefix);
+                if math {
+                    let line_start = text[..r.start].rfind('\n').map_or(0, |i| i + 1);
+                    let columns = |value: &str| {
+                        value.chars().fold(0, |column, c| {
+                            if c == '\t' {
+                                column + 4 - column % 4
+                            } else {
+                                column + 1
+                            }
+                        })
+                    };
+                    let target = columns(&text[line_start..r.start + prefix]);
+                    let mut offset = r.start;
+                    for (index, line) in source.split_inclusive('\n').enumerate() {
+                        if index > 0 {
+                            let mut column = 0;
+                            let count = line
+                                .bytes()
+                                .take_while(|byte| {
+                                    if column >= target || !matches!(byte, b' ' | b'\t' | b'>') {
+                                        return false;
+                                    }
+                                    column += if *byte == b'\t' { 4 - column % 4 } else { 1 };
+                                    true
+                                })
+                                .count();
+                            if count > 0 {
+                                list_prefixes.push(offset..offset + count);
+                            }
+                        }
+                        offset += line.len();
+                    }
+                }
             }
             Event::TaskListMarker(_) => {
                 push(spans, Kind::Task, r.clone());
@@ -342,6 +377,7 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
                 }
             }
             Event::InlineMath(_) | Event::DisplayMath(_) => {
+                math_ranges.push(r.clone());
                 protected[r].fill(true);
             }
             Event::Rule => {
@@ -349,6 +385,15 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
                 push(spans, Kind::Marker, r);
             }
             _ => {}
+        }
+    }
+    // 只隐藏公式源码行的列表续行缩进，普通正文仍保留现有投影。
+    for prefix in list_prefixes {
+        if math_ranges
+            .iter()
+            .any(|range| prefix.start < range.end && prefix.end >= range.start)
+        {
+            push(spans, Kind::Marker, prefix);
         }
     }
     // 闭合注释允许跨行；代码中的起始符不参与配对，未闭合时保留正常正文。

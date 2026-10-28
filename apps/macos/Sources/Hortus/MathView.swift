@@ -13,8 +13,9 @@ struct PreparedMathBlock: @unchecked Sendable {
 }
 
 extension MathService {
-    func prepare(_ blocks: [MathBlock], source: String, size: Double, width: Double) -> [PreparedMathBlock] {
+    func prepare(_ blocks: [MathBlock], source: String, size: Double, width: Double, displayText: String = "") -> [PreparedMathBlock] {
         let source = source as NSString
+        let display = displayText as NSString
         return blocks.filter { $0.block && !$0.latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.compactMap { block in
             let range = NSRange(location: Int(block.sourceStart), length: Int(block.sourceLength))
             guard range.location <= source.length, range.length <= source.length - range.location else { return nil }
@@ -41,7 +42,9 @@ extension MathService {
                     detail = String(describing: error)
                     message = L10n.string("Formula error: %@; showing source", detail)
                 }
-                let lineWidth = max(30, width - 16)
+                let prefixWidth = MathTypography.prefixWidth(in: display,
+                    range: NSRange(location: Int(block.displayStart), length: Int(block.displayLength)), size: size)
+                let lineWidth = max(80, width - prefixWidth) - 16
                 func wrap(_ text: String, attributes: [NSAttributedString.Key: Any]) -> [CTLine] {
                     guard !text.isEmpty else { return [] }
                     let typesetter = CTTypesetterCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
@@ -58,7 +61,7 @@ extension MathService {
                 let reasonFont = NSFont.systemFont(ofSize: 12)
                 let contextColor = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
                 let reasonLines = wrap(message, attributes: [.font: reasonFont, contextColor: true])
-                let lines = wrap(raw, attributes: [.font: sourceFont, contextColor: true])
+                let lines = wrap(block.displaySource, attributes: [.font: sourceFont, contextColor: true])
                 let textHeight = Double(reasonLines.count) * 16 + Double(lines.count) * (size + 5) + 16
                 return PreparedMathBlock(block: block, source: raw, math: nil,
                     reason: message, reasonLines: reasonLines, fallbackLines: lines,
@@ -207,10 +210,7 @@ extension DiagramTextView {
         mathViews = items.map { item in
             let prefixWidth: Double
             if let storage {
-                let paragraph = storage.paragraphRange(for: item.range)
-                let length = max(0, item.range.location - paragraph.location)
-                let prefix = storage.substring(with: NSRange(location: paragraph.location, length: length))
-                prefixWidth = Double((prefix as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: size)]).width)
+                prefixWidth = MathTypography.prefixWidth(in: storage, range: item.range, size: size)
             } else {
                 prefixWidth = 0
             }

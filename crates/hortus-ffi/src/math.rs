@@ -18,6 +18,7 @@ pub struct MathBlock {
     pub source_length: u64,
     pub display_start: u64,
     pub display_length: u64,
+    pub display_source: String,
     pub latex: String,
     pub style: MathStyle,
     pub block: bool,
@@ -160,6 +161,7 @@ impl DocumentSession {
                     source_length: item.source.len() as u64,
                     display_start: (display + item.display.start) as u64,
                     display_length: item.display.len() as u64,
+                    display_source: item.display_source.clone(),
                     latex: item.latex.clone(),
                     style: match item.style {
                         hortus_document::math::Style::Display => MathStyle::Display,

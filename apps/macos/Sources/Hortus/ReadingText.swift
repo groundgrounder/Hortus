@@ -371,7 +371,8 @@ struct ReadingText: NSViewRepresentable {
                                     let media = await LocalImageCache.shared.prepare(reading.6, vault: input.vault)
                                     var completed = ReadingRefreshResult(model: value.model, snapshot: value.snapshot, media: media, phases: value.phases)
                                     if !reading.7.isEmpty {
-                                        completed.math = await input.mathService.prepare(reading.7, source: reading.1?.text ?? "", size: input.fontSize, width: width)
+                                        completed.math = await input.mathService.prepare(reading.7, source: reading.1?.text ?? "", size: input.fontSize, width: width,
+                                            displayText: value.model.text)
                                     }
                                     completed.phases["diagrams_ms"] = (ProcessInfo.processInfo.systemUptime - diagramStart) * 1000
                                     guard let self else { return }

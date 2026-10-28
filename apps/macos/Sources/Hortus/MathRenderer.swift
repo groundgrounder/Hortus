@@ -5,6 +5,13 @@ import HortusCore
 enum MathTypography {
     static let scale = 1.21
     static let padding = 8.0
+
+    static func prefixWidth(in text: NSString, range: NSRange, size: Double) -> Double {
+        guard range.location <= text.length, range.length <= text.length - range.location else { return 0 }
+        let paragraph = text.paragraphRange(for: range)
+        let prefix = text.substring(with: NSRange(location: paragraph.location, length: range.location - paragraph.location))
+        return Double((prefix as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: size)]).width)
+    }
 }
 
 struct MathScene: Decodable, Sendable {
@@ -114,6 +121,7 @@ enum MathRenderer {
                 context.restoreGState()
             case let .line(point, width, thickness, dashed, tint):
                 context.setFillColor(color(tint))
+                context.setStrokeColor(color(tint))
                 let thickness = max(thickness, 1 / max(1, deviceScale))
                 if dashed {
                     let dash = 4 * thickness

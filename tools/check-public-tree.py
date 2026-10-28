@@ -28,6 +28,15 @@ MIGRATION_EXCEPTIONS = {
 }
 HAN = r'\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f'
 HAN_SEGMENTS = re.compile('[' + HAN + ']{4,}')
+KATEX_FONT_FILES = {
+    'KaTeX_AMS-Regular.ttf', 'KaTeX_Caligraphic-Bold.ttf', 'KaTeX_Caligraphic-Regular.ttf',
+    'KaTeX_Fraktur-Bold.ttf', 'KaTeX_Fraktur-Regular.ttf', 'KaTeX_Main-Bold.ttf',
+    'KaTeX_Main-BoldItalic.ttf', 'KaTeX_Main-Italic.ttf', 'KaTeX_Main-Regular.ttf',
+    'KaTeX_Math-BoldItalic.ttf', 'KaTeX_Math-Italic.ttf', 'KaTeX_SansSerif-Bold.ttf',
+    'KaTeX_SansSerif-Italic.ttf', 'KaTeX_SansSerif-Regular.ttf', 'KaTeX_Script-Regular.ttf',
+    'KaTeX_Size1-Regular.ttf', 'KaTeX_Size2-Regular.ttf', 'KaTeX_Size3-Regular.ttf',
+    'KaTeX_Size4-Regular.ttf', 'KaTeX_Typewriter-Regular.ttf',
+}
 
 
 def tracked_public_files(root):
@@ -109,8 +118,8 @@ def check_bundle(bundle):
             if component not in text:
                 violations.append((str(notices), 1, f'third-party notices do not mention {component.strip()}'))
     fonts = resources / 'Fonts/KaTeX'
-    if len(list(fonts.glob('KaTeX_*.ttf'))) != 20 or not (fonts / 'OFL.txt').is_file():
-        violations.append((str(fonts), 1, 'expected 20 KaTeX TTF fonts and OFL.txt'))
+    if {path.name for path in fonts.glob('KaTeX_*.ttf')} != KATEX_FONT_FILES or not (fonts / 'OFL.txt').is_file():
+        violations.append((str(fonts), 1, 'expected exact KaTeX TTF filenames and OFL.txt'))
     return violations
 
 

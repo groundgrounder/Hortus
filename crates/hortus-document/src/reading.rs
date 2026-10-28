@@ -33,6 +33,7 @@ impl Content {
 pub struct Math {
     pub source: Range<usize>,
     pub display: Range<usize>,
+    pub display_source: String,
     pub latex: String,
     pub style: Style,
     pub block: bool,
@@ -968,6 +969,13 @@ fn render_full_inner(
             result.math.push(Math {
                 source: source16..source_end,
                 display: display16..display16 + length,
+                display_source: text[byte..end]
+                    .char_indices()
+                    .filter_map(|(offset, character)| {
+                        let index = byte + offset;
+                        (!suppress[index] && masks[index] & 1 == 0).then_some(character)
+                    })
+                    .collect(),
                 latex: formula.latex,
                 style: formula.style,
                 block: formula.block,

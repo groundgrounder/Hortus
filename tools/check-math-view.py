@@ -41,6 +41,23 @@ def idle_math_cpu(base, vault, ready):
             process.terminate(); process.wait(timeout=10)
 
 
+def check_memory(sample):
+    peak = sample['peak_bytes']
+    retained = sample['retained_old_views']
+    retained_math = sample['retained_old_math_views']
+    # 分配器可保留首轮工作集；后十轮不得持续逐轮增加。
+    for key in ['memory_bytes', 'footprint_bytes']:
+        memory = sample[key]
+        assert len(memory) == 20, (key, memory)
+        assert not all(b > a for a, b in zip(memory[10:], memory[11:])), (key, memory)
+        assert max(memory[10:]) - min(memory[10:]) <= 16 * 1024 * 1024, (key, memory)
+    # ru_maxrss 只记录历史峰值；泄漏趋势由当前 RSS 和物理占用共同检查。
+    assert len(peak) == 20, peak
+    assert len(retained) == 20 and max(retained) <= 1, retained
+    assert all(count <= retained[10] for count in retained[10:]), retained
+    assert len(retained_math) == 20 and all(count == 0 for count in retained_math), retained_math
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/math-view')
@@ -52,7 +69,7 @@ def main():
         base = Path(temporary)
         vault = base / 'vault'
         vault.mkdir()
-        for name in ['showcase.md', 'performance-note.md', 'missing-glyphs.md']:
+        for name in ['showcase.md', 'performance-note.md', 'missing-glyphs.md', 'container-regressions.md']:
             shutil.copyfile(ROOT / 'fixtures/math' / name, vault / name)
         (vault / 'other.md').write_text('# Other\n')
         def run(name, note='showcase.md', mode='math', extra=()):
@@ -76,6 +93,13 @@ def main():
                 assert data['math_blocks'] == 6, data
                 assert data['missing_glyphs'] == 0 and data['unresolved_metrics'] == 0, data
                 assert required <= measured, (sorted(required - measured), data)
+                for case, section in [('dashed-array', 'Dashed array'), ('list-source', 'List source'),
+                                      ('quote-error', 'Quote error'), ('numbered-error', 'Numbered error')]:
+                    name = f'{case}-{appearance}'
+                    data = run(name, 'container-regressions.md', extra=[f'--{appearance}',
+                        f'--math-reveal=## {section}', f'--snapshot={output / (name + ".png")}'])
+                    assert data['math_blocks'] == 7 and len(data['math_errors']) == 2, data
+                    assert data['missing_glyphs'] == 0 and data['unresolved_metrics'] == 0, data
                 run(f'wide-end-{appearance}', extra=[f'--{appearance}', '--math-index=23', '--math-scroll-end',
                     f'--snapshot={output / ("wide-end-" + appearance + ".png")}'])
                 run(f'empty-{appearance}', extra=[f'--{appearance}', '--math-reveal=## Empty',
@@ -106,15 +130,7 @@ def main():
             assert all(r['rebuilt'] == 1 and r['same_anchor'] and r['anchor_shift_pt'] <= 1 for r in refreshes), summary
         if args.checks in ['all', 'memory']:
             sample = run('memory', 'performance-note.md', 'math-memory')
-            memory = sample['memory_bytes']
-            peak = sample['peak_bytes']
-            retained_math = sample['retained_old_math_views']
-            assert len(memory) == 20, memory
-            # 分配器可保留首轮工作集；后十轮不得持续逐轮增加。
-            assert not all(b > a for a, b in zip(memory[10:], memory[11:])), memory
-            assert max(memory[10:]) - min(memory[10:]) <= 16 * 1024 * 1024, memory
-            assert len(peak) == 20 and peak[-1] <= peak[9] + 16 * 1024 * 1024, peak
-            assert len(retained_math) == 20 and all(count == 0 for count in retained_math), retained_math
+            check_memory(sample)
         if args.checks in ['all', 'cpu']:
             empty = READING.HELPERS.idle_cpu(base / 'empty', [])
             opened = idle_math_cpu(base / 'opened', vault, output / 'cpu-ready.json')

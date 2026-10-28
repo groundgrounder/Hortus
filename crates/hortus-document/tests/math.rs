@@ -138,6 +138,43 @@ fn containers_multiple_formulas_and_mixed_paragraphs() {
 }
 
 #[test]
+fn callout_title_formulas_do_not_change_body_math_classification() {
+    for prefix in ["> ", "- > "] {
+        let continuation = if prefix.starts_with('-') {
+            "  > "
+        } else {
+            "> "
+        };
+        for title in ["Title", "$$a$$", "$a$"] {
+            let source = format!("{prefix}[!note] {title}\n{continuation}$$x$$\n");
+            let formulas = math::scan(&source);
+            assert_eq!(formulas.len(), 1, "{source}");
+            assert!(formulas[0].block, "{source}: {formulas:?}");
+        }
+    }
+}
+
+#[test]
+fn literal_math_hides_only_list_continuation_indentation() {
+    for (marker, indent) in [("- ", "  "), ("1. ", "   "), ("100. ", "     ")] {
+        for quote in ["", "> "] {
+            let source = format!(
+                "{marker}{quote}解方程\n{indent}{quote}$$\n{indent}{quote}x^2=1\n{indent}{quote}$$\n"
+            );
+            let text = output(&Cache::default().model(&source, false));
+            assert!(
+                text.contains("解方程\n$$\nx^2=1\n$$"),
+                "{source:?}: {text:?}"
+            );
+        }
+        let ordinary = format!("{marker}文字\n{indent}续行\n");
+        assert!(
+            output(&Cache::default().model(&ordinary, false)).contains(&format!("\n{indent}续行"))
+        );
+    }
+}
+
+#[test]
 fn unicode_ranges_are_utf16_and_inline_math_is_opaque() {
     let source = "前😀\n\n$$\\text{中😀}$$\n\n后😀 $a_1 b_1 ==literal== [[target]]$。\n";
     let model = Cache::default().model(source, false);
