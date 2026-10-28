@@ -22,7 +22,7 @@ fn cases(source: &str) -> Vec<&str> {
 #[test]
 fn twenty_pulldown_boundaries_match_the_documented_rules() {
     let fixtures = include_str!("../../../fixtures/math/markdown-boundaries.md");
-    // C09 是表格附件，单元格中的公式保持源码。
+    // C09 是表格附件，单元格中的公式不会进入公式显示模型。
     let expected: &[&[(Style, bool)]] = &[
         &[],
         &[],
@@ -61,7 +61,7 @@ fn twenty_pulldown_boundaries_match_the_documented_rules() {
                     .iter()
                     .map(|b| b.content.math.len())
                     .sum::<usize>(),
-                2
+                0
             );
             let table = &model.blocks[0].content.media[0];
             assert!(format!("{table:?}").contains("$x$"));
@@ -108,7 +108,6 @@ fn containers_multiple_formulas_and_mixed_paragraphs() {
         "$$x$$ $$y$$\n",
         "$$x$$\n$$y$$\n",
         "> $$x$$\n> $$y$$\n",
-        "> [!note] Title\n> $$x$$\n> $$y$$\n",
         "- $$x$$\n  $$y$$\n",
         "- [ ] $$x$$\n  $$y$$\n",
     ] {
@@ -118,6 +117,15 @@ fn containers_multiple_formulas_and_mixed_paragraphs() {
         let model = Cache::default().model(source, false);
         assert_eq!(output(&model).matches('\u{fffc}').count(), 2, "{source}");
     }
+    let callout = "> [!note] Title\n> $$x$$\n> $$y$$\n";
+    assert!(math::scan(callout).iter().all(|formula| formula.block));
+    let callout_title = "> [!note] $$E=mc^2$$\n";
+    assert!(
+        math::scan(callout_title)
+            .iter()
+            .all(|formula| !formula.block)
+    );
+    assert!(!output(&Cache::default().model(callout_title, false)).contains('\u{fffc}'));
     for source in [
         "text $$x$$ text",
         "$$x$$ $y$",

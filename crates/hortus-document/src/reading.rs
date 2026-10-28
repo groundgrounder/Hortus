@@ -652,7 +652,7 @@ pub(crate) fn inline(text: &str) -> Content {
         }
     }
     spans.sort_by_key(|(_, range)| (range.start, range.end));
-    render_full(text, false, false, false, &spans, &[])
+    render_full_inner(text, false, false, false, &spans, &[], false)
 }
 
 fn render_full(
@@ -662,6 +662,18 @@ fn render_full(
     diagram: bool,
     spans: &[(Kind, Range<usize>)],
     refs: &[(usize, usize, String)],
+) -> Content {
+    render_full_inner(text, mmd, front, diagram, spans, refs, true)
+}
+
+fn render_full_inner(
+    text: &str,
+    mmd: bool,
+    front: bool,
+    diagram: bool,
+    spans: &[(Kind, Range<usize>)],
+    refs: &[(usize, usize, String)],
+    parse_math: bool,
 ) -> Content {
     let mut result = Content::default();
     let mut masks = vec![0u32; text.len()];
@@ -858,8 +870,7 @@ fn render_full(
         }
     }
     let mut formulas = HashMap::new();
-    let mut table_formulas = Vec::new();
-    if !mmd && !front && !result.diagram && text.contains('$') {
+    if parse_math && !mmd && !front && !result.diagram && text.contains('$') {
         for formula in math::scan(text) {
             if suppress[formula.source.start] || masks[formula.source.start] & (16 | 32) != 0 {
                 continue;
@@ -868,7 +879,6 @@ fn render_full(
                 .values()
                 .any(|(r, _)| r.contains(&formula.source.start))
             {
-                table_formulas.push(formula);
                 continue;
             }
             let value = if formula.block && !formula.latex.trim().is_empty() {
@@ -883,7 +893,14 @@ fn render_full(
                     "\u{fffc}\n".into()
                 }
             } else {
-                text[formula.source.clone()].to_owned()
+                let mut value = String::new();
+                for (offset, character) in text[formula.source.clone()].char_indices() {
+                    let index = formula.source.start + offset;
+                    if !suppress[index] && masks[index] & 1 == 0 {
+                        value.push(character);
+                    }
+                }
+                value
             };
             replacements.insert(
                 formula.source.start,
@@ -926,19 +943,6 @@ fn render_full(
         }
         if let Some((span, kind)) = attachments.remove(&byte) {
             let leading = value.encode_utf16().take_while(|c| *c == 10).count();
-            for formula in table_formulas
-                .iter()
-                .filter(|f| span.contains(&f.source.start))
-            {
-                result.math.push(Math {
-                    source: text[..formula.source.start].encode_utf16().count()
-                        ..text[..formula.source.end].encode_utf16().count(),
-                    display: display16 + leading..display16 + leading + 1,
-                    latex: formula.latex.clone(),
-                    style: formula.style,
-                    block: false,
-                });
-            }
             result.media.push(Media {
                 source: source16..source16 + text[span].encode_utf16().count(),
                 display: display16 + leading..display16 + leading + 1,

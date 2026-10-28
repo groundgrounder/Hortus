@@ -388,6 +388,7 @@ dependencies = [
  "ratex-types",
  "serde",
  "serde_json",
+ "ttf-parser",
 ]
 
 [[package]]

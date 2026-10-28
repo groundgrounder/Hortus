@@ -15,10 +15,13 @@ use std::{
     sync::Arc,
 };
 
+mod katex_cmap;
+
 pub const MAX_SOURCE_BYTES: usize = 16_384;
 pub const MAX_ITEMS: usize = 32_768;
 const MAX_COMMANDS: usize = 131_072;
 const MAX_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GEOMETRY_EM: f64 = 4096.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Style {
@@ -131,15 +134,23 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 fn finite(values: &[f64]) -> Result<(), Error> {
-    if values
-        .iter()
-        .all(|v| v.is_finite() && v.abs() <= 1_000_000.0)
-    {
-        Ok(())
-    } else {
-        Err(Error::InvalidLayout(
-            "Non-finite or excessive formula geometry".into(),
+    if values.iter().any(|value| !value.is_finite()) {
+        Err(Error::InvalidLayout("Non-finite formula geometry".into()))
+    } else if values.iter().any(|value| value.abs() > MAX_GEOMETRY_EM) {
+        Err(Error::ResourceLimit(
+            "Formula resource limit exceeded: geometry is above 4096 em".into(),
         ))
+    } else {
+        Ok(())
+    }
+}
+
+fn layout_error(error: impl fmt::Display) -> Error {
+    let message = error.to_string();
+    if message.to_ascii_lowercase().contains("resource limit") {
+        Error::ResourceLimit(message)
+    } else {
+        Error::InvalidLayout(message)
     }
 }
 fn color(item: &DisplayItem) -> RaColor {
@@ -242,7 +253,11 @@ fn layout_inner(
         }
     }
     let ast = ratex_parser::parse(source).map_err(|e| {
-        if e.message == "Recursion limit exceeded" || e.message.starts_with("Too many expansions") {
+        if e.message == "Recursion limit exceeded"
+            || e.message.starts_with("Too many expansions")
+            || e.message
+                .contains("Macro expansion resource limit exceeded")
+        {
             Error::ResourceLimit(e.to_string())
         } else {
             Error::Parse(e.to_string())
@@ -268,7 +283,7 @@ fn layout_inner(
         Style::Text => MathStyle::Text,
     });
     let tree = layout_with_fallback_metrics(&ast, &options, Arc::clone(&fallback));
-    validate_layout(&tree).map_err(|e| Error::InvalidLayout(e.to_string()))?;
+    validate_layout(&tree).map_err(layout_error)?;
     let display = to_display_list(&tree);
     finite(&[display.width, display.height, display.depth])?;
     if display.width < 0.0 || display.height < 0.0 || display.depth < 0.0 {
@@ -285,7 +300,7 @@ fn layout_inner(
         &options.with_color(RaColor::rgb(0.25, 0.5, 0.75)),
         fallback,
     );
-    validate_layout(&alternate).map_err(|e| Error::InvalidLayout(e.to_string()))?;
+    validate_layout(&alternate).map_err(layout_error)?;
     let alternate = to_display_list(&alternate);
     if display.items.len() != alternate.items.len() {
         return Err(Error::InvalidLayout(
@@ -321,6 +336,9 @@ fn layout_inner(
                 if scale <= 0.0 {
                     return Err(Error::InvalidLayout("Invalid glyph scale".into()));
                 }
+                if matches!(char_code, 0x200d | 0xfe0e | 0xfe0f) {
+                    continue;
+                }
                 let id = ratex_font::FontId::parse(&font).filter(|id| {
                     !matches!(
                         id,
@@ -331,10 +349,18 @@ fn layout_inner(
                 });
                 let ch = char::from_u32(char_code)
                     .ok_or_else(|| Error::InvalidLayout("Invalid glyph codepoint".into()))?;
-                let codepoint = id.map_or(char_code, |id| {
-                    ratex_font::katex_ttf_glyph_char(id, char_code) as u32
-                });
-                if id.is_none() && !metrics.contains_key(&ch) {
+                let katex_codepoint =
+                    id.map(|id| ratex_font::katex_ttf_glyph_char(id, char_code) as u32);
+                let has_katex_glyph = id
+                    .zip(katex_codepoint)
+                    .is_some_and(|(id, codepoint)| katex_cmap::contains(id.as_str(), codepoint));
+                let fallback = !has_katex_glyph;
+                let codepoint = if fallback {
+                    char_code
+                } else {
+                    katex_codepoint.unwrap()
+                };
+                if fallback && !metrics.contains_key(&ch) {
                     missing.insert(char_code);
                 }
                 Item::Glyph {
@@ -343,7 +369,7 @@ fn layout_inner(
                     scale,
                     font,
                     codepoint,
-                    fallback: id.is_none(),
+                    fallback,
                     color,
                 }
             }

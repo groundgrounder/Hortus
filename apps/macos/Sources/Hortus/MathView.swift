@@ -7,6 +7,7 @@ struct PreparedMathBlock: @unchecked Sendable {
     let source: String
     let math: PreparedMath?
     let reason: String?
+    let reasonLines: [CTLine]
     let fallbackLines: [CTLine]
     let fallbackHeight: Double
 }
@@ -20,29 +21,48 @@ extension MathService {
             let raw = source.substring(with: range)
             do {
                 return PreparedMathBlock(block: block, source: raw, math: try render(block.latex, style: block.style, bodySize: size),
-                                         reason: nil, fallbackLines: [], fallbackHeight: 0)
+                                         reason: nil, reasonLines: [], fallbackLines: [], fallbackHeight: 0)
             } catch {
                 let detail: String
+                let message: String
                 if let failure = error as? MathFailure {
-                    detail = switch failure {
-                    case let .Parse(message), let .ResourceLimit(message), let .Panic(message), let .InvalidLayout(message): message
+                    switch failure {
+                    case let .ResourceLimit(value):
+                        detail = value
+                        message = L10n.string("Formula resource limit exceeded: %@; showing source", value)
+                    case let .Parse(value), let .Panic(value), let .InvalidLayout(value):
+                        detail = value
+                        message = L10n.string("Formula error: %@; showing source", value)
                     }
+                } else if let failure = error as? MathService.FontLoadError {
+                    detail = failure.description
+                    message = L10n.string("Formula fonts could not be loaded: %@; showing source", detail)
                 } else {
-                    detail = L10n.string("Formula fonts could not be loaded")
+                    detail = String(describing: error)
+                    message = L10n.string("Formula error: %@; showing source", detail)
                 }
-                let font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-                let attributes: [NSAttributedString.Key: Any] = [.font: font,
-                    NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true]
-                let typesetter = CTTypesetterCreateWithAttributedString(NSAttributedString(string: raw, attributes: attributes))
-                var offset = 0, lines: [CTLine] = []
-                while offset < (raw as NSString).length {
-                    let length = max(1, CTTypesetterSuggestLineBreak(typesetter, offset, max(30, width - 16)))
-                    lines.append(CTTypesetterCreateLine(typesetter, CFRange(location: offset, length: length)))
-                    offset += length
+                let lineWidth = max(30, width - 16)
+                func wrap(_ text: String, attributes: [NSAttributedString.Key: Any]) -> [CTLine] {
+                    guard !text.isEmpty else { return [] }
+                    let typesetter = CTTypesetterCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+                    let length = (text as NSString).length
+                    var offset = 0, lines: [CTLine] = []
+                    while offset < length {
+                        let count = max(1, CTTypesetterSuggestClusterBreak(typesetter, offset, lineWidth))
+                        lines.append(CTTypesetterCreateLine(typesetter, CFRange(location: offset, length: min(count, length - offset))))
+                        offset += count
+                    }
+                    return lines
                 }
+                let sourceFont = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+                let reasonFont = NSFont.systemFont(ofSize: 12)
+                let contextColor = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
+                let reasonLines = wrap(message, attributes: [.font: reasonFont, contextColor: true])
+                let lines = wrap(raw, attributes: [.font: sourceFont, contextColor: true])
+                let textHeight = Double(reasonLines.count) * 16 + Double(lines.count) * (size + 5) + 16
                 return PreparedMathBlock(block: block, source: raw, math: nil,
-                    reason: L10n.string("Formula error: %@; showing source", detail), fallbackLines: lines,
-                    fallbackHeight: Double(lines.count) * (size + 5) + 34)
+                    reason: message, reasonLines: reasonLines, fallbackLines: lines,
+                    fallbackHeight: textHeight)
             }
         }
     }
@@ -77,14 +97,23 @@ private final class MathCanvas: NSView {
         } else {
             NSColor.quaternaryLabelColor.withAlphaComponent(0.07).setFill()
             bounds.insetBy(dx: 0, dy: MathTypography.padding).fill()
-            if let reason = prepared.reason {
-                (reason as NSString).draw(in: CGRect(x: 8, y: 8, width: bounds.width - 16, height: 20),
-                    withAttributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor])
+            var lineY = 8.0
+            if !prepared.reasonLines.isEmpty {
+                context.setFillColor(NSColor.secondaryLabelColor.usingColorSpace(.sRGB)!.cgColor)
+                for line in prepared.reasonLines {
+                    context.saveGState()
+                    context.translateBy(x: 8, y: lineY + 14)
+                    context.scaleBy(x: 1, y: -1)
+                    context.textMatrix = .identity; context.textPosition = .zero
+                    CTLineDraw(line, context)
+                    context.restoreGState()
+                    lineY += 16
+                }
             }
             context.setFillColor(foreground)
             for (index, line) in prepared.fallbackLines.enumerated() {
                 context.saveGState()
-                context.translateBy(x: 8, y: 32 + bodySize + Double(index) * (bodySize + 5))
+                context.translateBy(x: 8, y: lineY + bodySize + Double(index) * (bodySize + 5))
                 context.scaleBy(x: 1, y: -1)
                 context.textMatrix = .identity; context.textPosition = .zero
                 CTLineDraw(line, context)
@@ -102,6 +131,7 @@ final class MathBlockView: NSView {
     let preferredSize: CGSize
     let scroll = NSScrollView()
     let bodySize: Double
+    let reservedPrefixWidth: Double
     private let canvas: MathCanvas
     var containerPrefix: NSAttributedString?
     var quote = false
@@ -110,23 +140,25 @@ final class MathBlockView: NSView {
     var onSelect: (() -> Void)?
     private(set) var maximumDrawMilliseconds = 0.0
     override var isFlipped: Bool { true }
-    init(_ item: NoteMath, width: Double, size: Double) {
+    init(_ item: NoteMath, width: Double, size: Double, prefixWidth: Double = 0) {
         self.item = item
         bodySize = size
+        reservedPrefixWidth = prefixWidth
         canvas = MathCanvas(item.prepared, size: size)
-        let wide = (item.prepared.math?.size.width ?? 0) > width
+        let availableWidth = max(80, width - prefixWidth)
+        let wide = (item.prepared.math?.size.width ?? 0) > availableWidth
         preferredSize = CGSize(width: width, height: (item.prepared.math.map { Double($0.size.height) } ?? item.prepared.fallbackHeight)
             + 2 * MathTypography.padding + (wide ? 14 : 0))
         super.init(frame: CGRect(x: 0, y: 0, width: width + 12, height: preferredSize.height))
         canvas.owner = self
         toolTip = item.prepared.reason
-        scroll.frame = CGRect(x: 12, y: 0, width: width, height: preferredSize.height)
+        scroll.frame = CGRect(x: 12 + prefixWidth, y: 0, width: availableWidth, height: preferredSize.height)
         scroll.autoresizingMask = [.width, .height]
         scroll.drawsBackground = false; scroll.borderType = .noBorder
         scroll.contentView.drawsBackground = false
         scroll.hasHorizontalScroller = wide; scroll.hasVerticalScroller = false
         scroll.autohidesScrollers = true
-        canvas.frame = CGRect(x: 0, y: 0, width: max(width, item.prepared.math?.size.width ?? 0),
+        canvas.frame = CGRect(x: 0, y: 0, width: max(availableWidth, item.prepared.math?.size.width ?? 0),
                               height: preferredSize.height - (wide ? 14 : 0))
         scroll.documentView = canvas; addSubview(scroll)
         setAccessibilityElement(true); setAccessibilityRole(.image)
@@ -169,26 +201,40 @@ extension DiagramTextView {
     func installMath(_ items: [NoteMath], width: Double, size: Double) {
         guard !items.isEmpty || !mathViews.isEmpty else { return }
         let old = mathViews
+        var unused = old
         var changed: [NSRange] = []
+        let storage = textStorage?.string as NSString?
         mathViews = items.map { item in
-            let reused = old.first { $0.item.prepared.block.blockId == item.prepared.block.blockId
+            let prefixWidth: Double
+            if let storage {
+                let paragraph = storage.paragraphRange(for: item.range)
+                let length = max(0, item.range.location - paragraph.location)
+                let prefix = storage.substring(with: NSRange(location: paragraph.location, length: length))
+                prefixWidth = Double((prefix as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: size)]).width)
+            } else {
+                prefixWidth = 0
+            }
+            let oldIndex = unused.firstIndex { $0.item.prepared.block.blockId == item.prepared.block.blockId
                 && $0.item.prepared.block.latex == item.prepared.block.latex
-                && $0.preferredSize.width == width && $0.bodySize == size }
-            let math = reused ?? MathBlockView(item, width: width, size: size)
-            if reused == nil { changed.append(item.range) }
+                && $0.preferredSize.width == width && $0.bodySize == size
+                && $0.reservedPrefixWidth == prefixWidth }
+            let reused = oldIndex.map { unused.remove(at: $0) }
+            let math = reused ?? MathBlockView(item, width: width, size: size, prefixWidth: prefixWidth)
+            if reused == nil || math.item.range != item.range { changed.append(item.range) }
             math.item = item
             math.onSelect = { [weak self] in self?.setSelectedRange(item.range) }
             if math.superview !== self { math.isHidden = true; addSubview(math) }
             return math
         }
-        if let text = textStorage?.string as NSString? {
-            for math in mathViews { mathParagraphs[text.paragraphRange(for: math.item.range).location] = math }
+        if let storage {
+            for math in mathViews { mathParagraphs[storage.paragraphRange(for: math.item.range).location] = math }
         }
         old.filter { previous in !mathViews.contains { $0 === previous } }.forEach { $0.removeFromSuperview() }
         if let manager = textLayoutManager, let content = manager.textContentManager {
             for range in changed {
-                if let start = content.location(content.documentRange.location, offsetBy: range.location),
-                   let end = content.location(start, offsetBy: range.length),
+                let paragraph = storage?.paragraphRange(for: range) ?? range
+                if let start = content.location(content.documentRange.location, offsetBy: paragraph.location),
+                   let end = content.location(start, offsetBy: paragraph.length),
                    let range = NSTextRange(location: start, end: end) { manager.invalidateLayout(for: range) }
             }
         }

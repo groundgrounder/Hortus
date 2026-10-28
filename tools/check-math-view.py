@@ -52,7 +52,7 @@ def main():
         base = Path(temporary)
         vault = base / 'vault'
         vault.mkdir()
-        for name in ['showcase.md', 'performance-note.md']:
+        for name in ['showcase.md', 'performance-note.md', 'missing-glyphs.md']:
             shutil.copyfile(ROOT / 'fixtures/math' / name, vault / name)
         (vault / 'other.md').write_text('# Other\n')
         def run(name, note='showcase.md', mode='math', extra=()):
@@ -66,8 +66,16 @@ def main():
                     assert data['math_blocks'] == 27, data
                     assert len(data['math_errors']) == 1, data
                     assert data['glyphs'] > 100, data
+                    assert data['missing_glyphs'] == 0 and data['unresolved_metrics'] == 0, data
                     assert data['maximum_metric_error_px'] <= .5, data
                     assert data['main_thread_preparations'] == 0 and data['font_registrations'] == 1, data
+                data = run(f'missing-glyphs-{appearance}', 'missing-glyphs.md', extra=[f'--{appearance}',
+                    f'--snapshot={output / ("missing-glyphs-" + appearance + ".png")}'])
+                required = {0x041F, 0x03B1, 0x20BB7, 0x2764, 0x1F468}
+                measured = set(data['measured_fallback_codepoints'])
+                assert data['math_blocks'] == 6, data
+                assert data['missing_glyphs'] == 0 and data['unresolved_metrics'] == 0, data
+                assert required <= measured, (sorted(required - measured), data)
                 run(f'wide-end-{appearance}', extra=[f'--{appearance}', '--math-index=23', '--math-scroll-end',
                     f'--snapshot={output / ("wide-end-" + appearance + ".png")}'])
                 run(f'empty-{appearance}', extra=[f'--{appearance}', '--math-reveal=## Empty',
@@ -97,11 +105,16 @@ def main():
             assert summary['median_ms'] <= 50, summary
             assert all(r['rebuilt'] == 1 and r['same_anchor'] and r['anchor_shift_pt'] <= 1 for r in refreshes), summary
         if args.checks in ['all', 'memory']:
-            memory = run('memory', 'performance-note.md', 'math-memory')['memory_bytes']
+            sample = run('memory', 'performance-note.md', 'math-memory')
+            memory = sample['memory_bytes']
+            peak = sample['peak_bytes']
+            retained_math = sample['retained_old_math_views']
             assert len(memory) == 20, memory
             # 分配器可保留首轮工作集；后十轮不得持续逐轮增加。
             assert not all(b > a for a, b in zip(memory[10:], memory[11:])), memory
             assert max(memory[10:]) - min(memory[10:]) <= 16 * 1024 * 1024, memory
+            assert len(peak) == 20 and peak[-1] <= peak[9] + 16 * 1024 * 1024, peak
+            assert len(retained_math) == 20 and all(count == 0 for count in retained_math), retained_math
         if args.checks in ['all', 'cpu']:
             empty = READING.HELPERS.idle_cpu(base / 'empty', [])
             opened = idle_math_cpu(base / 'opened', vault, output / 'cpu-ready.json')

@@ -3,7 +3,7 @@ use crate::{CoreError, DocumentSession};
 use hortus_math::{Engine, Error, GlyphMetrics, Style};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
@@ -68,6 +68,19 @@ fn guarded<T>(work: impl FnOnce() -> Result<T, MathFailure>) -> Result<T, MathFa
 pub struct MathEngine {
     engine: Mutex<Engine>,
 }
+impl MathEngine {
+    fn lock_engine(&self) -> MutexGuard<'_, Engine> {
+        match self.engine.lock() {
+            Ok(engine) => engine,
+            Err(poisoned) => {
+                let mut engine = poisoned.into_inner();
+                *engine = Engine::default();
+                self.engine.clear_poison();
+                engine
+            }
+        }
+    }
+}
 #[uniffi::export]
 impl MathEngine {
     #[uniffi::constructor]
@@ -92,30 +105,18 @@ impl MathEngine {
                     ))
                 })
                 .collect::<Result<Vec<_>, MathFailure>>()?;
-            self.engine
-                .lock()
-                .map_err(|_| MathFailure::Panic {
-                    message: "Formula engine lock failed".into(),
-                })?
-                .set_metrics(values)
-                .map_err(Into::into)
+            self.lock_engine().set_metrics(values).map_err(Into::into)
         })
     }
     pub fn render(&self, source: String, style: MathStyle) -> Result<Vec<u8>, MathFailure> {
         guarded(|| {
-            let scene = self
-                .engine
-                .lock()
-                .map_err(|_| MathFailure::Panic {
-                    message: "Formula engine lock failed".into(),
-                })?
-                .render(
-                    &source,
-                    match style {
-                        MathStyle::Display => Style::Display,
-                        MathStyle::Text => Style::Text,
-                    },
-                )?;
+            let scene = self.lock_engine().render(
+                &source,
+                match style {
+                    MathStyle::Display => Style::Display,
+                    MathStyle::Text => Style::Text,
+                },
+            )?;
             let payload =
                 serde_json::to_vec(scene.as_ref()).map_err(|e| MathFailure::InvalidLayout {
                     message: e.to_string(),
@@ -170,5 +171,33 @@ impl DocumentSession {
             display += block.content.display_len();
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poisoned_engine_lock_is_reset_and_recovers() {
+        let engine = MathEngine::new();
+        let poisoner = Arc::clone(&engine);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.engine.lock().unwrap();
+            panic!("inject engine lock poison");
+        })
+        .join();
+
+        assert!(engine.render("x^2".into(), MathStyle::Display).is_ok());
+        assert!(
+            engine
+                .set_metrics(vec![MathGlyphMetrics {
+                    codepoint: '中' as u32,
+                    width: 1.,
+                    height: 1.,
+                    depth: 0.,
+                }])
+                .is_ok()
+        );
     }
 }

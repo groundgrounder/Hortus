@@ -47,6 +47,7 @@ xcstringstool="$(xcrun --find xcstringstool)"
   --serialization-format text
 # 公式字体只作应用内进程注册，保留字体许可和版权。
 mkdir -p build/Hortus.app/Contents/Resources/Fonts
+rm -rf build/Hortus.app/Contents/Resources/Fonts/KaTeX
 cp -R apps/macos/Resources/Fonts/KaTeX build/Hortus.app/Contents/Resources/Fonts/
 # 应用自身的许可证和第三方许可证声明随包分发，关于窗口里有入口
 cp apps/LICENSE build/Hortus.app/Contents/Resources/LICENSE.txt

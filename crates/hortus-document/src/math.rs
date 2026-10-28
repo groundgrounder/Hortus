@@ -32,9 +32,7 @@ pub fn scan(text: &str) -> Vec<Formula> {
         .filter_map(|line| {
             let start = offset;
             offset += line.len();
-            let content = line.trim_start_matches([' ', '\t', '>']);
-            (line.contains('>') && content.starts_with("[!") && content.contains(']'))
-                .then_some(start..offset)
+            is_callout_header(line).then_some(start..offset)
         })
         .collect();
     let mut result: Vec<Formula> = Vec::new();
@@ -70,6 +68,14 @@ pub fn scan(text: &str) -> Vec<Formula> {
                 }
             }
             Event::InlineMath(ref latex) | Event::DisplayMath(ref latex) => {
+                if headers.iter().any(|header| {
+                    header.start <= range.start + front && range.end + front <= header.end
+                }) {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.other = true;
+                    }
+                    continue;
+                }
                 let style = if matches!(event, Event::DisplayMath(_)) {
                     Style::Display
                 } else {
@@ -103,4 +109,32 @@ pub fn scan(text: &str) -> Vec<Formula> {
         }
     }
     result
+}
+
+fn is_callout_header(line: &str) -> bool {
+    let mut content = line.trim_start();
+    loop {
+        if let Some(rest) = content.strip_prefix('>') {
+            content = rest.trim_start_matches([' ', '\t']);
+            continue;
+        }
+        let marker = content
+            .strip_prefix(['-', '+', '*'])
+            .filter(|rest| rest.starts_with([' ', '\t']))
+            .map(|rest| rest.trim_start_matches([' ', '\t']));
+        if let Some(rest) = marker {
+            content = rest;
+            continue;
+        }
+        let digits = content.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0
+            && matches!(content.as_bytes().get(digits), Some(b'.' | b')'))
+            && matches!(content.as_bytes().get(digits + 1), Some(b' ' | b'\t'))
+        {
+            content = content[digits + 2..].trim_start_matches([' ', '\t']);
+            continue;
+        }
+        break;
+    }
+    content.starts_with("[!") && content.contains(']')
 }

@@ -39,6 +39,22 @@ struct MathTests {
         #expect(await service.measurementCount == first)
     }
 
+    @Test func unicodeFallbackGlyphsAreMeasuredAndDrawnIndividually() async throws {
+        let source = try String(contentsOf: Self.root.appendingPathComponent("fixtures/math/missing-glyphs.md"), encoding: .utf8)
+        let service = Self.service()
+        let fixture = try ReadingTests.Fixture(source)
+        try await fixture.start(mathService: service)
+        #expect(fixture.view.mathViews.count == 6)
+        #expect(fixture.view.mathViews.allSatisfy { $0.item.prepared.math != nil })
+        #expect(fixture.view.mathViews.allSatisfy { $0.item.prepared.math?.unresolvedGlyphCount == 0 })
+        #expect(fixture.view.mathViews.allSatisfy { $0.item.prepared.math?.unresolvedMetricCount == 0 })
+        let measured = Set(await service.measuredFallbackCodepoints)
+        #expect(Set([0x041F, 0x03B1, 0x20BB7, 0x2764, 0x1F468]).isSubset(of: measured))
+        let accent = try #require(fixture.view.mathViews.last?.item.prepared.math)
+        #expect(accent.maximumMetricError * 2 <= 0.5)
+        await fixture.close()
+    }
+
     @Test func packetRejectsTruncationUnknownVersionAndInvalidGeometry() throws {
         let bytes = try MathEngine().render(source: "x", style: .display)
         #expect(throws: (any Error).self) { try MathScene(bytes.dropLast()) }
@@ -102,6 +118,26 @@ struct MathTests {
         #expect(await service.registrationCount == 0)
     }
 
+    @Test func longFormulaErrorsWrapSourceAndReasonByCharacterClusters() async throws {
+        let latex = "\\" + String(repeating: "unknowncommand", count: 300)
+        let source = "$$\(latex)$$"
+        let block = MathBlock(blockId: 1, sourceStart: 0, sourceLength: UInt64((source as NSString).length),
+                              displayStart: 0, displayLength: 1, latex: latex, style: .display, block: true)
+        let prepared = try #require(await Self.service().prepare([block], source: source, size: 15, width: 100).first)
+        #expect(prepared.math == nil)
+        #expect(prepared.fallbackLines.count > 1)
+        #expect(prepared.reasonLines.count > 1)
+        func assertWrapped(_ lines: [CTLine], text: String) {
+            let ranges = lines.map { CTLineGetStringRange($0) }
+            #expect(ranges.first?.location == 0)
+            #expect(ranges.last.map { $0.location + $0.length } == (text as NSString).length)
+            #expect(zip(ranges, ranges.dropFirst()).allSatisfy { $0.location + $0.length == $1.location })
+            #expect(lines.allSatisfy { CTLineGetTypographicBounds($0, nil, nil, nil) <= 84.5 })
+        }
+        assertWrapped(prepared.fallbackLines, text: source)
+        assertWrapped(prepared.reasonLines, text: prepared.reason!)
+    }
+
     @Test func containerMarkersAndQuoteSurfaceSurviveReplacement() async throws {
         let fixture = try ReadingTests.Fixture("> [!note] Formula\n> $$x^2$$\n\n- $$y^2$$\n\n1. $$z^2$$\n")
         try await fixture.start(mathService: Self.service())
@@ -116,6 +152,59 @@ struct MathTests {
         #expect((formulas.first?.sourceMask ?? 0) & (64 | 4096) != 0)
         #expect(formulas.first?.quoteHead == false && formulas.first?.quoteTail == true)
         #expect(formulas.dropFirst().compactMap { $0.replacementPrefix?.string.trimmingCharacters(in: .whitespaces) } == ["•", "1."])
+        #expect(fixture.view.mathViews.dropFirst().first?.reservedPrefixWidth ?? 0 > 0)
+        await fixture.close()
+    }
+
+    @Test func duplicateFormulasKeepDistinctViewsAcrossThemeAndExternalRefresh() async throws {
+        let source = "> intro\n>\n> $$x^2$$\n>\n> $$x^2$$\n"
+        let fixture = try ReadingTests.Fixture(source)
+        try await fixture.start(mathService: Self.service())
+        #expect(fixture.view.mathViews.count == 2)
+        #expect(Set(fixture.view.mathViews.map(ObjectIdentifier.init)).count == 2)
+        fixture.view.appearance = NSAppearance(named: .darkAqua)
+        fixture.coordinator.refresh(force: true)
+        try await fixture.ready()
+        #expect(Set(fixture.view.mathViews.map(ObjectIdentifier.init)).count == 2)
+        let changed = source.replacingOccurrences(of: "intro", with: "introduction")
+        try Data(changed.utf8).write(to: fixture.document.io.url)
+        fixture.document.refresh()
+        for _ in 0..<500 {
+            if fixture.document.text == changed && !fixture.coordinator.pending { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fixture.document.text == changed && !fixture.coordinator.pending)
+        #expect(fixture.view.mathViews.count == 2)
+        #expect(Set(fixture.view.mathViews.map(ObjectIdentifier.init)).count == 2)
+        await fixture.close()
+    }
+
+    @Test func externalTextBeforeFormulaRepositionsReusedViewAndKeepsDocumentHeight() async throws {
+        let source = "intro\n\n$$x^2$$\n\nAfter\n"
+        let fixture = try ReadingTests.Fixture(source)
+        try await fixture.start(mathService: Self.service())
+        let math = try #require(fixture.view.mathViews.first)
+        let changed = source.replacingOccurrences(of: "intro", with: "introduction")
+        try Data(changed.utf8).write(to: fixture.document.io.url)
+        fixture.document.refresh()
+        for _ in 0..<500 {
+            if fixture.document.text == changed && !fixture.coordinator.pending { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fixture.document.text == changed && !fixture.coordinator.pending)
+        #expect(fixture.view.mathViews.first === math)
+        let manager = try #require(fixture.view.textLayoutManager)
+        let content = try #require(manager.textContentManager)
+        manager.ensureLayout(for: content.documentRange)
+        var formulaFragment: NSTextLayoutFragment?
+        manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
+            if (fragment as? NoteLayoutFragment)?.replacement != nil { formulaFragment = fragment }
+            return true
+        }
+        let fragment = try #require(formulaFragment)
+        #expect(abs(math.frame.minY - fragment.layoutFragmentFrame.minY - fixture.view.textContainerInset.height) < 0.5)
+        #expect(abs(math.frame.height - math.preferredSize.height) < 0.5)
+        #expect(fixture.view.frame.height >= manager.usageBoundsForTextContainer.maxY + 2 * fixture.view.textContainerInset.height - 0.5)
         await fixture.close()
     }
 

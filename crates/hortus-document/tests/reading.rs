@@ -184,10 +184,7 @@ fn adding_a_block_boundary_falls_back_to_full_analysis() {
 
 #[test]
 fn removing_a_block_boundary_falls_back_to_full_analysis() {
-    for (before, after) in [
-        ("A\n\nB\n", "A\nB\n"),
-        ("A\n\n$$x$$\n", "A\n$$x$$\n"),
-    ] {
+    for (before, after) in [("A\n\nB\n", "A\nB\n"), ("A\n\n$$x$$\n", "A\n$$x$$\n")] {
         let mut cache = Cache::default();
         cache.model(before, false);
         let actual = cache.model(after, false);
@@ -195,18 +192,25 @@ fn removing_a_block_boundary_falls_back_to_full_analysis() {
         assert_same_rendering(&actual, &expected);
         assert_eq!(actual.blocks.len(), expected.blocks.len());
         assert_eq!(
-            actual.blocks.iter().flat_map(|block| &block.content.math).map(|math| math.block).collect::<Vec<_>>(),
-            expected.blocks.iter().flat_map(|block| &block.content.math).map(|math| math.block).collect::<Vec<_>>()
+            actual
+                .blocks
+                .iter()
+                .flat_map(|block| &block.content.math)
+                .map(|math| math.block)
+                .collect::<Vec<_>>(),
+            expected
+                .blocks
+                .iter()
+                .flat_map(|block| &block.content.math)
+                .map(|math| math.block)
+                .collect::<Vec<_>>()
         );
     }
 }
 
 #[test]
 fn inserting_a_block_boundary_falls_back_to_full_analysis() {
-    for (before, after) in [
-        ("A\nB\n", "A\n\nB\n"),
-        ("A\n$$x$$\n", "A\n\n$$x$$\n"),
-    ] {
+    for (before, after) in [("A\nB\n", "A\n\nB\n"), ("A\n$$x$$\n", "A\n\n$$x$$\n")] {
         let mut cache = Cache::default();
         cache.model(before, false);
         let actual = cache.model(after, false);
@@ -214,10 +218,80 @@ fn inserting_a_block_boundary_falls_back_to_full_analysis() {
         assert_same_rendering(&actual, &expected);
         assert_eq!(actual.blocks.len(), expected.blocks.len());
         assert_eq!(
-            actual.blocks.iter().flat_map(|block| &block.content.math).map(|math| math.block).collect::<Vec<_>>(),
-            expected.blocks.iter().flat_map(|block| &block.content.math).map(|math| math.block).collect::<Vec<_>>()
+            actual
+                .blocks
+                .iter()
+                .flat_map(|block| &block.content.math)
+                .map(|math| math.block)
+                .collect::<Vec<_>>(),
+            expected
+                .blocks
+                .iter()
+                .flat_map(|block| &block.content.math)
+                .map(|math| math.block)
+                .collect::<Vec<_>>()
         );
     }
+}
+
+#[test]
+fn mixed_math_source_hides_quote_continuation_prefixes() {
+    let source = "> 解方程\n> $$\n> x^2=1\n> $$\n";
+    let model = Document::new(source).reading(false).unwrap();
+    let text: String = model
+        .blocks
+        .iter()
+        .map(|block| block.content.text.as_str())
+        .collect();
+    assert!(text.contains("解方程\n$$\nx^2=1\n$$"), "{text:?}");
+    assert!(!text.contains("> x^2"), "{text:?}");
+}
+
+#[test]
+fn table_cell_math_stays_literal_and_callout_title_math_is_not_block_math() {
+    let model = Document::new("| $$x^2$$ | $y$ |\n|---|---|\n\n> [!note] $$E=mc^2$$\n")
+        .reading(false)
+        .unwrap();
+    let tables = model
+        .blocks
+        .iter()
+        .flat_map(|block| &block.content.media)
+        .filter_map(|media| match &media.kind {
+            hortus_document::media::Kind::Table(table) => Some(table),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].rows[0][0].text, "$$x^2$$");
+    assert_eq!(tables[0].rows[0][1].text, "$y$");
+    let formulas: Vec<_> = model
+        .blocks
+        .iter()
+        .flat_map(|block| &block.content.math)
+        .collect();
+    assert!(formulas.is_empty());
+    let displayed: String = model
+        .blocks
+        .iter()
+        .map(|block| block.content.text.as_str())
+        .collect();
+    assert!(displayed.contains("$$E=mc^2$$"), "{displayed:?}");
+}
+
+#[test]
+fn list_callout_math_matches_top_level_callout_math() {
+    let top_level = hortus_document::math::scan("> [!note]\n> $$x^2$$\n");
+    let in_list = hortus_document::math::scan("- > [!note]\n  > $$x^2$$\n");
+    assert_eq!(
+        top_level
+            .iter()
+            .map(|formula| (&formula.latex, formula.block))
+            .collect::<Vec<_>>(),
+        in_list
+            .iter()
+            .map(|formula| (&formula.latex, formula.block))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

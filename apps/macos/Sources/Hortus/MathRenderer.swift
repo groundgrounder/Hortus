@@ -41,7 +41,7 @@ struct MathScene: Decodable, Sendable {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         self = try decoder.decode(Self.self, from: bytes.dropFirst(8))
         func finite(_ values: [Double?]) -> Bool {
-            values.allSatisfy { $0.map { $0.isFinite && abs($0) <= 1_000_000 } == true }
+            values.allSatisfy { $0.map { $0.isFinite && abs($0) <= 4096 } == true }
         }
         var commandCount = 0
         guard finite([width, height, depth]), width >= 0, height >= 0, depth >= 0, items.count <= 32768,
@@ -85,6 +85,9 @@ struct PreparedMath: @unchecked Sendable {
     let size: CGSize
     let drawing: [Drawing]
     let glyphCount: Int
+    let fallbackGlyphCount: Int
+    let unresolvedGlyphCount: Int
+    let unresolvedMetricCount: Int
     let maximumMetricError: Double
     let estimatedBytes: Int
 }
@@ -114,12 +117,12 @@ enum MathRenderer {
                 let thickness = max(thickness, 1 / max(1, deviceScale))
                 if dashed {
                     let dash = 4 * thickness
-                    var offset = 0.0
-                    while offset < width {
-                        context.fill(CGRect(x: point.x + offset, y: point.y - thickness / 2,
-                                            width: min(dash, width - offset), height: thickness))
-                        offset += 2 * dash
-                    }
+                    context.setLineWidth(thickness)
+                    context.setLineDash(phase: 0, lengths: [dash, dash])
+                    context.move(to: point)
+                    context.addLine(to: CGPoint(x: point.x + width, y: point.y))
+                    context.strokePath()
+                    context.setLineDash(phase: 0, lengths: [])
                 } else {
                     context.fill(CGRect(x: point.x, y: point.y - thickness / 2, width: width, height: thickness))
                 }
@@ -153,21 +156,42 @@ actor MathService {
     private(set) var mainThreadPreparations = 0
     private(set) var registrationCount = 0
     private(set) var measurementCount = 0
+    var measuredFallbackCodepoints: [UInt32] { metrics.keys.sorted() }
+
+    private static let fontFiles: Set<String> = [
+        "KaTeX_AMS-Regular.ttf", "KaTeX_Caligraphic-Bold.ttf", "KaTeX_Caligraphic-Regular.ttf",
+        "KaTeX_Fraktur-Bold.ttf", "KaTeX_Fraktur-Regular.ttf", "KaTeX_Main-Bold.ttf",
+        "KaTeX_Main-BoldItalic.ttf", "KaTeX_Main-Italic.ttf", "KaTeX_Main-Regular.ttf",
+        "KaTeX_Math-BoldItalic.ttf", "KaTeX_Math-Italic.ttf", "KaTeX_SansSerif-Bold.ttf",
+        "KaTeX_SansSerif-Italic.ttf", "KaTeX_SansSerif-Regular.ttf", "KaTeX_Script-Regular.ttf",
+        "KaTeX_Size1-Regular.ttf", "KaTeX_Size2-Regular.ttf", "KaTeX_Size3-Regular.ttf",
+        "KaTeX_Size4-Regular.ttf", "KaTeX_Typewriter-Regular.ttf"
+    ]
+
+    struct FontLoadError: Error, CustomStringConvertible {
+        let cause: Error
+        var description: String { String(describing: cause) }
+    }
 
     init(resourceDirectory: URL? = nil) { self.resourceDirectory = resourceDirectory }
 
     private func register() throws {
         guard !registered else { return }
         if let registrationFailure { throw registrationFailure }
-        do { try registerFonts() } catch { registrationFailure = error; throw error }
+        do { try registerFonts() } catch {
+            let failure = FontLoadError(cause: error)
+            registrationFailure = failure
+            throw failure
+        }
     }
     private func registerFonts() throws {
         guard let directory = resourceDirectory ?? Bundle.main.resourceURL?.appendingPathComponent("Fonts/KaTeX") else {
             throw CocoaError(.fileNoSuchFile)
         }
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "ttf" && $0.lastPathComponent.hasPrefix("KaTeX_") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-        guard files.count == 20 else { throw CocoaError(.fileNoSuchFile) }
+            .filter { $0.pathExtension == "ttf" && $0.lastPathComponent.hasPrefix("KaTeX_") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard Set(files.map(\.lastPathComponent)) == Self.fontFiles else { throw CocoaError(.fileNoSuchFile) }
         for url in files {
             var error: Unmanaged<CFError>?
             if !CTFontManagerRegisterFontsForURL(url as CFURL, .process, &error) {
@@ -203,14 +227,17 @@ actor MathService {
         fallbackFonts[codepoint] = font
         return font
     }
-    private func measure(_ codepoint: UInt32) throws -> MathGlyphMetrics {
+    private func measure(_ codepoint: UInt32, at size: Double) throws -> MathGlyphMetrics {
         if let value = metrics[codepoint] { return value }
-        let font = try fallback(codepoint)
-        var glyph = try glyph(font, codepoint), advance = CGSize.zero, box = CGRect.zero
-        CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
-        CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &box, 1)
-        let value = MathGlyphMetrics(codepoint: codepoint, width: advance.width / 1000,
-                                    height: max(0, box.maxY) / 1000, depth: max(0, -box.minY) / 1000)
+        let font = try self.font("", codepoint: codepoint, fallback: true, size: size)
+        let found = try? glyph(font, codepoint)
+        var advance = CGSize.zero, box = CGRect.zero
+        if var glyph = found {
+            CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+            CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &box, 1)
+        }
+        let value = MathGlyphMetrics(codepoint: codepoint, width: advance.width / size,
+                                    height: max(0, box.maxY) / size, depth: max(0, -box.minY) / size)
         metrics[codepoint] = value; measurementCount += 1
         return value
     }
@@ -235,26 +262,49 @@ actor MathService {
         if let value = cached[key] { return value }
         var scene = try MathScene(engine.render(source: latex, style: style))
         if !scene.missingMetrics.isEmpty {
-            try engine.setMetrics(metrics: scene.missingMetrics.map { try measure($0) })
+            let fallbackScales = Dictionary(scene.items.compactMap { item -> (UInt32, Double)? in
+                guard item.kind == "Glyph", item.fallback == true, let codepoint = item.codepoint,
+                      let scale = item.scale else { return nil }
+                return (codepoint, scale)
+            }, uniquingKeysWith: { first, _ in first })
+            try engine.setMetrics(metrics: scene.missingMetrics.map { codepoint in
+                let scale = fallbackScales[codepoint] ?? 1
+                return try measure(codepoint, at: bodySize * MathTypography.scale * scale)
+            })
             scene = try MathScene(engine.render(source: latex, style: style))
         }
         let em = bodySize * MathTypography.scale
-        var drawing: [PreparedMath.Drawing] = [], glyphCount = 0, metricError = 0.0
+        var drawing: [PreparedMath.Drawing] = [], glyphCount = 0, fallbackGlyphCount = 0
+        var unresolvedGlyphCount = 0, metricError = 0.0
         var pathBytes = 0
         for item in scene.items {
             let point = CGPoint(x: item.x * em, y: item.y * em)
             switch item.kind {
             case "Glyph":
-                guard let codepoint = item.codepoint, let key = item.font, let scale = item.scale, let useFallback = item.fallback else { throw CocoaError(.fileReadCorruptFile) }
-                // 系统回退字体保留量字时的 1000 pt 实例，绘制变换保证光学字号不改变字宽。
-                let factor = useFallback ? scale * em / 1000 : 1
-                let font = try font(key, codepoint: codepoint, fallback: useFallback, size: useFallback ? 1000 : scale * em)
-                var glyph = try glyph(font, codepoint)
-                drawing.append(.glyph(font, glyph, point, factor, item.color)); glyphCount += 1
+                guard let codepoint = item.codepoint, let key = item.font, let scale = item.scale,
+                      let markedFallback = item.fallback else { throw CocoaError(.fileReadCorruptFile) }
+                var useFallback = markedFallback
+                var selectedFont: CTFont
+                var resolvedGlyph: CGGlyph?
+                if markedFallback {
+                    selectedFont = try font(key, codepoint: codepoint, fallback: true, size: scale * em)
+                    resolvedGlyph = try? glyph(selectedFont, codepoint)
+                } else {
+                    selectedFont = try font(key, codepoint: codepoint, fallback: false, size: scale * em)
+                    do { resolvedGlyph = try glyph(selectedFont, codepoint) }
+                    catch {
+                        useFallback = true
+                        selectedFont = try font(key, codepoint: codepoint, fallback: true, size: scale * em)
+                        resolvedGlyph = try? glyph(selectedFont, codepoint)
+                    }
+                }
+                guard var glyph = resolvedGlyph else { unresolvedGlyphCount += 1; continue }
+                drawing.append(.glyph(selectedFont, glyph, point, 1, item.color)); glyphCount += 1
+                if useFallback { fallbackGlyphCount += 1 }
                 if useFallback, let metric = metrics[codepoint] {
                     var advance = CGSize.zero
-                    CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
-                    metricError = max(metricError, abs(advance.width * factor - metric.width * scale * em))
+                    CTFontGetAdvancesForGlyphs(selectedFont, .horizontal, &glyph, &advance, 1)
+                    metricError = max(metricError, abs(advance.width - metric.width * scale * em))
                 }
             case "Line":
                 drawing.append(.line(point, (item.width ?? 0) * em, (item.thickness ?? 0) * em, item.dashed ?? false, item.color))
@@ -279,7 +329,9 @@ actor MathService {
             }
         }
         let value = PreparedMath(size: CGSize(width: scene.width * em, height: (scene.height + scene.depth) * em),
-                                 drawing: drawing, glyphCount: glyphCount, maximumMetricError: metricError,
+                                 drawing: drawing, glyphCount: glyphCount, fallbackGlyphCount: fallbackGlyphCount,
+                                 unresolvedGlyphCount: unresolvedGlyphCount, unresolvedMetricCount: scene.missingMetrics.count,
+                                 maximumMetricError: metricError,
                                  estimatedBytes: drawing.count * MemoryLayout<PreparedMath.Drawing>.stride + pathBytes + key.utf8.count)
         // Core Text 首次绘制还会准备字形缓存；在后台完成，避免首次滚入时阻塞主线程。
         if let context = CGContext(data: nil, width: 128, height: 128, bitsPerComponent: 8, bytesPerRow: 0,

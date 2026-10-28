@@ -49,6 +49,9 @@ enum ReadingInspection {
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         guard let document = workspace.current?.document, let path = workspace.selected else { throw CocoaError(.coderValueNotFound) }
         let mode = arguments.first { $0.hasPrefix("--reading-check=") }.map { String($0.dropFirst("--reading-check=".count)) } ?? "visual"
+        if mode == "math-memory" {
+            return try await MathInspection.runMemory(workspace: workspace, path: path, arguments: arguments)
+        }
         var view = try await settled(document.reading, document: document)
         let openedAt = view.isReading ? view.readingCoordinator?.displayedAt ?? 0 : view.sourceStyling?.openDisplayedAt ?? 0
         let source = try await document.io.perform { try $0.snapshot().text }

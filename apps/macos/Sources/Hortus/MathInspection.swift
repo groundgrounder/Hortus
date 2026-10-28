@@ -42,6 +42,44 @@ enum MathInspection {
         guard let current = workspace.current?.document else { throw CocoaError(.coderValueNotFound) }
         return WeakView(try await ReadingInspection.settled(true, document: current))
     }
+    static func runMemory(workspace: Workspace, path: String, arguments: [String]) async throws -> [String: Any] {
+        var memory: [UInt64] = []
+        var footprints: [UInt64] = []
+        var peaks: [Int] = []
+        var oldViews: [WeakView] = []
+        var retained: [Int] = []
+        var retainedMathViews: [Int] = []
+        let cycles = arguments.first { $0.hasPrefix("--math-memory-cycles=") }
+            .flatMap { Int($0.dropFirst("--math-memory-cycles=".count)) } ?? 20
+        for _ in 0..<max(1, min(100, cycles)) {
+            oldViews.append(try await Task { @MainActor in try await reopen(path, workspace: workspace) }.value)
+            DiagramInspection.finishEvent()
+            try await Task.sleep(for: .milliseconds(100))
+            retained.append(oldViews.dropLast().compactMap(\.value).count)
+            let active = oldViews.last?.value
+            retainedMathViews.append(oldViews.dropLast().compactMap(\.value)
+                .filter { $0 !== active }.reduce(0) { $0 + $1.mathViews.count })
+            memory.append(try residentBytes())
+            footprints.append(try footprintBytes())
+            var usage = rusage()
+            getrusage(RUSAGE_SELF, &usage)
+            peaks.append(usage.ru_maxrss)
+        }
+        var result: [String: Any] = [
+            "reading": true,
+            "memory_bytes": memory,
+            "footprint_bytes": footprints,
+            "peak_bytes": peaks,
+            "retained_old_views": retained,
+            "retained_old_math_views": retainedMathViews,
+        ]
+        if let view = oldViews.last?.value {
+            result["math_blocks"] = view.mathViews.count
+            result["glyphs"] = view.mathViews.reduce(0) { $0 + ($1.item.prepared.math?.glyphCount ?? 0) }
+            result["resident_bytes"] = memory.last
+        }
+        return result
+    }
     static func run(workspace: Workspace, document: NoteDocument, view initial: DiagramTextView,
                     source: String, mode: String, arguments: [String], initial result: [String: Any]) async throws -> [String: Any] {
         var result = result
@@ -50,11 +88,15 @@ enum MathInspection {
         result["math_blocks"] = view.mathViews.count
         result["math_errors"] = view.mathViews.compactMap { $0.item.prepared.reason }
         result["glyphs"] = view.mathViews.reduce(0) { $0 + ($1.item.prepared.math?.glyphCount ?? 0) }
+        result["system_fallback_glyphs"] = view.mathViews.reduce(0) { $0 + ($1.item.prepared.math?.fallbackGlyphCount ?? 0) }
+        result["missing_glyphs"] = view.mathViews.reduce(0) { $0 + ($1.item.prepared.math?.unresolvedGlyphCount ?? 0) }
+        result["unresolved_metrics"] = view.mathViews.reduce(0) { $0 + ($1.item.prepared.math?.unresolvedMetricCount ?? 0) }
         result["maximum_metric_error_px"] = (view.mathViews.compactMap { $0.item.prepared.math?.maximumMetricError }.max() ?? 0)
             * (view.window?.backingScaleFactor ?? 2)
         result["main_thread_preparations"] = await MathService.shared.mainThreadPreparations
         result["font_registrations"] = await MathService.shared.registrationCount
         result["fallback_measurements"] = await MathService.shared.measurementCount
+        result["measured_fallback_codepoints"] = await MathService.shared.measuredFallbackCodepoints
         result["main_thread_phases_ms"] = coordinator.phaseMilliseconds.filter { ["install_ms", "layout_ms", "display_ms", "main_block_ms"].contains($0.key) }
         if let arg = arguments.first(where: { $0.hasPrefix("--math-index=") }),
            let index = Int(arg.dropFirst("--math-index=".count)), view.mathViews.indices.contains(index) {
@@ -118,31 +160,6 @@ enum MathInspection {
             result["reused_math_views"] = view.mathViews.filter { current in old.contains { $0 === current } }.count
             result["anchor_shift_pt"] = abs(before.offset - after.offset)
             result["same_anchor"] = before.id == after.id
-        } else if mode == "math-memory" {
-            var memory: [UInt64] = []
-            var footprints: [UInt64] = []
-            var peaks: [Int] = []
-            var oldViews: [WeakView] = []
-            var retained: [Int] = []
-            let path = workspace.selected!
-            let cycles = arguments.first { $0.hasPrefix("--math-memory-cycles=") }
-                .flatMap { Int($0.dropFirst("--math-memory-cycles=".count)) } ?? 20
-            for _ in 0..<max(1, min(100, cycles)) {
-                // 每轮结束异步任务，避免自检持有上一轮的临时存储。
-                oldViews.append(try await Task { @MainActor in try await reopen(path, workspace: workspace) }.value)
-                DiagramInspection.finishEvent()
-                try await Task.sleep(for: .milliseconds(100))
-                retained.append(oldViews.dropLast().compactMap(\.value).count)
-                memory.append(try residentBytes())
-                footprints.append(try footprintBytes())
-                var usage = rusage()
-                getrusage(RUSAGE_SELF, &usage)
-                peaks.append(usage.ru_maxrss)
-            }
-            result["memory_bytes"] = memory
-            result["footprint_bytes"] = footprints
-            result["peak_bytes"] = peaks
-            result["retained_old_views"] = retained
         }
         return result
     }
