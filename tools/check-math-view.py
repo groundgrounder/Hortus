@@ -99,8 +99,11 @@ def main():
                                       ('loose-numbered-continuation', 'Loose numbered continuation'),
                                       ('nested-quote-error', 'Nested quote error')]:
                     name = f'{case}-{appearance}'
+                    formula_index = {'loose-numbered-continuation': 7, 'nested-quote-error': 8}.get(case)
+                    reveal = (f'--math-index={formula_index}' if formula_index is not None
+                              else f'--math-reveal=## {section}')
                     data = run(name, 'container-regressions.md', extra=[f'--{appearance}',
-                        f'--math-reveal=## {section}', f'--snapshot={output / (name + ".png")}'])
+                        reveal, f'--snapshot={output / (name + ".png")}'])
                     assert data['math_blocks'] == 9 and len(data['math_errors']) == 3, data
                     assert data['missing_glyphs'] == 0 and data['unresolved_metrics'] == 0, data
                 run(f'wide-end-{appearance}', extra=[f'--{appearance}', '--math-index=23', '--math-scroll-end',
