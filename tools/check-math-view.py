@@ -125,17 +125,26 @@ def main():
             assert perf['maximum_main_work_ms'] <= 16, perf
             assert perf['main_thread_preparations'] == 0, perf
             assert 0 < perf['maximum_formula_draw_ms'] <= 16, perf
-            refreshes = []
-            for index in range(5):
-                shutil.copyfile(ROOT / 'fixtures/math/performance-note.md', vault / 'performance-note.md')
-                refreshes.append(run(f'external-{index+1}', 'performance-note.md', 'math-external'))
-            summary = {'median_ms': median(r['after_debounce_ms'] for r in refreshes),
-                'samples_ms': [r['after_debounce_ms'] for r in refreshes],
-                'rebuilt': [r['rebuilt'] for r in refreshes], 'reused': [r['reused_math_views'] for r in refreshes],
-                'maximum_anchor_shift_pt': max(r['anchor_shift_pt'] for r in refreshes)}
-            (output / 'external-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-            assert summary['median_ms'] <= 50, summary
-            assert all(r['rebuilt'] == 1 and r['same_anchor'] and r['anchor_shift_pt'] <= 1 for r in refreshes), summary
+            for prefix_edit in [False, True]:
+                refreshes = []
+                name = 'prefix-external' if prefix_edit else 'external'
+                for index in range(5):
+                    shutil.copyfile(ROOT / 'fixtures/math/performance-note.md', vault / 'performance-note.md')
+                    refreshes.append(run(f'{name}-{index+1}', 'performance-note.md', 'math-external',
+                        extra=['--math-insert-prefix'] if prefix_edit else []))
+                summary = {'median_ms': median(r['after_debounce_ms'] for r in refreshes),
+                    'samples_ms': [r['after_debounce_ms'] for r in refreshes],
+                    'rebuilt': [r['rebuilt'] for r in refreshes], 'reused': [r['reused_math_views'] for r in refreshes],
+                    'invalidation': [r['attachment_invalidation'] for r in refreshes],
+                    'reused_inline': [r['reused_inline_attachments'] for r in refreshes],
+                    'shifted_inline': [r['shifted_inline_attachments'] for r in refreshes],
+                    'maximum_anchor_shift_pt': max(r['anchor_shift_pt'] for r in refreshes)}
+                (output / f'{name}-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+                assert summary['median_ms'] <= 50, summary
+                assert all(r['rebuilt'] == 1 and r['same_anchor'] and r['anchor_shift_pt'] <= 1 for r in refreshes), summary
+                if prefix_edit:
+                    assert all(r['reused_inline_attachments'] >= 499 for r in refreshes), summary
+                    assert all(r['shifted_inline_attachments'] >= 499 for r in refreshes), summary
         if args.checks in ['all', 'memory']:
             sample = run('memory', 'performance-note.md', 'math-memory')
             check_memory(sample)

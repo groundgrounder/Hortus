@@ -13,7 +13,7 @@ struct PreparedMathBlock: @unchecked Sendable {
 }
 
 extension MathService {
-    func prepare(_ blocks: [MathBlock], source: String, size: Double, width: Double, displayText: String, previous: [PreparedMathBlock] = []) -> [PreparedMathBlock] {
+    func prepare(_ blocks: [MathBlock], source: String, size: Double, width: Double, displayText: String, previous: [PreparedMathBlock] = [], cell: Bool = false) -> [PreparedMathBlock] {
         let source = source as NSString
         let display = displayText as NSString
         var retained: [String: PreparedMathBlock] = [:]
@@ -24,7 +24,7 @@ extension MathService {
             let range = NSRange(location: Int(block.sourceStart), length: Int(block.sourceLength))
             guard range.location <= source.length, range.length <= source.length - range.location else { return nil }
             let raw = source.substring(with: range)
-            let size = MathTypography.bodySize(size, mask: block.mask)
+            let size = cell ? size : MathTypography.bodySize(size, mask: block.mask)
             do {
                 let key = "\(block.style):\(block.mask):\(block.latex)"
                 if let old = retained[key], old.math == nil, !block.block {
@@ -69,7 +69,7 @@ extension MathService {
                     }
                     return lines
                 }
-                let sourceFont = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+                let sourceFont = cell ? NSFont.systemFont(ofSize: size) : NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
                 let reasonFont = NSFont.systemFont(ofSize: 12)
                 let contextColor = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
                 let reasonLines = wrap(message, attributes: [.font: reasonFont, contextColor: true])
@@ -85,9 +85,16 @@ extension MathService {
     }
 }
 
+struct MathIdentity: Hashable {
+    let block: UInt64
+    let offset: Int
+}
+
 struct NoteMath {
     let range: NSRange
     let prepared: PreparedMathBlock
+    let offset: Int
+    var identity: MathIdentity { MathIdentity(block: prepared.block.blockId, offset: offset) }
 }
 
 @MainActor
@@ -149,6 +156,7 @@ final class MathBlockView: NSView {
     let scroll = NSScrollView()
     let bodySize: Double
     let reservedPrefixWidth: Double
+    let scrollbarHeight: Double
     private let canvas: MathCanvas
     var containerPrefix: NSAttributedString?
     var quote = false
@@ -157,15 +165,16 @@ final class MathBlockView: NSView {
     var onSelect: (() -> Void)?
     private(set) var maximumDrawMilliseconds = 0.0
     override var isFlipped: Bool { true }
-    init(_ item: NoteMath, width: Double, size: Double, prefixWidth: Double = 0) {
+    init(_ item: NoteMath, width: Double, size: Double, prefixWidth: Double = 0, scrollerStyle: NSScroller.Style = NSScroller.preferredScrollerStyle) {
         self.item = item
         bodySize = size
         reservedPrefixWidth = prefixWidth
         canvas = MathCanvas(item.prepared, size: size)
         let availableWidth = max(80, width - prefixWidth)
         let wide = (item.prepared.math?.size.width ?? 0) > availableWidth
+        scrollbarHeight = wide ? MathTypography.scrollbarHeight(style: scrollerStyle) : 0
         preferredSize = CGSize(width: width, height: (item.prepared.math.map { Double($0.size.height) } ?? item.prepared.fallbackHeight)
-            + 2 * MathTypography.padding + (wide ? 14 : 0))
+            + 2 * MathTypography.padding + scrollbarHeight)
         super.init(frame: CGRect(x: 0, y: 0, width: width + 12, height: preferredSize.height))
         canvas.owner = self
         toolTip = item.prepared.reason
@@ -173,13 +182,15 @@ final class MathBlockView: NSView {
         scroll.autoresizingMask = [.width, .height]
         scroll.drawsBackground = false; scroll.borderType = .noBorder
         scroll.contentView.drawsBackground = false
+        scroll.scrollerStyle = scrollerStyle
         scroll.hasHorizontalScroller = wide; scroll.hasVerticalScroller = false
         scroll.autohidesScrollers = true
         canvas.frame = CGRect(x: 0, y: 0, width: max(availableWidth, item.prepared.math?.size.width ?? 0),
-                              height: preferredSize.height - (wide ? 14 : 0))
+                              height: preferredSize.height - scrollbarHeight)
         scroll.documentView = canvas; addSubview(scroll)
         setAccessibilityElement(true); setAccessibilityRole(.image)
         setAccessibilityLabel(L10n.string("Formula: %@", item.prepared.block.latex))
+        setAccessibilityHelp(item.prepared.reason)
     }
     required init?(coder: NSCoder) { nil }
     override func draw(_ dirtyRect: NSRect) {
@@ -217,10 +228,11 @@ final class MathBlockView: NSView {
 extension DiagramTextView {
     func installMath(_ items: [NoteMath], width: Double, size: Double) {
         guard !items.isEmpty || !mathViews.isEmpty || !inlineMath.isEmpty else { return }
-        installInlineMath(items.filter { !$0.prepared.block.block }, width: width, size: size)
         let old = mathViews
         var unused = old
         var changed: [NSRange] = []
+        let scrollerStyle = NSScroller.preferredScrollerStyle
+        let scrollbarHeight = MathTypography.scrollbarHeight(style: scrollerStyle)
         let storage = textStorage?.string as NSString?
         mathViews = items.filter { $0.prepared.block.block }.map { item in
             let prefixWidth: Double
@@ -232,9 +244,10 @@ extension DiagramTextView {
             let oldIndex = unused.firstIndex { $0.item.prepared.block.blockId == item.prepared.block.blockId
                 && $0.item.prepared.block.latex == item.prepared.block.latex
                 && $0.preferredSize.width == width && $0.bodySize == size
-                && $0.reservedPrefixWidth == prefixWidth }
+                && $0.reservedPrefixWidth == prefixWidth
+                && $0.scrollbarHeight == (($0.item.prepared.math?.size.width ?? 0) > max(80, width - prefixWidth) ? scrollbarHeight : 0) }
             let reused = oldIndex.map { unused.remove(at: $0) }
-            let math = reused ?? MathBlockView(item, width: width, size: size, prefixWidth: prefixWidth)
+            let math = reused ?? MathBlockView(item, width: width, size: size, prefixWidth: prefixWidth, scrollerStyle: scrollerStyle)
             if reused == nil || math.item.range != item.range { changed.append(item.range) }
             math.item = item
             math.onSelect = { [weak self] in self?.setSelectedRange(item.range) }

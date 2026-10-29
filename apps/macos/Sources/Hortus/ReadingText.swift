@@ -204,7 +204,7 @@ struct ReadingText: NSViewRepresentable {
         for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
         view.mediaViews = []; view.mediaBlocks = []
         view.mathViews.forEach { $0.removeFromSuperview() }; view.mathViews = []
-        view.inlineMath = [:]
+        view.inlineMath = [:]; view.installFormulaAccessibility([])
         view.inlineMathViews.forEach { $0.removeFromSuperview() }; view.inlineMathViews = []
         view.diagramViews = [:]; view.string = ""; view.textLayoutManager?.delegate = nil
         if let manager = view.textLayoutManager { manager.textContentManager?.removeTextLayoutManager(manager) }
@@ -286,7 +286,7 @@ struct ReadingText: NSViewRepresentable {
             view?.mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
             view?.mediaViews = []; view?.mediaBlocks = []; view?.mediaProjection = []
             view?.mathViews.forEach { $0.removeFromSuperview() }; view?.mathViews = []
-            view?.inlineMath = [:]
+            view?.inlineMath = [:]; view?.installFormulaAccessibility([])
             view?.inlineMathViews.forEach { $0.removeFromSuperview() }; view?.inlineMathViews = []
             if input?.document.viewOwner === self {
                 input?.document.onReload = nil; input?.document.onClosing = nil
@@ -431,7 +431,7 @@ struct ReadingText: NSViewRepresentable {
             }
             self.width = width; self.dark = dark; size = input.fontSize; source = input.document.text
             let installStart = ProcessInfo.processInfo.systemUptime
-            install(result.model, diagrams: diagrams, themeChanged: themeChanged)
+            let formulas = install(result.model, diagrams: diagrams, math: result.math, width: width, themeChanged: themeChanged)
             let blockIndices = Dictionary(uniqueKeysWithValues: result.model.blocks.enumerated().map { ($0.element.id, $0.offset) })
             let items = result.media.compactMap { item -> NoteMedia? in
                 guard let index = blockIndices[item.block.blockId], index < ranges.count else { return nil }
@@ -440,12 +440,6 @@ struct ReadingText: NSViewRepresentable {
                 return NoteMedia(range: NSRange(location: ranges[index].location + local, length: Int(item.block.displayLength)), prepared: item)
             }
             view.installMedia(items, width: width, size: input.fontSize, vault: input.vault, refresh: { [weak self] in self?.refresh(force: true) })
-            let formulas = result.math.compactMap { item -> NoteMath? in
-                guard let index = blockIndices[item.block.blockId], index < ranges.count else { return nil }
-                let block = result.model.blocks[index]
-                return NoteMath(range: NSRange(location: ranges[index].location + Int(item.block.displayStart - block.displayStart),
-                                               length: Int(item.block.displayLength)), prepared: item)
-            }
             view.installMath(formulas, width: width, size: input.fontSize)
             preparedMath = result.math
             phaseMilliseconds = result.phases
@@ -482,8 +476,8 @@ struct ReadingText: NSViewRepresentable {
             refreshQueued = false
             refresh()
         }
-        private func install(_ next: ReadingViewModel, diagrams: [NoteDiagram], themeChanged: Bool) {
-            guard let view, let storage = view.textStorage, let input else { return }
+        private func install(_ next: ReadingViewModel, diagrams: [NoteDiagram], math: [PreparedMathBlock], width: Double, themeChanged: Bool) -> [NoteMath] {
+            guard let view, let storage = view.textStorage, let input else { return [] }
             let assemblyStart = ProcessInfo.processInfo.systemUptime
             let anchor = visibleAnchor()
             let old = model
@@ -569,6 +563,15 @@ struct ReadingText: NSViewRepresentable {
                 }
             }
             styling.installReading(runs, size: input.fontSize)
+            let indices = Dictionary(uniqueKeysWithValues: next.blocks.enumerated().map { ($0.element.id, $0.offset) })
+            let formulas = math.compactMap { item -> NoteMath? in
+                guard let index = indices[item.block.blockId] else { return nil }
+                let local = Int(item.block.displayStart - next.blocks[index].displayStart)
+                return NoteMath(range: NSRange(location: nextRanges[index].location + local, length: Int(item.block.displayLength)),
+                                prepared: item, offset: local)
+            }
+            view.installInlineMath(formulas.filter { !$0.prepared.block.block }, width: width, size: input.fontSize)
+            view.installFormulaAccessibility(formulas)
             changedCharacters = 0
             if prefix + suffix < next.blocks.count || old?.blocks.count != next.blocks.count || themeChanged {
                 let start = old == nil ? 0 : (prefix < ranges.count ? ranges[prefix].location : storage.length)
@@ -582,6 +585,7 @@ struct ReadingText: NSViewRepresentable {
                 changedCharacters = replacement.length
                 view.diagramStorage?.performEditingTransaction { storage.replaceCharacters(in: NSRange(location: start, length: end - start), with: replacement) }
             }
+            view.invalidateInlineMath()
             phaseMilliseconds["swift_assembly_ms"] = assemblyMilliseconds
             phaseMilliseconds["text_storage_ms"] = (ProcessInfo.processInfo.systemUptime - assemblyStart) * 1000 - assemblyMilliseconds
             model = next; ranges = nextRanges; fallbacks = fallback; view.sourceUTF16Length = storage.length
@@ -592,6 +596,7 @@ struct ReadingText: NSViewRepresentable {
             } else if let anchor {
                 pendingAnchor = anchor
             }
+            return formulas
         }
         private func restore(_ anchor: (id: UInt64, source: Int, offset: Double)) {
             guard let view, let clip = view.enclosingScrollView?.contentView, let model else { return }

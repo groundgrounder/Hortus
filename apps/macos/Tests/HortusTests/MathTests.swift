@@ -148,7 +148,8 @@ struct MathTests {
         #expect(math.accessibilityLabel() == L10n.string("Formula: %@", "\\frac{a}{b}"))
         #expect(math.accessibilityChildren()?.isEmpty == true)
         #expect(fixture.view.mathViews[1].item.prepared.reason?.contains("unknowncommand") == true)
-        #expect(fixture.view.string.contains("$$$$") && fixture.view.inlineMath.count == 1)
+        #expect(fixture.view.string.contains("$$$$"))
+        #expect(fixture.view.inlineMath.values.map { $0.item.prepared.block.latex } == ["a_1 b_1"])
         let wide = try #require(fixture.view.mathViews.last)
         #expect(wide.scroll.hasHorizontalScroller)
         #expect(!wide.scroll.hasVerticalScroller)
@@ -274,9 +275,10 @@ struct MathTests {
         #expect(fixture.view.mathViews.count == 2)
         #expect(Set(fixture.view.mathViews.map(ObjectIdentifier.init)).count == 2)
         func assertUniqueAccessibility() {
-            let elements = (fixture.view.accessibilityChildren() ?? []).compactMap { $0 as? MathBlockView }
+            let elements = (fixture.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
             #expect(elements.count == 2)
             #expect(Set(elements.map(ObjectIdentifier.init)).count == 2)
+            #expect(elements.allSatisfy { $0.accessibilityLabel() == L10n.string("Formula: %@", "x^2") })
         }
         assertUniqueAccessibility()
         fixture.view.appearance = NSAppearance(named: .darkAqua)

@@ -1,10 +1,27 @@
 import AppKit
+import CoreText
 import HortusCore
 import Testing
 @testable import Hortus
 
+@MainActor private func eventually(_ predicate: () -> Bool) async throws {
+    for _ in 0..<500 {
+        if predicate() { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    Issue.record("等待公式刷新超时")
+}
+
 @Suite(.serialized) @MainActor
 struct InlineMathTests {
+    @Test func pageOverflowUsesDocumentWidthWhenScrollerIsDisabled() {
+        let scroll = NSScrollView(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
+        let document = NSView(frame: CGRect(x: 0, y: 0, width: 600, height: 200))
+        scroll.hasHorizontalScroller = false; scroll.documentView = document
+        #expect(MathInspection.pageHasHorizontalOverflow(document))
+        document.setFrameSize(CGSize(width: scroll.contentView.bounds.width, height: 200))
+        #expect(!MathInspection.pageHasHorizontalOverflow(document))
+    }
     @Test func headingErrorWideSelectionAndResizeReuse() async throws {
         let wide = Array(repeating: "x", count: 100).joined(separator: "+")
         let source = "# Title $x^2$\n\nBefore $x^2$ after $\\unknowncommand$ and $   $.\n\nBefore $\(wide)$ after.\n"
@@ -80,12 +97,7 @@ struct InlineMathTests {
                 attachments += 1
                 let formulaView = view.inlineMathViews.first { $0.attachment === attachment }
                 #expect(formulaView?.accessibilityLabel() == L10n.string("Formula: %@", attachment.item.prepared.block.latex))
-                let local = content.offset(from: fragment.rangeInElement.location, to: position)
-                if let line = fragment.textLineFragments.first(where: { NSLocationInRange(local, $0.characterRange) }) {
-                    let baseline = fragment.layoutFragmentFrame.minY + line.typographicBounds.minY + line.glyphOrigin.y + view.textContainerInset.height
-                    let formulaBaseline = (formulaView?.frame.minY ?? -.infinity) + attachment.ascent
-                    #expect(abs(formulaBaseline - baseline) <= 0.5, "baseline: \(formulaBaseline), text: \(baseline)")
-                }
+
             }
             return true
         }
@@ -98,7 +110,7 @@ struct InlineMathTests {
         }
         view.setSelectedRange(NSRange(location: 0, length: view.sourceUTF16Length))
         view.copy(nil)
-        #expect(NSPasteboard.general.string(forType: .string) == source.replacingOccurrences(of: "Before $$y=2$$ after.", with: "Before \n$$y=2$$\n after."))
+        #expect(NSPasteboard.general.string(forType: .string) == source.replacingOccurrences(of: "Before $$y=2$$ after.", with: "Before\n$$y=2$$\nafter."))
         fixture.coordinator.copyMarkdown()
         #expect(NSPasteboard.general.string(forType: .string) == source)
         #expect(view.textLayoutManager === manager)
@@ -126,4 +138,229 @@ struct InlineMathTests {
         #expect(NSPasteboard.general.string(forType: .string) == "$x^2$")
         await fixture.close()
     }
+
+    @Test func readingClipboardTypesAndContainerSources() async throws {
+        for source in ["Plain **text**.\n", "> $$\n> \\frac{1}{2}\n> $$\n\n> [!note]\n> $a\n> +b$\n"] {
+            let f = try ReadingTests.Fixture(source)
+            try await f.start(mathService: MathTests.service())
+            f.view.setSelectedRange(NSRange(location: 0, length: f.view.sourceUTF16Length))
+            f.view.copy(nil)
+            #expect(Set(NSPasteboard.general.types ?? []) == Set([.string, NSPasteboard.PasteboardType("NSStringPboardType")]))
+            let copied = try #require(NSPasteboard.general.string(forType: .string))
+            #expect(!copied.contains("> "))
+            if source.contains("frac") { #expect(copied.contains("$$\n\\frac{1}{2}\n$$")) }
+            #expect(f.view.writablePasteboardTypes == [.string])
+            let board = NSPasteboard.withUniqueName()
+            defer { board.releaseGlobally() }
+            #expect(f.view.writeSelection(to: board, types: [.rtf, .string]))
+            #expect(Set(board.types ?? []) == Set([.string, NSPasteboard.PasteboardType("NSStringPboardType")]))
+            #expect(board.string(forType: .string) == copied)
+            #expect(!f.view.writeSelection(to: board, type: .rtf))
+            #expect(f.view.writeSelection(to: board, type: .string))
+            #expect(Set(board.types ?? []) == Set([.string, NSPasteboard.PasteboardType("NSStringPboardType")]))
+            #expect(board.string(forType: .string) == copied)
+            await f.close()
+        }
+    }
+
+    @Test func shiftedRepeatedAttachmentsAndDeletionBeforeMedia() async throws {
+        let source = "First $a$.\n\nRepeated $x$ and $x$.\n\nRepeated $x$ and $x$.\n\n![missing](missing.png)\n\n```mermaid\nflowchart LR\nA --> B\n```\n"
+        let f = try ReadingTests.Fixture(source)
+        try await f.start(mathService: MathTests.service())
+        let original = f.view.inlineMath.values.sorted { $0.item.range.location < $1.item.range.location }
+        let shifted = "Inserted text " + source
+        try Data(shifted.utf8).write(to: f.document.io.url); f.document.refresh()
+        try await eventually { f.document.text == shifted && !f.coordinator.pending && f.coordinator.model?.revision == f.document.revision }
+        let moved = f.view.inlineMath.values.sorted { $0.item.range.location < $1.item.range.location }
+        #expect(moved.count == original.count)
+        for (a, b) in zip(original.dropFirst(), moved.dropFirst()) { #expect(a === b) }
+        #expect(moved.allSatisfy { f.view.inlineMath[$0.item.range.location] === $0 })
+        let deleted = shifted.replacingOccurrences(of: "First $a$.", with: "First.")
+        try Data(deleted.utf8).write(to: f.document.io.url); f.document.refresh()
+        try await eventually { f.document.text == deleted && !f.coordinator.pending && f.coordinator.model?.revision == f.document.revision }
+        let manager = try #require(f.view.textLayoutManager), content = try #require(manager.textContentManager)
+        manager.ensureLayout(for: content.documentRange)
+        manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
+            let offset = content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location)
+            if let paragraph = fragment.textElement as? NSTextParagraph {
+                paragraph.attributedString.enumerateAttribute(.attachment, in: NSRange(location: 0, length: paragraph.attributedString.length)) { value, range, _ in
+                    if let attachment = value as? InlineMathAttachment {
+                        #expect(f.view.inlineMath[offset + range.location] === attachment)
+                        #expect(attachment.item.range.location == offset + range.location)
+                    }
+                }
+            }
+            return true
+        }
+        #expect(f.view.inlineMath.count == 4 && f.view.mediaViews.count == 1 && f.view.diagramViews.count == 1)
+        await f.close()
+    }
+
+    @Test func accessibilityIncludesOffscreenFormulasInDocumentOrder() async throws {
+        let source = "First $a$.\n\n![missing](missing.png)\n\n$$b$$\n\n```mermaid\nflowchart LR\nA --> B\n```\n\n" + (0..<80).map { "Paragraph \($0) $x_\($0)$.\n\n" }.joined() + "$\\unknowncommand$\n"
+        let f = try ReadingTests.Fixture(source)
+        try await f.start(mathService: MathTests.service())
+        let labels = (f.view.accessibilityChildren() ?? []).compactMap {
+            ($0 as? NSAccessibilityElement)?.accessibilityLabel() ?? ($0 as? NSView)?.accessibilityLabel()
+        }.filter { $0.hasPrefix(L10n.string("Formula: %@", "")) }
+        let expected = ["a", "b"] + (0..<80).map { "x_\($0)" } + ["\\unknowncommand"]
+        #expect(labels == expected.map { L10n.string("Formula: %@", $0) })
+        let ordered = (f.view.accessibilityChildren() ?? []).compactMap { child -> String? in
+            if let element = child as? NSAccessibilityElement { return element.accessibilityLabel() }
+            if child is MediaView { return "media" }
+            if child is DiagramView { return "diagram" }
+            return nil
+        }
+        #expect(Array(ordered.prefix(4)) == [L10n.string("Formula: %@", "a"), "media", L10n.string("Formula: %@", "b"), "diagram"])
+        let errors = (f.view.accessibilityChildren() ?? []).compactMap {
+            ($0 as? NSAccessibilityElement)?.accessibilityHelp() ?? ($0 as? NSView)?.accessibilityHelp()
+        }
+        #expect(errors.contains { $0.contains("unknowncommand") })
+        let elements = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
+        let shifted = "Inserted text " + source
+        try Data(shifted.utf8).write(to: f.document.io.url); f.document.refresh()
+        try await eventually { f.document.text == shifted && !f.coordinator.pending && f.coordinator.model?.revision == f.document.revision }
+        let refreshed = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
+        #expect(refreshed.count == elements.count)
+        for (before, after) in zip(elements.dropFirst(), refreshed.dropFirst()) { #expect(before === after) }
+        await f.close()
+    }
+
+    @Test func tableFormulaSizeFallbackWidthAndErrorAccessibility() async throws {
+        let source = "Body $x$.\n\n| Formula | Other |\n|---|---|\n| # $x$ | $a\\|b$ |\n| $\\unknowncommand{abcdefghijklmnop}$ | end |\n"
+        let f = try ReadingTests.Fixture(source)
+        try await f.start(mathService: MathTests.service())
+        let body = try #require(f.view.inlineMath.values.first?.item.prepared.math)
+        let table = try #require(f.view.mediaBlocks.first)
+        let formulas = table.prepared.math.flatMap { $0 }
+        #expect(formulas.contains { $0.block.latex == "a|b" })
+        let heading = try #require(formulas.first { $0.block.latex == "x" }?.math)
+        #expect(abs(body.size.width - heading.size.width) < 0.001)
+        let error = try #require(formulas.first { $0.reason != nil })
+        let line = try #require(error.fallbackLines.first)
+        let width = CTLineGetTypographicBounds(line, nil, nil, nil)
+        #expect(width + 20 <= table.prepared.block.columns[0] + 0.01)
+        let help = f.view.mediaViews.flatMap { $0.subviews }.compactMap { ($0 as? NSScrollView)?.documentView?.accessibilityHelp() }
+        #expect(help.contains { $0.contains("unknowncommand") })
+        await f.close()
+    }
+
+
+    @Test func renderedInkBaselineAndExactSizesAcrossBodySizes() async throws {
+        for size in [12.0, 15, 18, 24] {
+            let f = try ReadingTests.Fixture("x $x$\nNormal abc.\nSame $x^2$.\nTall $\\frac{a}{b}$.\nNormal abc.\n")
+            f.view.appearance = NSAppearance(named: .aqua)
+            try await f.start(mathService: MathTests.service(), size: size)
+            let formula = try #require(f.view.inlineMathViews.min { $0.attachment.item.range.location < $1.attachment.item.range.location })
+            let screen = f.view.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
+            let textRect = f.view.convert(f.editing.window.convertFromScreen(screen), from: nil)
+            func inkBottom(_ rect: CGRect) throws -> Double {
+                let bitmap = try #require(f.view.bitmapImageRepForCachingDisplay(in: rect))
+                f.view.cacheDisplay(in: rect, to: bitmap)
+                var last: Int?
+                for y in 0..<bitmap.pixelsHigh {
+                    for x in 0..<bitmap.pixelsWide {
+                        if let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                           color.alphaComponent > 0.5, max(color.redComponent, color.greenComponent, color.blueComponent) < 0.5 {
+                            last = y
+                        }
+                    }
+                }
+                return rect.minY + Double(try #require(last) + 1) * rect.height / Double(bitmap.pixelsHigh)
+            }
+            let textBottom = try inkBottom(textRect), formulaBottom = try inkBottom(formula.frame)
+            #expect(abs(textBottom - formulaBottom) <= 0.5, "size=\(size), ink text=\(textBottom), math=\(formulaBottom)")
+            for view in f.view.inlineMathViews {
+                #expect(abs(view.frame.width - view.attachment.bounds.width) < 0.001)
+                #expect(abs(view.frame.height - view.attachment.bounds.height) < 0.001)
+            }
+            let manager = try #require(f.view.textLayoutManager), content = try #require(manager.textContentManager)
+            manager.ensureLayout(for: content.documentRange)
+            var lines: [NSTextLineFragment] = []
+            manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
+                lines.append(contentsOf: fragment.textLineFragments.filter { $0.characterRange.length > 1 }); return true
+            }
+            #expect(lines.count >= 5)
+            if lines.count >= 5 {
+                #expect(abs(lines[1].typographicBounds.height - lines[2].typographicBounds.height) <= 0.5)
+                #expect(lines[3].typographicBounds.height > lines[2].typographicBounds.height)
+                #expect(abs(lines[1].typographicBounds.height - lines[4].typographicBounds.height) <= 0.5)
+            }
+            await f.close()
+        }
+    }
+
+    @Test func existingInlineFormulaFollowsThemeAndLegacyScrollbar() async throws {
+        let wide = Array(repeating: "x", count: 100).joined(separator: "+")
+        let f = try ReadingTests.Fixture("$x$ and $\(wide)$\n\n$$\(wide)$$\n")
+        f.view.appearance = NSAppearance(named: .aqua)
+        try await f.start(mathService: MathTests.service())
+        let before = try #require(f.view.inlineMath.values.min { $0.item.range.location < $1.item.range.location })
+        var light: NSColor?
+        f.view.effectiveAppearance.performAsCurrentDrawingAppearance { light = before.foreground.usingColorSpace(.sRGB) }
+        f.view.appearance = NSAppearance(named: .darkAqua); f.coordinator.refresh(force: true)
+        try await f.ready()
+        let after = try #require(f.view.inlineMath.values.min { $0.item.range.location < $1.item.range.location })
+        var dark: NSColor?
+        f.view.effectiveAppearance.performAsCurrentDrawingAppearance { dark = after.foreground.usingColorSpace(.sRGB) }
+        #expect(light != dark)
+        let attachment = try #require(f.view.inlineMath.values.first { $0.wide })
+        let wideView = InlineMathView(attachment)
+        wideView.scroll.scrollerStyle = .legacy; wideView.layoutSubtreeIfNeeded()
+        let thickness = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+        let legacy = InlineMathAttachment(attachment.item, width: attachment.availableWidth, size: attachment.bodySize,
+            foreground: attachment.foreground, scrollerStyle: .legacy)
+        #expect(legacy.bounds.height >= legacy.naturalSize.height + thickness)
+        let current = try #require(f.view.mathViews.first)
+        let block = MathBlockView(current.item, width: current.preferredSize.width, size: current.bodySize, scrollerStyle: .legacy)
+        #expect(block.preferredSize.height >= block.item.prepared.math!.size.height + 2 * MathTypography.padding + thickness)
+        #expect(MathTypography.scale == mathTypographyScale())
+        await f.close()
+    }
+
+
+    @Test func selectionBackgroundFollowsNativeTextAndHostOwnsErrorTooltip() async throws {
+        let f = try ReadingTests.Fixture("A $\\quad x$ Z $\\unknowncommand$.\n")
+        try await f.start(mathService: MathTests.service())
+        let formula = try #require(f.view.inlineMathViews.min { $0.attachment.item.range.location < $1.attachment.item.range.location })
+        let field = NSTextField(frame: CGRect(x: 0, y: 0, width: 20, height: 20))
+        f.editing.window.contentView?.addSubview(field)
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            f.view.appearance = NSAppearance(named: appearance)
+            for focusBody in [true, false] {
+                f.editing.window.makeKeyAndOrderFront(nil)
+                f.view.setSelectedRange(NSRange(location: 0, length: f.view.sourceUTF16Length))
+                f.editing.window.makeFirstResponder(focusBody ? f.view : field)
+                #expect((f.editing.window.firstResponder === f.view) == focusBody)
+                f.view.needsDisplay = true; f.view.layoutSubtreeIfNeeded(); f.view.displayIfNeeded()
+                let area = CGRect(x: formula.frame.minX - 3, y: formula.frame.minY - 2, width: 8, height: formula.frame.height + 6)
+                let bitmap = try #require(f.view.bitmapImageRepForCachingDisplay(in: area))
+                f.view.cacheDisplay(in: area, to: bitmap)
+                let scale = Double(bitmap.pixelsWide) / area.width
+                var difference = 0.0
+                for y in 0..<bitmap.pixelsHigh {
+                    let a = try #require(bitmap.colorAt(x: Int(scale), y: y)?.usingColorSpace(.sRGB))
+                    let b = try #require(bitmap.colorAt(x: Int(5 * scale), y: y)?.usingColorSpace(.sRGB))
+                    difference = max(difference, abs(a.redComponent - b.redComponent), abs(a.greenComponent - b.greenComponent), abs(a.blueComponent - b.blueComponent))
+                }
+                #expect(difference <= 0.03, "theme=\(appearance), body=\(focusBody), background delta=\(difference)")
+            }
+        }
+        let error = try #require(f.view.inlineMathViews.first { $0.attachment.item.prepared.reason != nil })
+        #expect(error.hitTest(.zero) == nil)
+        let tag = try #require(f.view.formulaTooltips.keys.first)
+        #expect(f.view.view(f.view, stringForToolTip: tag, point: error.frame.origin, userData: nil).contains("unknowncommand"))
+        await f.close()
+    }
+
+    @Test func duplicateMountedAttachmentDoesNotCrashLayout() async throws {
+        let f = try ReadingTests.Fixture("First $x$.\n\nSecond $x$.\n")
+        try await f.start(mathService: MathTests.service())
+        let first = try #require(f.view.inlineMathViews.first)
+        f.view.inlineMathViews.append(first)
+        f.view.needsLayout = true; f.view.layoutSubtreeIfNeeded()
+        #expect(Set(f.view.inlineMathViews.map { ObjectIdentifier($0.attachment) }).count == f.view.inlineMathViews.count)
+        await f.close()
+    }
+
 }

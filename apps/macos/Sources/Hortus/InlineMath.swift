@@ -11,9 +11,12 @@ final class InlineMathAttachment: NSTextAttachment {
     let naturalSize: CGSize
     let ascent: Double
     let descent: Double
+    let scrollbarHeight: Double
+    private let layoutBounds: CGRect
     var maximumDrawMilliseconds = 0.0
     var wide: Bool { naturalSize.width > availableWidth }
-    init(_ item: NoteMath, width: Double, size: Double, foreground: NSColor) {
+    init(_ item: NoteMath, width: Double, size: Double, foreground: NSColor, scrollerStyle: NSScroller.Style = NSScroller.preferredScrollerStyle,
+         bodyAscent: Double? = nil) {
         self.item = item; availableWidth = max(1, width); bodySize = size; self.foreground = foreground
         if let math = item.prepared.math {
             naturalSize = math.size; ascent = math.ascent; descent = math.descent
@@ -22,13 +25,21 @@ final class InlineMathAttachment: NSTextAttachment {
             let width = item.prepared.fallbackLines.first.map { CTLineGetTypographicBounds($0, &up, &down, nil) } ?? 0
             naturalSize = CGSize(width: width, height: up + down); ascent = Double(up); descent = Double(down)
         }
+        scrollbarHeight = naturalSize.width > availableWidth ? MathTypography.scrollbarHeight(style: scrollerStyle) : 0
+        // 小公式可使用现有的 4 pt 行间空白，不为不足一行的上伸重复增高行距。
+        let bodyAscent = bodyAscent ?? NSFont.systemFont(ofSize: MathTypography.bodySize(size, mask: item.prepared.block.mask)).ascender
+        let layoutAscent = naturalSize.width <= availableWidth && ascent <= bodyAscent + 4 ? min(ascent, bodyAscent) : ascent
+        layoutBounds = CGRect(x: 0, y: -descent - scrollbarHeight, width: min(naturalSize.width, availableWidth),
+                              height: layoutAscent + descent + scrollbarHeight)
         super.init(data: nil, ofType: nil)
         allowsTextAttachmentView = false
-        bounds = CGRect(x: 0, y: -descent - (wide ? 14 : 0),
-            width: min(naturalSize.width, availableWidth), height: naturalSize.height + (wide ? 14 : 0))
-        attachmentCell = InlineMathCell(size: bounds.size, descent: descent + (wide ? 14 : 0))
+        bounds = CGRect(x: 0, y: -descent - scrollbarHeight,
+            width: min(naturalSize.width, availableWidth), height: naturalSize.height + scrollbarHeight)
+        attachmentCell = InlineMathCell(size: layoutBounds.size, descent: descent + scrollbarHeight)
     }
     required init?(coder: NSCoder) { nil }
+    override func attachmentBounds(for attributes: [NSAttributedString.Key: Any], location: any NSTextLocation,
+                                   textContainer: NSTextContainer?, proposedLineFragment: CGRect, position: CGPoint) -> CGRect { layoutBounds }
     override func image(for bounds: CGRect, attributes: [NSAttributedString.Key: Any],
                         location: any NSTextLocation, textContainer: NSTextContainer?) -> NSImage? { nil }
 }
@@ -90,15 +101,17 @@ private final class InlineMathCanvas: NSView {
         defer { attachment.maximumDrawMilliseconds = max(attachment.maximumDrawMilliseconds, (ProcessInfo.processInfo.systemUptime - began) * 1000) }
         var ancestor = superview
         while ancestor != nil && !(ancestor is DiagramTextView) { ancestor = ancestor?.superview }
-        let selected = (ancestor as? DiagramTextView)?.selectedRanges.contains {
+        let host = ancestor as? DiagramTextView
+        let selected = host?.selectedRanges.contains {
             NSIntersectionRange($0.rangeValue, attachment.item.range).length > 0
         } ?? false
-        if selected {
-            NSColor.selectedTextBackgroundColor.setFill(); bounds.fill()
-        } else if attachment.item.prepared.math == nil {
+        // 原生选区已覆盖整行，透明画布跟随正文的活动/非活动高亮。
+        if !selected && attachment.item.prepared.math == nil {
             NSColor.quaternaryLabelColor.withAlphaComponent(0.10).setFill(); bounds.fill()
         }
-        let foreground = (selected ? NSColor.selectedTextColor : attachment.foreground).usingColorSpace(.sRGB)!.cgColor
+        let active = host?.window?.isKeyWindow == true && host?.window?.firstResponder === host
+        let selectedColor = active ? NSColor.selectedTextColor : NSColor.unemphasizedSelectedTextColor
+        let foreground = (selected ? selectedColor : attachment.foreground).usingColorSpace(.sRGB)!.cgColor
         if let math = attachment.item.prepared.math {
             MathRenderer.draw(math, in: context, origin: .zero, foreground: foreground,
                 deviceScale: Double(window?.backingScaleFactor ?? 2))
@@ -115,48 +128,56 @@ private final class InlineMathCanvas: NSView {
 extension DiagramTextView {
     func installInlineMath(_ items: [NoteMath], width: Double, size: Double) {
         let previous = inlineMath
+        let retained = Dictionary(previous.values.map { ($0.item.identity, $0) }, uniquingKeysWith: { first, _ in first })
         var next: [Int: InlineMathAttachment] = [:]
-        var changed: [NSRange] = []
+        var changed = previous.mapValues { $0.item.range }
+        let scrollerStyle = NSScroller.preferredScrollerStyle
+        let scrollbarHeight = MathTypography.scrollbarHeight(style: scrollerStyle)
+        var ascents: [Double: Double] = [:]
         for item in items {
             let color = sourceStyling?.style(item.prepared.block.mask)[.foregroundColor] as? NSColor ?? .textColor
-            if let old = previous[item.range.location], old.item.prepared.block.blockId == item.prepared.block.blockId,
-               old.item.prepared.source == item.prepared.source, old.availableWidth == width,
-               old.bodySize == size, old.foreground == color {
+            if let old = retained[item.identity], old.item.prepared.source == item.prepared.source,
+               old.availableWidth == width, old.bodySize == size, old.foreground == color,
+               old.scrollbarHeight == (old.wide ? scrollbarHeight : 0) {
+                if old.item.range == item.range { changed.removeValue(forKey: item.range.location) }
                 old.item = item; next[item.range.location] = old
             } else {
-                next[item.range.location] = InlineMathAttachment(item, width: width, size: size, foreground: color)
-                changed.append(item.range)
+                let fontSize = MathTypography.bodySize(size, mask: item.prepared.block.mask)
+                let ascent = ascents[fontSize] ?? NSFont.systemFont(ofSize: fontSize).ascender
+                ascents[fontSize] = ascent
+                next[item.range.location] = InlineMathAttachment(item, width: width, size: size, foreground: color,
+                    scrollerStyle: scrollerStyle, bodyAscent: ascent)
             }
+            if previous[item.range.location] !== next[item.range.location] { changed[item.range.location] = item.range }
         }
+        // 新表必须在文本存储编辑前可见，原生段落回调随时可能请求附件。
         inlineMath = next
-        if let storage = textStorage {
+        inlineMathInvalidation = changed.values.reduce(nil as NSRange?) { current, range in current.map { NSUnionRange($0, range) } ?? range }
+    }
+
+    func invalidateInlineMath() {
+        guard let storage = textStorage, let range = inlineMathInvalidation else { return }
+        let start = min(range.location, storage.length), end = min(NSMaxRange(range), storage.length)
+        if end > start {
             diagramStorage?.performEditingTransaction {
-                // 附件随可见段落附加；只失效一次，避免逐个更新整篇文本存储。
-                if let first = changed.first, let last = changed.last, NSMaxRange(last) <= storage.length {
-                    storage.edited(.editedAttributes, range: NSUnionRange(first, last), changeInLength: 0)
-                }
+                storage.edited(.editedAttributes, range: NSRange(location: start, length: end - start), changeInLength: 0)
             }
         }
     }
 
-    func copyWithFormulas() -> Bool {
-        guard isReading, let storage = textStorage else { return false }
-        let items = inlineMath.values.map { $0.item } + mathViews.map { $0.item }
-        guard !items.isEmpty else { return false }
+    func selectionPlainText() -> String? {
+        guard let storage = textStorage else { return nil }
+        let items = (inlineMath.values.map { $0.item } + mathViews.map { $0.item }).sorted { $0.range.location > $1.range.location }
         let pieces = selectedRanges.compactMap { value -> String? in
             let range = value.rangeValue
             guard range.length > 0, NSMaxRange(range) <= storage.length else { return nil }
             let result = NSMutableString(string: (storage.string as NSString).substring(with: range))
-            for item in items.sorted(by: { $0.range.location > $1.range.location })
-                where NSIntersectionRange(item.range, range).length > 0 {
+            for item in items where NSIntersectionRange(item.range, range).length > 0 {
                 let local = NSRange(location: item.range.location - range.location, length: item.range.length)
-                result.replaceCharacters(in: local, with: item.prepared.source)
+                result.replaceCharacters(in: local, with: item.prepared.block.displaySource)
             }
             return result as String
         }
-        guard !pieces.isEmpty else { return false }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(pieces.joined(separator: "\n"), forType: .string)
-        return true
+        return pieces.isEmpty ? nil : pieces.joined(separator: "\n")
     }
 }

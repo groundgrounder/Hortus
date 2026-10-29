@@ -4,6 +4,25 @@ import Darwin
 /// 显式检查参数才采样；正常阅读不安装计时器。
 @MainActor
 enum MathInspection {
+    static func pageHasHorizontalOverflow(_ view: NSView) -> Bool {
+        view.bounds.width > (view.enclosingScrollView?.contentView.bounds.width ?? view.bounds.width) + 0.5
+    }
+    private static func selectionBackgroundDifference(_ view: DiagramTextView, _ formula: InlineMathView) throws -> Double {
+        // 公开选区夹具用 \quad 留出无墨迹区域，对比公式内外整条选区的像素。
+        let area = CGRect(x: formula.frame.minX - 3, y: formula.frame.minY - 2, width: 8, height: formula.frame.height + 6)
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: area) else { throw CocoaError(.coderValueNotFound) }
+        view.cacheDisplay(in: area, to: bitmap)
+        let scale = Double(bitmap.pixelsWide) / area.width
+        var difference = 0.0
+        for y in 0..<bitmap.pixelsHigh {
+            guard let a = bitmap.colorAt(x: Int(scale), y: y)?.usingColorSpace(.sRGB),
+                  let b = bitmap.colorAt(x: Int(5 * scale), y: y)?.usingColorSpace(.sRGB) else {
+                throw CocoaError(.coderValueNotFound)
+            }
+            difference = max(difference, abs(a.redComponent - b.redComponent), abs(a.greenComponent - b.greenComponent), abs(a.blueComponent - b.blueComponent))
+        }
+        return difference
+    }
     @MainActor
     private final class WeakView {
         weak var value: DiagramTextView?
@@ -138,15 +157,34 @@ enum MathInspection {
                 formula.displayIfNeeded()
                 result["inline_scroll_offset"] = formula.scroll.contentView.bounds.minX
                 result["inline_frame"] = NSStringFromRect(formula.frame)
-                result["page_horizontal_scroll"] = view.enclosingScrollView?.hasHorizontalScroller ?? false
+                result["page_horizontal_scroll"] = pageHasHorizontalOverflow(view)
             }
         }
         if arguments.contains("--inline-select"),
            let attachment = view.inlineMath.values.min(by: { $0.item.range.location < $1.item.range.location }) {
             coordinator.reveal(source: Int(attachment.item.prepared.block.sourceStart))
-            view.setSelectedRange(attachment.item.range)
+            NSApp.activate(ignoringOtherApps: true); view.window?.makeKeyAndOrderFront(nil)
+            for _ in 0..<100 {
+                if NSApp.isActive, view.window?.isKeyWindow == true { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            view.setSelectedRange((view.string as NSString).lineRange(for: attachment.item.range))
             view.needsLayout = true; view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
+            if arguments.contains("--inline-sidebar-focus"), let root = view.window?.contentView {
+                func focusSidebar(_ candidate: NSView) -> Bool {
+                    if candidate !== view, candidate is NSOutlineView, view.window?.makeFirstResponder(candidate) == true { return true }
+                    return candidate.subviews.contains { focusSidebar($0) }
+                }
+                result["sidebar_focused"] = focusSidebar(root)
+            } else { view.window?.makeFirstResponder(view) }
+            view.needsDisplay = true; view.displayIfNeeded()
             result["selected_inline_length"] = view.selectedRange().length
+            result["selection_window_key"] = view.window?.isKeyWindow == true && NSApp.isActive
+            result["selection_focus_body"] = view.window?.firstResponder === view
+            guard let formula = view.inlineMathViews.first(where: { $0.attachment === attachment }) else {
+                throw CocoaError(.coderValueNotFound)
+            }
+            result["selection_background_delta"] = try selectionBackgroundDifference(view, formula)
         }
         if mode == "math-performance" {
             var frames: [Double] = []
@@ -201,7 +239,9 @@ enum MathInspection {
             result["anchor_before"] = ["id": String(before.id), "source": String(before.source), "offset": String(before.offset)]
             let old = view.mathViews
             let oldInline = Array(view.inlineMath.values)
-            let changed = (source as NSString).replacingCharacters(in: NSRange(location: Int(formula.prepared.block.sourceStart),
+            let oldInlineRanges = Dictionary(oldInline.map { (ObjectIdentifier($0), $0.item.range) }, uniquingKeysWith: { first, _ in first })
+            let prefixEdit = arguments.contains("--math-insert-prefix")
+            let changed = prefixEdit ? "Inserted prefix " + source : (source as NSString).replacingCharacters(in: NSRange(location: Int(formula.prepared.block.sourceStart),
                 length: Int(formula.prepared.block.sourceLength)), with: formula.prepared.block.block ? "$$x^3+y^3=z^3$$" : "$x^3+y^3=z^3$")
             try Data(changed.utf8).write(to: document.io.url)
             for _ in 0..<10000 {
@@ -213,6 +253,10 @@ enum MathInspection {
             result["anchor_after"] = ["id": String(after.id), "source": String(after.source), "offset": String(after.offset)]
             result["after_debounce_ms"] = (coordinator.displayedAt - document.refreshStartedAt) * 1000
             result["rebuilt"] = coordinator.model?.rebuilt
+            result["attachment_invalidation"] = view.inlineMathInvalidation.map { ["location": $0.location, "length": $0.length] } ?? [:]
+            result["shifted_inline_attachments"] = view.inlineMath.values.filter { current in
+                oldInlineRanges[ObjectIdentifier(current)].map { $0 != current.item.range } ?? false
+            }.count
             result["reused_math_views"] = view.mathViews.filter { current in old.contains { $0 === current } }.count
             result["reused_inline_attachments"] = view.inlineMath.values.filter { current in oldInline.contains { $0 === current } }.count
             result["anchor_shift_pt"] = abs(before.offset - after.offset)

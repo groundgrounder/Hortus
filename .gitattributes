@@ -1,0 +1,1 @@
+fixtures/math/inline-crlf.md -text whitespace=-blank-at-eol,cr-at-eol

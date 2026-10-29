@@ -6,6 +6,11 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+#[uniffi::export]
+pub fn math_typography_scale() -> f64 {
+    hortus_math::TYPOGRAPHY_SCALE
+}
+
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
 pub enum MathStyle {
     Display,
@@ -181,6 +186,11 @@ impl DocumentSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typography_scale_matches_the_core() {
+        assert_eq!(math_typography_scale(), hortus_math::TYPOGRAPHY_SCALE);
+    }
 
     #[test]
     fn poisoned_engine_lock_is_reset_and_recovers() {

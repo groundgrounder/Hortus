@@ -20,6 +20,68 @@ fn cases(source: &str) -> Vec<&str> {
 }
 
 #[test]
+fn display_math_preserves_existing_newlines_and_source_container_prefixes() {
+    for (source, expected) in [
+        ("$$a+b$$\r\n\r\nnext\r\n", "\u{fffc}\r\n\r\nnext\r\n"),
+        ("$$a+b$$  \n\nnext\n", "\u{fffc}  \n\nnext\n"),
+        ("- $$x$$\r\n- $$y$$ \n", "• \u{fffc}\r\n• \u{fffc} \n"),
+        ("1) $$z$$\n", "1) \u{fffc}\n"),
+        ("t[^1]\n\n[^1]: $$x$$\n", "t[1]\n\n[1] \u{fffc}\n"),
+        ("**$$x$$**\n", "\u{fffc}\n"),
+        ("$$x$$%%c%%\n", "\u{fffc}\n"),
+        ("> $$x$$\r\n> t\r\n", "\u{fffc}\r\nt\r\n"),
+    ] {
+        assert_eq!(
+            output(&Cache::default().model(source, false)),
+            expected,
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn inserted_display_newlines_hide_adjacent_spaces_without_changing_formula_mapping() {
+    for (source, expected) in [
+        ("前 $$a+b$$ 后", "前\n\u{fffc}\n后"),
+        ("$$a$$ $$b$$", "\u{fffc}\n\u{fffc}"),
+        ("前 **$$x$$** %%hidden%% 后", "前\n\u{fffc}\n后"),
+    ] {
+        let model = Cache::default().model(source, false);
+        assert_eq!(output(&model), expected, "{source:?}");
+        let units: Vec<_> = source.encode_utf16().collect();
+        for block in model.blocks {
+            for formula in &block.content.math {
+                let raw = String::from_utf16_lossy(
+                    &units[block.source.start + formula.source.start
+                        ..block.source.start + formula.source.end],
+                );
+                assert_eq!(raw, formula.display_source);
+            }
+        }
+    }
+}
+
+#[test]
+fn outline_preserves_formula_source_and_single_spaces() {
+    let mut document = hortus_document::Document::new("# H $$x$$ t\n\n# a $x*y*z$ b\n");
+    let headings = document.outline(false).unwrap();
+    assert_eq!(
+        headings
+            .iter()
+            .map(|h| h.title.as_str())
+            .collect::<Vec<_>>(),
+        ["H $$x$$ t", "a $x*y*z$ b"]
+    );
+}
+
+#[test]
+fn gfm_table_unescapes_pipe_inside_latex() {
+    let (_, table) = hortus_document::media::Table::parse("| $a\\|b$ |\n|---|\n").unwrap();
+    assert_eq!(table.rows[0][0].math[0].latex, "a|b");
+    assert_eq!(table.rows[0][0].math[0].display_source, "$a|b$");
+}
+
+#[test]
 fn inline_ranges_masks_and_heading_source() {
     use hortus_document::Document;
     let source = "# 标题 $a_i b_i$😀\n\n中😀 **$x^2$** [公式 $y_i$](target) 后\n\n> [!note] 标题 $z$\n> 前 $$a+b$$ 后\n";
@@ -59,7 +121,7 @@ fn inline_ranges_masks_and_heading_source() {
     assert_ne!(formulas[1].1.mask & 2, 0);
     assert_ne!(formulas[2].1.mask & 128, 0);
     assert_ne!(formulas[3].1.mask & 4096, 0);
-    assert!(output(&model).contains("前 \n\u{fffc}\n 后"));
+    assert!(output(&model).contains("前\n\u{fffc}\n后"));
     assert_eq!(
         Document::new(source).outline(false).unwrap()[0].title,
         "标题 $a_i b_i$😀"
@@ -182,7 +244,7 @@ fn twenty_pulldown_boundaries_match_the_documented_rules() {
             assert!(text.contains("$x"));
         }
         if index == 10 {
-            assert_eq!(text, "正文 \n\u{fffc}\n 继续。");
+            assert_eq!(text, "正文\n\u{fffc}\n继续。");
         }
         for block in &model.blocks {
             for formula in &block.content.math {

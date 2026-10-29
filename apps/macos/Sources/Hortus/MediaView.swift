@@ -67,7 +67,7 @@ actor LocalImageCache {
                     for (index, cell) in block.cells.enumerated() {
                         item.math.append(await mathService.prepare(cell.math, source: cell.source, size: size,
                             width: block.columns[index % block.columns.count] - 20, displayText: cell.text,
-                            previous: previousMath))
+                            previous: previousMath, cell: true))
                     }
                 }
                 result.append(item)
@@ -166,6 +166,7 @@ private final class TableCanvas: NSView {
             return label as String
         }.joined(separator: ", "))
         toolTip = math.flatMap { $0 }.compactMap(\.reason).joined(separator: "\n")
+        setAccessibilityHelp(toolTip)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func draw(_ dirtyRect: NSRect) {

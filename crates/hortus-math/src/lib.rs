@@ -17,6 +17,9 @@ use std::{
 
 mod katex_cmap;
 
+/// 正文公式的统一 em 倍数，供宿主和表格列宽共同使用。
+pub const TYPOGRAPHY_SCALE: f64 = 1.21;
+
 pub const MAX_SOURCE_BYTES: usize = 16_384;
 pub const MAX_ITEMS: usize = 32_768;
 const MAX_COMMANDS: usize = 131_072;

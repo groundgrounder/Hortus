@@ -155,14 +155,69 @@ impl Table {
     }
 }
 
+fn lock_formula_engine(
+    engine: &std::sync::Mutex<hortus_math::Engine>,
+) -> std::sync::MutexGuard<'_, hortus_math::Engine> {
+    match engine.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            *guard = hortus_math::Engine::default();
+            engine.clear_poison();
+            guard
+        }
+    }
+}
+
+#[cfg(test)]
+mod math_lock_tests {
+    #[test]
+    fn poisoned_table_engine_resets_cached_metrics_and_recovers() {
+        let engine = std::sync::Mutex::new(hortus_math::Engine::default());
+        let _ = std::panic::catch_unwind(|| {
+            let mut guard = engine.lock().unwrap();
+            guard
+                .set_metrics([(
+                    '中',
+                    hortus_math::GlyphMetrics {
+                        width: 1.,
+                        height: 1.,
+                        depth: 0.,
+                    },
+                )])
+                .unwrap();
+            assert!(
+                guard
+                    .render("中", hortus_math::Style::Text)
+                    .unwrap()
+                    .missing_metrics
+                    .is_empty()
+            );
+            panic!("inject table formula lock poison");
+        });
+        assert!(engine.is_poisoned());
+        assert!(
+            super::lock_formula_engine(&engine)
+                .render("x", hortus_math::Style::Text)
+                .is_ok()
+        );
+        assert_eq!(
+            super::lock_formula_engine(&engine)
+                .render("中", hortus_math::Style::Text)
+                .unwrap()
+                .missing_metrics,
+            vec!['中' as u32]
+        );
+        assert!(!engine.is_poisoned());
+    }
+}
+
 // 尺寸缓存与可用列宽无关；拖宽度只做水位分配，不重新排相同公式。
 fn formula_width(formula: &reading::Math, size: f64, fonts: &mut dyn FontMetrics) -> f64 {
     use std::sync::{Mutex, OnceLock};
     static ENGINE: OnceLock<Mutex<hortus_math::Engine>> = OnceLock::new();
-    let mut engine = ENGINE
-        .get_or_init(|| Mutex::new(hortus_math::Engine::default()))
-        .lock()
-        .unwrap();
+    let mut engine =
+        lock_formula_engine(ENGINE.get_or_init(|| Mutex::new(hortus_math::Engine::default())));
     let layout = (|| {
         let scene = engine.render(&formula.latex, hortus_math::Style::Text)?;
         if scene.missing_metrics.is_empty() {
@@ -189,7 +244,7 @@ fn formula_width(formula: &reading::Math, size: f64, fonts: &mut dyn FontMetrics
     })();
     layout.map_or_else(
         |_: hortus_math::Error| fonts.measure(&formula.display_source, size, 400).width,
-        |scene| scene.width * size * 1.21,
+        |scene| scene.width * size * hortus_math::TYPOGRAPHY_SCALE,
     )
 }
 

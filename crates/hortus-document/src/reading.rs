@@ -578,7 +578,7 @@ pub(crate) fn heading_text(
     spans: &[(Kind, Range<usize>)],
     refs: &[(usize, usize, String)],
 ) -> String {
-    let content = render(text, false, false, false, spans, refs);
+    let content = render_full_inner(text, false, false, false, spans, refs, true);
     let mut units: Vec<u16> = content.text.encode_utf16().collect();
     for formula in content.math.iter().rev() {
         units.splice(
@@ -693,7 +693,11 @@ pub(crate) fn inline(text: &str) -> Content {
         }
     }
     spans.sort_by_key(|(_, range)| (range.start, range.end));
-    render_full_inner(text, false, false, false, &spans, &[], true)
+    let mut content = render_full_inner(text, false, false, false, &spans, &[], true);
+    for formula in &mut content.math {
+        formula.latex = formula.latex.replace("\\|", "|");
+    }
+    content
 }
 
 fn render_full(
@@ -945,6 +949,59 @@ fn render_full_inner(
             formulas.insert(formula.source.start, formula);
         }
     }
+    // 只隐藏人为分行旁的空白；原有换行（包括 CRLF）保持原样。
+    let hidden = |index: usize| suppress[index] || masks[index] & (1 | 2048) != 0;
+    let mut whitespace = Vec::new();
+    let mut following_newline = HashMap::new();
+    for formula in formulas
+        .values()
+        .filter(|f| f.block && !f.latex.trim().is_empty())
+    {
+        let start = formula.source.start;
+        let end = formula.source.end;
+        let mut spaces = Vec::new();
+        for (index, ch) in text[..start].char_indices().rev() {
+            if ch == '\n' {
+                break;
+            }
+            if hidden(index) {
+                continue;
+            }
+            if ch.is_whitespace() {
+                spaces.push(index);
+            } else {
+                // 标记范围才是容器前缀，不能根据投影后的字符串猜测。
+                if !refs.iter().any(|(a, b, _)| *a <= index && index < *b) {
+                    whitespace.extend(spaces);
+                }
+                break;
+            }
+        }
+        let mut newline = false;
+        let mut spaces = Vec::new();
+        for (offset, ch) in text[end..].char_indices() {
+            let index = end + offset;
+            if ch == '\n' {
+                newline = true;
+                break;
+            }
+            if hidden(index) {
+                continue;
+            }
+            if ch.is_whitespace() {
+                spaces.push(index);
+            } else {
+                break;
+            }
+        }
+        following_newline.insert(start, newline);
+        if !newline {
+            whitespace.extend(spaces);
+        }
+    }
+    for index in whitespace {
+        suppress[index] = true;
+    }
     let mut byte = 0;
     let mut source16 = 0;
     let mut display16 = 0;
@@ -968,16 +1025,21 @@ fn render_full_inner(
         {
             // 混排 display 单独成行；只有容器缩进时保留它作为附件前缀。
             let line = result.text.rsplit('\n').next().unwrap_or("");
-            let prefix = line.trim();
-            let marker = matches!(prefix, "•" | "☐" | "☑")
-                || prefix.strip_suffix('.').is_some_and(|number| {
-                    !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
-                });
-            if !prefix.is_empty() && !marker {
+            let line_start = text[..byte].rfind('\n').map_or(0, |i| i + 1);
+            let only_prefix = text[line_start..byte].char_indices().all(|(offset, ch)| {
+                let index = line_start + offset;
+                ch.is_whitespace()
+                    || suppress[index]
+                    || masks[index] & (1 | 2048 | 131072) != 0
+                    || refs
+                        .iter()
+                        .any(|(start, end, _)| *start <= index && index < *end)
+            });
+            if !line.trim().is_empty() && !only_prefix {
                 value.insert(0, '\n');
                 formula_leading = 1;
             }
-            if end < text.len() && !text[end..].starts_with('\n') {
+            if end < text.len() && !following_newline[&byte] {
                 value.push('\n');
             }
         }

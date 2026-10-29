@@ -3,12 +3,11 @@ import CoreText
 import HortusCore
 
 enum MathTypography {
-    static let scale: Double = {
-        // 显式检查启动参数仅用于字号对比，不存入用户配置。
-        let args = ProcessInfo.processInfo.arguments
-        if args.contains(where: { $0.hasPrefix("--reading-inspection=") }), args.contains("--math-scale=1.15") { return 1.15 }
-        return 1.21
-    }()
+    static let scale = mathTypographyScale()
+    // 为常驻滚动条预留空间；overlay 样式无需增加公式盒子高度。
+    @MainActor static func scrollbarHeight(style: NSScroller.Style = NSScroller.preferredScrollerStyle) -> Double {
+        style == .legacy ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: style) : 0
+    }
     static let padding = 8.0
     static func bodySize(_ size: Double, mask: UInt32) -> Double {
         size * ([1: 1.6, 2: 1.35, 3: 1.15][Int(mask >> 24)] ?? 1)

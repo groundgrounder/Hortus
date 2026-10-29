@@ -19,7 +19,7 @@ struct ReadingTests {
         var view: DiagramTextView { editing.view }
         var document: NoteDocument { editing.document }
         init(_ source: String) throws { editing = try EditingTests.Fixture(source) }
-        func start(mathService: MathService = .shared) async throws {
+        func start(mathService: MathService = .shared, size: Double = 15) async throws {
             try await editing.ready()
             editing.coordinator.task?.cancel(); editing.coordinator.styling.reset()
             view.delegate = nil; view.textStorage?.delegate = nil
@@ -27,7 +27,7 @@ struct ReadingTests {
             view.isReading = true; view.isEditable = false; view.isRichText = true; view.allowsUndo = false
             view.readingCoordinator = coordinator; coordinator.view = view
             coordinator.update(ReadingText(mathService: mathService, document: document, path: "note.md", vault: editing.vault.path,
-                fontSize: 15, service: editing.service, core: editing.core) { _, _ in })
+                fontSize: size, service: editing.service, core: editing.core) { _, _ in })
             try await ready()
         }
         func ready() async throws {

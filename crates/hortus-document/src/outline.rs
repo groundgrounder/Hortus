@@ -15,7 +15,8 @@ pub(crate) fn parse(text: &str) -> Vec<Heading> {
     let options = Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_TABLES;
+        | Options::ENABLE_TABLES
+        | Options::ENABLE_MATH;
     let headings = Parser::new_ext(&text[front..], options)
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
@@ -38,13 +39,13 @@ pub(crate) fn parse(text: &str) -> Vec<Heading> {
         headings
             .iter()
             .flat_map(|(_, range)| {
-                markdown::analyze_bytes(&text[range.clone()])
+                markdown::analyze_bytes_with_math(&text[range.clone()], true)
                     .into_iter()
                     .map(|(kind, local)| (kind, local.start + range.start..local.end + range.start))
             })
             .collect::<Vec<_>>()
     } else {
-        markdown::analyze_bytes(text)
+        markdown::analyze_bytes_with_math(text, true)
     };
     let footnotes = reading::footnotes(text);
     let mut result = Vec::new();
