@@ -13,7 +13,7 @@ struct PreparedMathBlock: @unchecked Sendable {
 }
 
 extension MathService {
-    func prepare(_ blocks: [MathBlock], source: String, size: Double, width: Double, displayText: String = "") -> [PreparedMathBlock] {
+    func prepare(_ blocks: [MathBlock], source: String, size: Double, width: Double, displayText: String) -> [PreparedMathBlock] {
         let source = source as NSString
         let display = displayText as NSString
         return blocks.filter { $0.block && !$0.latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.compactMap { block in

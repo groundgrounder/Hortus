@@ -163,7 +163,10 @@ fn literal_math_hides_only_list_continuation_indentation() {
             );
             let text = output(&Cache::default().model(&source, false));
             assert!(
-                text.contains("解方程\n$$\nx^2=1\n$$"),
+                text.contains(&format!(
+                    "解方程\n{}$$\nx^2=1\n$$",
+                    if quote.is_empty() { indent } else { "" }
+                )),
                 "{source:?}: {text:?}"
             );
         }
@@ -249,4 +252,43 @@ fn incremental_fast_and_full_builds_match_and_only_one_block_changes() {
         &first.blocks[1].content,
         &cache.model(source, false).blocks[1].content
     ));
+}
+
+#[test]
+fn list_continuations_preserve_indentation_outside_formula_source() {
+    let cases = [
+        ("- 解方程\n\n  $$x^2=1$$\n", "• 解方程\n\n  \u{fffc}\n"),
+        ("- $$x$$\n  $$y$$\n", "• \u{fffc}\n  \u{fffc}\n"),
+        ("100. 解\n\n     $$x$$\n", "100. 解\n\n     \u{fffc}\n"),
+        ("- 文字\n  $a$ 续行\n", "• 文字\n  $a$ 续行\n"),
+    ];
+    let actual: Vec<_> = cases
+        .iter()
+        .map(|(source, _)| output(&Cache::default().model(source, false)))
+        .collect();
+    assert_eq!(
+        actual,
+        cases
+            .iter()
+            .map(|(_, expected)| *expected)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn callout_headers_require_a_quote_and_the_first_paragraph_line() {
+    for source in [
+        "[!a] $$a$$\n$$x$$\n",
+        "- [!a] $$a$$\n  $$x$$\n",
+        "> intro\n> [!a] $$a$$\n> $$x$$\n",
+        "> intro\n> [!a] title\n> $$x$$\n",
+    ] {
+        let formulas = math::scan(source);
+        assert!(!formulas.is_empty());
+        assert!(
+            formulas.iter().all(|formula| !formula.block),
+            "{source}: {formulas:?}"
+        );
+        assert!(!output(&Cache::default().model(source, false)).contains('\u{fffc}'));
+    }
 }

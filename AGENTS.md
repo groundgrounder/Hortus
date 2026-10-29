@@ -11,6 +11,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ./tools/build-macos.sh
 ./tools/test-macos.sh
+python3 -B tools/test-math-checks.py
 python3 -B tools/check-public-tree.py
 ```
 

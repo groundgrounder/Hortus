@@ -1,6 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
+python3 -B tools/test-math-checks.py
 ./tools/build-macos.sh
 swift test --package-path apps/macos -Xswiftc -warnings-as-errors \
   -Xlinker "$PWD/target/release/libhortus_ffi.a" \

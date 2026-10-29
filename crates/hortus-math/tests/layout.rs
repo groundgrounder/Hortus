@@ -433,3 +433,9 @@ fn public_corpus_covers_all_primitives_and_path_commands() {
         "{commands:?}"
     );
 }
+
+#[test]
+fn resource_limit_words_in_invalid_color_remain_a_parse_error() {
+    let error = layout(r"\color{resource limit}x", Style::Display, &HashMap::new()).unwrap_err();
+    assert!(matches!(error, Error::Parse(_)), "{error:?}");
+}

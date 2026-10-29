@@ -79,6 +79,41 @@ struct MediaTests {
         await f.close()
     }
 
+    @Test func compositionOnTheSeparatorBetweenTableAndImageMatchesFullBuild() async throws {
+        let source = Self.table + "\n![说明](a.png)\n"
+        let f = try EditingTests.Fixture(source)
+        try Self.writeImage(f.vault.appendingPathComponent("a.png"))
+        try await f.ready()
+        #expect(f.view.mediaBlocks.count == 2)
+        let separator = (source as NSString).range(of: "\n\n").location + 1
+        f.view.setSelectedRange(NSRange(location: separator, length: 0))
+        f.coordinator.mediaSelectionChanged()
+        let originalProjection = f.view.mediaProjection
+        f.view.setMarkedText("zhong", selectedRange: NSRange(location: 5, length: 0),
+                             replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(f.view.hasMarkedText())
+        #expect(f.view.mediaProjection.count == originalProjection.count)
+        #expect(f.view.mediaProjection.first == originalProjection.first)
+        let image = try #require(f.view.mediaProjection.last)
+        #expect((f.view.string as NSString).substring(with: image) == "![说明](a.png)")
+        f.view.insertText("中", replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(!f.view.hasMarkedText())
+        let expected = (source as NSString).replacingCharacters(in: NSRange(location: separator, length: 0), with: "中")
+        #expect(f.view.string == expected)
+        #expect(try await f.text() == expected)
+        f.view.setSelectedRange(NSRange(location: f.view.sourceUTF16Length, length: 0))
+        try await f.ready()
+        #expect(f.view.mediaBlocks.count == 1)
+        #expect(f.view.mediaProjection.count == 1)
+        let full = try EditingTests.Fixture(expected)
+        try Self.writeImage(full.vault.appendingPathComponent("a.png"))
+        try await full.ready()
+        #expect(full.view.mediaBlocks.count == 1)
+        #expect(full.view.mediaBlocks.map { $0.range } == f.view.mediaBlocks.map { $0.range })
+        await full.close()
+        await f.close()
+    }
+
     @Test func readingGeometryCacheQuickLookAndExternalReplacement() async throws {
         let source = "![Local](a.png)\n\n" + Self.table + "\n![Remote](https://example.invalid/a.png)\n"
         let f = try ReadingTests.Fixture(source)

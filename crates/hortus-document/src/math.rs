@@ -25,16 +25,9 @@ struct Paragraph {
 
 pub fn scan(text: &str) -> Vec<Formula> {
     let front = crate::markdown::body_start(text);
-    // callout 首行属于容器标题，不把同段中的公式误判为混排正文。
-    let mut offset = 0;
-    let headers: Vec<_> = text
-        .split_inclusive('\n')
-        .filter_map(|line| {
-            let start = offset;
-            offset += line.len();
-            is_callout_header(line).then_some(start..offset)
-        })
-        .collect();
+    // 标题必须是解析器识别的引用段落首行。
+    let mut quote_depth = 0usize;
+    let mut headers = Vec::new();
     let mut result: Vec<Formula> = Vec::new();
     let mut paragraphs: Vec<Paragraph> = Vec::new();
     for (event, range) in Parser::new_ext(
@@ -50,6 +43,13 @@ pub fn scan(text: &str) -> Vec<Formula> {
         match event {
             Event::Start(Tag::Paragraph | Tag::Item) => {
                 let item = matches!(event, Event::Start(Tag::Item));
+                if !item && quote_depth > 0 {
+                    let start = range.start + front;
+                    let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+                    if is_callout_header(&text[start..end]) {
+                        headers.push(start..end);
+                    }
+                }
                 paragraphs.push(Paragraph {
                     item,
                     ..Paragraph::default()
@@ -91,6 +91,16 @@ pub fn scan(text: &str) -> Vec<Formula> {
                     block: false,
                 });
             }
+            Event::Start(Tag::BlockQuote(_)) | Event::End(TagEnd::BlockQuote(_)) => {
+                if matches!(event, Event::Start(_)) {
+                    quote_depth += 1;
+                } else {
+                    quote_depth -= 1;
+                }
+                if let Some(paragraph) = paragraphs.last_mut() {
+                    paragraph.other = true;
+                }
+            }
             Event::SoftBreak | Event::HardBreak | Event::TaskListMarker(_) => {}
             Event::Text(ref text) if text.trim().is_empty() => {}
             _ if headers.iter().any(|header| {
@@ -109,29 +119,5 @@ pub fn scan(text: &str) -> Vec<Formula> {
 }
 
 fn is_callout_header(line: &str) -> bool {
-    let mut content = line.trim_start();
-    loop {
-        if let Some(rest) = content.strip_prefix('>') {
-            content = rest.trim_start_matches([' ', '\t']);
-            continue;
-        }
-        let marker = content
-            .strip_prefix(['-', '+', '*'])
-            .filter(|rest| rest.starts_with([' ', '\t']))
-            .map(|rest| rest.trim_start_matches([' ', '\t']));
-        if let Some(rest) = marker {
-            content = rest;
-            continue;
-        }
-        let digits = content.bytes().take_while(u8::is_ascii_digit).count();
-        if digits > 0
-            && matches!(content.as_bytes().get(digits), Some(b'.' | b')'))
-            && matches!(content.as_bytes().get(digits + 1), Some(b' ' | b'\t'))
-        {
-            content = content[digits + 2..].trim_start_matches([' ', '\t']);
-            continue;
-        }
-        break;
-    }
-    content.starts_with("[!") && content.contains(']')
+    line.starts_with("[!") && line.contains(']')
 }

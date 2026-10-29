@@ -145,9 +145,14 @@ fn finite(values: &[f64]) -> Result<(), Error> {
     }
 }
 
+fn is_resource_limit(message: &str) -> bool {
+    message == "Layout resource limit exceeded"
+        || message.starts_with("Macro expansion resource limit exceeded")
+}
+
 fn layout_error(error: impl fmt::Display) -> Error {
     let message = error.to_string();
-    if message.to_ascii_lowercase().contains("resource limit") {
+    if is_resource_limit(&message) {
         Error::ResourceLimit(message)
     } else {
         Error::InvalidLayout(message)
@@ -255,7 +260,7 @@ fn layout_inner(
     let ast = ratex_parser::parse(source).map_err(|e| {
         if e.message == "Recursion limit exceeded"
             || e.message.starts_with("Too many expansions")
-            || e.message.to_ascii_lowercase().contains("resource limit")
+            || is_resource_limit(&e.message)
         {
             Error::ResourceLimit(e.to_string())
         } else {
@@ -528,5 +533,30 @@ impl Engine {
         self.cache
             .push_back((source.into(), style, Arc::clone(&scene), bytes));
         Ok(scene)
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn layout_resource_errors_match_engine_messages_exactly() {
+        for message in [
+            "Layout resource limit exceeded",
+            "Macro expansion resource limit exceeded: too many nodes",
+        ] {
+            assert!(matches!(layout_error(message), Error::ResourceLimit(_)));
+        }
+        for message in [
+            "Invalid color: resource limit",
+            "Layout resource limit exceeded in an invalid label",
+            "layout resource limit exceeded",
+        ] {
+            assert!(
+                matches!(layout_error(message), Error::InvalidLayout(_)),
+                "{message}"
+            );
+        }
     }
 }

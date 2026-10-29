@@ -45,3 +45,15 @@ $$\color{red}\begin{array}{c:c}a&b\\\hdashline c&d\end{array}$$
 - $$x$$
 
 - $$x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x$$
+
+## Loose numbered continuation
+
+100. Solve the equation
+
+     $$x^2=1$$
+
+## Nested quote error
+
+> > $$
+> > \frac{1}
+> > $$

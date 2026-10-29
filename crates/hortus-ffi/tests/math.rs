@@ -129,3 +129,42 @@ fn error_display_source_removes_containers_but_original_ranges_preserve_them() {
         ));
     }
 }
+
+#[test]
+fn nested_quotes_and_empty_list_markers_strip_each_container_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = WorkspaceCore::in_directories(
+        temp.path().join("config").to_string_lossy().into(),
+        temp.path().join("cache").to_string_lossy().into(),
+    )
+    .unwrap();
+    let vault = temp.path().join("vault");
+    std::fs::create_dir(&vault).unwrap();
+    let sources = [
+        "> > $$\n> > \\frac{1}\n> > $$\n",
+        ">> $$\n>> \\frac{1}\n>> $$\n",
+        "> - $$\n>   \\frac{1}\n>   $$\n",
+        "-\n  $$\n  \\frac{1}\n  $$\n",
+        "1.\n   $$\n   \\frac{1}\n   $$\n",
+    ];
+    let actual: Vec<_> = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let name = format!("prefix-{index}.md");
+            std::fs::write(vault.join(&name), source).unwrap();
+            let session = core
+                .open_document(vault.to_string_lossy().into(), name)
+                .unwrap();
+            let blocks = session.math_blocks().unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert!(blocks[0].block);
+            assert!(matches!(
+                MathEngine::new().render(blocks[0].latex.clone(), MathStyle::Display),
+                Err(MathFailure::Parse { .. })
+            ));
+            blocks[0].display_source.clone()
+        })
+        .collect();
+    assert_eq!(actual, vec!["$$\n\\frac{1}\n$$"; sources.len()]);
+}

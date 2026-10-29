@@ -51,6 +51,7 @@ def check_memory(sample):
         assert len(memory) == 20, (key, memory)
         assert not all(b > a for a, b in zip(memory[10:], memory[11:])), (key, memory)
         assert max(memory[10:]) - min(memory[10:]) <= 16 * 1024 * 1024, (key, memory)
+        assert median(memory[15:20]) - median(memory[10:15]) <= 2 * 1024 * 1024, (key, memory)
     # ru_maxrss 只记录历史峰值；泄漏趋势由当前 RSS 和物理占用共同检查。
     assert len(peak) == 20, peak
     assert len(retained) == 20 and max(retained) <= 1, retained
@@ -94,11 +95,13 @@ def main():
                 assert data['missing_glyphs'] == 0 and data['unresolved_metrics'] == 0, data
                 assert required <= measured, (sorted(required - measured), data)
                 for case, section in [('dashed-array', 'Dashed array'), ('list-source', 'List source'),
-                                      ('quote-error', 'Quote error'), ('numbered-error', 'Numbered error')]:
+                                      ('quote-error', 'Quote error'), ('numbered-error', 'Numbered error'),
+                                      ('loose-numbered-continuation', 'Loose numbered continuation'),
+                                      ('nested-quote-error', 'Nested quote error')]:
                     name = f'{case}-{appearance}'
                     data = run(name, 'container-regressions.md', extra=[f'--{appearance}',
                         f'--math-reveal=## {section}', f'--snapshot={output / (name + ".png")}'])
-                    assert data['math_blocks'] == 7 and len(data['math_errors']) == 2, data
+                    assert data['math_blocks'] == 9 and len(data['math_errors']) == 3, data
                     assert data['missing_glyphs'] == 0 and data['unresolved_metrics'] == 0, data
                 run(f'wide-end-{appearance}', extra=[f'--{appearance}', '--math-index=23', '--math-scroll-end',
                     f'--snapshot={output / ("wide-end-" + appearance + ".png")}'])

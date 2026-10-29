@@ -182,7 +182,8 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
     if math {
         options |= Options::ENABLE_MATH;
     }
-    let mut list_prefixes = Vec::new();
+    let mut quote_prefix_ends = std::collections::HashMap::new();
+    let mut list_prefixes: Vec<Range<usize>> = Vec::new();
     let mut math_ranges = Vec::new();
     for (event, local) in Parser::new_ext(&text[body_start..], options).into_offset_iter() {
         let r = local.start + body_start..local.end + body_start;
@@ -268,28 +269,35 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
             }
             Event::Start(Tag::BlockQuote(_)) => {
                 let mut offset = r.start;
+                let mut line_start = text[..r.start].rfind('\n').map_or(0, |i| i + 1);
                 for line in source.split_inclusive('\n') {
-                    let indent = line.len() - line.trim_start_matches(' ').len();
-                    if line.as_bytes().get(indent) == Some(&b'>') {
+                    // 内层引用从外层已消费的前缀之后继续，不能再次隐藏同一个 >。
+                    let start = offset.max(*quote_prefix_ends.get(&line_start).unwrap_or(&offset));
+                    let rest = &text[start..offset + line.len()];
+                    let indent = rest.len() - rest.trim_start_matches(' ').len();
+                    if rest.as_bytes().get(indent) == Some(&b'>') {
                         let n = indent
                             + 1
-                            + usize::from(line.as_bytes().get(indent + 1) == Some(&b' '));
-                        push(spans, Kind::Marker, offset..offset + n);
+                            + usize::from(rest.as_bytes().get(indent + 1) == Some(&b' '));
+                        let end = start + n;
+                        quote_prefix_ends.insert(line_start, end);
+                        push(spans, Kind::Marker, start..end);
                         push(
                             spans,
                             Kind::Quote,
-                            offset + n..offset + line.trim_end_matches(['\n', '\r']).len(),
+                            end..offset + line.trim_end_matches(['\n', '\r']).len(),
                         );
-                        let content = &line[n..];
+                        let content = &rest[n..];
                         if let Some(end) = content
                             .strip_prefix("[!")
                             .and_then(|s| s.find(']').map(|i| i + 3))
                         {
-                            push(spans, Kind::Callout, offset + n..offset + line.len());
-                            push(spans, Kind::Marker, offset + n..offset + n + end);
+                            push(spans, Kind::Callout, start + n..offset + line.len());
+                            push(spans, Kind::Marker, start + n..start + n + end);
                         }
                     }
                     offset += line.len();
+                    line_start = offset;
                 }
             }
             Event::Start(Tag::Item) => {
@@ -325,7 +333,9 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
                             }
                         })
                     };
-                    let target = columns(&text[line_start..r.start + prefix]);
+                    let empty_marker = source[prefix..].starts_with(['\n', '\r']);
+                    let target = columns(&text[line_start..r.start + prefix])
+                        + usize::from(empty_marker && prefix == marker);
                     let mut offset = r.start;
                     for (index, line) in source.split_inclusive('\n').enumerate() {
                         if index > 0 {
@@ -387,13 +397,30 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
             _ => {}
         }
     }
-    // 只隐藏公式源码行的列表续行缩进，普通正文仍保留现有投影。
+    // 合并嵌套列表的重复前缀，再线性扫描公式范围；只隐藏源码范围以内的缩进。
+    // 公式前紧邻的缩进仍参与普通正文和块级附件的布局。
+    list_prefixes.sort_unstable_by_key(|range| range.start);
+    let mut prefixes: Vec<Range<usize>> = Vec::new();
     for prefix in list_prefixes {
-        if math_ranges
-            .iter()
-            .any(|range| prefix.start < range.end && prefix.end >= range.start)
-        {
-            push(spans, Kind::Marker, prefix);
+        if let Some(last) = prefixes.last_mut().filter(|last| prefix.start <= last.end) {
+            last.end = last.end.max(prefix.end);
+        } else {
+            prefixes.push(prefix);
+        }
+    }
+    let (mut prefix, mut formula) = (0, 0);
+    while prefix < prefixes.len() && formula < math_ranges.len() {
+        let left = &prefixes[prefix];
+        let right = &math_ranges[formula];
+        let start = left.start.max(right.start);
+        let end = left.end.min(right.end);
+        if start < end {
+            push(spans, Kind::Marker, start..end);
+        }
+        if left.end <= right.end {
+            prefix += 1;
+        } else {
+            formula += 1;
         }
     }
     // 闭合注释允许跨行；代码中的起始符不参与配对，未闭合时保留正常正文。

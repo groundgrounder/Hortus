@@ -186,8 +186,8 @@ struct MathTests {
         let source = "$$x$$"
         let block = MathBlock(blockId: 1, sourceStart: 0, sourceLength: 5, displayStart: 0,
                               displayLength: 1, displaySource: source, latex: "x", style: .display, block: true)
-        let prepared = try #require(await service.prepare([block], source: source, size: 15, width: 100).first)
-        #expect(prepared.reason?.hasPrefix(L10n.string("Formula fonts could not be loaded: %@; showing source", "").components(separatedBy: ":")[0]) == true)
+        let prepared = try #require(await service.prepare([block], source: source, size: 15, width: 100, displayText: "\u{fffc}").first)
+        #expect(prepared.reason?.hasPrefix(L10n.string("Formula fonts could not be loaded: %@; showing source", "").components(separatedBy: CharacterSet(charactersIn: ":："))[0]) == true)
     }
 
     @Test func longFormulaErrorsWrapSourceAndReasonByCharacterClusters() async throws {
@@ -195,9 +195,9 @@ struct MathTests {
         let source = "$$\(latex)$$"
         let block = MathBlock(blockId: 1, sourceStart: 0, sourceLength: UInt64((source as NSString).length),
                               displayStart: 0, displayLength: 1, displaySource: source, latex: latex, style: .display, block: true)
-        let prepared = try #require(await Self.service().prepare([block], source: source, size: 15, width: 100).first)
+        let prepared = try #require(await Self.service().prepare([block], source: source, size: 15, width: 100, displayText: "\u{fffc}").first)
         #expect(prepared.math == nil)
-        #expect(prepared.reason?.hasPrefix(L10n.string("Formula error: %@; showing source", "").components(separatedBy: ":")[0]) == true)
+        #expect(prepared.reason?.hasPrefix(L10n.string("Formula error: %@; showing source", "").components(separatedBy: CharacterSet(charactersIn: ":："))[0]) == true)
         #expect(prepared.fallbackLines.count > 1)
         #expect(prepared.reasonLines.count > 1)
         func assertWrapped(_ lines: [CTLine], text: String) {
@@ -250,6 +250,20 @@ struct MathTests {
                 }
                 await fixture.close()
             }
+        }
+    }
+
+    @Test func listContinuationFormulasStartAfterTheBodyIndentation() async throws {
+        for (marker, indent) in [("- ", "  "), ("100. ", "     ")] {
+            let fixture = try ReadingTests.Fixture("\(marker)Solve\n\n\(indent)$$x^2=1$$\n")
+            try await fixture.start(mathService: Self.service())
+            let view = try #require(fixture.view.mathViews.first)
+            let font = NSFont.systemFont(ofSize: 15)
+            let expected = (indent as NSString).size(withAttributes: [.font: font]).width
+            #expect(fixture.view.string.contains("\n\(indent)\u{fffc}"))
+            #expect(view.reservedPrefixWidth >= expected - 0.5)
+            #expect(view.scroll.frame.minX >= 12 + expected - 0.5)
+            await fixture.close()
         }
     }
 

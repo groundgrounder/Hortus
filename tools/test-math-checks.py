@@ -52,6 +52,15 @@ class MathCheckTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             MATH.check_memory(sample)
 
+    def test_paused_one_mib_per_round_leak_is_rejected(self):
+        for key in ['memory_bytes', 'footprint_bytes']:
+            with self.subTest(key=key):
+                sample = self.sample()
+                sample[key] = [90_000_000 + (index - int(index >= 15)) * 1024 * 1024
+                               for index in range(20)]
+                with self.assertRaises(AssertionError):
+                    MATH.check_memory(sample)
+
     def test_large_footprint_range_is_rejected(self):
         sample = self.sample()
         sample['footprint_bytes'][-1] += 17 * 1024 * 1024
