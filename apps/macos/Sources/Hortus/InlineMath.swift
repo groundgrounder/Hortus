@@ -75,7 +75,7 @@ final class InlineMathView: NSView {
             scroll.documentView = canvas; addSubview(scroll)
         } else { addSubview(canvas) }
         toolTip = attachment.item.prepared.reason
-        setAccessibilityElement(true); setAccessibilityRole(.image)
+        setAccessibilityElement(false); setAccessibilityRole(.image)
         setAccessibilityLabel(L10n.string("Formula: %@", attachment.item.prepared.block.latex))
         setAccessibilityHelp(attachment.item.prepared.reason)
     }
@@ -126,12 +126,13 @@ private final class InlineMathCanvas: NSView {
 }
 
 extension DiagramTextView {
-    func installInlineMath(_ items: [NoteMath], width: Double, size: Double) {
+    func installInlineMath(_ items: [NoteMath], width: Double, size: Double, replacing: NSRange? = nil) {
         let previous = inlineMath
         let retained = Dictionary(previous.values.map { ($0.item.identity, $0) }, uniquingKeysWith: { first, _ in first })
         var next: [Int: InlineMathAttachment] = [:]
-        var changed = previous.mapValues { $0.item.range }
-        let scrollerStyle = NSScroller.preferredScrollerStyle
+        var removed = retained
+        var changed: [NSRange] = []
+        let scrollerStyle = formulaScrollerStyle
         let scrollbarHeight = MathTypography.scrollbarHeight(style: scrollerStyle)
         var ascents: [Double: Double] = [:]
         for item in items {
@@ -139,7 +140,7 @@ extension DiagramTextView {
             if let old = retained[item.identity], old.item.prepared.source == item.prepared.source,
                old.availableWidth == width, old.bodySize == size, old.foreground == color,
                old.scrollbarHeight == (old.wide ? scrollbarHeight : 0) {
-                if old.item.range == item.range { changed.removeValue(forKey: item.range.location) }
+                removed.removeValue(forKey: item.identity)
                 old.item = item; next[item.range.location] = old
             } else {
                 let fontSize = MathTypography.bodySize(size, mask: item.prepared.block.mask)
@@ -147,12 +148,23 @@ extension DiagramTextView {
                 ascents[fontSize] = ascent
                 next[item.range.location] = InlineMathAttachment(item, width: width, size: size, foreground: color,
                     scrollerStyle: scrollerStyle, bodyAscent: ascent)
+                changed.append(item.range)
             }
-            if previous[item.range.location] !== next[item.range.location] { changed[item.range.location] = item.range }
+        }
+        for old in removed.values {
+            guard let replacing else { changed.append(old.item.range); continue }
+            let range = old.item.range
+            if range.location < replacing.location {
+                changed.append(NSRange(location: range.location, length: min(NSMaxRange(range), replacing.location) - range.location))
+            }
+            if NSMaxRange(range) > NSMaxRange(replacing) {
+                let start = max(range.location, NSMaxRange(replacing))
+                changed.append(NSRange(location: start, length: NSMaxRange(range) - start))
+            }
         }
         // 新表必须在文本存储编辑前可见，原生段落回调随时可能请求附件。
         inlineMath = next
-        inlineMathInvalidation = changed.values.reduce(nil as NSRange?) { current, range in current.map { NSUnionRange($0, range) } ?? range }
+        inlineMathInvalidation = changed.reduce(nil as NSRange?) { current, range in current.map { NSUnionRange($0, range) } ?? range }
     }
 
     func invalidateInlineMath() {

@@ -20,6 +20,102 @@ fn cases(source: &str) -> Vec<&str> {
 }
 
 #[test]
+fn display_math_uses_visible_newlines_and_preserves_code_spaces() {
+    let cases = [
+        ("$$x$$ %%a\nb%% tail\n", "\u{fffc}\n  tail\n"),
+        ("前文 %%a\nb%% $$x$$ 后\n", "前文  \n\u{fffc}\n 后\n"),
+        ("[^1] $$x$$\n\n[^1]: n\n", "[1] \n\u{fffc}\n\n[1] n\n"),
+        ("> [!note] $$x$$\n> body\n", "note · \n\u{fffc}\nbody\n"),
+        ("$$x$$\r\rnext\r", "\u{fffc}\n\r\rnext\r"),
+        ("前\r$$x$$\r后\r", "前\r\u{fffc}\n\r后\r"),
+        ("`a `$$x$$` b`", "a \n\u{fffc}\n b"),
+        ("t[^1] $$x$$ x\n\n[^1]: n\n", "t[1]\n\u{fffc}\nx\n\n[1] n\n"),
+    ];
+    let actual: Vec<_> = cases
+        .iter()
+        .map(|(source, _)| output(&Cache::default().model(source, false)))
+        .collect();
+    assert_eq!(
+        actual,
+        cases
+            .iter()
+            .map(|(_, expected)| *expected)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn gfm_table_double_backslash_pipe_matches_display_source() {
+    let (_, table) = hortus_document::media::Table::parse("| $a\\\\|b$ |\n|---|\n").unwrap();
+    let formula = &table.rows[0][0].math[0];
+    assert_eq!(formula.latex, r"a\|b");
+    assert_eq!(formula.display_source, r"$a\|b$");
+}
+
+#[test]
+fn table_error_source_uses_code_metrics_and_does_not_overlap_next_column() {
+    use hortus_diagram::{DeterministicMetrics, FontInfo, FontMetrics, Measurement};
+    struct CodeMetrics {
+        sources: Vec<String>,
+    }
+    impl FontMetrics for CodeMetrics {
+        fn measure(&mut self, text: &str, size: f64, weight: u16) -> Measurement {
+            DeterministicMetrics.measure(text, size, weight)
+        }
+        fn measure_code(&mut self, text: &str, _size: f64) -> Measurement {
+            self.sources.push(text.into());
+            Measurement {
+                width: 420.,
+                ..Measurement::default()
+            }
+        }
+        fn used_fonts(&self) -> Vec<FontInfo> {
+            vec![]
+        }
+    }
+    let (_, table) = hortus_document::media::Table::parse(
+        r"| Error | Next |
+|---|---|
+| $\unknowncommand{abcdefghijklmnop}$ | end |
+",
+    )
+    .unwrap();
+    let mut metrics = CodeMetrics { sources: vec![] };
+    let layout = table.layout(380., 15., &mut metrics);
+    assert_eq!(metrics.sources, [r"$\unknowncommand{abcdefghijklmnop}$"]);
+    assert_eq!(layout.widths[0], 440.);
+    assert!(layout.scrolls);
+    assert!(layout.widths[1] >= layout.minimum);
+}
+
+#[test]
+#[ignore = "独立运行的构建计时，避免并行测试干扰"]
+fn dense_math_and_plain_heading_timings() {
+    let dense = "w $$y$$ ".repeat(16_000);
+    let headings = "# Plain **heading** text\n\n".repeat(11_000);
+    for _ in 0..7 {
+        let start = std::time::Instant::now();
+        let model = Cache::default().model(&dense, false);
+        assert_eq!(
+            model
+                .blocks
+                .iter()
+                .map(|b| b.content.math.len())
+                .sum::<usize>(),
+            16_000
+        );
+        let dense_ms = start.elapsed().as_secs_f64() * 1000.;
+        let start = std::time::Instant::now();
+        let mut document = hortus_document::Document::new(&headings);
+        assert_eq!(document.outline(false).unwrap().len(), 11_000);
+        println!(
+            "dense_math_ms={dense_ms:.3} plain_headings_ms={:.3}",
+            start.elapsed().as_secs_f64() * 1000.
+        );
+    }
+}
+
+#[test]
 fn display_math_preserves_existing_newlines_and_source_container_prefixes() {
     for (source, expected) in [
         ("$$a+b$$\r\n\r\nnext\r\n", "\u{fffc}\r\n\r\nnext\r\n"),
@@ -146,7 +242,7 @@ fn table_formula_widths_fit_three_reading_columns() {
         let layout = table.layout(width, 15.0, &mut DeterministicMetrics);
         assert!(layout.width <= width + 0.001);
         assert!(!layout.scrolls);
-        assert!(layout.widths[0] >= scene.width * 15.0 * 1.21 + 20.0);
+        assert!(layout.widths[0] >= scene.width * 15.0 * hortus_math::TYPOGRAPHY_SCALE + 20.0);
     }
 }
 

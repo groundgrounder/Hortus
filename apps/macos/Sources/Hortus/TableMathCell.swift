@@ -28,6 +28,7 @@ final class TableMathCell: NSTextAttachmentCell {
             MathRenderer.draw(math, in: context, origin: cellFrame.origin, foreground: color,
                 deviceScale: Double(controlView?.window?.backingScaleFactor ?? 2))
         } else if let line = prepared.fallbackLines.first {
+            NSColor.quaternaryLabelColor.withAlphaComponent(0.10).setFill(); cellFrame.fill()
             context.saveGState(); context.setFillColor(color)
             context.translateBy(x: cellFrame.minX, y: cellFrame.minY + measuredSize.height - descent)
             context.scaleBy(x: 1, y: -1); context.textMatrix = .identity; context.textPosition = .zero

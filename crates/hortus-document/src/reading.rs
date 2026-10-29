@@ -578,6 +578,12 @@ pub(crate) fn heading_text(
     spans: &[(Kind, Range<usize>)],
     refs: &[(usize, usize, String)],
 ) -> String {
+    if !text.contains('$') {
+        return render(text, false, false, false, spans, refs)
+            .text
+            .trim()
+            .replace(['\r', '\n'], " ");
+    }
     let content = render_full_inner(text, false, false, false, spans, refs, true);
     let mut units: Vec<u16> = content.text.encode_utf16().collect();
     for formula in content.math.iter().rev() {
@@ -696,6 +702,7 @@ pub(crate) fn inline(text: &str) -> Content {
     let mut content = render_full_inner(text, false, false, false, &spans, &[], true);
     for formula in &mut content.math {
         formula.latex = formula.latex.replace("\\|", "|");
+        formula.display_source = formula.display_source.replace("\\|", "|");
     }
     content
 }
@@ -949,7 +956,30 @@ fn render_full_inner(
             formulas.insert(formula.source.start, formula);
         }
     }
-    // 只隐藏人为分行旁的空白；原有换行（包括 CRLF）保持原样。
+    // 脚注定义是容器前缀；引用与 callout 标题会投影成可见文字。
+    let mut container_prefix = vec![false; text.len()];
+    let mut reference = vec![false; text.len()];
+    let mut visible_label = vec![false; text.len()];
+    for (kind, range) in spans {
+        if matches!(kind, Kind::Marker | Kind::Task) {
+            container_prefix[range.clone()].fill(true);
+        }
+    }
+    for (start, end, _) in refs {
+        if text[*start..*end].ends_with("]:") {
+            container_prefix[*start..*end].fill(true);
+        } else {
+            reference[*start..*end].fill(true);
+            container_prefix[*start..*end].fill(false);
+        }
+    }
+    for (start, (end, _, mask)) in &replacements {
+        if mask & 4096 != 0 && text[*start..*end].starts_with("[!") {
+            visible_label[*start..*end].fill(true);
+            container_prefix[*start..*end].fill(false);
+        }
+    }
+    // 只隐藏人为分行旁的空白；代码内空格、跨行注释和原有换行保持原样。
     let hidden = |index: usize| suppress[index] || masks[index] & (1 | 2048) != 0;
     let mut whitespace = Vec::new();
     let mut following_newline = HashMap::new();
@@ -959,34 +989,49 @@ fn render_full_inner(
     {
         let start = formula.source.start;
         let end = formula.source.end;
+        let mut preceding_hidden_newline = false;
         let mut spaces = Vec::new();
         for (index, ch) in text[..start].char_indices().rev() {
-            if ch == '\n' {
+            if masks[index] & 16 != 0 || visible_label[index] {
                 break;
             }
-            if hidden(index) {
+            if reference[index] {
                 continue;
+            }
+            if hidden(index) {
+                preceding_hidden_newline |= matches!(ch, '\r' | '\n');
+                continue;
+            }
+            if matches!(ch, '\r' | '\n') {
+                break;
             }
             if ch.is_whitespace() {
                 spaces.push(index);
             } else {
                 // 标记范围才是容器前缀，不能根据投影后的字符串猜测。
-                if !refs.iter().any(|(a, b, _)| *a <= index && index < *b) {
+                if !container_prefix[index] && !preceding_hidden_newline {
                     whitespace.extend(spaces);
                 }
                 break;
             }
         }
         let mut newline = false;
+        let mut bare_cr = false;
+        let mut hidden_newline = false;
         let mut spaces = Vec::new();
         for (offset, ch) in text[end..].char_indices() {
             let index = end + offset;
-            if ch == '\n' {
-                newline = true;
+            if masks[index] & 16 != 0 {
                 break;
             }
             if hidden(index) {
+                hidden_newline |= matches!(ch, '\r' | '\n');
                 continue;
+            }
+            if matches!(ch, '\r' | '\n') {
+                newline = true;
+                bare_cr = ch == '\r' && !text[index..].starts_with("\r\n");
+                break;
             }
             if ch.is_whitespace() {
                 spaces.push(index);
@@ -994,8 +1039,9 @@ fn render_full_inner(
                 break;
             }
         }
-        following_newline.insert(start, newline);
-        if !newline {
+        // 裸 CR 参与可见行判断且不能隐藏；保留既有 display 的 LF 分隔符与原始 CR 空行。
+        following_newline.insert(start, newline && !bare_cr);
+        if !newline && !hidden_newline && !preceding_hidden_newline {
             whitespace.extend(spaces);
         }
     }
@@ -1005,6 +1051,7 @@ fn render_full_inner(
     let mut byte = 0;
     let mut source16 = 0;
     let mut display16 = 0;
+    let mut only_prefix = true;
     while byte < text.len() {
         let (end, mut value, mask) = if let Some((end, value, mask)) = replacements.remove(&byte) {
             (end, value, mask)
@@ -1024,23 +1071,22 @@ fn render_full_inner(
             && !formula.latex.trim().is_empty()
         {
             // 混排 display 单独成行；只有容器缩进时保留它作为附件前缀。
-            let line = result.text.rsplit('\n').next().unwrap_or("");
-            let line_start = text[..byte].rfind('\n').map_or(0, |i| i + 1);
-            let only_prefix = text[line_start..byte].char_indices().all(|(offset, ch)| {
-                let index = line_start + offset;
-                ch.is_whitespace()
-                    || suppress[index]
-                    || masks[index] & (1 | 2048 | 131072) != 0
-                    || refs
-                        .iter()
-                        .any(|(start, end, _)| *start <= index && index < *end)
-            });
-            if !line.trim().is_empty() && !only_prefix {
+            if !only_prefix {
                 value.insert(0, '\n');
                 formula_leading = 1;
             }
             if end < text.len() && !following_newline[&byte] {
                 value.push('\n');
+            }
+        }
+        // 随显示投影推进可见行首，隐藏的换行不会重置状态。
+        for ch in value.chars() {
+            if matches!(ch, '\r' | '\n') {
+                only_prefix = true;
+            } else if !ch.is_whitespace()
+                && (!container_prefix[byte] || formulas.contains_key(&byte))
+            {
+                only_prefix = false;
             }
         }
         let source_end = source16 + text[byte..end].encode_utf16().count();

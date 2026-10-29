@@ -145,6 +145,7 @@ def main():
                 if prefix_edit:
                     assert all(r['reused_inline_attachments'] >= 499 for r in refreshes), summary
                     assert all(r['shifted_inline_attachments'] >= 499 for r in refreshes), summary
+                    assert all(r['attachment_invalidation']['length'] <= 1 for r in refreshes), summary
         if args.checks in ['all', 'memory']:
             sample = run('memory', 'performance-note.md', 'math-memory')
             check_memory(sample)

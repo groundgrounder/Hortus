@@ -4,6 +4,8 @@ use hortus_diagram::SystemFonts;
 use hortus_document::{media, reading};
 use std::sync::{Mutex, OnceLock};
 
+static FONTS: OnceLock<Mutex<Option<SystemFonts>>> = OnceLock::new();
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MediaRun {
     pub start: u64,
@@ -61,7 +63,6 @@ pub(crate) fn blocks(
     width: f64,
     size: f64,
 ) -> Result<Vec<MediaBlock>, CoreError> {
-    static FONTS: OnceLock<Mutex<Option<SystemFonts>>> = OnceLock::new();
     let mut result = Vec::new();
     if model
         .blocks
@@ -93,7 +94,13 @@ pub(crate) fn blocks(
             };
             match &item.kind {
                 media::Kind::Table(table) => {
-                    let mut fonts = FONTS.get_or_init(|| Mutex::new(None)).lock().unwrap();
+                    let cache = FONTS.get_or_init(|| Mutex::new(None));
+                    let mut fonts = cache.lock().unwrap_or_else(|poisoned| {
+                        let mut guard = poisoned.into_inner();
+                        *guard = None;
+                        cache.clear_poison();
+                        guard
+                    });
                     if fonts.is_none() {
                         *fonts = Some(
                             SystemFonts::new().map_err(|_| CoreError::failure("diagram.font"))?,
@@ -176,10 +183,20 @@ pub(crate) fn blocks(
     Ok(result)
 }
 
+impl DocumentSession {
+    fn lock_media_state(&self) -> std::sync::MutexGuard<'_, crate::document::State> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            let guard = poisoned.into_inner();
+            self.state.clear_poison();
+            guard
+        })
+    }
+}
+
 #[uniffi::export]
 impl DocumentSession {
     pub fn media_blocks(&self, width: f64, size: f64) -> Result<Vec<MediaBlock>, CoreError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_media_state();
         let revision = state.document.revision();
         if state
             .reading_snapshot
@@ -201,7 +218,7 @@ impl DocumentSession {
         )
     }
     pub fn attachment_metrics(&self) -> AttachmentMetrics {
-        let stats = self.state.lock().unwrap().image_resolver.stats();
+        let stats = self.lock_media_state().image_resolver.stats();
         AttachmentMetrics {
             files: stats.files,
             directories: stats.directories,
@@ -211,7 +228,7 @@ impl DocumentSession {
         }
     }
     pub fn align_table(&self, caret: u64) -> Result<Option<TablePatch>, CoreError> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock_media_state();
         Ok(
             media::align_table(&state.document.text()?, caret as usize).map(|patch| TablePatch {
                 start: patch.source.start as u64,
@@ -226,6 +243,55 @@ impl DocumentSession {
 mod tests {
     use crate::WorkspaceCore;
     use std::fs;
+
+    fn table_session() -> (
+        tempfile::TempDir,
+        std::sync::Arc<crate::document::DocumentSession>,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("vault");
+        fs::create_dir(&root).unwrap();
+        fs::write(
+            root.join("table.md"),
+            "| Formula | Other |\n|---|---|\n| $x$ | end |\n",
+        )
+        .unwrap();
+        let core = WorkspaceCore::in_directories(
+            directory.path().join("config").to_string_lossy().into(),
+            directory.path().join("cache").to_string_lossy().into(),
+        )
+        .unwrap();
+        let session = core
+            .open_document(root.to_string_lossy().into(), "table.md".into())
+            .unwrap();
+        (directory, session)
+    }
+
+    #[test]
+    fn table_layout_recovers_poisoned_font_cache() {
+        let (_directory, session) = table_session();
+        let first = session.media_blocks(700., 15.).unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = super::FONTS.get().unwrap().lock().unwrap();
+            panic!("inject font cache poison");
+        }));
+        let recovered = session.media_blocks(700., 15.).unwrap();
+        assert_eq!(first[0].columns, recovered[0].columns);
+        assert!(!super::FONTS.get().unwrap().is_poisoned());
+    }
+
+    #[test]
+    fn table_layout_recovers_poisoned_session_without_losing_content() {
+        let (_directory, session) = table_session();
+        let first = session.media_blocks(700., 15.).unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = session.state.lock().unwrap();
+            panic!("inject session poison");
+        }));
+        let recovered = session.media_blocks(700., 15.).unwrap();
+        assert_eq!(first[0].columns, recovered[0].columns);
+        assert_eq!(recovered[0].cells[2].math[0].latex, "x");
+    }
 
     #[test]
     fn reopened_document_finds_external_attachment_changes_without_vault_state() {

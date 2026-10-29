@@ -380,6 +380,34 @@ final class NoteLayoutFragment: NSTextLayoutFragment {
 }
 
 @MainActor
+private final class FormulaAccessibilityGeometry {
+    weak var host: DiagramTextView?
+    var item: NoteMath
+    init(_ item: NoteMath, host: DiagramTextView) {
+        self.item = item; self.host = host
+    }
+    func frame() -> NSRect { host?.formulaAccessibilityFrame(item) ?? .zero }
+}
+
+@MainActor
+final class FormulaAccessibilityElement: NSAccessibilityElement {
+    private nonisolated let geometry: FormulaAccessibilityGeometry
+    var item: NoteMath {
+        get { geometry.item }
+        set { geometry.item = newValue }
+    }
+    init(_ item: NoteMath, host: DiagramTextView) {
+        geometry = FormulaAccessibilityGeometry(item, host: host)
+        super.init()
+        setAccessibilityParent(host); setAccessibilityRole(.image)
+    }
+    override func accessibilityFrame() -> NSRect {
+        let geometry = geometry
+        return MainActor.assumeIsolated { geometry.frame() }
+    }
+}
+
+@MainActor
 final class DiagramTextView: NSTextView {
     override func copy(_ sender: Any?) {
         if isReading {
@@ -397,7 +425,8 @@ final class DiagramTextView: NSTextView {
     }
     override func writeSelection(to pasteboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
         guard isReading else { return super.writeSelection(to: pasteboard, type: type) }
-        return type == .string && writeSelection(to: pasteboard, types: [.string])
+        guard type == .string, let text = selectionPlainText() else { return false }
+        return pasteboard.setString(text, forType: .string)
     }
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
@@ -420,7 +449,9 @@ final class DiagramTextView: NSTextView {
     var inlineMathViews: [InlineMathView] = []
     var inlineMathInvalidation: NSRange?
     private var accessibleFormulas: [NoteMath] = []
-    private var formulaAccessibility: [MathIdentity: NSAccessibilityElement] = [:]
+    private var formulaAccessibility: [MathIdentity: FormulaAccessibilityElement] = [:]
+    private var readingAccessibilityChildren: [Any] = []
+    var formulaScrollerStyle: NSScroller.Style { enclosingScrollView?.scrollerStyle ?? NSScroller.preferredScrollerStyle }
     var formulaTooltips: [NSView.ToolTipTag: String] = [:]
     var mathViews: [MathBlockView] = [] { didSet { mathParagraphs.removeAll(keepingCapacity: true) } }
     var mathParagraphs: [Int: MathBlockView] = [:]
@@ -737,40 +768,76 @@ final class DiagramTextView: NSTextView {
     }
     func installFormulaAccessibility(_ items: [NoteMath]) {
         accessibleFormulas = items.sorted { $0.range.location < $1.range.location }
-        let identities = Set(items.map(\.identity))
-        formulaAccessibility = formulaAccessibility.filter { identities.contains($0.key) }
-        for item in items {
-            if let element = formulaAccessibility[item.identity] {
-                element.setAccessibilityLabel(L10n.string("Formula: %@", item.prepared.block.latex))
+        var next: [MathIdentity: FormulaAccessibilityElement] = [:]
+        next.reserveCapacity(items.count)
+        var labels: [String: String] = [:]
+        var ordered: [(Int, Any)] = accessibleFormulas.map { item in
+            let element = formulaAccessibility[item.identity] ?? FormulaAccessibilityElement(item, host: self)
+            let previous = formulaAccessibility[item.identity]?.item
+            element.item = item
+            if previous?.prepared.block.latex != item.prepared.block.latex {
+                let latex = item.prepared.block.latex
+                let label = labels[latex] ?? L10n.string("Formula: %@", latex)
+                labels[latex] = label
+                element.setAccessibilityLabel(label)
+            }
+            if previous == nil || previous?.prepared.reason != item.prepared.reason {
                 element.setAccessibilityHelp(item.prepared.reason)
             }
-        }
-    }
-    override func accessibilityChildren() -> [Any]? {
-        guard isReading else { return super.accessibilityChildren() }
-        let children = (super.accessibilityChildren() ?? []).filter {
-            !($0 is InlineMathView) && !($0 is MathBlockView) && !($0 is DiagramView) && !($0 is MediaView)
-        }
-        // 查询时才创建完整正文的元素；离屏元素与视图挂载无关，并按稳定身份保留。
-        var ordered: [(Int, Any)] = accessibleFormulas.map { item in
-            let element = formulaAccessibility[item.identity] ?? NSAccessibilityElement()
-            element.setAccessibilityParent(self); element.setAccessibilityRole(.image)
-            element.setAccessibilityLabel(L10n.string("Formula: %@", item.prepared.block.latex))
-            element.setAccessibilityHelp(item.prepared.reason)
-            formulaAccessibility[item.identity] = element
+            next[item.identity] = element
             return (item.range.location, element)
         }
-        if let window {
-            for formula in inlineMathViews {
-                formulaAccessibility[formula.attachment.item.identity]?.setAccessibilityFrame(window.convertToScreen(convert(formula.frame, to: nil)))
-            }
-            for formula in mathViews where !formula.isHidden {
-                formulaAccessibility[formula.item.identity]?.setAccessibilityFrame(window.convertToScreen(convert(formula.frame, to: nil)))
-            }
-        }
+        formulaAccessibility = next
         ordered += blocks.compactMap { block in diagramViews[block.ordinal].map { (block.range.location, $0 as Any) } }
         ordered += zip(mediaBlocks, mediaViews).map { ($0.0.range.location, $0.1 as Any) }
-        return children + ordered.sorted { $0.0 < $1.0 }.map { $0.1 }
+        let native = (super.accessibilityChildren() ?? []).filter {
+            !($0 is InlineMathView) && !($0 is MathBlockView) && !($0 is DiagramView) && !($0 is MediaView)
+        }
+        readingAccessibilityChildren = native + ordered.sorted { $0.0 < $1.0 }.map { $0.1 }
+    }
+    override func accessibilityChildren() -> [Any]? {
+        isReading ? readingAccessibilityChildren : super.accessibilityChildren()
+    }
+    override func accessibilityAttributedString(for range: NSRange) -> NSAttributedString? {
+        guard isReading else { return super.accessibilityAttributedString(for: range) }
+        guard let storage = textStorage, range.location != NSNotFound, range.location <= storage.length,
+              range.length <= storage.length - range.location else { return nil }
+        let result = NSMutableAttributedString(attributedString:
+            super.accessibilityAttributedString(for: range) ?? storage.attributedSubstring(from: range))
+        for item in accessibleFormulas.reversed() where NSIntersectionRange(item.range, range).length > 0 {
+            var label = L10n.string("Formula: %@", item.prepared.block.latex)
+            if let reason = item.prepared.reason { label += " — " + reason }
+            let local = NSRange(location: item.range.location - range.location, length: item.range.length)
+            result.replaceCharacters(in: local, with: label)
+        }
+        return result
+    }
+    override func accessibilityString(for range: NSRange) -> String? {
+        isReading ? accessibilityAttributedString(for: range)?.string : super.accessibilityString(for: range)
+    }
+    func formulaAccessibilityFrame(_ item: NoteMath) -> NSRect {
+        guard let window, let manager = textLayoutManager, let content = manager.textContentManager,
+              let location = content.location(content.documentRange.location, offsetBy: item.range.location),
+              let fragment = manager.textLayoutFragment(for: location), fragment.state.rawValue >= NSTextLayoutFragment.State.layoutAvailable.rawValue else { return .zero }
+        var rect: CGRect
+        if let attachment = inlineMath[item.range.location] {
+            rect = fragment.frameForTextAttachment(at: location)
+            guard !rect.isEmpty else { return .zero }
+            rect.size = attachment.bounds.size
+            let local = content.offset(from: fragment.rangeInElement.location, to: location)
+            if let line = fragment.textLineFragments.first(where: { NSLocationInRange(local, $0.characterRange) }) {
+                rect.origin.y = line.typographicBounds.minY + line.glyphOrigin.y - attachment.ascent
+            }
+            rect = rect.offsetBy(dx: fragment.layoutFragmentFrame.minX + textContainerInset.width,
+                                 dy: fragment.layoutFragmentFrame.minY + textContainerInset.height)
+        } else if let math = mathViews.first(where: { $0.item.identity == item.identity }) {
+            rect = CGRect(origin: CGPoint(x: textContainerInset.width - 12, y: fragment.layoutFragmentFrame.minY + textContainerInset.height),
+                          size: CGSize(width: math.frame.width, height: math.preferredSize.height))
+        } else { return .zero }
+        return window.convertToScreen(convert(rect, to: nil))
+    }
+    func clearFormulaTooltips() {
+        for tag in formulaTooltips.keys { removeToolTip(tag) }; formulaTooltips = [:]
     }
     @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
         formulaTooltips[tag] ?? ""
@@ -789,7 +856,7 @@ final class DiagramTextView: NSTextView {
         let oldInlineViews = inlineMathViews
         let retainedInline = Dictionary(oldInlineViews.map { (ObjectIdentifier($0.attachment), $0) }, uniquingKeysWith: { first, _ in first })
         var mounted = Set<ObjectIdentifier>()
-        for tag in formulaTooltips.keys { removeToolTip(tag) }; formulaTooltips = [:]
+        clearFormulaTooltips()
         inlineMathViews = []
         let ensured = ProcessInfo.processInfo.systemUptime
         // 由原生视口控制器排版可见内容，不为放置叠加视图强制排完整篇笔记。
@@ -816,10 +883,6 @@ final class DiagramTextView: NSTextView {
                     guard rect.intersects(self.visibleRect) else { return }
                     let formula = retainedInline[ObjectIdentifier(attachment)] ?? InlineMathView(attachment)
                     formula.frame = rect
-                    if let element = self.formulaAccessibility[attachment.item.identity],
-                       let window = self.window {
-                        element.setAccessibilityFrame(window.convertToScreen(self.convert(rect, to: nil)))
-                    }
                     if formula.superview !== self { self.addSubview(formula) }
                     formula.isHidden = false
                     self.inlineMathViews.append(formula)
@@ -843,10 +906,6 @@ final class DiagramTextView: NSTextView {
                 }
                 math.frame.origin = CGPoint(x: self.textContainerInset.width - 12, y: fragment.layoutFragmentFrame.minY + self.textContainerInset.height)
                 math.isHidden = false
-                if let element = self.formulaAccessibility[math.item.identity],
-                   let window = self.window {
-                    element.setAccessibilityFrame(window.convertToScreen(self.convert(math.frame, to: nil)))
-                }
             }
             let indices = self.mediaIndices(at: offset)
             var mediaY = fragment.layoutFragmentFrame.minY

@@ -205,6 +205,7 @@ struct ReadingText: NSViewRepresentable {
         view.mediaViews = []; view.mediaBlocks = []
         view.mathViews.forEach { $0.removeFromSuperview() }; view.mathViews = []
         view.inlineMath = [:]; view.installFormulaAccessibility([])
+        view.clearFormulaTooltips()
         view.inlineMathViews.forEach { $0.removeFromSuperview() }; view.inlineMathViews = []
         view.diagramViews = [:]; view.string = ""; view.textLayoutManager?.delegate = nil
         if let manager = view.textLayoutManager { manager.textContentManager?.removeTextLayoutManager(manager) }
@@ -219,6 +220,7 @@ struct ReadingText: NSViewRepresentable {
             let width: Double
             let dark: Bool
             let size: Double
+            let scrollerStyle: Int
             let forcedGeneration: UInt64
         }
 
@@ -240,6 +242,7 @@ struct ReadingText: NSViewRepresentable {
         private var width = 0.0
         private var dark = false
         private var size = 0.0
+        private var scrollerStyle: NSScroller.Style?
         private var source = ""
         private var fallbacks: [Bool] = []
         var displayedAt = 0.0
@@ -268,7 +271,8 @@ struct ReadingText: NSViewRepresentable {
             view.onWidthOrThemeChange = { [weak self, weak view] in
                 guard let self, let view else { return }
                 let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                if abs(width - max(120, view.bounds.width - 60)) > 0.25 || self.dark != dark { refresh() }
+                if abs(width - max(120, view.bounds.width - 60)) > 0.25 || self.dark != dark
+                    || scrollerStyle != view.formulaScrollerStyle { refresh() }
             }
             view.onToggle = { [weak self] ordinal, id in
                 guard let self, let index = rendered.firstIndex(where: { $0.ordinal == ordinal }) else { return }
@@ -287,6 +291,7 @@ struct ReadingText: NSViewRepresentable {
             view?.mediaViews = []; view?.mediaBlocks = []; view?.mediaProjection = []
             view?.mathViews.forEach { $0.removeFromSuperview() }; view?.mathViews = []
             view?.inlineMath = [:]; view?.installFormulaAccessibility([])
+            view?.clearFormulaTooltips()
             view?.inlineMathViews.forEach { $0.removeFromSuperview() }; view?.inlineMathViews = []
             if input?.document.viewOwner === self {
                 input?.document.onReload = nil; input?.document.onClosing = nil
@@ -303,7 +308,7 @@ struct ReadingText: NSViewRepresentable {
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             if force { forcedGeneration &+= 1 }
             let key = RefreshKey(revision: input.document.revision, width: width, dark: dark,
-                                 size: input.fontSize, forcedGeneration: forcedGeneration)
+                                 size: input.fontSize, scrollerStyle: view.formulaScrollerStyle.rawValue, forcedGeneration: forcedGeneration)
             if let inFlightKey {
                 guard key != inFlightKey, !refreshQueued else { return }
                 refreshQueued = true
@@ -318,7 +323,7 @@ struct ReadingText: NSViewRepresentable {
             pending = true; view.diagramPending = true
             let began = ProcessInfo.processInfo.systemUptime
             if firstRefreshStartedAt == 0 { firstRefreshStartedAt = began }
-            let themeChanged = self.dark != dark || size != input.fontSize
+            let themeChanged = self.dark != dark || size != input.fontSize || scrollerStyle != view.formulaScrollerStyle
             let oldRendered = rendered
             let oldMath = size == input.fontSize ? preparedMath : []
             let oldTableMath = size == input.fontSize ? view.mediaBlocks.flatMap { $0.prepared.math.flatMap { $0 } } : []
@@ -430,6 +435,7 @@ struct ReadingText: NSViewRepresentable {
                 return
             }
             self.width = width; self.dark = dark; size = input.fontSize; source = input.document.text
+            scrollerStyle = view.formulaScrollerStyle
             let installStart = ProcessInfo.processInfo.systemUptime
             let formulas = install(result.model, diagrams: diagrams, math: result.math, width: width, themeChanged: themeChanged)
             let blockIndices = Dictionary(uniqueKeysWithValues: result.model.blocks.enumerated().map { ($0.element.id, $0.offset) })
@@ -441,6 +447,7 @@ struct ReadingText: NSViewRepresentable {
             }
             view.installMedia(items, width: width, size: input.fontSize, vault: input.vault, refresh: { [weak self] in self?.refresh(force: true) })
             view.installMath(formulas, width: width, size: input.fontSize)
+            view.installFormulaAccessibility(formulas)
             preparedMath = result.math
             phaseMilliseconds = result.phases
             phaseMilliseconds["install_ms"] = (ProcessInfo.processInfo.systemUptime - installStart) * 1000
@@ -570,8 +577,10 @@ struct ReadingText: NSViewRepresentable {
                 return NoteMath(range: NSRange(location: nextRanges[index].location + local, length: Int(item.block.displayLength)),
                                 prepared: item, offset: local)
             }
-            view.installInlineMath(formulas.filter { !$0.prepared.block.block }, width: width, size: input.fontSize)
-            view.installFormulaAccessibility(formulas)
+            let replacedStart = prefix < ranges.count ? ranges[prefix].location : storage.length
+            let replacedEnd = suffix > 0 ? ranges[ranges.count - suffix].location : storage.length
+            view.installInlineMath(formulas.filter { !$0.prepared.block.block }, width: width, size: input.fontSize,
+                replacing: NSRange(location: replacedStart, length: replacedEnd - replacedStart))
             changedCharacters = 0
             if prefix + suffix < next.blocks.count || old?.blocks.count != next.blocks.count || themeChanged {
                 let start = old == nil ? 0 : (prefix < ranges.count ? ranges[prefix].location : storage.length)

@@ -45,11 +45,15 @@ def main():
                 extra=[f'--{appearance}', '--inline-scroll-end', f'--snapshot={target / (name + ".png")}'])
             assert data['inline_scroll_offset'] > 0, data
             assert not data['page_horizontal_scroll'], data
-            for section, note in [('CRLF', 'inline-crlf.md'), ('Parenthesis list', 'inline-fixes.md'), ('Table fixes', 'inline-fixes.md')]:
+            for section, note in [('CRLF', 'inline-crlf.md'), ('Parenthesis list', 'inline-fixes.md'),
+                    ('Table fixes', 'inline-fixes.md'), ('Callout display', 'display-callout.md'),
+                    ('Footnote display', 'display-footnote.md'), ('Comment display', 'display-comment.md')]:
                 name = section.lower().replace(' ', '-') + '-' + appearance
                 data = READING.run(base / name, target, name, ROOT / 'fixtures/math', note, 'math',
                     extra=[f'--{appearance}', f'--math-reveal=## {section}', f'--snapshot={target / (name + ".png")}'])
                 assert data['missing_glyphs'] == 0, data
+                if note.startswith('display-'):
+                    assert data['math_blocks'] == (2 if section == 'Comment display' else 1), data
             for focus in ['body', 'sidebar']:
                 name = 'selection-' + focus + '-' + appearance
                 data = READING.run(base / name, target, name, ROOT / 'fixtures/math', 'inline-fixes.md', 'math',

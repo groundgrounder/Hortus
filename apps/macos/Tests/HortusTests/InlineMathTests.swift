@@ -14,6 +14,47 @@ import Testing
 
 @Suite(.serialized) @MainActor
 struct InlineMathTests {
+    @Test func accessibilityTextFramesAndUniqueObjects() async throws {
+        let f = try ReadingTests.Fixture("Before $x$ after $\\unknowncommand$.\n\n" + String(repeating: "Paragraph.\n\n", count: 90))
+        try await f.start(mathService: MathTests.service())
+        let range = NSRange(location: 0, length: f.view.sourceUTF16Length)
+        let text = try #require(f.view.accessibilityString(for: range))
+        let error = try #require(f.view.inlineMath.values.first { $0.item.prepared.reason != nil })
+        #expect(text == "Before " + L10n.string("Formula: %@", "x") + " after " + L10n.string("Formula: %@", "\\unknowncommand") + " — " + error.item.prepared.reason! + ".\n\n" + String(repeating: "Paragraph.\n\n", count: 90))
+        #expect(f.view.accessibilityAttributedString(for: range)?.string == text)
+        let attributed = try #require(f.view.accessibilityAttributedString(for: range))
+        attributed.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attributed.length)) { value, _, _ in
+            #expect(value == nil)
+        }
+        let elements = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
+        #expect(elements.count == 2)
+        #expect(f.view.inlineMathViews.allSatisfy { !$0.isAccessibilityElement() })
+        let first = try #require(elements.first)
+        let before = first.accessibilityFrame()
+        f.view.enclosingScrollView?.contentView.scroll(to: CGPoint(x: 0, y: 45))
+        #expect(abs(first.accessibilityFrame().minY - before.minY - 45) < 0.5)
+        let window = f.editing.window, origin = window.frame.origin
+        window.setFrameOrigin(CGPoint(x: origin.x + 20, y: origin.y + 30))
+        #expect(abs(first.accessibilityFrame().minX - before.minX - 20) < 0.5)
+        window.setFrameOrigin(origin)
+        await f.close()
+    }
+
+    @Test func singleClipboardWritePreservesOtherTypesAndDetachClearsTooltips() async throws {
+        let f = try ReadingTests.Fixture("A $\\unknowncommand$.\n")
+        try await f.start(mathService: MathTests.service())
+        f.view.setSelectedRange(NSRange(location: 0, length: f.view.sourceUTF16Length))
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        board.setData(Data([1, 2, 3]), forType: .png)
+        #expect(f.view.writeSelection(to: board, type: .string))
+        #expect(board.data(forType: .png) == Data([1, 2, 3]))
+        #expect(!f.view.formulaTooltips.isEmpty)
+        f.coordinator.detach()
+        #expect(f.view.formulaTooltips.isEmpty)
+        await f.close()
+    }
+
     @Test func pageOverflowUsesDocumentWidthWhenScrollerIsDisabled() {
         let scroll = NSScrollView(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
         let document = NSView(frame: CGRect(x: 0, y: 0, width: 600, height: 200))
@@ -147,8 +188,7 @@ struct InlineMathTests {
             f.view.copy(nil)
             #expect(Set(NSPasteboard.general.types ?? []) == Set([.string, NSPasteboard.PasteboardType("NSStringPboardType")]))
             let copied = try #require(NSPasteboard.general.string(forType: .string))
-            #expect(!copied.contains("> "))
-            if source.contains("frac") { #expect(copied.contains("$$\n\\frac{1}{2}\n$$")) }
+            #expect(copied == (source.contains("frac") ? "$$\n\\frac{1}{2}\n$$\n\nnote ·\n$a\n+b$\n" : "Plain text.\n"))
             #expect(f.view.writablePasteboardTypes == [.string])
             let board = NSPasteboard.withUniqueName()
             defer { board.releaseGlobally() }
@@ -174,6 +214,7 @@ struct InlineMathTests {
         let moved = f.view.inlineMath.values.sorted { $0.item.range.location < $1.item.range.location }
         #expect(moved.count == original.count)
         for (a, b) in zip(original.dropFirst(), moved.dropFirst()) { #expect(a === b) }
+        #expect(NSMaxRange(f.view.inlineMathInvalidation ?? NSRange(location: 0, length: 0)) <= 25)
         #expect(moved.allSatisfy { f.view.inlineMath[$0.item.range.location] === $0 })
         let deleted = shifted.replacingOccurrences(of: "First $a$.", with: "First.")
         try Data(deleted.utf8).write(to: f.document.io.url); f.document.refresh()
@@ -218,6 +259,14 @@ struct InlineMathTests {
         #expect(errors.contains { $0.contains("unknowncommand") })
         let elements = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
         let shifted = "Inserted text " + source
+        let manager = try #require(f.view.textLayoutManager), content = try #require(manager.textContentManager)
+        let lastItem = try #require(f.view.inlineMath.values.max { $0.item.range.location < $1.item.range.location })
+        let start = try #require(content.location(content.documentRange.location, offsetBy: lastItem.item.range.location))
+        let end = try #require(content.location(start, offsetBy: 1))
+        manager.invalidateLayout(for: try #require(NSTextRange(location: start, end: end)))
+        #expect(elements.last?.accessibilityFrame().isEmpty == true)
+        let repeated = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
+        #expect(zip(elements, repeated).allSatisfy { $0 === $1 })
         try Data(shifted.utf8).write(to: f.document.io.url); f.document.refresh()
         try await eventually { f.document.text == shifted && !f.coordinator.pending && f.coordinator.model?.revision == f.document.revision }
         let refreshed = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
@@ -239,6 +288,9 @@ struct InlineMathTests {
         let error = try #require(formulas.first { $0.reason != nil })
         let line = try #require(error.fallbackLines.first)
         let width = CTLineGetTypographicBounds(line, nil, nil, nil)
+        let runs = CTLineGetGlyphRuns(line) as! [CTRun]
+        let font = (CTRunGetAttributes(try #require(runs.first)) as NSDictionary)[kCTFontAttributeName] as! CTFont
+        #expect(CTFontGetSymbolicTraits(font).contains(.traitMonoSpace))
         #expect(width + 20 <= table.prepared.block.columns[0] + 0.01)
         let help = f.view.mediaViews.flatMap { $0.subviews }.compactMap { ($0 as? NSScrollView)?.documentView?.accessibilityHelp() }
         #expect(help.contains { $0.contains("unknowncommand") })
@@ -271,7 +323,9 @@ struct InlineMathTests {
             let textBottom = try inkBottom(textRect), formulaBottom = try inkBottom(formula.frame)
             #expect(abs(textBottom - formulaBottom) <= 0.5, "size=\(size), ink text=\(textBottom), math=\(formulaBottom)")
             for view in f.view.inlineMathViews {
-                #expect(abs(view.frame.width - view.attachment.bounds.width) < 0.001)
+                let next = f.view.firstRect(forCharacterRange: NSRange(location: NSMaxRange(view.attachment.item.range), length: 1), actualRange: nil)
+                let attachment = f.view.firstRect(forCharacterRange: view.attachment.item.range, actualRange: nil)
+                #expect(abs(next.minX - attachment.minX - view.attachment.naturalSize.width) < 0.001)
                 #expect(abs(view.frame.height - view.attachment.bounds.height) < 0.001)
             }
             let manager = try #require(f.view.textLayoutManager), content = try #require(manager.textContentManager)
@@ -292,29 +346,44 @@ struct InlineMathTests {
 
     @Test func existingInlineFormulaFollowsThemeAndLegacyScrollbar() async throws {
         let wide = Array(repeating: "x", count: 100).joined(separator: "+")
-        let f = try ReadingTests.Fixture("$x$ and $\(wide)$\n\n$$\(wide)$$\n")
+        let f = try ReadingTests.Fixture("$x$ and $\(wide)$\n\n$$\(wide)$$\n\n| $\(wide)$ |\n|---|\n")
+        f.view.enclosingScrollView?.scrollerStyle = .overlay
         f.view.appearance = NSAppearance(named: .aqua)
         try await f.start(mathService: MathTests.service())
         let before = try #require(f.view.inlineMath.values.min { $0.item.range.location < $1.item.range.location })
-        var light: NSColor?
-        f.view.effectiveAppearance.performAsCurrentDrawingAppearance { light = before.foreground.usingColorSpace(.sRGB) }
+        func pixels() throws -> [Double] {
+            let mounted = try #require(f.view.inlineMathViews.first { $0.attachment.item.identity == before.item.identity })
+            let bitmap = try #require(mounted.bitmapImageRepForCachingDisplay(in: mounted.bounds))
+            mounted.cacheDisplay(in: mounted.bounds, to: bitmap)
+            return (0..<bitmap.pixelsHigh).flatMap { y in (0..<bitmap.pixelsWide).compactMap { x -> Double? in
+                let c = bitmap.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!
+                guard c.alphaComponent > 0.8 else { return nil }
+                return Double(c.redComponent + c.greenComponent + c.blueComponent) / 3
+            } }
+        }
+        let light = try pixels()
         f.view.appearance = NSAppearance(named: .darkAqua); f.coordinator.refresh(force: true)
         try await f.ready()
-        let after = try #require(f.view.inlineMath.values.min { $0.item.range.location < $1.item.range.location })
-        var dark: NSColor?
-        f.view.effectiveAppearance.performAsCurrentDrawingAppearance { dark = after.foreground.usingColorSpace(.sRGB) }
-        #expect(light != dark)
+        let dark = try pixels()
+        #expect(!light.isEmpty && !dark.isEmpty)
+        #expect(light.reduce(0, +) / Double(light.count) < 0.5)
+        #expect(dark.reduce(0, +) / Double(dark.count) > 0.5)
         let attachment = try #require(f.view.inlineMath.values.first { $0.wide })
-        let wideView = InlineMathView(attachment)
-        wideView.scroll.scrollerStyle = .legacy; wideView.layoutSubtreeIfNeeded()
+        let oldBlock = try #require(f.view.mathViews.first)
+        let width = f.view.bounds.width
+        f.view.enclosingScrollView?.scrollerStyle = .legacy
+        f.view.onWidthOrThemeChange?()
+        try await f.ready()
+        #expect(f.view.bounds.width == width)
         let thickness = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
-        let legacy = InlineMathAttachment(attachment.item, width: attachment.availableWidth, size: attachment.bodySize,
-            foreground: attachment.foreground, scrollerStyle: .legacy)
+        let legacy = try #require(f.view.inlineMath.values.first { $0.wide })
+        #expect(legacy !== attachment)
         #expect(legacy.bounds.height >= legacy.naturalSize.height + thickness)
-        let current = try #require(f.view.mathViews.first)
-        let block = MathBlockView(current.item, width: current.preferredSize.width, size: current.bodySize, scrollerStyle: .legacy)
+        let block = try #require(f.view.mathViews.first)
+        #expect(block !== oldBlock)
         #expect(block.preferredSize.height >= block.item.prepared.math!.size.height + 2 * MathTypography.padding + thickness)
-        #expect(MathTypography.scale == mathTypographyScale())
+        let table = try #require(f.view.mediaBlocks.first)
+        #expect(abs(legacy.naturalSize.width - (table.prepared.block.columns[0] - 20)) < 0.001)
         await f.close()
     }
 

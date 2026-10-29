@@ -188,8 +188,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn typography_scale_matches_the_core() {
-        assert_eq!(math_typography_scale(), hortus_math::TYPOGRAPHY_SCALE);
+    fn exported_typography_scale_matches_table_geometry() {
+        let latex = std::iter::repeat_n("x", 80).collect::<Vec<_>>().join("+");
+        let scene = Engine::default().render(&latex, Style::Text).unwrap();
+        let (_, table) =
+            hortus_document::media::Table::parse(&format!("| ${latex}$ |\n|---|\n")).unwrap();
+        let layout = table.layout(120., 15., &mut hortus_diagram::DeterministicMetrics);
+        assert!(
+            (layout.widths[0] - 20. - scene.width * 15. * math_typography_scale()).abs() < 0.001
+        );
     }
 
     #[test]

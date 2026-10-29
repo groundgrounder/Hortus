@@ -69,7 +69,8 @@ extension MathService {
                     }
                     return lines
                 }
-                let sourceFont = cell ? NSFont.systemFont(ofSize: size) : NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+                // Rust 与原生错误源码共用系统随附的 Menlo，避免私有系统等宽字体的可变字宽不一致。
+                let sourceFont = NSFont(name: "Menlo-Regular", size: size) ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
                 let reasonFont = NSFont.systemFont(ofSize: 12)
                 let contextColor = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
                 let reasonLines = wrap(message, attributes: [.font: reasonFont, contextColor: true])
@@ -188,7 +189,7 @@ final class MathBlockView: NSView {
         canvas.frame = CGRect(x: 0, y: 0, width: max(availableWidth, item.prepared.math?.size.width ?? 0),
                               height: preferredSize.height - scrollbarHeight)
         scroll.documentView = canvas; addSubview(scroll)
-        setAccessibilityElement(true); setAccessibilityRole(.image)
+        setAccessibilityElement(false); setAccessibilityRole(.image)
         setAccessibilityLabel(L10n.string("Formula: %@", item.prepared.block.latex))
         setAccessibilityHelp(item.prepared.reason)
     }
@@ -231,7 +232,7 @@ extension DiagramTextView {
         let old = mathViews
         var unused = old
         var changed: [NSRange] = []
-        let scrollerStyle = NSScroller.preferredScrollerStyle
+        let scrollerStyle = formulaScrollerStyle
         let scrollbarHeight = MathTypography.scrollbarHeight(style: scrollerStyle)
         let storage = textStorage?.string as NSString?
         mathViews = items.filter { $0.prepared.block.block }.map { item in

@@ -29,6 +29,9 @@ pub struct Measurement {
 
 pub trait FontMetrics {
     fn measure(&mut self, text: &str, size: f64, weight: u16) -> Measurement;
+    fn measure_code(&mut self, text: &str, size: f64) -> Measurement {
+        self.measure(text, size, 400)
+    }
     fn used_fonts(&self) -> Vec<FontInfo>;
     fn reference_fonts_available(&self) -> bool {
         false
@@ -88,11 +91,12 @@ pub struct SystemFonts {
     db: Database,
     faces: HashMap<ID, LoadedFace>,
     files: HashMap<PathBuf, FontData>,
-    selections: HashMap<(char, u16), ID>,
-    cache: HashMap<(String, u64, u16), Measurement>,
+    selections: HashMap<(char, u16, bool), ID>,
+    cache: HashMap<(String, u64, u16, bool), Measurement>,
     used: BTreeMap<(String, u16), FontInfo>,
     ui: String,
     cjk: String,
+    monospace: String,
     reference: bool,
 }
 
@@ -130,6 +134,15 @@ impl SystemFonts {
             "Hiragino Sans GB",
         ])
         .unwrap_or_else(|| ui.clone());
+        let monospace = find(&[
+            "Menlo",
+            ".AppleSystemUIFontMonospaced",
+            "SF Mono",
+            "Cascadia Mono",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+        ])
+        .unwrap_or_else(|| ui.clone());
         let reference =
             (ui == ".AppleSystemUIFont" || ui == "System Font" || ui.starts_with("SF Pro"))
                 && cjk == "PingFang SC";
@@ -142,6 +155,7 @@ impl SystemFonts {
             used: BTreeMap::new(),
             ui,
             cjk,
+            monospace,
             reference,
         })
     }
@@ -195,11 +209,15 @@ impl SystemFonts {
             .is_some_and(|f| f.glyph_index(ch).is_some())
     }
 
-    fn select(&mut self, ch: char, weight: u16) -> ID {
-        if let Some(id) = self.selections.get(&(ch, weight)) {
+    fn select(&mut self, ch: char, weight: u16, monospace: bool) -> ID {
+        if let Some(id) = self.selections.get(&(ch, weight, monospace)) {
             return *id;
         }
-        let primary = if ch.is_ascii() { &self.ui } else { &self.cjk };
+        let primary = if ch.is_ascii() {
+            if monospace { &self.monospace } else { &self.ui }
+        } else {
+            &self.cjk
+        };
         let mut candidates = self
             .db
             .query(&Query {
@@ -227,20 +245,26 @@ impl SystemFonts {
         }
         let id = selected.unwrap_or(primary_id);
         self.load(id);
-        self.selections.insert((ch, weight), id);
+        self.selections.insert((ch, weight, monospace), id);
         id
     }
 }
 
-impl FontMetrics for SystemFonts {
-    fn measure(&mut self, text: &str, size: f64, weight: u16) -> Measurement {
-        let key = (text.into(), size.to_bits(), weight);
+impl SystemFonts {
+    fn measure_style(
+        &mut self,
+        text: &str,
+        size: f64,
+        weight: u16,
+        monospace: bool,
+    ) -> Measurement {
+        let key = (text.into(), size.to_bits(), weight, monospace);
         if let Some(measured) = self.cache.get(&key) {
             return measured.clone();
         }
         let mut groups: Vec<(ID, String)> = Vec::new();
         for grapheme in text.graphemes(true) {
-            let id = self.select(grapheme.chars().next().unwrap(), weight);
+            let id = self.select(grapheme.chars().next().unwrap(), weight, monospace);
             if let Some((last_id, value)) = groups.last_mut().filter(|(last, _)| *last == id) {
                 let _ = last_id;
                 value.push_str(grapheme);
@@ -294,7 +318,15 @@ impl FontMetrics for SystemFonts {
         self.cache.insert(key, result.clone());
         result
     }
+}
 
+impl FontMetrics for SystemFonts {
+    fn measure(&mut self, text: &str, size: f64, weight: u16) -> Measurement {
+        self.measure_style(text, size, weight, false)
+    }
+    fn measure_code(&mut self, text: &str, size: f64) -> Measurement {
+        self.measure_style(text, size, 400, true)
+    }
     fn used_fonts(&self) -> Vec<FontInfo> {
         self.used.values().cloned().collect()
     }
