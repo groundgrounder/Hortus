@@ -20,6 +20,75 @@ fn cases(source: &str) -> Vec<&str> {
 }
 
 #[test]
+fn inline_ranges_masks_and_heading_source() {
+    use hortus_document::Document;
+    let source = "# 标题 $a_i b_i$😀\n\n中😀 **$x^2$** [公式 $y_i$](target) 后\n\n> [!note] 标题 $z$\n> 前 $$a+b$$ 后\n";
+    let model = Cache::default().model(source, false);
+    let units: Vec<_> = source.encode_utf16().collect();
+    let formulas: Vec<_> = model
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .content
+                .math
+                .iter()
+                .map(move |formula| (block, formula))
+        })
+        .collect();
+    assert_eq!(formulas.len(), 5);
+    for ((block, formula), expected) in
+        formulas
+            .iter()
+            .zip(["$a_i b_i$", "$x^2$", "$y_i$", "$z$", "$$a+b$$"])
+    {
+        assert_eq!(
+            String::from_utf16_lossy(
+                &units[block.source.start + formula.source.start
+                    ..block.source.start + formula.source.end]
+            ),
+            expected
+        );
+        assert_eq!(formula.display.len(), 1);
+        assert_eq!(
+            block.content.text.encode_utf16().nth(formula.display.start),
+            Some(0xfffc)
+        );
+    }
+    assert_eq!(formulas[0].1.mask >> 24, 1);
+    assert_ne!(formulas[1].1.mask & 2, 0);
+    assert_ne!(formulas[2].1.mask & 128, 0);
+    assert_ne!(formulas[3].1.mask & 4096, 0);
+    assert!(output(&model).contains("前 \n\u{fffc}\n 后"));
+    assert_eq!(
+        Document::new(source).outline(false).unwrap()[0].title,
+        "标题 $a_i b_i$😀"
+    );
+}
+
+#[test]
+fn table_formula_widths_fit_three_reading_columns() {
+    use hortus_diagram::DeterministicMetrics;
+    use hortus_document::media::Table;
+    let latex = r"\frac{a+b+c+d+e}{f+g+h}";
+    let source = format!("| Formula | 中文 |\n|---|---|\n| before ${latex}$ after | $x^2$ |\n");
+    let (_, table) = Table::parse(&source).unwrap();
+    let cell = &table.rows[1][0];
+    assert_eq!(cell.math.len(), 1);
+    assert_eq!(cell.math[0].style, Style::Text);
+    assert_eq!(cell.text, "before \u{fffc} after");
+    let scene = hortus_math::Engine::default()
+        .render(latex, hortus_math::Style::Text)
+        .unwrap();
+    for width in [380.0, 700.0, 1100.0] {
+        let layout = table.layout(width, 15.0, &mut DeterministicMetrics);
+        assert!(layout.width <= width + 0.001);
+        assert!(!layout.scrolls);
+        assert!(layout.widths[0] >= scene.width * 15.0 * 1.21 + 20.0);
+    }
+}
+
+#[test]
 fn twenty_pulldown_boundaries_match_the_documented_rules() {
     let fixtures = include_str!("../../../fixtures/math/markdown-boundaries.md");
     // C09 是表格附件，单元格中的公式不会进入公式显示模型。
@@ -34,15 +103,39 @@ fn twenty_pulldown_boundaries_match_the_documented_rules() {
         &[],
         &[(Style::Text, false), (Style::Text, false)],
         &[(Style::Display, true)],
-        &[(Style::Display, false)],
+        &[(Style::Display, true)],
         &[(Style::Text, false), (Style::Text, false)],
         &[(Style::Text, false), (Style::Text, false)],
         &[],
         &[(Style::Display, true)],
         &[(Style::Text, false)],
     ];
+    let latex: &[&[&str]] = &[
+        &[],
+        &[],
+        &[],
+        &["x"],
+        &["x"],
+        &[r"\frac{a}{b}"],
+        &[],
+        &[],
+        &["x", "x^2"],
+        &["x^2+y^2=z^2"],
+        &["x"],
+        &["5", "6"],
+        &["x", "x"],
+        &[],
+        &[""],
+        &["a\n+b"],
+    ];
     for (index, (source, expected)) in cases(fixtures).iter().zip(expected).enumerate() {
         let formulas = math::scan(source);
+        assert_eq!(
+            formulas.iter().map(|f| f.latex.trim()).collect::<Vec<_>>(),
+            latex[index],
+            "C{:02}: {source}",
+            index + 1
+        );
         assert_eq!(
             formulas
                 .iter()
@@ -64,7 +157,12 @@ fn twenty_pulldown_boundaries_match_the_documented_rules() {
                 0
             );
             let table = &model.blocks[0].content.media[0];
-            assert!(format!("{table:?}").contains("$x$"));
+            let hortus_document::media::Kind::Table(table) = &table.kind else {
+                panic!("C09 must be a table")
+            };
+            assert_eq!(table.rows[1][0].text, "\u{fffc}");
+            assert_eq!(table.rows[1][1].math[0].latex, "x^2");
+            assert_eq!(table.rows[1][1].math[0].style, Style::Text);
         } else {
             assert_eq!(
                 model
@@ -83,20 +181,48 @@ fn twenty_pulldown_boundaries_match_the_documented_rules() {
         if index == 13 {
             assert!(text.contains("$x"));
         }
+        if index == 10 {
+            assert_eq!(text, "正文 \n\u{fffc}\n 继续。");
+        }
+        for block in &model.blocks {
+            for formula in &block.content.math {
+                let units: Vec<_> = block.content.text.encode_utf16().collect();
+                let display = String::from_utf16_lossy(&units[formula.display.clone()]);
+                assert_eq!(
+                    display,
+                    if formula.latex.trim().is_empty() {
+                        formula.display_source.as_str()
+                    } else {
+                        "\u{fffc}"
+                    },
+                    "C{:02}",
+                    index + 1
+                );
+            }
+        }
     }
     let isolated = cases(include_str!("../../../fixtures/math/markdown-isolated.md"));
-    for (source, expected) in isolated.into_iter().zip([
-        vec![Style::Text],
-        vec![Style::Text],
-        vec![Style::Text],
-        vec![Style::Display],
-    ]) {
+    for ((source, expected), projection) in isolated
+        .into_iter()
+        .zip([
+            vec![Style::Text],
+            vec![Style::Text],
+            vec![Style::Text],
+            vec![Style::Display],
+        ])
+        .zip(["\u{fffc}2", "a\u{fffc}b", "\u{fffc}", "$$$$"])
+    {
         assert_eq!(
             math::scan(source)
                 .iter()
                 .map(|f| f.style)
                 .collect::<Vec<_>>(),
             expected,
+            "{source}"
+        );
+        assert_eq!(
+            output(&Cache::default().model(source, false)),
+            projection,
             "{source}"
         );
     }
@@ -123,17 +249,22 @@ fn containers_multiple_formulas_and_mixed_paragraphs() {
     assert!(
         math::scan(callout_title)
             .iter()
-            .all(|formula| !formula.block)
+            .all(|formula| formula.block)
     );
-    assert!(!output(&Cache::default().model(callout_title, false)).contains('\u{fffc}'));
+    assert!(output(&Cache::default().model(callout_title, false)).contains('\u{fffc}'));
     for source in [
         "text $$x$$ text",
         "$$x$$ $y$",
         "- text $$x$$",
         "> text $$x$$",
     ] {
-        assert!(math::scan(source).iter().all(|f| !f.block), "{source}");
-        assert!(!output(&Cache::default().model(source, false)).contains('\u{fffc}'));
+        assert!(
+            math::scan(source)
+                .iter()
+                .all(|f| f.block == (f.style == Style::Display)),
+            "{source}"
+        );
+        assert!(output(&Cache::default().model(source, false)).contains('\u{fffc}'));
     }
 }
 
@@ -148,8 +279,12 @@ fn callout_title_formulas_do_not_change_body_math_classification() {
         for title in ["Title", "$$a$$", "$a$"] {
             let source = format!("{prefix}[!note] {title}\n{continuation}$$x$$\n");
             let formulas = math::scan(&source);
-            assert_eq!(formulas.len(), 1, "{source}");
-            assert!(formulas[0].block, "{source}: {formulas:?}");
+            assert_eq!(
+                formulas.len(),
+                if title == "Title" { 1 } else { 2 },
+                "{source}"
+            );
+            assert!(formulas.last().unwrap().block, "{source}: {formulas:?}");
         }
     }
 }
@@ -164,7 +299,7 @@ fn literal_math_hides_only_list_continuation_indentation() {
             let text = output(&Cache::default().model(&source, false));
             assert!(
                 text.contains(&format!(
-                    "解方程\n{}$$\nx^2=1\n$$",
+                    "解方程\n{}\u{fffc}",
                     if quote.is_empty() { indent } else { "" }
                 )),
                 "{source:?}: {text:?}"
@@ -182,7 +317,7 @@ fn unicode_ranges_are_utf16_and_inline_math_is_opaque() {
     let source = "前😀\n\n$$\\text{中😀}$$\n\n后😀 $a_1 b_1 ==literal== [[target]]$。\n";
     let model = Cache::default().model(source, false);
     let text = output(&model);
-    assert!(text.contains("$a_1 b_1 ==literal== [[target]]$"), "{text}");
+    assert_eq!(text.matches('\u{fffc}').count(), 2, "{text}");
     for block in &model.blocks {
         for formula in &block.content.math {
             let source16: Vec<_> = source.encode_utf16().collect();
@@ -194,7 +329,7 @@ fn unicode_ranges_are_utf16_and_inline_math_is_opaque() {
             assert!(raw.starts_with('$') && raw.ends_with('$'));
             let display16: Vec<_> = block.content.text.encode_utf16().collect();
             let display = String::from_utf16(&display16[formula.display.clone()]).unwrap();
-            assert_eq!(display, if formula.block { "\u{fffc}" } else { &raw });
+            assert_eq!(display, "\u{fffc}");
         }
     }
 }
@@ -260,7 +395,7 @@ fn list_continuations_preserve_indentation_outside_formula_source() {
         ("- 解方程\n\n  $$x^2=1$$\n", "• 解方程\n\n  \u{fffc}\n"),
         ("- $$x$$\n  $$y$$\n", "• \u{fffc}\n  \u{fffc}\n"),
         ("100. 解\n\n     $$x$$\n", "100. 解\n\n     \u{fffc}\n"),
-        ("- 文字\n  $a$ 续行\n", "• 文字\n  $a$ 续行\n"),
+        ("- 文字\n  $a$ 续行\n", "• 文字\n  \u{fffc} 续行\n"),
     ];
     let actual: Vec<_> = cases
         .iter()
@@ -286,9 +421,9 @@ fn callout_headers_require_a_quote_and_the_first_paragraph_line() {
         let formulas = math::scan(source);
         assert!(!formulas.is_empty());
         assert!(
-            formulas.iter().all(|formula| !formula.block),
+            formulas.iter().all(|formula| formula.block),
             "{source}: {formulas:?}"
         );
-        assert!(!output(&Cache::default().model(source, false)).contains('\u{fffc}'));
+        assert!(output(&Cache::default().model(source, false)).contains('\u{fffc}'));
     }
 }

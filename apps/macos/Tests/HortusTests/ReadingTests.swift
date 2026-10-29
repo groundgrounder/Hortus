@@ -24,7 +24,7 @@ struct ReadingTests {
             editing.coordinator.task?.cancel(); editing.coordinator.styling.reset()
             view.delegate = nil; view.textStorage?.delegate = nil
             view.onCommit = nil; view.onCompositionState = nil
-            view.isReading = true; view.isEditable = false; view.allowsUndo = false
+            view.isReading = true; view.isEditable = false; view.isRichText = true; view.allowsUndo = false
             view.readingCoordinator = coordinator; coordinator.view = view
             coordinator.update(ReadingText(mathService: mathService, document: document, path: "note.md", vault: editing.vault.path,
                 fontSize: 15, service: editing.service, core: editing.core) { _, _ in })

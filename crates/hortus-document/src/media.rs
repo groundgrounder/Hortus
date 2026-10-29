@@ -13,8 +13,10 @@ pub enum Align {
 
 #[derive(Clone, Debug)]
 pub struct Cell {
+    pub source: String,
     pub text: String,
     pub runs: Vec<reading::Run>,
+    pub math: Vec<reading::Math>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,7 +40,9 @@ impl Table {
         let mut table = None;
         let mut range = 0..0;
         let mut row = Vec::new();
-        for (event, span) in Parser::new_ext(text, Options::ENABLE_TABLES).into_offset_iter() {
+        for (event, span) in
+            Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_MATH).into_offset_iter()
+        {
             match event {
                 Event::Start(Tag::Table(alignments)) => {
                     range = span;
@@ -60,8 +64,10 @@ impl Table {
                     let source = text[span].trim_matches([' ', '\t']);
                     let content = reading::inline(source);
                     row.push(Cell {
+                        source: source.into(),
                         text: content.text,
                         runs: content.runs,
+                        math: content.math,
                     });
                 }
                 Event::End(TagEnd::TableHead | TagEnd::TableRow) if table.is_some() => {
@@ -94,6 +100,14 @@ impl Table {
                 for run in &cell.runs {
                     let value = String::from_utf16_lossy(&units[run.display.clone()]);
                     let weight = if run.mask & 2 != 0 { 700 } else { weight };
+                    if let Some(formula) = cell.math.iter().find(|formula| {
+                        formula.display == run.display && !formula.latex.trim().is_empty()
+                    }) {
+                        let width = formula_width(formula, size, fonts);
+                        measured += width;
+                        floors[column] = floors[column].max(width + 20.0);
+                        continue;
+                    }
                     measured += fonts.measure(&value, size, weight).width;
                     for word in words(&value) {
                         let word = fonts.measure(word, size, weight).width + 20.0;
@@ -139,6 +153,44 @@ impl Table {
             scrolls,
         }
     }
+}
+
+// 尺寸缓存与可用列宽无关；拖宽度只做水位分配，不重新排相同公式。
+fn formula_width(formula: &reading::Math, size: f64, fonts: &mut dyn FontMetrics) -> f64 {
+    use std::sync::{Mutex, OnceLock};
+    static ENGINE: OnceLock<Mutex<hortus_math::Engine>> = OnceLock::new();
+    let mut engine = ENGINE
+        .get_or_init(|| Mutex::new(hortus_math::Engine::default()))
+        .lock()
+        .unwrap();
+    let layout = (|| {
+        let scene = engine.render(&formula.latex, hortus_math::Style::Text)?;
+        if scene.missing_metrics.is_empty() {
+            return Ok(scene);
+        }
+        engine.set_metrics(
+            scene
+                .missing_metrics
+                .iter()
+                .filter_map(|codepoint| char::from_u32(*codepoint))
+                .map(|ch| {
+                    let measured = fonts.measure(&ch.to_string(), 1000.0, 400);
+                    (
+                        ch,
+                        hortus_math::GlyphMetrics {
+                            width: measured.width / 1000.0,
+                            height: measured.ascent / 1000.0,
+                            depth: measured.descent / 1000.0,
+                        },
+                    )
+                }),
+        )?;
+        engine.render(&formula.latex, hortus_math::Style::Text)
+    })();
+    layout.map_or_else(
+        |_: hortus_math::Error| fonts.measure(&formula.display_source, size, 400).width,
+        |scene| scene.width * size * 1.21,
+    )
 }
 
 /// 不能在中间断行的片段：按空白切开；中日韩字符之间本来就能断，每个字单独算

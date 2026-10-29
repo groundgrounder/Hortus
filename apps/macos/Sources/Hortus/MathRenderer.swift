@@ -3,8 +3,16 @@ import CoreText
 import HortusCore
 
 enum MathTypography {
-    static let scale = 1.21
+    static let scale: Double = {
+        // 显式检查启动参数仅用于字号对比，不存入用户配置。
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains(where: { $0.hasPrefix("--reading-inspection=") }), args.contains("--math-scale=1.15") { return 1.15 }
+        return 1.21
+    }()
     static let padding = 8.0
+    static func bodySize(_ size: Double, mask: UInt32) -> Double {
+        size * ([1: 1.6, 2: 1.35, 3: 1.15][Int(mask >> 24)] ?? 1)
+    }
 
     static func prefixWidth(in text: NSString, range: NSRange, size: Double) -> Double {
         guard range.location <= text.length, range.length <= text.length - range.location else { return 0 }
@@ -90,6 +98,8 @@ struct PreparedMath: @unchecked Sendable {
         case path(CGPath, Bool, MathScene.Color)
     }
     let size: CGSize
+    let ascent: Double
+    let descent: Double
     let drawing: [Drawing]
     let glyphCount: Int
     let fallbackGlyphCount: Int
@@ -162,6 +172,7 @@ actor MathService {
     private var cachedBytes = 0
     private let cacheLimit = 16 * 1024 * 1024
     private(set) var mainThreadPreparations = 0
+    private(set) var layoutCount = 0
     private(set) var registrationCount = 0
     private(set) var measurementCount = 0
     var measuredFallbackCodepoints: [UInt32] { metrics.keys.sorted() }
@@ -268,6 +279,7 @@ actor MathService {
         try register()
         let key = "\(style):\(bodySize):\(latex)"
         if let value = cached[key] { return value }
+        layoutCount += 1
         var scene = try MathScene(engine.render(source: latex, style: style))
         if !scene.missingMetrics.isEmpty {
             let fallbackScales = Dictionary(scene.items.compactMap { item -> (UInt32, Double)? in
@@ -337,6 +349,7 @@ actor MathService {
             }
         }
         let value = PreparedMath(size: CGSize(width: scene.width * em, height: (scene.height + scene.depth) * em),
+                                 ascent: scene.height * em, descent: scene.depth * em,
                                  drawing: drawing, glyphCount: glyphCount, fallbackGlyphCount: fallbackGlyphCount,
                                  unresolvedGlyphCount: unresolvedGlyphCount, unresolvedMetricCount: scene.missingMetrics.count,
                                  maximumMetricError: metricError,

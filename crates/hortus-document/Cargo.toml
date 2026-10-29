@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 hortus-diagram = { path = "../hortus-diagram" }
+hortus-math = { path = "../hortus-math" }
 pulldown-cmark = { version = "=0.13.4", default-features = false }

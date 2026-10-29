@@ -99,12 +99,12 @@ def main():
                                       ('loose-numbered-continuation', 'Loose numbered continuation'),
                                       ('nested-quote-error', 'Nested quote error')]:
                     name = f'{case}-{appearance}'
-                    formula_index = {'loose-numbered-continuation': 7, 'nested-quote-error': 8}.get(case)
+                    formula_index = {'loose-numbered-continuation': 11, 'nested-quote-error': 12}.get(case)
                     reveal = (f'--math-index={formula_index}' if formula_index is not None
                               else f'--math-reveal=## {section}')
                     data = run(name, 'container-regressions.md', extra=[f'--{appearance}',
                         reveal, f'--snapshot={output / (name + ".png")}'])
-                    assert data['math_blocks'] == 9 and len(data['math_errors']) == 3, data
+                    assert data['math_blocks'] == 13 and len(data['math_errors']) == 3, data
                     assert data['missing_glyphs'] == 0 and data['unresolved_metrics'] == 0, data
                 run(f'wide-end-{appearance}', extra=[f'--{appearance}', '--math-index=23', '--math-scroll-end',
                     f'--snapshot={output / ("wide-end-" + appearance + ".png")}'])
@@ -116,6 +116,8 @@ def main():
         if args.checks in ['all', 'performance']:
             perf = run('performance', 'performance-note.md', 'math-performance')
             assert perf['math_blocks'] == 50, perf
+            assert perf['inline_formulas'] == 500, perf
+            assert perf['resize_formula_layouts'] == 0, perf
             assert 0 < perf['open_ms'] <= 150, perf
             assert perf['scroll_p95_ms'] <= 8, perf
             assert perf['scroll_max_ms'] <= 16, perf

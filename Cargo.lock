@@ -360,6 +360,7 @@ name = "hortus-document"
 version = "0.1.0"
 dependencies = [
  "hortus-diagram",
+ "hortus-math",
  "pulldown-cmark",
 ]
 

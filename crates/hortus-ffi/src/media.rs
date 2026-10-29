@@ -12,8 +12,10 @@ pub struct MediaRun {
 }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct TableCell {
+    pub source: String,
     pub text: String,
     pub runs: Vec<MediaRun>,
+    pub math: Vec<crate::math::MathBlock>,
 }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MediaBlock {
@@ -114,12 +116,31 @@ pub(crate) fn blocks(
                         for column in 0..table.alignments.len() {
                             wire.cells.push(row.get(column).map_or_else(
                                 || TableCell {
+                                    source: String::new(),
                                     text: String::new(),
                                     runs: Vec::new(),
+                                    math: Vec::new(),
                                 },
                                 |cell| {
                                     TableCell {
+                                        source: cell.source.clone(),
                                         text: cell.text.clone(),
+                                        math: cell
+                                            .math
+                                            .iter()
+                                            .map(|formula| crate::math::MathBlock {
+                                                mask: formula.mask,
+                                                block_id: block.id,
+                                                source_start: formula.source.start as u64,
+                                                source_length: formula.source.len() as u64,
+                                                display_start: formula.display.start as u64,
+                                                display_length: formula.display.len() as u64,
+                                                display_source: formula.display_source.clone(),
+                                                latex: formula.latex.clone(),
+                                                style: crate::math::MathStyle::Text,
+                                                block: false,
+                                            })
+                                            .collect(),
                                         runs: cell
                                             .runs
                                             .iter()

@@ -58,7 +58,7 @@ enum MathInspection {
             retained.append(oldViews.dropLast().compactMap(\.value).count)
             let active = oldViews.last?.value
             retainedMathViews.append(oldViews.dropLast().compactMap(\.value)
-                .filter { $0 !== active }.reduce(0) { $0 + $1.mathViews.count })
+                .filter { $0 !== active }.reduce(0) { $0 + $1.mathViews.count + $1.inlineMath.count + $1.inlineMathViews.count })
             memory.append(try residentBytes())
             footprints.append(try footprintBytes())
             var usage = rusage()
@@ -86,12 +86,17 @@ enum MathInspection {
         let view = initial
         guard let coordinator = view.readingCoordinator else { throw CocoaError(.coderValueNotFound) }
         result["math_blocks"] = view.mathViews.count
+        let formulas = view.mathViews.map { $0.item.prepared } + view.inlineMath.values.map { $0.item.prepared }
+        result["inline_formulas"] = view.inlineMath.count
+        result["visible_inline_views"] = view.inlineMathViews.count
+        result["math_scale"] = MathTypography.scale
         result["math_errors"] = view.mathViews.compactMap { $0.item.prepared.reason }
-        result["glyphs"] = view.mathViews.reduce(0) { $0 + ($1.item.prepared.math?.glyphCount ?? 0) }
-        result["system_fallback_glyphs"] = view.mathViews.reduce(0) { $0 + ($1.item.prepared.math?.fallbackGlyphCount ?? 0) }
-        result["missing_glyphs"] = view.mathViews.reduce(0) { $0 + ($1.item.prepared.math?.unresolvedGlyphCount ?? 0) }
-        result["unresolved_metrics"] = view.mathViews.reduce(0) { $0 + ($1.item.prepared.math?.unresolvedMetricCount ?? 0) }
-        result["maximum_metric_error_px"] = (view.mathViews.compactMap { $0.item.prepared.math?.maximumMetricError }.max() ?? 0)
+        result["inline_errors"] = view.inlineMath.values.compactMap { $0.item.prepared.reason }
+        result["glyphs"] = formulas.reduce(0) { $0 + ($1.math?.glyphCount ?? 0) }
+        result["system_fallback_glyphs"] = formulas.reduce(0) { $0 + ($1.math?.fallbackGlyphCount ?? 0) }
+        result["missing_glyphs"] = formulas.reduce(0) { $0 + ($1.math?.unresolvedGlyphCount ?? 0) }
+        result["unresolved_metrics"] = formulas.reduce(0) { $0 + ($1.math?.unresolvedMetricCount ?? 0) }
+        result["maximum_metric_error_px"] = (formulas.compactMap { $0.math?.maximumMetricError }.max() ?? 0)
             * (view.window?.backingScaleFactor ?? 2)
         result["main_thread_preparations"] = await MathService.shared.mainThreadPreparations
         result["font_registrations"] = await MathService.shared.registrationCount
@@ -122,31 +127,82 @@ enum MathInspection {
             let range = (source as NSString).range(of: query)
             if range.location != NSNotFound { coordinator.reveal(source: range.location); view.layoutSubtreeIfNeeded(); view.displayIfNeeded() }
         }
+        if arguments.contains("--inline-scroll-end") || arguments.contains("--inline-scroll-start"),
+           let attachment = view.inlineMath.values.first(where: { $0.wide }) {
+            coordinator.reveal(source: Int(attachment.item.prepared.block.sourceStart))
+            view.needsLayout = true; view.layoutSubtreeIfNeeded()
+            if let formula = view.inlineMathViews.first(where: { $0.attachment.wide }), let canvas = formula.scroll.documentView {
+                let x = arguments.contains("--inline-scroll-end") ? max(0, canvas.bounds.width - formula.scroll.contentSize.width) : 0
+                formula.scroll.contentView.scroll(to: CGPoint(x: x, y: 0))
+                formula.scroll.reflectScrolledClipView(formula.scroll.contentView)
+                formula.displayIfNeeded()
+                result["inline_scroll_offset"] = formula.scroll.contentView.bounds.minX
+                result["inline_frame"] = NSStringFromRect(formula.frame)
+                result["page_horizontal_scroll"] = view.enclosingScrollView?.hasHorizontalScroller ?? false
+            }
+        }
+        if arguments.contains("--inline-select"),
+           let attachment = view.inlineMath.values.min(by: { $0.item.range.location < $1.item.range.location }) {
+            coordinator.reveal(source: Int(attachment.item.prepared.block.sourceStart))
+            view.setSelectedRange(attachment.item.range)
+            view.needsLayout = true; view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
+            result["selected_inline_length"] = view.selectedRange().length
+        }
         if mode == "math-performance" {
             var frames: [Double] = []
+            var slowest: [String: Double] = [:]
             for index in 0..<240 {
                 let began = ProcessInfo.processInfo.systemUptime
                 let y = max(0, view.bounds.height - view.visibleRect.height) * Double(index < 120 ? index : 239-index) / 119
                 view.enclosingScrollView?.contentView.scroll(to: CGPoint(x: 0, y: y))
                 view.enclosingScrollView?.reflectScrolledClipView(view.enclosingScrollView!.contentView)
-                view.needsLayout = true; view.layoutSubtreeIfNeeded(); view.window?.displayIfNeeded()
-                frames.append((ProcessInfo.processInfo.systemUptime - began) * 1000)
+                let scrolled = ProcessInfo.processInfo.systemUptime
+                view.needsLayout = true; view.layoutSubtreeIfNeeded()
+                let laidOut = ProcessInfo.processInfo.systemUptime
+                view.window?.displayIfNeeded()
+                let ended = ProcessInfo.processInfo.systemUptime
+                let elapsed = (ended - began) * 1000
+                if elapsed > (frames.max() ?? 0) {
+                    slowest = ["index": Double(index), "scroll_ms": (scrolled - began) * 1000,
+                        "layout_ms": (laidOut - scrolled) * 1000, "display_ms": (ended - laidOut) * 1000]
+                    for (key, value) in view.layoutPhases { slowest["text_" + key] = value }
+                }
+                frames.append(elapsed)
                 try await Task.sleep(for: .milliseconds(1))
             }
             frames.sort(); result["scroll_p95_ms"] = frames[Int(Double(frames.count - 1) * 0.95)]
             result["scroll_max_ms"] = frames.last
+            result["slowest_scroll_phases_ms"] = slowest
             result["maximum_main_work_ms"] = view.maximumMainWorkMilliseconds
-            result["maximum_formula_draw_ms"] = view.mathViews.map(\.maximumDrawMilliseconds).max()
+            result["maximum_formula_draw_ms"] = (view.mathViews.map(\.maximumDrawMilliseconds) + view.inlineMath.values.map(\.maximumDrawMilliseconds)).max()
+            let layouts = await MathService.shared.layoutCount
+            var reflows: [Double] = []
+            if let window = view.window {
+                let original = window.contentView!.frame.size
+                for index in 0..<30 {
+                    let began = ProcessInfo.processInfo.systemUptime
+                    window.setContentSize(CGSize(width: index.isMultiple(of: 2) ? original.width - 100 : original.width, height: original.height))
+                    window.contentView?.layoutSubtreeIfNeeded(); coordinator.refresh()
+                    while coordinator.pending { try await Task.sleep(for: .milliseconds(1)) }
+                    view.needsLayout = true; view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
+                    reflows.append((ProcessInfo.processInfo.systemUptime - began) * 1000)
+                }
+            }
+            reflows.sort()
+            result["resize_p95_ms"] = reflows.isEmpty ? 0 : reflows[Int(Double(reflows.count - 1) * 0.95)]
+            result["resize_formula_layouts"] = await MathService.shared.layoutCount - layouts
         } else if mode == "math-external" {
-            guard let formula = view.mathViews.dropFirst(view.mathViews.count / 2).first else { throw CocoaError(.coderValueNotFound) }
-            coordinator.reveal(source: Int(formula.item.prepared.block.sourceStart))
+            let inline = view.inlineMath.values.sorted { $0.item.range.location < $1.item.range.location }
+            guard let formula = inline.dropFirst(inline.count / 2).first?.item ?? view.mathViews.first?.item else { throw CocoaError(.coderValueNotFound) }
+            coordinator.reveal(source: Int(formula.prepared.block.sourceStart))
             try await Task.sleep(for: .milliseconds(50))
             view.layoutSubtreeIfNeeded()
             let before = try coordinator.visibleAnchor().unwrap()
             result["anchor_before"] = ["id": String(before.id), "source": String(before.source), "offset": String(before.offset)]
             let old = view.mathViews
-            let changed = (source as NSString).replacingCharacters(in: NSRange(location: Int(formula.item.prepared.block.sourceStart),
-                length: Int(formula.item.prepared.block.sourceLength)), with: "$$x^3+y^3=z^3$$")
+            let oldInline = Array(view.inlineMath.values)
+            let changed = (source as NSString).replacingCharacters(in: NSRange(location: Int(formula.prepared.block.sourceStart),
+                length: Int(formula.prepared.block.sourceLength)), with: formula.prepared.block.block ? "$$x^3+y^3=z^3$$" : "$x^3+y^3=z^3$")
             try Data(changed.utf8).write(to: document.io.url)
             for _ in 0..<10000 {
                 if document.text == changed, coordinator.model?.revision == document.revision, !coordinator.pending { break }
@@ -158,9 +214,11 @@ enum MathInspection {
             result["after_debounce_ms"] = (coordinator.displayedAt - document.refreshStartedAt) * 1000
             result["rebuilt"] = coordinator.model?.rebuilt
             result["reused_math_views"] = view.mathViews.filter { current in old.contains { $0 === current } }.count
+            result["reused_inline_attachments"] = view.inlineMath.values.filter { current in oldInline.contains { $0 === current } }.count
             result["anchor_shift_pt"] = abs(before.offset - after.offset)
             result["same_anchor"] = before.id == after.id
         }
+        result["visible_inline_views"] = view.inlineMathViews.count
         return result
     }
 }

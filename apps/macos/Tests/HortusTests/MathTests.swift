@@ -148,7 +148,7 @@ struct MathTests {
         #expect(math.accessibilityLabel() == L10n.string("Formula: %@", "\\frac{a}{b}"))
         #expect(math.accessibilityChildren()?.isEmpty == true)
         #expect(fixture.view.mathViews[1].item.prepared.reason?.contains("unknowncommand") == true)
-        #expect(fixture.view.string.contains("$$$$") && fixture.view.string.contains("$a_1 b_1$"))
+        #expect(fixture.view.string.contains("$$$$") && fixture.view.inlineMath.count == 1)
         let wide = try #require(fixture.view.mathViews.last)
         #expect(wide.scroll.hasHorizontalScroller)
         #expect(!wide.scroll.hasVerticalScroller)
@@ -184,7 +184,7 @@ struct MathTests {
         }
         #expect(await service.registrationCount == 0)
         let source = "$$x$$"
-        let block = MathBlock(blockId: 1, sourceStart: 0, sourceLength: 5, displayStart: 0,
+        let block = MathBlock(mask: 0, blockId: 1, sourceStart: 0, sourceLength: 5, displayStart: 0,
                               displayLength: 1, displaySource: source, latex: "x", style: .display, block: true)
         let prepared = try #require(await service.prepare([block], source: source, size: 15, width: 100, displayText: "\u{fffc}").first)
         #expect(prepared.reason?.hasPrefix(L10n.string("Formula fonts could not be loaded: %@; showing source", "").components(separatedBy: CharacterSet(charactersIn: ":："))[0]) == true)
@@ -193,7 +193,7 @@ struct MathTests {
     @Test func longFormulaErrorsWrapSourceAndReasonByCharacterClusters() async throws {
         let latex = "\\" + String(repeating: "unknowncommand", count: 300)
         let source = "$$\(latex)$$"
-        let block = MathBlock(blockId: 1, sourceStart: 0, sourceLength: UInt64((source as NSString).length),
+        let block = MathBlock(mask: 0, blockId: 1, sourceStart: 0, sourceLength: UInt64((source as NSString).length),
                               displayStart: 0, displayLength: 1, displaySource: source, latex: latex, style: .display, block: true)
         let prepared = try #require(await Self.service().prepare([block], source: source, size: 15, width: 100, displayText: "\u{fffc}").first)
         #expect(prepared.math == nil)

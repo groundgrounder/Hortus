@@ -215,6 +215,13 @@ final class SourceStyling {
         }
         apply(style(codeMask), range)
         overlapping(range) { run, intersection in apply(style(run.mask | codeMask), intersection) }
+        if view.isReading {
+            for (local, unit) in result.string.utf16.enumerated() where unit == 0xfffc {
+                if let attachment = view.inlineMath[range.location + local] {
+                    result.addAttribute(.attachment, value: attachment, range: NSRange(location: local, length: 1))
+                }
+            }
+        }
         return result
     }
     func installReading(_ next: [SourceStyleRun], size: Double) {

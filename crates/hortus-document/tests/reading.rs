@@ -339,12 +339,22 @@ fn mixed_math_source_hides_quote_continuation_prefixes() {
         .iter()
         .map(|block| block.content.text.as_str())
         .collect();
-    assert!(text.contains("解方程\n$$\nx^2=1\n$$"), "{text:?}");
+    assert!(text.contains("解方程\n\u{fffc}"), "{text:?}");
+    assert_eq!(
+        model
+            .blocks
+            .iter()
+            .flat_map(|b| &b.content.math)
+            .next()
+            .unwrap()
+            .display_source,
+        "$$\nx^2=1\n$$"
+    );
     assert!(!text.contains("> x^2"), "{text:?}");
 }
 
 #[test]
-fn table_cell_math_stays_literal_and_callout_title_math_is_not_block_math() {
+fn table_cell_math_and_callout_title_math_render_with_source_metadata() {
     let model = Document::new("| $$x^2$$ | $y$ |\n|---|---|\n\n> [!note] $$E=mc^2$$\n")
         .reading(false)
         .unwrap();
@@ -358,20 +368,23 @@ fn table_cell_math_stays_literal_and_callout_title_math_is_not_block_math() {
         })
         .collect::<Vec<_>>();
     assert_eq!(tables.len(), 1);
-    assert_eq!(tables[0].rows[0][0].text, "$$x^2$$");
-    assert_eq!(tables[0].rows[0][1].text, "$y$");
+    assert_eq!(tables[0].rows[0][0].text, "\u{fffc}");
+    assert_eq!(tables[0].rows[0][1].text, "\u{fffc}");
+    assert_eq!(tables[0].rows[0][0].math[0].display_source, "$$x^2$$");
+    assert_eq!(tables[0].rows[0][1].math[0].display_source, "$y$");
     let formulas: Vec<_> = model
         .blocks
         .iter()
         .flat_map(|block| &block.content.math)
         .collect();
-    assert!(formulas.is_empty());
+    assert_eq!(formulas.len(), 1);
+    assert_eq!(formulas[0].display_source, "$$E=mc^2$$");
     let displayed: String = model
         .blocks
         .iter()
         .map(|block| block.content.text.as_str())
         .collect();
-    assert!(displayed.contains("$$E=mc^2$$"), "{displayed:?}");
+    assert!(displayed.contains('\u{fffc}'), "{displayed:?}");
 }
 
 #[test]

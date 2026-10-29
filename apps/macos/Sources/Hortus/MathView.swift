@@ -13,15 +13,27 @@ struct PreparedMathBlock: @unchecked Sendable {
 }
 
 extension MathService {
-    func prepare(_ blocks: [MathBlock], source: String, size: Double, width: Double, displayText: String) -> [PreparedMathBlock] {
+    func prepare(_ blocks: [MathBlock], source: String, size: Double, width: Double, displayText: String, previous: [PreparedMathBlock] = []) -> [PreparedMathBlock] {
         let source = source as NSString
         let display = displayText as NSString
-        return blocks.filter { $0.block && !$0.latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.compactMap { block in
+        var retained: [String: PreparedMathBlock] = [:]
+        for item in previous {
+            retained["\(item.block.style):\(item.block.mask):\(item.block.latex)"] = item
+        }
+        return blocks.filter { !$0.latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.compactMap { block in
             let range = NSRange(location: Int(block.sourceStart), length: Int(block.sourceLength))
             guard range.location <= source.length, range.length <= source.length - range.location else { return nil }
             let raw = source.substring(with: range)
+            let size = MathTypography.bodySize(size, mask: block.mask)
             do {
-                return PreparedMathBlock(block: block, source: raw, math: try render(block.latex, style: block.style, bodySize: size),
+                let key = "\(block.style):\(block.mask):\(block.latex)"
+                if let old = retained[key], old.math == nil, !block.block {
+                    return PreparedMathBlock(block: block, source: raw, math: nil,
+                        reason: old.reason, reasonLines: old.reasonLines, fallbackLines: old.fallbackLines,
+                        fallbackHeight: old.fallbackHeight)
+                }
+                let math = try retained[key]?.math ?? render(block.latex, style: block.style, bodySize: size)
+                return PreparedMathBlock(block: block, source: raw, math: math,
                                          reason: nil, reasonLines: [], fallbackLines: [], fallbackHeight: 0)
             } catch {
                 let detail: String
@@ -61,7 +73,9 @@ extension MathService {
                 let reasonFont = NSFont.systemFont(ofSize: 12)
                 let contextColor = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
                 let reasonLines = wrap(message, attributes: [.font: reasonFont, contextColor: true])
-                let lines = wrap(block.displaySource, attributes: [.font: sourceFont, contextColor: true])
+                let lines = block.block ? wrap(block.displaySource, attributes: [.font: sourceFont, contextColor: true])
+                    : [CTLineCreateWithAttributedString(NSAttributedString(string: block.displaySource,
+                        attributes: [.font: sourceFont, contextColor: true]))]
                 let textHeight = Double(reasonLines.count) * 16 + Double(lines.count) * (size + 5) + 16
                 return PreparedMathBlock(block: block, source: raw, math: nil,
                     reason: message, reasonLines: reasonLines, fallbackLines: lines,
@@ -202,12 +216,13 @@ final class MathBlockView: NSView {
 
 extension DiagramTextView {
     func installMath(_ items: [NoteMath], width: Double, size: Double) {
-        guard !items.isEmpty || !mathViews.isEmpty else { return }
+        guard !items.isEmpty || !mathViews.isEmpty || !inlineMath.isEmpty else { return }
+        installInlineMath(items.filter { !$0.prepared.block.block }, width: width, size: size)
         let old = mathViews
         var unused = old
         var changed: [NSRange] = []
         let storage = textStorage?.string as NSString?
-        mathViews = items.map { item in
+        mathViews = items.filter { $0.prepared.block.block }.map { item in
             let prefixWidth: Double
             if let storage {
                 prefixWidth = MathTypography.prefixWidth(in: storage, range: item.range, size: size)
@@ -230,13 +245,13 @@ extension DiagramTextView {
             for math in mathViews { mathParagraphs[storage.paragraphRange(for: math.item.range).location] = math }
         }
         old.filter { previous in !mathViews.contains { $0 === previous } }.forEach { $0.removeFromSuperview() }
-        if let manager = textLayoutManager, let content = manager.textContentManager {
-            for range in changed {
-                let paragraph = storage?.paragraphRange(for: range) ?? range
-                if let start = content.location(content.documentRange.location, offsetBy: paragraph.location),
-                   let end = content.location(start, offsetBy: paragraph.length),
-                   let range = NSTextRange(location: start, end: end) { manager.invalidateLayout(for: range) }
-            }
+        if let manager = textLayoutManager, let content = manager.textContentManager,
+           let changedRange = changed.reduce(nil as NSRange?, { current, next in current.map { NSUnionRange($0, next) } ?? next }) {
+            // 一次更新可能包含很多公式；合并失效范围，避免逐式重建原生元素缓存。
+            let paragraph = storage?.paragraphRange(for: changedRange) ?? changedRange
+            if let start = content.location(content.documentRange.location, offsetBy: paragraph.location),
+               let end = content.location(start, offsetBy: paragraph.length),
+               let range = NSTextRange(location: start, end: end) { manager.invalidateLayout(for: range) }
         }
         needsLayout = true
     }

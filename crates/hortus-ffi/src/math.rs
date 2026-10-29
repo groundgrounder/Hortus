@@ -13,6 +13,7 @@ pub enum MathStyle {
 }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MathBlock {
+    pub mask: u32,
     pub block_id: u64,
     pub source_start: u64,
     pub source_length: u64,
@@ -156,6 +157,7 @@ impl DocumentSession {
         for block in &state.reading_snapshot.as_ref().unwrap().1.blocks {
             for item in &block.content.math {
                 result.push(MathBlock {
+                    mask: item.mask,
                     block_id: block.id,
                     source_start: (block.source.start + item.source.start) as u64,
                     source_length: item.source.len() as u64,

@@ -186,7 +186,7 @@ struct ReadingText: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         let view = DiagramTextView(diagramLayout: true)
-        view.isReading = true; view.isEditable = false; view.isSelectable = true; view.isRichText = false
+        view.isReading = true; view.isEditable = false; view.isSelectable = true; view.isRichText = true
         view.drawsBackground = false; view.usesFindBar = true; view.allowsUndo = false
         view.isVerticallyResizable = true; view.isHorizontallyResizable = false
         view.textContainerInset = NSSize(width: 30, height: 24)
@@ -204,6 +204,8 @@ struct ReadingText: NSViewRepresentable {
         for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
         view.mediaViews = []; view.mediaBlocks = []
         view.mathViews.forEach { $0.removeFromSuperview() }; view.mathViews = []
+        view.inlineMath = [:]
+        view.inlineMathViews.forEach { $0.removeFromSuperview() }; view.inlineMathViews = []
         view.diagramViews = [:]; view.string = ""; view.textLayoutManager?.delegate = nil
         if let manager = view.textLayoutManager { manager.textContentManager?.removeTextLayoutManager(manager) }
         view.diagramStorage = nil; scroll.documentView = nil
@@ -223,6 +225,7 @@ struct ReadingText: NSViewRepresentable {
         weak var view: DiagramTextView?
         var input: ReadingText?
         var model: ReadingViewModel?
+        private var preparedMath: [PreparedMathBlock] = []
         var ranges: [NSRange] = []
         var task: Task<Void, Never>?
         let styling = SourceStyling()
@@ -283,11 +286,14 @@ struct ReadingText: NSViewRepresentable {
             view?.mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
             view?.mediaViews = []; view?.mediaBlocks = []; view?.mediaProjection = []
             view?.mathViews.forEach { $0.removeFromSuperview() }; view?.mathViews = []
+            view?.inlineMath = [:]
+            view?.inlineMathViews.forEach { $0.removeFromSuperview() }; view?.inlineMathViews = []
             if input?.document.viewOwner === self {
                 input?.document.onReload = nil; input?.document.onClosing = nil
                 input?.document.onStateChange = nil; input?.document.viewOwner = nil
             }
             input = nil; model = nil; ranges = []; fallbacks = []; rendered = []; source = ""
+            preparedMath = []
             pendingInitialSource = nil; pendingAnchor = nil
             pendingRevealSource = nil
         }
@@ -314,6 +320,8 @@ struct ReadingText: NSViewRepresentable {
             if firstRefreshStartedAt == 0 { firstRefreshStartedAt = began }
             let themeChanged = self.dark != dark || size != input.fontSize
             let oldRendered = rendered
+            let oldMath = size == input.fontSize ? preparedMath : []
+            let oldTableMath = size == input.fontSize ? view.mediaBlocks.flatMap { $0.prepared.math.flatMap { $0 } } : []
             let oldModel = model
             let modelRevision = model?.revision ?? UInt64.max
             let io = input.document.io
@@ -368,11 +376,12 @@ struct ReadingText: NSViewRepresentable {
                                             mmd: input.path.lowercased().hasSuffix(".mmd"), blocks: diagrams,
                                             width: width, dark: dark)
                                     }
-                                    let media = await LocalImageCache.shared.prepare(reading.6, vault: input.vault)
+                                    let media = await LocalImageCache.shared.prepare(reading.6, vault: input.vault,
+                                        size: input.fontSize, mathService: input.mathService, previousMath: oldTableMath)
                                     var completed = ReadingRefreshResult(model: value.model, snapshot: value.snapshot, media: media, phases: value.phases)
                                     if !reading.7.isEmpty {
                                         completed.math = await input.mathService.prepare(reading.7, source: reading.1?.text ?? "", size: input.fontSize, width: width,
-                                            displayText: value.model.text)
+                                            displayText: value.model.text, previous: oldMath)
                                     }
                                     completed.phases["diagrams_ms"] = (ProcessInfo.processInfo.systemUptime - diagramStart) * 1000
                                     guard let self else { return }
@@ -423,32 +432,37 @@ struct ReadingText: NSViewRepresentable {
             self.width = width; self.dark = dark; size = input.fontSize; source = input.document.text
             let installStart = ProcessInfo.processInfo.systemUptime
             install(result.model, diagrams: diagrams, themeChanged: themeChanged)
+            let blockIndices = Dictionary(uniqueKeysWithValues: result.model.blocks.enumerated().map { ($0.element.id, $0.offset) })
             let items = result.media.compactMap { item -> NoteMedia? in
-                guard let index = result.model.blocks.firstIndex(where: { $0.id == item.block.blockId }), index < ranges.count else { return nil }
+                guard let index = blockIndices[item.block.blockId], index < ranges.count else { return nil }
                 let block = result.model.blocks[index]
                 let local = Int(item.block.displayStart - block.displayStart)
                 return NoteMedia(range: NSRange(location: ranges[index].location + local, length: Int(item.block.displayLength)), prepared: item)
             }
             view.installMedia(items, width: width, size: input.fontSize, vault: input.vault, refresh: { [weak self] in self?.refresh(force: true) })
             let formulas = result.math.compactMap { item -> NoteMath? in
-                guard let index = result.model.blocks.firstIndex(where: { $0.id == item.block.blockId }), index < ranges.count else { return nil }
+                guard let index = blockIndices[item.block.blockId], index < ranges.count else { return nil }
                 let block = result.model.blocks[index]
                 return NoteMath(range: NSRange(location: ranges[index].location + Int(item.block.displayStart - block.displayStart),
                                                length: Int(item.block.displayLength)), prepared: item)
             }
             view.installMath(formulas, width: width, size: input.fontSize)
+            preparedMath = result.math
             phaseMilliseconds = result.phases
             phaseMilliseconds["install_ms"] = (ProcessInfo.processInfo.systemUptime - installStart) * 1000
             rendered = diagrams; pending = false; view.diagramPending = false
             let layoutStart = ProcessInfo.processInfo.systemUptime
-            view.layoutSubtreeIfNeeded()
             if let source = pendingInitialSource {
                 pendingInitialSource = nil
-                reveal(source: source)
+                // 新视图已在文首；避免为零锚点重复迁移视口、重排首屏。
+                if source != 0 || view.visibleRect.minY > 0.5 { reveal(source: source) }
                 view.layoutSubtreeIfNeeded()
-            } else if let anchor = pendingAnchor {
-                pendingAnchor = nil
-                restore(anchor)
+            } else {
+                view.layoutSubtreeIfNeeded()
+                if let anchor = pendingAnchor {
+                    pendingAnchor = nil
+                    restore(anchor)
+                }
             }
             phaseMilliseconds["layout_ms"] = (ProcessInfo.processInfo.systemUptime - layoutStart) * 1000
             let displayStart = ProcessInfo.processInfo.systemUptime

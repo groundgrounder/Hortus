@@ -8,6 +8,7 @@ struct PreparedMedia: Sendable {
     let imageSize: CGSize
     let reason: String
     let version: String
+    var math: [[PreparedMathBlock]] = []
 }
 
 /// 只在后台读文件、探测尺寸和解码。相同文件版本共享像素，不缓存到笔记目录。
@@ -56,14 +57,26 @@ actor LocalImageCache {
         order.removeAll { $0 == path }; order.append(path)
         return entry
     }
-    func prepare(_ blocks: [MediaBlock], vault: String) -> [PreparedMedia] {
-        blocks.map { block in
+    func prepare(_ blocks: [MediaBlock], vault: String, size: Double = 15, mathService: MathService? = nil,
+                 previousMath: [PreparedMathBlock] = []) async -> [PreparedMedia] {
+        var result: [PreparedMedia] = []
+        for block in blocks {
             guard block.columns.isEmpty, block.imageReason.isEmpty else {
-                return PreparedMedia(block: block, imageSize: .zero, reason: block.imageReason, version: "")
+                var item = PreparedMedia(block: block, imageSize: .zero, reason: block.imageReason, version: "")
+                if let mathService {
+                    for (index, cell) in block.cells.enumerated() {
+                        item.math.append(await mathService.prepare(cell.math, source: cell.source, size: size,
+                            width: block.columns[index % block.columns.count] - 20, displayText: cell.text,
+                            previous: previousMath))
+                    }
+                }
+                result.append(item)
+                continue
             }
             let entry = inspect(block.imagePath, vault: vault)
-            return PreparedMedia(block: block, imageSize: entry.size, reason: entry.reason, version: entry.stamp)
+            result.append(PreparedMedia(block: block, imageSize: entry.size, reason: entry.reason, version: entry.stamp))
         }
+        return result
     }
     func version(_ path: String, vault: String) -> String {
         checkedURL(path, vault: vault).flatMap { stamp($0) } ?? ""
@@ -105,7 +118,7 @@ private final class TableCanvas: NSView {
     private let texts: [NSAttributedString]
     let heights: [CGFloat]
     var edit: (() -> Void)?
-    init(_ block: MediaBlock, size: Double) {
+    init(_ block: MediaBlock, size: Double, math: [[PreparedMathBlock]]) {
         columns = block.columns
         let styling = SourceStyling(); styling.installReading([], size: size)
         let texts = block.cells.enumerated().map { index, cell -> NSAttributedString in
@@ -114,6 +127,16 @@ private final class TableCanvas: NSView {
             for run in cell.runs {
                 let range = NSRange(location: Int(run.start), length: Int(run.length))
                 if NSMaxRange(range) <= text.length { text.setAttributes(styling.style(run.mask | header), range: range) }
+            }
+            if index < math.count {
+                for formula in math[index] {
+                    let range = NSRange(location: Int(formula.block.displayStart), length: Int(formula.block.displayLength))
+                    guard NSMaxRange(range) <= text.length else { continue }
+                    let attachment = NSTextAttachment()
+                    let color = styling.style(formula.block.mask | header)[.foregroundColor] as? NSColor ?? .textColor
+                    attachment.attachmentCell = TableMathCell(formula, color: color)
+                    text.addAttribute(.attachment, value: attachment, range: range)
+                }
             }
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = 4
@@ -134,7 +157,15 @@ private final class TableCanvas: NSView {
         }
         super.init(frame: CGRect(x: 0, y: 0, width: columns.reduce(0, +), height: heights.reduce(0, +)))
         setAccessibilityElement(true); setAccessibilityRole(.table)
-        setAccessibilityLabel(block.cells.map(\.text).joined(separator: ", "))
+        setAccessibilityLabel(block.cells.map { cell in
+            let label = NSMutableString(string: cell.text)
+            for formula in cell.math.reversed() where !formula.latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                label.replaceCharacters(in: NSRange(location: Int(formula.displayStart), length: Int(formula.displayLength)),
+                    with: L10n.string("Formula: %@", formula.latex))
+            }
+            return label as String
+        }.joined(separator: ", "))
+        toolTip = math.flatMap { $0 }.compactMap(\.reason).joined(separator: "\n")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func draw(_ dirtyRect: NSRect) {
@@ -179,7 +210,7 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         let block = prepared.block
         var table: TableCanvas?
         if !block.columns.isEmpty {
-            let canvas = TableCanvas(block, size: size); table = canvas
+            let canvas = TableCanvas(block, size: size, math: prepared.math); table = canvas
             let scrolls = canvas.frame.width > width + 0.5
             preferredSize = CGSize(width: min(width, canvas.frame.width), height: canvas.frame.height + (scrolls ? 15 : 0) + 12)
         } else if prepared.imageSize.width > 0 {

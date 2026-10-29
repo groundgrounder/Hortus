@@ -31,6 +31,7 @@ impl Content {
 }
 #[derive(Clone, Debug)]
 pub struct Math {
+    pub mask: u32,
     pub source: Range<usize>,
     pub display: Range<usize>,
     pub display_source: String,
@@ -577,8 +578,15 @@ pub(crate) fn heading_text(
     spans: &[(Kind, Range<usize>)],
     refs: &[(usize, usize, String)],
 ) -> String {
-    render(text, false, false, false, spans, refs)
-        .text
+    let content = render(text, false, false, false, spans, refs);
+    let mut units: Vec<u16> = content.text.encode_utf16().collect();
+    for formula in content.math.iter().rev() {
+        units.splice(
+            formula.display.clone(),
+            formula.display_source.encode_utf16(),
+        );
+    }
+    String::from_utf16_lossy(&units)
         .trim()
         .replace(['\r', '\n'], " ")
 }
@@ -685,7 +693,7 @@ pub(crate) fn inline(text: &str) -> Content {
         }
     }
     spans.sort_by_key(|(_, range)| (range.start, range.end));
-    render_full_inner(text, false, false, false, &spans, &[], false)
+    render_full_inner(text, false, false, false, &spans, &[], true)
 }
 
 fn render_full(
@@ -696,7 +704,7 @@ fn render_full(
     spans: &[(Kind, Range<usize>)],
     refs: &[(usize, usize, String)],
 ) -> Content {
-    render_full_inner(text, mmd, front, diagram, spans, refs, true)
+    render_full_inner(text, mmd, front, diagram, spans, refs, false)
 }
 
 fn render_full_inner(
@@ -706,7 +714,7 @@ fn render_full_inner(
     diagram: bool,
     spans: &[(Kind, Range<usize>)],
     refs: &[(usize, usize, String)],
-    parse_math: bool,
+    inline_context: bool,
 ) -> Content {
     let mut result = Content::default();
     let mut masks = vec![0u32; text.len()];
@@ -903,8 +911,12 @@ fn render_full_inner(
         }
     }
     let mut formulas = HashMap::new();
-    if parse_math && !mmd && !front && !result.diagram && text.contains('$') {
-        for formula in math::scan(text) {
+    if !mmd && !front && !result.diagram && text.contains('$') {
+        for mut formula in math::scan(text) {
+            if inline_context {
+                formula.block = false;
+                formula.style = Style::Text;
+            }
             if suppress[formula.source.start] || masks[formula.source.start] & (16 | 32) != 0 {
                 continue;
             }
@@ -914,17 +926,8 @@ fn render_full_inner(
             {
                 continue;
             }
-            let value = if formula.block && !formula.latex.trim().is_empty() {
-                if text[formula.source.end..]
-                    .chars()
-                    .take_while(|c| c.is_whitespace())
-                    .any(|c| c == '\n')
-                    || formula.source.end == text.len()
-                {
-                    "\u{fffc}".into()
-                } else {
-                    "\u{fffc}\n".into()
-                }
+            let value = if !formula.latex.trim().is_empty() {
+                "\u{fffc}".into()
             } else {
                 let mut value = String::new();
                 for (offset, character) in text[formula.source.clone()].char_indices() {
@@ -946,7 +949,7 @@ fn render_full_inner(
     let mut source16 = 0;
     let mut display16 = 0;
     while byte < text.len() {
-        let (end, value, mask) = if let Some((end, value, mask)) = replacements.remove(&byte) {
+        let (end, mut value, mask) = if let Some((end, value, mask)) = replacements.remove(&byte) {
             (end, value, mask)
         } else {
             let c = text[byte..].chars().next().unwrap();
@@ -958,17 +961,38 @@ fn render_full_inner(
                 mask & !1,
             )
         };
+        let mut formula_leading = 0;
+        if let Some(formula) = formulas.get(&byte)
+            && formula.block
+            && !formula.latex.trim().is_empty()
+        {
+            // 混排 display 单独成行；只有容器缩进时保留它作为附件前缀。
+            let line = result.text.rsplit('\n').next().unwrap_or("");
+            let prefix = line.trim();
+            let marker = matches!(prefix, "•" | "☐" | "☑")
+                || prefix.strip_suffix('.').is_some_and(|number| {
+                    !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+                });
+            if !prefix.is_empty() && !marker {
+                value.insert(0, '\n');
+                formula_leading = 1;
+            }
+            if end < text.len() && !text[end..].starts_with('\n') {
+                value.push('\n');
+            }
+        }
         let source_end = source16 + text[byte..end].encode_utf16().count();
         let display_end = display16 + value.encode_utf16().count();
         if let Some(formula) = formulas.remove(&byte) {
-            let length = if formula.block && !formula.latex.trim().is_empty() {
+            let length = if !formula.latex.trim().is_empty() {
                 1
             } else {
                 display_end - display16
             };
             result.math.push(Math {
+                mask,
                 source: source16..source_end,
-                display: display16..display16 + length,
+                display: display16 + formula_leading..display16 + formula_leading + length,
                 display_source: text[byte..end]
                     .char_indices()
                     .filter_map(|(offset, character)| {

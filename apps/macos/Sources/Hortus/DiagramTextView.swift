@@ -381,7 +381,19 @@ final class NoteLayoutFragment: NSTextLayoutFragment {
 
 @MainActor
 final class DiagramTextView: NSTextView {
+    override func copy(_ sender: Any?) {
+        if !copyWithFormulas() { super.copy(sender) }
+    }
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        for formula in inlineMathViews {
+            formula.subviews.forEach { $0.needsDisplay = true }
+            if formula.attachment.wide { formula.scroll.documentView?.needsDisplay = true }
+        }
+    }
     let editorActions = EditorActions()
+    var inlineMath: [Int: InlineMathAttachment] = [:]
+    var inlineMathViews: [InlineMathView] = []
     var mathViews: [MathBlockView] = [] { didSet { mathParagraphs.removeAll(keepingCapacity: true) } }
     var mathParagraphs: [Int: MathBlockView] = [:]
     var isReading = false
@@ -568,6 +580,11 @@ final class DiagramTextView: NSTextView {
             }
         }
         let updated = ProcessInfo.processInfo.systemUptime
+        if isReading && blocks.isEmpty && diagramViews.isEmpty {
+            // 阅读内容的样式、媒体和公式统一装好后再排首屏。
+            needsLayout = true
+            return
+        }
         if !geometryChanged || onlyTailHeightChanged {
             if let manager = textLayoutManager, let content = manager.textContentManager {
                 enumerateVisibleFragments { fragment in
@@ -676,14 +693,15 @@ final class DiagramTextView: NSTextView {
         let start = viewport?.location ?? content.documentRange.location
         let end = viewport?.endLocation ?? content.location(start, offsetBy: min(4096, sourceUTF16Length)) ?? content.documentRange.endLocation
         // 无 ensuresLayout 也会创建所经段落的缓存。必须在视口末尾停止，防止每键平移整篇元素缓存。
-        manager.enumerateTextLayoutFragments(from: start, options: []) { fragment in
+        manager.enumerateTextLayoutFragments(from: start, options: inlineMath.isEmpty ? [] : [.ensuresLayout]) { fragment in
             if fragment.rangeInElement.location.compare(end) != .orderedAscending { return false }
             body(fragment)
             return true
         }
     }
     override func accessibilityChildren() -> [Any]? {
-        (super.accessibilityChildren() ?? []) + diagramViews.keys.sorted().compactMap { diagramViews[$0] } + mathViews
+        let children = (super.accessibilityChildren() ?? []).filter { !($0 is InlineMathView) }
+        return children + diagramViews.keys.sorted().compactMap { diagramViews[$0] } + mathViews + inlineMathViews
     }
     override func layout() {
         let started = ProcessInfo.processInfo.systemUptime
@@ -696,11 +714,35 @@ final class DiagramTextView: NSTextView {
         for view in diagramViews.values { view.isHidden = true }
         for view in mediaViews { view.isHidden = true }
         for view in mathViews { view.isHidden = true }
+        let oldInlineViews = inlineMathViews
+        let retainedInline = Dictionary(uniqueKeysWithValues: oldInlineViews.map { (ObjectIdentifier($0.attachment), $0) })
+        inlineMathViews = []
         let ensured = ProcessInfo.processInfo.systemUptime
         // 由原生视口控制器排版可见内容，不为放置叠加视图强制排完整篇笔记。
         enumerateVisibleFragments { fragment in
             let offset = content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location)
             if let fragment = fragment as? NoteLayoutFragment { self.configure(fragment, at: offset) }
+            if let paragraph = fragment.textElement as? NSTextParagraph {
+                paragraph.attributedString.enumerateAttribute(.attachment,
+                    in: NSRange(location: 0, length: paragraph.attributedString.length)) { value, range, _ in
+                    guard let attachment = value as? InlineMathAttachment,
+                          let location = content.location(fragment.rangeInElement.location, offsetBy: range.location) else { return }
+                    var rect = fragment.frameForTextAttachment(at: location)
+                    let local = content.offset(from: fragment.rangeInElement.location, to: location)
+                    if let line = fragment.textLineFragments.first(where: { NSLocationInRange(local, $0.characterRange) }) {
+                        // 原生附件矩形会取整；矢量盒子直接对齐文字行的精确基线。
+                        rect.origin.y = line.typographicBounds.minY + line.glyphOrigin.y - attachment.ascent
+                    }
+                    rect = rect.offsetBy(dx: fragment.layoutFragmentFrame.minX + self.textContainerInset.width,
+                                         dy: fragment.layoutFragmentFrame.minY + self.textContainerInset.height)
+                    guard rect.intersects(self.visibleRect) else { return }
+                    let formula = retainedInline[ObjectIdentifier(attachment)] ?? InlineMathView(attachment)
+                    formula.frame = rect
+                    if formula.superview !== self { self.addSubview(formula) }
+                    formula.isHidden = false
+                    self.inlineMathViews.append(formula)
+                }
+            }
             if let math = self.mathView(at: offset) {
                 if let fragment = fragment as? NoteLayoutFragment {
                     math.containerPrefix = fragment.replacementPrefix
@@ -736,6 +778,7 @@ final class DiagramTextView: NSTextView {
             }
         }
         let enumerated = ProcessInfo.processInfo.systemUptime
+        oldInlineViews.filter { old in !inlineMathViews.contains { $0 === old } }.forEach { $0.removeFromSuperview() }
         resizeDocument()
         recordMediaDisplay()
         layoutPhases = ["native_ms": (native - started) * 1000, "ensure_ms": (ensured - native) * 1000,
