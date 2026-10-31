@@ -53,8 +53,10 @@ def main():
                     ('CR quote and list', 'display-cr.md')]:
                 name = section.lower().replace(' ', '-') + '-' + appearance
                 data = READING.run(base / name, target, name, ROOT / 'fixtures/math', note, 'math',
-                    extra=[f'--{appearance}', f'--math-reveal=## {section}', f'--snapshot={target / (name + ".png")}'])
+                    extra=[f'--{appearance}', '--inspect-reading-text', f'--math-reveal=## {section}', f'--snapshot={target / (name + ".png")}'])
                 assert data['missing_glyphs'] == 0, data
+                if note == 'display-comment.md':
+                    assert 'SPDX' not in data['display_text'] and '<!--' not in data['display_text'], data
                 if note.startswith('display-'):
                     assert data['math_blocks'] == (2 if section in ['Comment display', 'CR quote and list'] else 1), data
             for focus in ['body', 'sidebar']:
