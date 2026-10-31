@@ -26,4 +26,5 @@ serde_json.workspace = true
 uniffi = { version = "=0.32.2", default-features = false }
 
 [dev-dependencies]
+hortus-document = { path = "../hortus-document", features = ["test-hooks"] }
 tempfile = "=3.27.0"

@@ -143,43 +143,41 @@ impl MathEngine {
 #[uniffi::export]
 impl DocumentSession {
     pub fn math_blocks(&self) -> Result<Vec<MathBlock>, CoreError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| CoreError::failure("math.lock"))?;
-        let revision = state.document.revision();
-        if state
-            .reading_snapshot
-            .as_ref()
-            .is_none_or(|(cached, _)| *cached != revision)
-        {
-            let mmd = state.relative.to_lowercase().ends_with(".mmd");
-            let model = state.document.reading(mmd)?;
-            state.reading_snapshot = Some((revision, model));
-        }
-        let mut result = Vec::new();
-        let mut display = 0;
-        for block in &state.reading_snapshot.as_ref().unwrap().1.blocks {
-            for item in &block.content.math {
-                result.push(MathBlock {
-                    mask: item.mask,
-                    block_id: block.id,
-                    source_start: (block.source.start + item.source.start) as u64,
-                    source_length: item.source.len() as u64,
-                    display_start: (display + item.display.start) as u64,
-                    display_length: item.display.len() as u64,
-                    display_source: item.display_source.clone(),
-                    latex: item.latex.clone(),
-                    style: match item.style {
-                        hortus_document::math::Style::Display => MathStyle::Display,
-                        hortus_document::math::Style::Text => MathStyle::Text,
-                    },
-                    block: item.block,
-                });
+        self.with_core(|state| {
+            let revision = state.document.revision();
+            if state
+                .reading_snapshot
+                .as_ref()
+                .is_none_or(|(cached, _)| *cached != revision)
+            {
+                let mmd = state.relative.to_lowercase().ends_with(".mmd");
+                let model = state.document.reading(mmd)?;
+                state.reading_snapshot = Some((revision, model));
             }
-            display += block.content.display_len();
-        }
-        Ok(result)
+            let mut result = Vec::new();
+            let mut display = 0;
+            for block in &state.reading_snapshot.as_ref().unwrap().1.blocks {
+                for item in &block.content.math {
+                    result.push(MathBlock {
+                        mask: item.mask,
+                        block_id: block.id,
+                        source_start: (block.source.start + item.source.start) as u64,
+                        source_length: item.source.len() as u64,
+                        display_start: (display + item.display.start) as u64,
+                        display_length: item.display.len() as u64,
+                        display_source: item.display_source.clone(),
+                        latex: item.latex.clone(),
+                        style: match item.style {
+                            hortus_document::math::Style::Display => MathStyle::Display,
+                            hortus_document::math::Style::Text => MathStyle::Text,
+                        },
+                        block: item.block,
+                    });
+                }
+                display += block.content.display_len();
+            }
+            Ok(result)
+        })
     }
 }
 

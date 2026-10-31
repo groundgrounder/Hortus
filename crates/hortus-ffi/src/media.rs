@@ -183,42 +183,33 @@ pub(crate) fn blocks(
     Ok(result)
 }
 
-impl DocumentSession {
-    fn lock_media_state(&self) -> std::sync::MutexGuard<'_, crate::document::State> {
-        self.state.lock().unwrap_or_else(|poisoned| {
-            let guard = poisoned.into_inner();
-            self.state.clear_poison();
-            guard
-        })
-    }
-}
-
 #[uniffi::export]
 impl DocumentSession {
     pub fn media_blocks(&self, width: f64, size: f64) -> Result<Vec<MediaBlock>, CoreError> {
-        let mut state = self.lock_media_state();
-        let revision = state.document.revision();
-        if state
-            .reading_snapshot
-            .as_ref()
-            .is_none_or(|(cached, _)| *cached != revision)
-        {
-            let mmd = state.relative.to_lowercase().ends_with(".mmd");
-            let model = state.document.reading(mmd)?;
-            state.reading_snapshot = Some((revision, model));
-        }
-        let model = &state.reading_snapshot.as_ref().unwrap().1;
-        blocks(
-            model,
-            &state.root,
-            std::path::Path::new(&state.relative),
-            &state.image_resolver,
-            width,
-            size,
-        )
+        self.with_core(|state| {
+            let revision = state.document.revision();
+            if state
+                .reading_snapshot
+                .as_ref()
+                .is_none_or(|(cached, _)| *cached != revision)
+            {
+                let mmd = state.relative.to_lowercase().ends_with(".mmd");
+                let model = state.document.reading(mmd)?;
+                state.reading_snapshot = Some((revision, model));
+            }
+            let model = &state.reading_snapshot.as_ref().unwrap().1;
+            blocks(
+                model,
+                &state.root,
+                std::path::Path::new(&state.relative),
+                &state.image_resolver,
+                width,
+                size,
+            )
+        })
     }
     pub fn attachment_metrics(&self) -> AttachmentMetrics {
-        let stats = self.lock_media_state().image_resolver.stats();
+        let stats = self.lock_state().image_resolver.stats();
         AttachmentMetrics {
             files: stats.files,
             directories: stats.directories,
@@ -228,14 +219,17 @@ impl DocumentSession {
         }
     }
     pub fn align_table(&self, caret: u64) -> Result<Option<TablePatch>, CoreError> {
-        let state = self.lock_media_state();
-        Ok(
-            media::align_table(&state.document.text()?, caret as usize).map(|patch| TablePatch {
-                start: patch.source.start as u64,
-                length: patch.source.len() as u64,
-                replacement: patch.replacement,
-            }),
-        )
+        self.with_core(|state| {
+            Ok(
+                media::align_table(&state.document.text()?, caret as usize).map(|patch| {
+                    TablePatch {
+                        start: patch.source.start as u64,
+                        length: patch.source.len() as u64,
+                        replacement: patch.replacement,
+                    }
+                }),
+            )
+        })
     }
 }
 

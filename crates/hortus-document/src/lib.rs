@@ -17,6 +17,8 @@ pub struct Document {
     dirty_style: Option<std::ops::Range<usize>>,
     reading: reading::Cache,
     outline: Option<(u64, bool, Vec<outline::Heading>)>,
+    #[cfg(feature = "test-hooks")]
+    panic_reading: bool,
 }
 
 impl Document {
@@ -42,10 +44,22 @@ impl Document {
             dirty_style: None,
             reading: reading::Cache::default(),
             outline: None,
+            #[cfg(feature = "test-hooks")]
+            panic_reading: false,
         }
     }
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    /// 内核异常后仅丢弃派生缓存，正文与修订号保持不变。
+    pub fn invalidate_derived(&mut self) {
+        self.styles.clear();
+        self.analyzer = markdown::Analyzer::default();
+        self.styled = false;
+        self.style_revision = u64::MAX;
+        self.dirty_style = None;
+        self.reading = reading::Cache::default();
+        self.outline = None;
     }
     pub fn outline(&mut self, mmd: bool) -> io::Result<&[outline::Heading]> {
         if !self
@@ -63,7 +77,17 @@ impl Document {
         Ok(&self.outline.as_ref().unwrap().2)
     }
     pub fn reading(&mut self, mmd: bool) -> io::Result<reading::Model> {
-        Ok(self.reading.model(&self.text()?, mmd))
+        let model = self.reading.model(&self.text()?, mmd);
+        #[cfg(feature = "test-hooks")]
+        if std::mem::take(&mut self.panic_reading) {
+            panic!("inject reading kernel panic after cache update");
+        }
+        Ok(model)
+    }
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn inject_reading_panic(&mut self) {
+        self.panic_reading = true;
     }
     pub fn replace(&mut self, start: usize, length: usize, replacement: &str) -> io::Result<u64> {
         let end = start

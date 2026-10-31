@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+test-hooks = []
+
 [dependencies]
 hortus-diagram = { path = "../hortus-diagram" }
 hortus-math = { path = "../hortus-math" }

@@ -6,8 +6,9 @@ use hortus_document::{
 };
 use hortus_vault::note::{self, DiskVersion, Format, Recovery, WriteFailure};
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -32,6 +33,11 @@ pub enum DocumentPersistence {
 
 const FULL_READING_MODEL: u64 = u64::MAX;
 const EMPTY_READING_DELTA: u64 = u64::MAX - 1;
+
+#[cfg(test)]
+thread_local! {
+    static INJECT_CORE_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 fn reading_model_is_compact(model: &Model) -> bool {
     model.blocks.iter().all(|block| {
@@ -605,24 +611,79 @@ impl WorkspaceCore {
     }
 }
 
+impl State {
+    fn invalidate_derived(&mut self) {
+        self.reading_snapshot = None;
+        self.document.invalidate_derived();
+        self.image_resolver = Default::default();
+    }
+}
+
+impl DocumentSession {
+    pub(crate) fn lock_state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            let mut state = poisoned.into_inner();
+            state.invalidate_derived();
+            self.state.clear_poison();
+            state
+        })
+    }
+
+    // guard 在 catch_unwind 外，内核异常不会把锁中毒带到下一次保存。
+    pub(crate) fn with_core<T>(
+        &self,
+        work: impl FnOnce(&mut State) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        let mut state = self.lock_state();
+        match catch_unwind(AssertUnwindSafe(|| {
+            let result = work(&mut state);
+            #[cfg(test)]
+            if INJECT_CORE_PANIC.replace(false) {
+                panic!("inject reading core panic after cache update");
+            }
+            result
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                state.invalidate_derived();
+                Err(CoreError::failure("document.core_panic"))
+            }
+        }
+    }
+
+    fn with_update(&self, work: impl FnOnce(&mut State) -> DocumentUpdate) -> DocumentUpdate {
+        let mut state = self.lock_state();
+        match catch_unwind(AssertUnwindSafe(|| work(&mut state))) {
+            Ok(update) => update,
+            Err(_) => {
+                state.invalidate_derived();
+                state.issue = DocumentIssue::SaveFailed;
+                state.message = "document.save_failed".into();
+                state.update(None)
+            }
+        }
+    }
+}
+
 #[uniffi::export]
 impl DocumentSession {
     pub fn outline(&self) -> Result<DocumentOutline, CoreError> {
-        let mut state = self.state.lock().unwrap();
-        let mmd = state.relative.to_lowercase().ends_with(".mmd");
-        let headings = state
-            .document
-            .outline(mmd)?
-            .iter()
-            .map(|heading| DocumentHeading {
-                level: heading.level,
-                title: heading.title.clone(),
-                start: heading.start as u64,
+        self.with_core(|state| {
+            let mmd = state.relative.to_lowercase().ends_with(".mmd");
+            let headings = state
+                .document
+                .outline(mmd)?
+                .iter()
+                .map(|heading| DocumentHeading {
+                    level: heading.level,
+                    title: heading.title.clone(),
+                    start: heading.start as u64,
+                })
+                .collect();
+            Ok(DocumentOutline {
+                revision: state.document.revision(),
+                headings,
             })
-            .collect();
-        Ok(DocumentOutline {
-            revision: state.document.revision(),
-            headings,
         })
     }
     pub fn reading_model(&self) -> Result<ReadingModel, CoreError> {
@@ -630,49 +691,51 @@ impl DocumentSession {
     }
 
     pub fn reading_model_since(&self, since: u64) -> Result<ReadingModel, CoreError> {
-        let mut state = self.state.lock().unwrap();
-        let mmd = state.relative.to_lowercase().ends_with(".mmd");
-        let model = state.document.reading(mmd)?;
-        let revision = state.document.revision();
-        let previous = state.reading_snapshot.take();
-        let result = if since != FULL_READING_MODEL {
-            previous
-                .as_ref()
-                .filter(|(previous_revision, _)| *previous_revision == since)
-                .and_then(|(_, previous_model)| {
-                    pack_reading_delta(previous_model, &model, revision)
-                })
-                .unwrap_or_else(|| pack_full_reading_model(&model, revision))
-        } else {
-            pack_full_reading_model(&model, revision)
-        };
-        state.reading_snapshot = Some((revision, model));
-        Ok(result)
+        self.with_core(|state| {
+            let mmd = state.relative.to_lowercase().ends_with(".mmd");
+            let model = state.document.reading(mmd)?;
+            let revision = state.document.revision();
+            let previous = state.reading_snapshot.take();
+            let result = if since != FULL_READING_MODEL {
+                previous
+                    .as_ref()
+                    .filter(|(previous_revision, _)| *previous_revision == since)
+                    .and_then(|(_, previous_model)| {
+                        pack_reading_delta(previous_model, &model, revision)
+                    })
+                    .unwrap_or_else(|| pack_full_reading_model(&model, revision))
+            } else {
+                pack_full_reading_model(&model, revision)
+            };
+            state.reading_snapshot = Some((revision, model));
+            Ok(result)
+        })
     }
     pub fn source_styles(&self, since: u64, force: bool) -> Result<SourceStyles, CoreError> {
-        let mut state = self.state.lock().unwrap();
-        let started = Instant::now();
-        let runs = state.document.style_changes(since, force)?;
-        let analysis_micros = started.elapsed().as_micros() as u64;
-        let mut packed_runs = Vec::with_capacity(runs.len() * 20);
-        for run in runs {
-            packed_runs.extend_from_slice(&(run.range.start as u64).to_le_bytes());
-            packed_runs.extend_from_slice(&(run.range.len() as u64).to_le_bytes());
-            packed_runs.extend_from_slice(&run.mask.to_le_bytes());
-        }
-        Ok(SourceStyles {
-            revision: state.document.revision(),
-            packed_runs,
-            analysis_micros,
+        self.with_core(|state| {
+            let started = Instant::now();
+            let runs = state.document.style_changes(since, force)?;
+            let analysis_micros = started.elapsed().as_micros() as u64;
+            let mut packed_runs = Vec::with_capacity(runs.len() * 20);
+            for run in runs {
+                packed_runs.extend_from_slice(&(run.range.start as u64).to_le_bytes());
+                packed_runs.extend_from_slice(&(run.range.len() as u64).to_le_bytes());
+                packed_runs.extend_from_slice(&run.mask.to_le_bytes());
+            }
+            Ok(SourceStyles {
+                revision: state.document.revision(),
+                packed_runs,
+                analysis_micros,
+            })
         })
     }
 
     pub fn initial(&self) -> Result<DocumentUpdate, CoreError> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock_state();
         Ok(state.update(Some(state.document.text()?)))
     }
     pub fn replace(&self, start: u64, length: u64, replacement: String) -> Result<u64, CoreError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         if state.read_only.is_some() {
             return Err(CoreError::failure("document.read_only"));
         }
@@ -683,7 +746,7 @@ impl DocumentSession {
         Ok(revision)
     }
     pub fn snapshot(&self) -> Result<DocumentSnapshot, CoreError> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock_state();
         let text = state.document.text()?;
         let blocks = if state.relative.to_lowercase().ends_with(".mmd") {
             vec![DocumentBlockRange {
@@ -708,21 +771,22 @@ impl DocumentSession {
         })
     }
     pub fn failed_save(&self, message: String) -> DocumentUpdate {
-        let mut state = self.state.lock().unwrap();
-        state.issue = DocumentIssue::SaveFailed;
-        state.message = if message.starts_with("io.") {
-            message
-        } else {
-            "document.save_failed".into()
-        };
-        let _ = state.checkpoint();
-        state.update(None)
+        self.with_update(|state| {
+            state.issue = DocumentIssue::SaveFailed;
+            state.message = if message.starts_with("io.") {
+                message
+            } else {
+                "document.save_failed".into()
+            };
+            let _ = state.checkpoint();
+            state.update(None)
+        })
     }
     pub fn checkpoint(&self) -> Result<(), CoreError> {
-        self.state.lock().unwrap().checkpoint()
+        self.lock_state().checkpoint()
     }
     pub fn refresh(&self) -> Result<DocumentUpdate, CoreError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         let _ = note::note_path(&state.root, &state.relative)?;
         let disk = note::read(&state.path)?;
         // 权限独立于正文版本，即使字节未变也要重新派生。
@@ -744,7 +808,7 @@ impl DocumentSession {
         }
     }
     pub fn use_disk(&self) -> Result<DocumentUpdate, CoreError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         let _ = note::note_path(&state.root, &state.relative)?;
         match note::read(&state.path)? {
             Some(disk) => Ok(state.propose(disk)),
@@ -752,7 +816,7 @@ impl DocumentSession {
         }
     }
     pub fn accept_external(&self, revision: u64) -> Result<DocumentUpdate, CoreError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         if state.document.revision() != revision {
             return state.conflict(false);
         }
@@ -762,7 +826,7 @@ impl DocumentSession {
         }
     }
     pub fn recover(&self, restore: bool) -> Result<DocumentUpdate, CoreError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         if restore {
             if state.read_only.is_some() {
                 return Err(CoreError::failure("document.recovery_read_only"));
@@ -787,31 +851,237 @@ impl DocumentSession {
         Ok(state.update(None))
     }
     pub fn save(&self, temporary: String, choice: SaveChoice) -> Result<DocumentUpdate, CoreError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         Ok(state.save_body(Path::new(&temporary), choice))
     }
     /// 关闭、退出前调用：组合输入只写恢复稿，其余情况先写恢复稿再尝试保存笔记。
     /// 返回的 `persistence` 说明最新正文是否至少有一份已落盘。
     pub fn prepare_close(&self, temporary: String, write_note: bool) -> DocumentUpdate {
-        let mut state = self.state.lock().unwrap();
-        if write_note {
-            return state.save_body(Path::new(&temporary), SaveChoice::Normal);
-        }
-        if state.checkpoint().is_err() {
-            state.issue = DocumentIssue::SaveFailed;
-            state.message = "document.save_failed".into();
-        }
-        state.update(None)
+        self.with_update(|state| {
+            if write_note {
+                return state.save_body(Path::new(&temporary), SaveChoice::Normal);
+            }
+            if state.checkpoint().is_err() {
+                state.issue = DocumentIssue::SaveFailed;
+                state.message = "document.save_failed".into();
+            }
+            state.update(None)
+        })
     }
     /// 最新正文是否已安全持久化（笔记文件或恢复稿）。
     pub fn persistence(&self) -> DocumentPersistence {
-        self.state.lock().unwrap().persistence()
+        self.lock_state().persistence()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn poison(session: &DocumentSession) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = session.state.lock().unwrap();
+            panic!("inject session poison");
+        }));
+        assert!(session.state.is_poisoned());
+    }
+
+    #[test]
+    fn every_session_export_recovers_poison_without_losing_content_or_revision() {
+        let f = Fixture::new();
+        fs::write(
+            f.root.join("n.md"),
+            "# Title\n\n> [!note] t\n\n| A |\n|---|\n| $x$ |\n",
+        )
+        .unwrap();
+        let session = f.open("n.md");
+        session.replace(0, 0, "edited ".into()).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let revision = snapshot.revision;
+        let text = snapshot.text;
+        session.reading_model().unwrap();
+        session.source_styles(u64::MAX, true).unwrap();
+        session.outline().unwrap();
+        let fresh =
+            pack_full_reading_model(&Document::new(&text).reading(false).unwrap(), revision);
+        for method in [
+            "initial",
+            "snapshot",
+            "outline",
+            "reading_model",
+            "reading_model_since",
+            "source_styles",
+            "math_blocks",
+            "media_blocks",
+            "attachment_metrics",
+            "align_table",
+            "replace",
+            "checkpoint",
+            "refresh",
+            "use_disk",
+            "accept_external",
+            "recover",
+            "failed_save",
+            "save",
+            "prepare_close",
+            "persistence",
+        ] {
+            poison(&session);
+            match method {
+                "initial" => {
+                    session.initial().unwrap();
+                }
+                "snapshot" => {
+                    session.snapshot().unwrap();
+                }
+                "outline" => {
+                    session.outline().unwrap();
+                }
+                "reading_model" => {
+                    session.reading_model().unwrap();
+                }
+                "reading_model_since" => {
+                    let actual = session.reading_model_since(revision).unwrap();
+                    assert_eq!(actual.delta_index, FULL_READING_MODEL);
+                    assert_eq!(actual.text, fresh.text);
+                }
+                "source_styles" => {
+                    assert_eq!(
+                        session.source_styles(revision, false).unwrap().packed_runs,
+                        session.source_styles(u64::MAX, true).unwrap().packed_runs
+                    );
+                }
+                "math_blocks" => {
+                    assert!(session.math_blocks().unwrap().is_empty());
+                }
+                "media_blocks" => {
+                    assert_eq!(session.media_blocks(700., 15.).unwrap().len(), 1);
+                }
+                "attachment_metrics" => {
+                    session.attachment_metrics();
+                }
+                "align_table" => {
+                    session.align_table(0).unwrap();
+                }
+                "replace" => {
+                    assert!(session.replace(u64::MAX, 0, String::new()).is_err());
+                }
+                "checkpoint" => {
+                    session.checkpoint().unwrap();
+                }
+                "refresh" => {
+                    session.refresh().unwrap();
+                }
+                "use_disk" => {
+                    session.use_disk().unwrap();
+                    session.lock_state().pending_external = None;
+                }
+                "accept_external" => {
+                    session.accept_external(revision).unwrap();
+                }
+                "recover" => {
+                    session.recover(true).unwrap();
+                }
+                "failed_save" => {
+                    session.failed_save("io.failure".into());
+                }
+                "save" => {
+                    f.save(&session, SaveChoice::Normal);
+                }
+                "prepare_close" => {
+                    session.prepare_close(f.temporary.to_string_lossy().into(), true);
+                }
+                "persistence" => {
+                    session.persistence();
+                }
+                _ => unreachable!(),
+            }
+            assert!(!session.state.is_poisoned(), "{method}");
+            assert_eq!(session.snapshot().unwrap().text, text, "{method}");
+            assert_eq!(session.snapshot().unwrap().revision, revision, "{method}");
+        }
+        assert_eq!(fs::read_to_string(f.root.join("n.md")).unwrap(), text);
+    }
+
+    #[test]
+    fn reading_core_panics_return_errors_without_poisoning_session() {
+        let f = Fixture::new();
+        fs::write(f.root.join("n.md"), "> [!note] t\n\n$x$\n").unwrap();
+        let session = f.open("n.md");
+        session.lock_state().document.inject_reading_panic();
+        assert_eq!(
+            session.reading_model_since(0).err().unwrap().to_string(),
+            "document.core_panic"
+        );
+        assert!(!session.state.is_poisoned());
+        assert!(session.reading_model().is_ok());
+        for method in ["reading", "math", "media", "outline", "styles", "table"] {
+            INJECT_CORE_PANIC.set(true);
+            let result = match method {
+                "reading" => session.reading_model_since(0).map(|_| ()),
+                "math" => session.math_blocks().map(|_| ()),
+                "media" => session.media_blocks(700., 15.).map(|_| ()),
+                "outline" => session.outline().map(|_| ()),
+                "styles" => session.source_styles(0, false).map(|_| ()),
+                _ => session.align_table(0).map(|_| ()),
+            };
+            assert_eq!(result.unwrap_err().to_string(), "document.core_panic");
+            assert!(!session.state.is_poisoned());
+            assert!(session.lock_state().reading_snapshot.is_none());
+            assert_eq!(session.snapshot().unwrap().text, "> [!note] t\n\n$x$\n");
+            assert!(session.reading_model().is_ok());
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_pending_external_and_recovery_state() {
+        let f = Fixture::new();
+        fs::write(f.root.join("n.md"), "disk\n").unwrap();
+        let session = f.open("n.md");
+        fs::write(f.root.join("n.md"), "external\n").unwrap();
+        session.refresh().unwrap();
+        {
+            let mut state = session.lock_state();
+            state.pending_recovery = Some(("draft\n".into(), state.format.clone()));
+            state.recovery_revision = Some(7);
+        }
+        poison(&session);
+        {
+            let state = session.lock_state();
+            assert_eq!(state.pending_external.as_ref().unwrap().text, "external\n");
+            assert_eq!(state.pending_recovery.as_ref().unwrap().0, "draft\n");
+            assert_eq!(state.recovery_revision, Some(7));
+            assert!(!state.dirty);
+        }
+        assert_eq!(
+            session.recover(true).unwrap().text.as_deref(),
+            Some("draft\n")
+        );
+    }
+    #[test]
+    fn callout_comment_edit_can_be_read_saved_and_closed() {
+        let f = Fixture::new();
+        fs::write(f.root.join("n.md"), "> [!note] t\n").unwrap();
+        let session = f.open("n.md");
+        session.replace(4, 4, "%%x%%".into()).unwrap();
+        let read =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.reading_model()));
+        let snapshot =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.snapshot()));
+        let save = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            f.save(&session, SaveChoice::Normal)
+        }));
+        let close = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.prepare_close(f.temporary.to_string_lossy().into(), true)
+        }));
+        assert!(read.is_ok(), "reading panicked");
+        assert!(snapshot.is_ok(), "snapshot panicked after reading");
+        assert!(save.is_ok(), "save panicked after reading");
+        assert!(close.is_ok(), "close panicked after reading");
+        assert_eq!(
+            fs::read_to_string(f.root.join("n.md")).unwrap(),
+            "> [!%%x%%] t\n"
+        );
+    }
     use std::os::unix::fs::PermissionsExt;
     struct Fixture {
         _directory: tempfile::TempDir,

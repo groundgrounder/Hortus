@@ -131,6 +131,25 @@ impl SemanticSink for Vec<(Kind, Range<usize>)> {
         *self = kept;
     }
 }
+// 阅读中的结构范围不能被注释切开；显示样式仍由普通 sink 清除注释覆盖。
+#[derive(Default)]
+struct ReadingSink(Vec<(Kind, Range<usize>)>);
+impl SemanticSink for ReadingSink {
+    fn insert(&mut self, kind: Kind, range: Range<usize>) {
+        self.0.push((kind, range));
+    }
+    fn clear_range(&mut self, range: Range<usize>) {
+        let callouts: Vec<_> = self
+            .0
+            .iter()
+            .filter(|(kind, _)| *kind == Kind::Callout)
+            .cloned()
+            .collect();
+        self.0.retain(|(kind, _)| *kind != Kind::Callout);
+        self.0.clear_range(range);
+        self.0.extend(callouts);
+    }
+}
 /// 显示路径直接叠加掩码，不先分配数十万个带范围的语义对象。
 struct MaskSink<'a> {
     masks: &'a mut [u32],
@@ -195,7 +214,13 @@ pub(crate) fn body_start(text: &str) -> usize {
     0
 }
 
-fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<bool>, math: bool) {
+fn analyze_into(
+    text: &str,
+    spans: &mut impl SemanticSink,
+    protected: &mut Vec<bool>,
+    math: bool,
+    html_comments: bool,
+) {
     if protected.capacity() < text.len() {
         protected.reserve(text.len() - protected.len() + (text.len() / 8).max(4096));
     }
@@ -226,10 +251,19 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
     let mut quote_prefix_ends = std::collections::HashMap::new();
     let mut list_prefixes: Vec<Range<usize>> = Vec::new();
     let mut math_ranges = Vec::new();
+    let mut html_ranges = Vec::new();
+    let mut callout_lines = Vec::new();
     for (event, local) in Parser::new_ext(&text[body_start..], options).into_offset_iter() {
         let r = local.start + body_start..local.end + body_start;
         let source = &text[r.clone()];
         match event {
+            Event::Start(Tag::HtmlBlock) | Event::InlineHtml(_)
+                if html_comments && source.starts_with("<!--") =>
+            {
+                if let Some(close) = source.find("-->") {
+                    html_ranges.push(r.start..r.start + close + 3);
+                }
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 let trimmed = source.trim_end_matches(['\n', '\r']);
                 let leading = trimmed.len() - trimmed.trim_start().len();
@@ -311,7 +345,7 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
             Event::Start(Tag::BlockQuote(_)) => {
                 let mut offset = r.start;
                 let mut line_start = line_start(text, r.start);
-                for line in split_lines_inclusive(source) {
+                for (index, line) in split_lines_inclusive(source).enumerate() {
                     // 内层引用从外层已消费的前缀之后继续，不能再次隐藏同一个 >。
                     let start = offset.max(*quote_prefix_ends.get(&line_start).unwrap_or(&offset));
                     let rest = &text[start..offset + line.len()];
@@ -328,13 +362,8 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
                             Kind::Quote,
                             end..offset + line.trim_end_matches(['\n', '\r']).len(),
                         );
-                        let content = &rest[n..];
-                        if let Some(end) = content
-                            .strip_prefix("[!")
-                            .and_then(|s| s.find(']').map(|i| i + 3))
-                        {
-                            push(spans, Kind::Callout, start + n..offset + line.len());
-                            push(spans, Kind::Marker, start + n..start + n + end);
+                        if index == 0 {
+                            callout_lines.push(start + n..offset + line.len());
                         }
                     }
                     offset += line.len();
@@ -465,9 +494,27 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
         }
     }
     // 闭合注释允许跨行；代码中的起始符不参与配对，未闭合时保留正常正文。
+    let mut comments = Vec::new();
     let mut position = body_start;
-    while let Some(offset) = text[position..].find("%%") {
-        position += offset;
+    let mut html = html_ranges.into_iter().peekable();
+    while position < text.len() {
+        while html.peek().is_some_and(|range| range.start < position) {
+            html.next();
+        }
+        let percent = text[position..].find("%%").map(|offset| position + offset);
+        if html
+            .peek()
+            .is_some_and(|range| percent.is_none_or(|p| range.start <= p))
+        {
+            let range = html.next().unwrap();
+            position = range.end;
+            comments.push((range, 4, 3));
+            continue;
+        }
+        let Some(start) = percent else {
+            break;
+        };
+        position = start;
         if !protected[position] && !escaped(text.as_bytes(), position) {
             let close = text[position + 2..]
                 .match_indices("%%")
@@ -475,14 +522,30 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
                 .find(|&i| !protected[i] && !escaped(text.as_bytes(), i));
             if let Some(close) = close {
                 let end = close + 2;
-                spans.clear_range(position..end);
-                wrapped(spans, Kind::Comment, position..end, 2, 2);
-                protected[position..end].fill(true);
+                comments.push((position..end, 2, 2));
                 position = end;
                 continue;
             }
         }
         position += 2;
+    }
+    let mut hidden = vec![false; text.len()];
+    for (range, _, _) in &comments {
+        hidden[range.clone()].fill(true);
+    }
+    for line in callout_lines {
+        if let Some((end, _)) = callout_header(&text[line.clone()], &hidden[line.clone()]) {
+            push(spans, Kind::Callout, line.clone());
+            push(spans, Kind::Marker, line.start..line.start + end);
+        }
+    }
+    for (range, left, right) in comments {
+        spans.clear_range(range.clone());
+        if range.len() == left + right {
+            push(spans, Kind::Comment, range.clone());
+        }
+        wrapped(spans, Kind::Comment, range.clone(), left, right);
+        protected[range].fill(true);
     }
     // 扩展在代码/目标地址之外逐行匹配；未闭合的扩展不会跨行吞正文。
     let mut base = body_start;
@@ -550,6 +613,25 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
     }
 }
 
+/// 注释内的右括号不结束标题；返回原始源码里的闭括号边界。
+pub(crate) fn callout_header(text: &str, hidden: &[bool]) -> Option<(usize, String)> {
+    let mut visible = text.char_indices().filter(|(index, _)| !hidden[*index]);
+    if visible.next()?.1 != '[' || visible.next()?.1 != '!' {
+        return None;
+    }
+    let mut label = String::new();
+    for (index, character) in visible {
+        if character == ']' {
+            return Some((index + 1, label));
+        }
+        if matches!(character, '\r' | '\n') {
+            return None;
+        }
+        label.push(character);
+    }
+    None
+}
+
 fn sort_spans(spans: &mut Vec<(Kind, Range<usize>)>) {
     // 原生语法与扩展各自大致有序，稳定排序可利用已有连续区间。
     spans.sort_by_key(|(_, r)| (r.start, r.end));
@@ -587,14 +669,24 @@ pub fn analyze(text: &str) -> Vec<Span> {
 }
 
 pub(crate) fn analyze_bytes(text: &str) -> Vec<(Kind, Range<usize>)> {
-    analyze_bytes_with_math(text, false)
+    let mut spans = Vec::new();
+    analyze_into(text, &mut spans, &mut Vec::new(), false, true);
+    sort_spans(&mut spans);
+    spans
 }
 
 pub(crate) fn analyze_bytes_with_math(text: &str, math: bool) -> Vec<(Kind, Range<usize>)> {
     let mut spans = Vec::new();
-    analyze_into(text, &mut spans, &mut Vec::new(), math);
+    analyze_into(text, &mut spans, &mut Vec::new(), math, false);
     sort_spans(&mut spans);
     spans
+}
+
+pub(crate) fn reading_spans(text: &str, math: bool) -> Vec<(Kind, Range<usize>)> {
+    let mut sink = ReadingSink::default();
+    analyze_into(text, &mut sink, &mut Vec::new(), math, true);
+    sort_spans(&mut sink.0);
+    sink.0
 }
 
 /// 文档持有分析缓冲，避免每次编辑重新分配大型语义片段数组。
@@ -630,7 +722,7 @@ impl Analyzer {
             coverage: 0,
             exceeded: false,
         };
-        analyze_into(text, &mut sink, &mut self.protected, false);
+        analyze_into(text, &mut sink, &mut self.protected, false, true);
         let exceeded = sink.exceeded;
         let mut result = std::mem::take(&mut self.spare_runs);
         // 常见笔记的叠加深度很小，按字节合并后线性压缩，省去排序和事件堆。
@@ -653,7 +745,7 @@ impl Analyzer {
         }
         // 超过预算时再收集片段；首轮直接叠加的工作量始终不超过正文的 8 倍。
         self.spans.clear();
-        analyze_into(text, &mut self.spans, &mut self.protected, false);
+        analyze_into(text, &mut self.spans, &mut self.protected, false, true);
         sort_spans(&mut self.spans);
         let mut spans = self
             .spans

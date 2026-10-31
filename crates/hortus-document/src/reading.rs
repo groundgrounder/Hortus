@@ -450,13 +450,12 @@ impl Cache {
         if fast_update {
             for (index, range) in ranges.iter().enumerate() {
                 if reused_blocks[index].is_none() {
-                    semantics[index] =
-                        markdown::analyze_bytes_with_math(&text[range.clone()], !mmd);
+                    semantics[index] = markdown::reading_spans(&text[range.clone()], !mmd);
                 }
             }
         } else {
             // 全文扫描处理可能跨块的注释、脚注、引用式链接和 HTML 语境。
-            for (kind, span) in markdown::analyze_bytes_with_math(text, !mmd) {
+            for (kind, span) in markdown::reading_spans(text, !mmd) {
                 let first = ranges.partition_point(|r| r.end <= span.start);
                 for i in first..ranges.len() {
                     if ranges[i].start >= span.end {
@@ -685,7 +684,7 @@ fn render_simple(text: &str, spans: &[(Kind, Range<usize>)]) -> Content {
 }
 
 pub(crate) fn inline(text: &str) -> Content {
-    let mut spans = markdown::analyze_bytes_with_math(text, true);
+    let mut spans = markdown::reading_spans(text, true);
     for (index, _) in text.match_indices("\\|") {
         if text[..index]
             .bytes()
@@ -740,8 +739,14 @@ fn render_full_inner(
     for (kind, r) in spans {
         if *kind == Kind::Comment {
             suppress[r.clone()].fill(true);
-            if r.start >= 2 && &text[r.start - 2..r.start] == "%%" {
+            if r.start >= 2 && text.get(r.start - 2..r.start) == Some("%%") {
                 suppress[r.start - 2..r.start].fill(true);
+            }
+            if r.start >= 4 && text.get(r.start - 4..r.start) == Some("<!--") {
+                suppress[r.start - 4..r.start].fill(true);
+            }
+            if text.get(r.end..r.end + 3) == Some("-->") {
+                suppress[r.end..r.end + 3].fill(true);
             }
             if text.get(r.end..r.end + 2) == Some("%%") {
                 suppress[r.end..r.end + 2].fill(true);
@@ -750,6 +755,7 @@ fn render_full_inner(
     }
     // 纯注释行连同换行符一起去掉；段落原有的空白间距仍保留。
     let mut line_start = 0;
+    let mut leading_comment = false;
     for line in markdown::split_lines_inclusive(text) {
         let end = line_start + line.len();
         if !line.trim().is_empty()
@@ -758,6 +764,13 @@ fn render_full_inner(
                 .all(|(index, c)| c.is_whitespace() || suppress[line_start + index])
         {
             suppress[line_start..end].fill(true);
+            if line_start == 0 || suppress[..line_start].iter().all(|value| *value) {
+                leading_comment = true;
+            }
+        } else if leading_comment && line.trim().is_empty() {
+            suppress[line_start..end].fill(true);
+        } else {
+            leading_comment = false;
         }
         line_start = end;
     }
@@ -917,10 +930,11 @@ fn render_full_inner(
                     }
                 }
                 Kind::Callout => {
-                    if let Some(end) = text[r.clone()].find(']') {
-                        let kind = &text[r.start + 2..r.start + end];
+                    if let Some((end, kind)) =
+                        markdown::callout_header(&text[r.clone()], &suppress[r.clone()])
+                    {
                         replacements
-                            .insert(r.start, (r.start + end + 1, format!("{kind} ·"), 4096 | 2));
+                            .insert(r.start, (r.start + end, format!("{kind} ·"), 4096 | 2));
                     }
                 }
                 Kind::Rule => {
@@ -1206,7 +1220,7 @@ mod tests {
             "$$$$",
             "> [!note]\n> $$x$$\n",
         ] {
-            let spans = markdown::analyze_bytes_with_math(source, true);
+            let spans = markdown::reading_spans(source, true);
             let simple = render_simple(source, &spans);
             let full = render_full(source, false, false, false, &spans, &[]);
             assert_eq!(format!("{simple:?}"), format!("{full:?}"));
