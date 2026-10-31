@@ -117,6 +117,7 @@ private final class TableCanvas: NSView {
     let columns: [Double]
     private let texts: [NSAttributedString]
     let heights: [CGFloat]
+    private var layoutCache: [Int: (storage: NSTextStorage, layout: NSLayoutManager, container: NSTextContainer)] = [:]
     var edit: (() -> Void)?
     init(_ block: MediaBlock, size: Double, math: [[PreparedMathBlock]]) {
         columns = block.columns
@@ -169,6 +170,10 @@ private final class TableCanvas: NSView {
         setAccessibilityHelp(toolTip)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func accessibilityHitTest(_ point: NSPoint) -> Any? {
+        let hit = MainActor.assumeIsolated { AccessibilityHitResult(value: cachedFormulaAccessibility(at: point)) }
+        return hit.value ?? super.accessibilityHitTest(point)
+    }
     override func draw(_ dirtyRect: NSRect) {
         // 只画行线不画竖线：列之间靠内边距分开，界面少线
         var y: CGFloat = 0
@@ -187,6 +192,36 @@ private final class TableCanvas: NSView {
         lines.stroke()
     }
     override func mouseDown(with event: NSEvent) { edit?() }
+
+    private func layout(for cell: Int) -> (layout: NSLayoutManager, container: NSTextContainer)? {
+        guard cell >= 0, cell < texts.count, !columns.isEmpty else { return nil }
+        if let cached = layoutCache[cell] { return (cached.layout, cached.container) }
+        let storage = NSTextStorage(attributedString: texts[cell])
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(size: CGSize(width: max(1, columns[cell % columns.count] - 20), height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        layout.addTextContainer(container); storage.addLayoutManager(layout)
+        layoutCache[cell] = (storage, layout, container)
+        return (layout, container)
+    }
+
+    func formulaFrame(row: Int, column: Int, formulaIndex: Int) -> NSRect? {
+        let cell = row * columns.count + column
+        guard cell >= 0, cell < texts.count, let cached = layout(for: cell) else {
+            return nil
+        }
+        // 位置查询才创建单元格布局，文字存储须和布局一起持有。
+        var attachments: [NSRange] = []
+        texts[cell].enumerateAttribute(.attachment, in: NSRange(location: 0, length: texts[cell].length)) { value, range, _ in
+            if value is NSTextAttachment { attachments.append(range) }
+        }
+        guard formulaIndex < attachments.count else { return nil }
+        let glyphs = cached.layout.glyphRange(forCharacterRange: attachments[formulaIndex], actualCharacterRange: nil)
+        let rect = cached.layout.boundingRect(forGlyphRange: glyphs, in: cached.container)
+        let x = columns.prefix(column).reduce(0, +) + 10
+        let y = heights.prefix(row).reduce(0, +) + 8
+        return rect.offsetBy(dx: x, dy: y)
+    }
 }
 
 /// 表格的局部滚动和图片的快速查看均使用原生控件。
@@ -203,6 +238,7 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
     private var watchers: [DispatchSourceFileSystemObject] = []
     private var previewItem: NSURL?
     private var decodeFailed = false
+    private var tableCanvas: TableCanvas?
     var imagePending: Bool { decoding != nil }
     var hasDecodedImage: Bool { image != nil }
 
@@ -225,7 +261,8 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         super.init(frame: CGRect(origin: .zero, size: preferredSize))
         if prepared.reason.isEmpty, !block.imagePath.isEmpty { previewItem = NSURL(fileURLWithPath: block.imagePath) }
         if let table {
-            let scroll = NSScrollView(frame: CGRect(origin: .zero, size: CGSize(width: preferredSize.width, height: preferredSize.height - 12)))
+            tableCanvas = table
+            let scroll = FormulaScrollView(frame: CGRect(origin: .zero, size: CGSize(width: preferredSize.width, height: preferredSize.height - 12)))
             scroll.drawsBackground = false; scroll.hasHorizontalScroller = table.frame.width > width + 0.5
             scroll.hasVerticalScroller = false; scroll.autohidesScrollers = true
             scroll.documentView = table; addSubview(scroll)
@@ -244,6 +281,11 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.dataSource === self {
             panel.orderOut(nil); panel.dataSource = nil
         }
+    }
+
+    var tableCanvasView: NSView? { tableCanvas }
+    func formulaFrame(row: Int, column: Int, formulaIndex: Int) -> NSRect? {
+        tableCanvas?.formulaFrame(row: row, column: column, formulaIndex: formulaIndex)
     }
     func becameVisible() {
         guard prepared.block.columns.isEmpty else { return }

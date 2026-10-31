@@ -146,6 +146,10 @@ private final class MathCanvas: NSView {
             }
         }
     }
+    override func accessibilityHitTest(_ point: NSPoint) -> Any? {
+        let hit = MainActor.assumeIsolated { AccessibilityHitResult(value: cachedFormulaAccessibility(at: point)) }
+        return hit.value ?? super.accessibilityHitTest(point)
+    }
     override func mouseDown(with event: NSEvent) { owner?.onSelect?() }
     override func menu(for event: NSEvent) -> NSMenu? { owner?.menu(for: event) }
 }
@@ -154,7 +158,7 @@ private final class MathCanvas: NSView {
 final class MathBlockView: NSView {
     var item: NoteMath
     let preferredSize: CGSize
-    let scroll = NSScrollView()
+    let scroll = FormulaScrollView()
     let bodySize: Double
     let reservedPrefixWidth: Double
     let scrollbarHeight: Double
@@ -203,6 +207,10 @@ final class MathBlockView: NSView {
         containerPrefix?.draw(at: CGPoint(x: 12, y: max(0, (bounds.height - (containerPrefix?.size().height ?? 0)) / 2)))
     }
     override func accessibilityChildren() -> [Any]? { [] }
+    override func accessibilityHitTest(_ point: NSPoint) -> Any? {
+        let hit = MainActor.assumeIsolated { AccessibilityHitResult(value: cachedFormulaAccessibility(at: point)) }
+        return hit.value ?? super.accessibilityHitTest(point)
+    }
     override func mouseDown(with event: NSEvent) { onSelect?() }
     override func menu(for event: NSEvent) -> NSMenu? {
         onSelect?()

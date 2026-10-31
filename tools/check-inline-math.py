@@ -19,6 +19,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     crlf = (ROOT / 'fixtures/math/inline-crlf.md').read_bytes()
     assert b'\r\n' in crlf and b'\n' not in crlf.replace(b'\r\n', b''), 'CRLF fixture was normalized'
+    cr = (ROOT / 'fixtures/math/display-cr.md').read_bytes()
+    assert b'\r' in cr and b'\n' not in cr, 'CR fixture was normalized'
     with tempfile.TemporaryDirectory(prefix='hortus-inline-') as directory:
         base = Path(directory)
         for appearance in ['light', 'dark']:
@@ -47,13 +49,14 @@ def main():
             assert not data['page_horizontal_scroll'], data
             for section, note in [('CRLF', 'inline-crlf.md'), ('Parenthesis list', 'inline-fixes.md'),
                     ('Table fixes', 'inline-fixes.md'), ('Callout display', 'display-callout.md'),
-                    ('Footnote display', 'display-footnote.md'), ('Comment display', 'display-comment.md')]:
+                    ('Footnote display', 'display-footnote.md'), ('Comment display', 'display-comment.md'),
+                    ('CR quote and list', 'display-cr.md')]:
                 name = section.lower().replace(' ', '-') + '-' + appearance
                 data = READING.run(base / name, target, name, ROOT / 'fixtures/math', note, 'math',
                     extra=[f'--{appearance}', f'--math-reveal=## {section}', f'--snapshot={target / (name + ".png")}'])
                 assert data['missing_glyphs'] == 0, data
                 if note.startswith('display-'):
-                    assert data['math_blocks'] == (2 if section == 'Comment display' else 1), data
+                    assert data['math_blocks'] == (2 if section in ['Comment display', 'CR quote and list'] else 1), data
             for focus in ['body', 'sidebar']:
                 name = 'selection-' + focus + '-' + appearance
                 data = READING.run(base / name, target, name, ROOT / 'fixtures/math', 'inline-fixes.md', 'math',

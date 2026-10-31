@@ -15,33 +15,80 @@ import Testing
 @Suite(.serialized) @MainActor
 struct InlineMathTests {
     @Test func accessibilityTextFramesAndUniqueObjects() async throws {
-        let f = try ReadingTests.Fixture("Before $x$ after $\\unknowncommand$.\n\n" + String(repeating: "Paragraph.\n\n", count: 90))
+        let f = try ReadingTests.Fixture("Before $x$ after.\n\n$$a\n+b$$\n\n$\\unknowncommand$.\n")
         try await f.start(mathService: MathTests.service())
-        let range = NSRange(location: 0, length: f.view.sourceUTF16Length)
-        let text = try #require(f.view.accessibilityString(for: range))
-        let error = try #require(f.view.inlineMath.values.first { $0.item.prepared.reason != nil })
-        #expect(text == "Before " + L10n.string("Formula: %@", "x") + " after " + L10n.string("Formula: %@", "\\unknowncommand") + " — " + error.item.prepared.reason! + ".\n\n" + String(repeating: "Paragraph.\n\n", count: 90))
-        #expect(f.view.accessibilityAttributedString(for: range)?.string == text)
-        let attributed = try #require(f.view.accessibilityAttributedString(for: range))
-        attributed.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attributed.length)) { value, _, _ in
-            #expect(value == nil)
+        #expect(f.view.formulaAccessibilityBuildCount == 0)
+        let full = NSRange(location: 0, length: f.view.sourceUTF16Length)
+        #expect(f.view.accessibilityNumberOfCharacters() == full.length)
+        #expect(f.view.accessibilityValue() == f.view.string)
+        let ranges = [full, NSRange(location: 0, length: 7)]
+            + f.view.inlineMath.values.map { $0.item.range }
+            + f.view.mathViews.map { $0.item.range }
+        for range in ranges {
+            let string = try #require(f.view.accessibilityString(for: range))
+            let attributed = try #require(f.view.accessibilityAttributedString(for: range))
+            #expect(string == attributed.string)
+            #expect((string as NSString).length == range.length)
+            #expect(attributed.length == range.length)
+            f.view.setSelectedRange(range)
+            #expect(f.view.accessibilitySelectedTextRange() == range)
+            #expect((f.view.accessibilitySelectedText() as NSString?)?.length == range.length)
+            #expect(f.view.accessibilitySelectedText() == string)
         }
+        for line in 0..<5 {
+            let range = f.view.accessibilityRange(forLine: line)
+            guard range.location != NSNotFound else { continue }
+            #expect(NSMaxRange(range) <= full.length)
+            #expect((f.view.accessibilityString(for: range) as NSString?)?.length == range.length)
+        }
+        for item in f.view.inlineMath.values.map(\.item) + f.view.mathViews.map(\.item) {
+            let range = f.view.accessibilityRange(for: item.range.location)
+            #expect(range == item.range)
+            let frame = f.view.accessibilityFrame(for: range)
+            #expect(!frame.isEmpty)
+            let atPoint = f.view.accessibilityRange(for: CGPoint(x: frame.midX, y: frame.midY))
+            #expect(atPoint == range)
+            #expect((f.view.accessibilityString(for: atPoint) as NSString?)?.length == atPoint.length)
+        }
+        let attributed = try #require(f.view.accessibilityAttributedString(for: full))
+        #expect(f.view.formulaAccessibilityBuildCount == 1)
+        _ = f.view.accessibilityChildren()
+        #expect(f.view.formulaAccessibilityBuildCount == 1)
         let elements = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
-        #expect(elements.count == 2)
+        let formulas = elements.filter { $0.accessibilityRole() == .image }
+        #expect(formulas.count == 3)
+        #expect(formulas.allSatisfy { !($0.accessibilityLabel() ?? "").contains("\n") })
+        var attachmentCount = 0
+        var attachedElements: [FormulaAccessibilityElement] = []
+        attributed.enumerateAttribute(.accessibilityAttachment, in: NSRange(location: 0, length: attributed.length)) {
+            value, range, _ in
+            guard range.length == 1, let element = value as? FormulaAccessibilityElement else { return }
+            attachedElements.append(element)
+            attachmentCount += 1
+        }
+        #expect(attachmentCount == 3)
+        #expect(Set(attachedElements.map(ObjectIdentifier.init)).count == 3)
+        #expect(attachedElements.allSatisfy { element in formulas.contains { $0 === element } })
         #expect(f.view.inlineMathViews.allSatisfy { !$0.isAccessibilityElement() })
-        let first = try #require(elements.first)
+        let first = try #require(formulas.first)
         let before = first.accessibilityFrame()
-        f.view.enclosingScrollView?.contentView.scroll(to: CGPoint(x: 0, y: 45))
-        #expect(abs(first.accessibilityFrame().minY - before.minY - 45) < 0.5)
+        f.view.enclosingScrollView?.contentView.scroll(to: CGPoint(x: 0, y: 5))
+        let scrolled = first.accessibilityFrame()
+        #expect(!scrolled.isEmpty)
+        #expect(abs(scrolled.minY - before.minY - 5) < 0.5)
+        f.view.enclosingScrollView?.contentView.scroll(to: .zero)
+        f.view.enclosingScrollView?.reflectScrolledClipView(f.view.enclosingScrollView!.contentView)
+        let restored = first.accessibilityFrame()
+        #expect(!restored.isEmpty)
         let window = f.editing.window, origin = window.frame.origin
         window.setFrameOrigin(CGPoint(x: origin.x + 20, y: origin.y + 30))
-        #expect(abs(first.accessibilityFrame().minX - before.minX - 20) < 0.5)
+        #expect(abs(first.accessibilityFrame().minX - restored.minX - 20) < 0.5)
         window.setFrameOrigin(origin)
         await f.close()
     }
 
     @Test func singleClipboardWritePreservesOtherTypesAndDetachClearsTooltips() async throws {
-        let f = try ReadingTests.Fixture("A $\\unknowncommand$.\n")
+        let f = try ReadingTests.Fixture("A $\\unknowncommand$.\n\n![missing](missing.png)\n\n```mermaid\nflowchart LR\nA --> B\n```\n")
         try await f.start(mathService: MathTests.service())
         f.view.setSelectedRange(NSRange(location: 0, length: f.view.sourceUTF16Length))
         let board = NSPasteboard.withUniqueName()
@@ -50,8 +97,31 @@ struct InlineMathTests {
         #expect(f.view.writeSelection(to: board, type: .string))
         #expect(board.data(forType: .png) == Data([1, 2, 3]))
         #expect(!f.view.formulaTooltips.isEmpty)
+        let beforeChildren = f.view.accessibilityChildren() ?? []
+        #expect(!beforeChildren.isEmpty)
         f.coordinator.detach()
         #expect(f.view.formulaTooltips.isEmpty)
+        #expect(f.view.accessibilityChildren()?.isEmpty == true)
+        #expect(f.view.diagramViews.isEmpty)
+        #expect(f.view.mediaViews.isEmpty)
+        #expect(f.view.blocks.isEmpty)
+        await f.close()
+    }
+
+    @Test func accessibilityHitTestReturnsInlineBlockAndTableFormulas() async throws {
+        let source = "Inline $x$.\n\n$$y$$\n\n| Formula |\n|---|\n| $z$ |\n"
+        let f = try ReadingTests.Fixture(source)
+        try await f.start(mathService: MathTests.service())
+        let elements = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
+            .filter { $0.accessibilityRole() == .image }
+        #expect(elements.count == 3)
+        for element in elements {
+            let frame = element.accessibilityFrame()
+            #expect(!frame.isEmpty)
+            let hit = f.editing.window.accessibilityHitTest(CGPoint(x: frame.midX, y: frame.midY))
+            let matches = (hit as AnyObject?) === element
+            #expect(matches, "\(element.accessibilityLabel() ?? "")")
+        }
         await f.close()
     }
 
@@ -136,8 +206,9 @@ struct InlineMathTests {
                 let position = content.location(content.documentRange.location, offsetBy: attachment.item.range.location)!
                 guard fragment.rangeInElement.contains(position) else { continue }
                 attachments += 1
-                let formulaView = view.inlineMathViews.first { $0.attachment === attachment }
-                #expect(formulaView?.accessibilityLabel() == L10n.string("Formula: %@", attachment.item.prepared.block.latex))
+                let formulaElement = (view.accessibilityChildren() ?? []).compactMap { $0 as? FormulaAccessibilityElement }
+                    .first { $0.item.identity == attachment.item.identity }
+                #expect(formulaElement?.accessibilityLabel() == L10n.string("Formula: %@", attachment.item.prepared.block.latex))
 
             }
             return true
@@ -214,7 +285,7 @@ struct InlineMathTests {
         let moved = f.view.inlineMath.values.sorted { $0.item.range.location < $1.item.range.location }
         #expect(moved.count == original.count)
         for (a, b) in zip(original.dropFirst(), moved.dropFirst()) { #expect(a === b) }
-        #expect(NSMaxRange(f.view.inlineMathInvalidation ?? NSRange(location: 0, length: 0)) <= 25)
+        #expect(f.view.inlineMathInvalidation == NSRange(location: 20, length: 1))
         #expect(moved.allSatisfy { f.view.inlineMath[$0.item.range.location] === $0 })
         let deleted = shifted.replacingOccurrences(of: "First $a$.", with: "First.")
         try Data(deleted.utf8).write(to: f.document.io.url); f.document.refresh()
@@ -245,7 +316,8 @@ struct InlineMathTests {
             ($0 as? NSAccessibilityElement)?.accessibilityLabel() ?? ($0 as? NSView)?.accessibilityLabel()
         }.filter { $0.hasPrefix(L10n.string("Formula: %@", "")) }
         let expected = ["a", "b"] + (0..<80).map { "x_\($0)" } + ["\\unknowncommand"]
-        #expect(labels == expected.map { L10n.string("Formula: %@", $0) })
+        #expect(Array(labels.dropLast()) == expected.dropLast().map { L10n.string("Formula: %@", $0) })
+        #expect(labels.last?.contains("\\unknowncommand") == true)
         let ordered = (f.view.accessibilityChildren() ?? []).compactMap { child -> String? in
             if let element = child as? NSAccessibilityElement { return element.accessibilityLabel() }
             if child is MediaView { return "media" }
@@ -258,15 +330,24 @@ struct InlineMathTests {
         }
         #expect(errors.contains { $0.contains("unknowncommand") })
         let elements = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
-        let shifted = "Inserted text " + source
-        let manager = try #require(f.view.textLayoutManager), content = try #require(manager.textContentManager)
         let lastItem = try #require(f.view.inlineMath.values.max { $0.item.range.location < $1.item.range.location })
-        let start = try #require(content.location(content.documentRange.location, offsetBy: lastItem.item.range.location))
-        let end = try #require(content.location(start, offsetBy: 1))
-        manager.invalidateLayout(for: try #require(NSTextRange(location: start, end: end)))
-        #expect(elements.last?.accessibilityFrame().isEmpty == true)
+        f.coordinator.reveal(source: Int(lastItem.item.prepared.block.sourceStart))
+        f.view.layoutSubtreeIfNeeded(); f.view.displayIfNeeded()
+        let mountedLast = try #require((f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
+            .last(where: { ($0.accessibilityLabel() ?? "").contains(lastItem.item.prepared.block.latex) }))
+        #expect(!mountedLast.accessibilityFrame().isEmpty)
+        f.view.enclosingScrollView?.contentView.scroll(to: .zero)
+        f.view.enclosingScrollView?.reflectScrolledClipView(f.view.enclosingScrollView!.contentView)
+        let tallPrefix = Array(repeating: "Prefix line that changes height.\n", count: 80).joined() + source
+        try Data(tallPrefix.utf8).write(to: f.document.io.url); f.document.refresh()
+        try await eventually { f.document.text == tallPrefix && !f.coordinator.pending && f.coordinator.model?.revision == f.document.revision }
+        let afterHeightChange = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
+        #expect(afterHeightChange.count == elements.count)
+        #expect(afterHeightChange.last === mountedLast)
+        #expect(afterHeightChange.last?.accessibilityFrame().isEmpty == true)
+        let shifted = "Inserted text " + source
         let repeated = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
-        #expect(zip(elements, repeated).allSatisfy { $0 === $1 })
+        #expect(zip(afterHeightChange, repeated).allSatisfy { $0 === $1 })
         try Data(shifted.utf8).write(to: f.document.io.url); f.document.refresh()
         try await eventually { f.document.text == shifted && !f.coordinator.pending && f.coordinator.model?.revision == f.document.revision }
         let refreshed = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
@@ -372,7 +453,7 @@ struct InlineMathTests {
         let oldBlock = try #require(f.view.mathViews.first)
         let width = f.view.bounds.width
         f.view.enclosingScrollView?.scrollerStyle = .legacy
-        f.view.onWidthOrThemeChange?()
+        NotificationCenter.default.post(name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
         try await f.ready()
         #expect(f.view.bounds.width == width)
         let thickness = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)

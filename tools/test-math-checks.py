@@ -17,6 +17,7 @@ def load(name):
 
 
 MATH = load('check-math-view')
+DIAGRAM = load('check-diagram-view')
 PUBLIC = load('check-public-tree')
 
 
@@ -66,6 +67,16 @@ class MathCheckTests(unittest.TestCase):
         sample['footprint_bytes'][-1] += 17 * 1024 * 1024
         with self.assertRaises(AssertionError):
             MATH.check_memory(sample)
+
+    def test_opening_main_thread_gate_uses_three_run_median(self):
+        for module in [MATH, DIAGRAM]:
+            with self.subTest(checker=module.__name__):
+                self.assertTrue(module.opening_main_thread_pass([20, 20, 20]))
+                self.assertFalse(module.opening_main_thread_pass([35, 35, 20]))
+                self.assertTrue(module.opening_main_thread_pass([40, 20, 20]))
+                for samples in [[], [20], [20, 20], [20] * 4]:
+                    with self.assertRaises(AssertionError):
+                        module.opening_main_thread_pass(samples)
 
     def test_twenty_fonts_with_a_wrong_filename_are_rejected(self):
         with tempfile.TemporaryDirectory(prefix='hortus-font-check-') as temporary:

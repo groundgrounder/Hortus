@@ -328,7 +328,7 @@ impl Cache {
         if text.starts_with("---\n") || text.starts_with("---\r\n") {
             let first = text.find('\n').unwrap() + 1;
             let mut offset = first;
-            for line in text[first..].split_inclusive('\n') {
+            for line in markdown::split_lines_inclusive(&text[first..]) {
                 offset += line.len();
                 if matches!(line.trim_end(), "---" | "...") {
                     front = offset;
@@ -750,7 +750,7 @@ fn render_full_inner(
     }
     // 纯注释行连同换行符一起去掉；段落原有的空白间距仍保留。
     let mut line_start = 0;
-    for line in text.split_inclusive('\n') {
+    for line in markdown::split_lines_inclusive(text) {
         let end = line_start + line.len();
         if !line.trim().is_empty()
             && line
@@ -859,9 +859,26 @@ fn render_full_inner(
             }
             match kind {
                 Kind::OrderedList | Kind::UnorderedList => {
-                    let start = text[..r.start].rfind('\n').map_or(0, |i| i + 1);
-                    let marker = spans.iter().find(|(kind, marker)| {
-                        *kind == Kind::Marker && marker.end == r.start && marker.start >= start
+                    let start = text[..r.start]
+                        .char_indices()
+                        .rev()
+                        .find(|(_, c)| matches!(c, '\r' | '\n'))
+                        .map_or(0, |(i, c)| i + c.len_utf8());
+                    let marker = spans.iter().find(|(marker_kind, marker)| {
+                        if *marker_kind != Kind::Marker
+                            || marker.end != r.start
+                            || marker.start < start
+                        {
+                            return false;
+                        }
+                        let value = text.get(marker.clone()).unwrap_or_default().trim_start();
+                        match kind {
+                            Kind::UnorderedList => value.starts_with(['-', '*', '+']),
+                            Kind::OrderedList => {
+                                value.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                            }
+                            _ => false,
+                        }
                     });
                     if let Some((_, marker)) = marker {
                         let value = if *kind == Kind::OrderedList {
@@ -1009,14 +1026,13 @@ fn render_full_inner(
                 spaces.push(index);
             } else {
                 // 标记范围才是容器前缀，不能根据投影后的字符串猜测。
-                if !container_prefix[index] && !preceding_hidden_newline {
+                if !container_prefix[index] || preceding_hidden_newline {
                     whitespace.extend(spaces);
                 }
                 break;
             }
         }
         let mut newline = false;
-        let mut bare_cr = false;
         let mut hidden_newline = false;
         let mut spaces = Vec::new();
         for (offset, ch) in text[end..].char_indices() {
@@ -1030,7 +1046,6 @@ fn render_full_inner(
             }
             if matches!(ch, '\r' | '\n') {
                 newline = true;
-                bare_cr = ch == '\r' && !text[index..].starts_with("\r\n");
                 break;
             }
             if ch.is_whitespace() {
@@ -1039,9 +1054,9 @@ fn render_full_inner(
                 break;
             }
         }
-        // 裸 CR 参与可见行判断且不能隐藏；保留既有 display 的 LF 分隔符与原始 CR 空行。
-        following_newline.insert(start, newline && !bare_cr);
-        if !newline && !hidden_newline && !preceding_hidden_newline {
+        // 裸 CR 本身就是可见行分隔符；公式后已有换行时不再补 LF。
+        following_newline.insert(start, newline);
+        if !newline || hidden_newline {
             whitespace.extend(spaces);
         }
     }

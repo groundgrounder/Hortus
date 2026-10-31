@@ -2,6 +2,47 @@
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 use std::ops::Range;
 
+pub(crate) struct LinesInclusive<'a> {
+    text: &'a str,
+    offset: usize,
+}
+
+impl<'a> Iterator for LinesInclusive<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset >= self.text.len() {
+            return None;
+        }
+        let bytes = self.text.as_bytes();
+        let start = self.offset;
+        let mut end = start;
+        while end < bytes.len() && !matches!(bytes[end], b'\r' | b'\n') {
+            end += 1;
+        }
+        if end < bytes.len() {
+            end += 1;
+            if bytes[end - 1] == b'\r' && bytes.get(end) == Some(&b'\n') {
+                end += 1;
+            }
+        }
+        self.offset = end;
+        Some(&self.text[start..end])
+    }
+}
+
+pub(crate) fn split_lines_inclusive(text: &str) -> LinesInclusive<'_> {
+    LinesInclusive { text, offset: 0 }
+}
+
+fn line_start(text: &str, position: usize) -> usize {
+    text[..position]
+        .char_indices()
+        .rev()
+        .find(|(_, c)| matches!(c, '\r' | '\n'))
+        .map_or(0, |(index, character)| index + character.len_utf8())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Marker,
@@ -144,7 +185,7 @@ pub(crate) fn body_start(text: &str) -> usize {
     if text.starts_with("---\n") || text.starts_with("---\r\n") {
         let first = text.find('\n').unwrap() + 1;
         let mut offset = first;
-        for line in text[first..].split_inclusive('\n') {
+        for line in split_lines_inclusive(&text[first..]) {
             offset += line.len();
             if matches!(line.trim_end(), "---" | "...") {
                 return offset;
@@ -269,8 +310,8 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
             }
             Event::Start(Tag::BlockQuote(_)) => {
                 let mut offset = r.start;
-                let mut line_start = text[..r.start].rfind('\n').map_or(0, |i| i + 1);
-                for line in source.split_inclusive('\n') {
+                let mut line_start = line_start(text, r.start);
+                for line in split_lines_inclusive(source) {
                     // 内层引用从外层已消费的前缀之后继续，不能再次隐藏同一个 >。
                     let start = offset.max(*quote_prefix_ends.get(&line_start).unwrap_or(&offset));
                     let rest = &text[start..offset + line.len()];
@@ -323,7 +364,7 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
                 );
                 push(spans, Kind::Marker, r.start..r.start + prefix);
                 if math {
-                    let line_start = text[..r.start].rfind('\n').map_or(0, |i| i + 1);
+                    let line_start = line_start(text, r.start);
                     let columns = |value: &str| {
                         value.chars().fold(0, |column, c| {
                             if c == '\t' {
@@ -337,7 +378,7 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
                     let target = columns(&text[line_start..r.start + prefix])
                         + usize::from(empty_marker && prefix == marker);
                     let mut offset = r.start;
-                    for (index, line) in source.split_inclusive('\n').enumerate() {
+                    for (index, line) in split_lines_inclusive(source).enumerate() {
                         if index > 0 {
                             let mut column = 0;
                             let count = line
@@ -445,7 +486,7 @@ fn analyze_into(text: &str, spans: &mut impl SemanticSink, protected: &mut Vec<b
     }
     // 扩展在代码/目标地址之外逐行匹配；未闭合的扩展不会跨行吞正文。
     let mut base = body_start;
-    for line in text[body_start..].split_inclusive('\n') {
+    for line in split_lines_inclusive(&text[body_start..]) {
         let bytes = line.as_bytes();
         let mut i = 0;
         while i < bytes.len() {

@@ -204,7 +204,8 @@ struct ReadingText: NSViewRepresentable {
         for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
         view.mediaViews = []; view.mediaBlocks = []
         view.mathViews.forEach { $0.removeFromSuperview() }; view.mathViews = []
-        view.inlineMath = [:]; view.installFormulaAccessibility([])
+        view.blocks = []
+        view.inlineMath = [:]; view.clearFormulaAccessibility()
         view.clearFormulaTooltips()
         view.inlineMathViews.forEach { $0.removeFromSuperview() }; view.inlineMathViews = []
         view.diagramViews = [:]; view.string = ""; view.textLayoutManager?.delegate = nil
@@ -287,10 +288,13 @@ struct ReadingText: NSViewRepresentable {
             generation += 1; task?.cancel(); task = nil
             inFlightToken = nil; inFlightKey = nil; refreshQueued = false
             styling.reset()
+            view?.diagramViews.values.forEach { $0.detach() }
+            view?.diagramViews = [:]
+            view?.blocks = []
             view?.mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
             view?.mediaViews = []; view?.mediaBlocks = []; view?.mediaProjection = []
             view?.mathViews.forEach { $0.removeFromSuperview() }; view?.mathViews = []
-            view?.inlineMath = [:]; view?.installFormulaAccessibility([])
+            view?.inlineMath = [:]; view?.clearFormulaAccessibility()
             view?.clearFormulaTooltips()
             view?.inlineMathViews.forEach { $0.removeFromSuperview() }; view?.inlineMathViews = []
             if input?.document.viewOwner === self {

@@ -50,6 +50,7 @@ struct NoteText: NSViewRepresentable {
         for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
         view.mediaViews = []; view.mediaBlocks = []; view.mediaProjection = []
         view.diagramViews = [:]
+        view.blocks = []
         view.string = ""
         view.textLayoutManager?.delegate = nil
         if let manager = view.textLayoutManager { manager.textContentManager?.removeTextLayoutManager(manager) }
@@ -87,6 +88,7 @@ struct NoteText: NSViewRepresentable {
             view?.editingCoordinator = nil
             view?.mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
             view?.mediaViews = []; view?.mediaBlocks = []; view?.mediaProjection = []
+            view?.blocks = []
             input = nil; blocks = []
         }
 
@@ -380,6 +382,18 @@ final class NoteLayoutFragment: NSTextLayoutFragment {
 }
 
 @MainActor
+private func formulaAccessibilityLabel(_ prepared: PreparedMathBlock) -> String {
+    func singleLine(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+    }
+    var label = L10n.string("Formula: %@", singleLine(prepared.block.latex))
+    if let reason = prepared.reason { label += " — " + singleLine(reason) }
+    return label
+}
+
+@MainActor
 private final class FormulaAccessibilityGeometry {
     weak var host: DiagramTextView?
     var item: NoteMath
@@ -401,6 +415,89 @@ final class FormulaAccessibilityElement: NSAccessibilityElement {
         super.init()
         setAccessibilityParent(host); setAccessibilityRole(.image)
     }
+    override func accessibilityFrame() -> NSRect {
+        let geometry = geometry
+        return MainActor.assumeIsolated { geometry.frame() }
+    }
+}
+
+private struct TableMathIdentity: Hashable {
+    let block: UInt64
+    let cell: Int
+    let formula: Int
+}
+
+struct AccessibilityHitResult: @unchecked Sendable {
+    let value: Any?
+}
+
+extension NSView {
+    @MainActor func cachedFormulaAccessibility(at point: NSPoint) -> NSAccessibilityElement? {
+        var ancestor = superview
+        while let view = ancestor {
+            if let host = view as? DiagramTextView { return host.formulaAccessibilityElement(at: point) }
+            ancestor = view.superview
+        }
+        return nil
+    }
+}
+
+/// 原生滚动区可能直接接到窗口的命中查询，转给宿主缓存的公式对象。
+final class FormulaScrollView: NSScrollView {
+    override func accessibilityHitTest(_ point: NSPoint) -> Any? {
+        let hit = MainActor.assumeIsolated { AccessibilityHitResult(value: cachedFormulaAccessibility(at: point)) }
+        return hit.value ?? super.accessibilityHitTest(point)
+    }
+}
+
+@MainActor
+private final class TableFormulaAccessibilityGeometry {
+    weak var host: DiagramTextView?
+    weak var media: MediaView?
+    let row: Int
+    let column: Int
+    let formulaIndex: Int
+
+    init(host: DiagramTextView, media: MediaView, row: Int, column: Int, formulaIndex: Int) {
+        self.host = host; self.media = media
+        self.row = row; self.column = column; self.formulaIndex = formulaIndex
+    }
+
+    func update(media: MediaView) { self.media = media }
+
+    func frame() -> NSRect {
+        guard let host, let media, !media.isHidden,
+              let frame = media.formulaFrame(row: row, column: column, formulaIndex: formulaIndex),
+              let window = host.window else { return .zero }
+        let local = media.convert(frame, from: media.tableCanvasView)
+        guard media.visibleRect.intersects(local) else { return .zero }
+        return window.convertToScreen(media.convert(local, to: nil))
+    }
+}
+
+@MainActor
+final class TableFormulaAccessibilityElement: NSAccessibilityElement {
+    private nonisolated let geometry: TableFormulaAccessibilityGeometry
+
+    init(host: DiagramTextView, media: MediaView, row: Int, column: Int, formulaIndex: Int,
+         prepared: PreparedMathBlock) {
+        geometry = TableFormulaAccessibilityGeometry(host: host, media: media, row: row, column: column,
+                                                     formulaIndex: formulaIndex)
+        super.init()
+        setAccessibilityParent(host); setAccessibilityRole(.image)
+        update(prepared: prepared)
+    }
+
+    func update(prepared: PreparedMathBlock) {
+        setAccessibilityLabel(formulaAccessibilityLabel(prepared))
+        setAccessibilityHelp(prepared.reason)
+    }
+
+    func update(media: MediaView, prepared: PreparedMathBlock) {
+        geometry.update(media: media)
+        update(prepared: prepared)
+    }
+
     override func accessibilityFrame() -> NSRect {
         let geometry = geometry
         return MainActor.assumeIsolated { geometry.frame() }
@@ -451,6 +548,9 @@ final class DiagramTextView: NSTextView {
     private var accessibleFormulas: [NoteMath] = []
     private var formulaAccessibility: [MathIdentity: FormulaAccessibilityElement] = [:]
     private var readingAccessibilityChildren: [Any] = []
+    private var tableFormulaAccessibility: [TableMathIdentity: TableFormulaAccessibilityElement] = [:]
+    private var accessibilityChildrenBuilt = false
+    private(set) var formulaAccessibilityBuildCount = 0
     var formulaScrollerStyle: NSScroller.Style { enclosingScrollView?.scrollerStyle ?? NSScroller.preferredScrollerStyle }
     var formulaTooltips: [NSView.ToolTipTag: String] = [:]
     var mathViews: [MathBlockView] = [] { didSet { mathParagraphs.removeAll(keepingCapacity: true) } }
@@ -766,59 +866,156 @@ final class DiagramTextView: NSTextView {
             return true
         }
     }
-    func installFormulaAccessibility(_ items: [NoteMath]) {
-        accessibleFormulas = items.sorted { $0.range.location < $1.range.location }
+
+    private func ensureFormulaAccessibility() {
+        guard isReading, !accessibilityChildrenBuilt else { return }
+        accessibilityChildrenBuilt = true
+        formulaAccessibilityBuildCount += 1
         var next: [MathIdentity: FormulaAccessibilityElement] = [:]
-        next.reserveCapacity(items.count)
+        next.reserveCapacity(accessibleFormulas.count)
         var labels: [String: String] = [:]
-        var ordered: [(Int, Any)] = accessibleFormulas.map { item in
-            let element = formulaAccessibility[item.identity] ?? FormulaAccessibilityElement(item, host: self)
+        for item in accessibleFormulas {
             let previous = formulaAccessibility[item.identity]?.item
+            let element = formulaAccessibility[item.identity] ?? FormulaAccessibilityElement(item, host: self)
             element.item = item
-            if previous?.prepared.block.latex != item.prepared.block.latex {
+            if previous == nil || previous?.prepared.block.latex != item.prepared.block.latex
+                || previous?.prepared.reason != item.prepared.reason {
                 let latex = item.prepared.block.latex
-                let label = labels[latex] ?? L10n.string("Formula: %@", latex)
-                labels[latex] = label
+                let label: String
+                if item.prepared.reason == nil {
+                    label = labels[latex] ?? formulaAccessibilityLabel(item.prepared)
+                    labels[latex] = label
+                } else { label = formulaAccessibilityLabel(item.prepared) }
                 element.setAccessibilityLabel(label)
             }
             if previous == nil || previous?.prepared.reason != item.prepared.reason {
                 element.setAccessibilityHelp(item.prepared.reason)
             }
             next[item.identity] = element
-            return (item.range.location, element)
         }
         formulaAccessibility = next
+
+        var tableNext: [TableMathIdentity: TableFormulaAccessibilityElement] = [:]
+        var tableChildren: [(Int, Any)] = []
+        for (mediaIndex, media) in mediaBlocks.enumerated() {
+            guard mediaIndex < mediaViews.count, !media.prepared.block.columns.isEmpty else { continue }
+            for (cellIndex, formulas) in media.prepared.math.enumerated() {
+                let row = cellIndex / media.prepared.block.columns.count
+                let column = cellIndex % media.prepared.block.columns.count
+                for (formulaIndex, formula) in formulas.enumerated() {
+                    let key = TableMathIdentity(block: media.prepared.block.blockId, cell: cellIndex, formula: formulaIndex)
+                    let element: TableFormulaAccessibilityElement
+                    if let existing = tableFormulaAccessibility[key] {
+                        existing.update(media: mediaViews[mediaIndex], prepared: formula)
+                        element = existing
+                    } else {
+                        element = TableFormulaAccessibilityElement(
+                            host: self, media: mediaViews[mediaIndex], row: row, column: column,
+                            formulaIndex: formulaIndex, prepared: formula)
+                    }
+                    tableNext[key] = element
+                    tableChildren.append((media.range.location, element))
+                }
+            }
+        }
+        tableFormulaAccessibility = tableNext
+
+        var ordered: [(Int, Any)] = accessibleFormulas.compactMap { item in
+            formulaAccessibility[item.identity].map { (item.range.location, $0 as Any) }
+        }
         ordered += blocks.compactMap { block in diagramViews[block.ordinal].map { (block.range.location, $0 as Any) } }
         ordered += zip(mediaBlocks, mediaViews).map { ($0.0.range.location, $0.1 as Any) }
+        ordered += tableChildren
         let native = (super.accessibilityChildren() ?? []).filter {
             !($0 is InlineMathView) && !($0 is MathBlockView) && !($0 is DiagramView) && !($0 is MediaView)
         }
         readingAccessibilityChildren = native + ordered.sorted { $0.0 < $1.0 }.map { $0.1 }
     }
+
+    func installFormulaAccessibility(_ items: [NoteMath]) {
+        accessibleFormulas = items.sorted { $0.range.location < $1.range.location }
+        accessibilityChildrenBuilt = false
+        formulaAccessibilityBuildCount = 0
+        if items.isEmpty {
+            formulaAccessibility.removeAll(keepingCapacity: true)
+            tableFormulaAccessibility.removeAll(keepingCapacity: true)
+            readingAccessibilityChildren = []
+        }
+    }
+
+    func clearFormulaAccessibility() {
+        accessibleFormulas = []
+        formulaAccessibility.removeAll(keepingCapacity: false)
+        tableFormulaAccessibility.removeAll(keepingCapacity: false)
+        readingAccessibilityChildren = []
+        accessibilityChildrenBuilt = false
+    }
     override func accessibilityChildren() -> [Any]? {
-        isReading ? readingAccessibilityChildren : super.accessibilityChildren()
+        guard isReading else { return super.accessibilityChildren() }
+        ensureFormulaAccessibility()
+        return readingAccessibilityChildren
     }
     override func accessibilityAttributedString(for range: NSRange) -> NSAttributedString? {
         guard isReading else { return super.accessibilityAttributedString(for: range) }
         guard let storage = textStorage, range.location != NSNotFound, range.location <= storage.length,
               range.length <= storage.length - range.location else { return nil }
+        ensureFormulaAccessibility()
         let result = NSMutableAttributedString(attributedString:
             super.accessibilityAttributedString(for: range) ?? storage.attributedSubstring(from: range))
-        for item in accessibleFormulas.reversed() where NSIntersectionRange(item.range, range).length > 0 {
-            var label = L10n.string("Formula: %@", item.prepared.block.latex)
-            if let reason = item.prepared.reason { label += " — " + reason }
+        for item in accessibleFormulas where NSIntersectionRange(item.range, range).length > 0 {
+            guard let element = formulaAccessibility[item.identity] else { continue }
             let local = NSRange(location: item.range.location - range.location, length: item.range.length)
-            result.replaceCharacters(in: local, with: label)
+            guard local.location >= 0, NSMaxRange(local) <= result.length else { continue }
+            result.addAttribute(.accessibilityAttachment, value: element, range: local)
         }
         return result
     }
     override func accessibilityString(for range: NSRange) -> String? {
         isReading ? accessibilityAttributedString(for: range)?.string : super.accessibilityString(for: range)
     }
+    override func accessibilityFrame(for range: NSRange) -> NSRect {
+        if isReading, let item = accessibleFormulas.first(where: { $0.range == range }) {
+            return formulaAccessibilityFrame(item)
+        }
+        return super.accessibilityFrame(for: range)
+    }
+    override func accessibilityRange(for point: NSPoint) -> NSRange {
+        if isReading, let item = accessibleFormulas.first(where: { formulaAccessibilityFrame($0).contains(point) }) {
+            return item.range
+        }
+        return super.accessibilityRange(for: point)
+    }
+    override func accessibilityHitTest(_ point: NSPoint) -> Any? {
+        let result: AccessibilityHitResult = MainActor.assumeIsolated {
+            AccessibilityHitResult(value: accessibilityHitTestOnMainActor(point))
+        }
+        return result.value
+    }
+    @MainActor
+    private func accessibilityHitTestOnMainActor(_ point: NSPoint) -> Any? {
+        guard isReading else { return super.accessibilityHitTest(point) }
+        return formulaAccessibilityElement(at: point) ?? super.accessibilityHitTest(point)
+    }
+    func formulaAccessibilityElement(at point: NSPoint) -> NSAccessibilityElement? {
+        guard isReading else { return nil }
+        ensureFormulaAccessibility()
+        for item in accessibleFormulas {
+            guard let element = formulaAccessibility[item.identity] else { continue }
+            let frame = element.accessibilityFrame()
+            if !frame.isEmpty && frame.contains(point) { return element }
+        }
+        for element in tableFormulaAccessibility.values {
+            let frame = element.accessibilityFrame()
+            if !frame.isEmpty && frame.contains(point) { return element }
+        }
+        return nil
+    }
     func formulaAccessibilityFrame(_ item: NoteMath) -> NSRect {
         guard let window, let manager = textLayoutManager, let content = manager.textContentManager,
               let location = content.location(content.documentRange.location, offsetBy: item.range.location),
               let fragment = manager.textLayoutFragment(for: location), fragment.state.rawValue >= NSTextLayoutFragment.State.layoutAvailable.rawValue else { return .zero }
+        let fragmentRect = fragment.layoutFragmentFrame.offsetBy(dx: textContainerInset.width, dy: textContainerInset.height)
+        guard visibleRect.intersects(fragmentRect) else { return .zero }
         var rect: CGRect
         if let attachment = inlineMath[item.range.location] {
             rect = fragment.frameForTextAttachment(at: location)

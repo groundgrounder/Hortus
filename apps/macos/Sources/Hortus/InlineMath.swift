@@ -61,7 +61,7 @@ private final class InlineMathCell: NSTextAttachmentCell {
 @MainActor
 final class InlineMathView: NSView {
     let attachment: InlineMathAttachment
-    lazy var scroll = NSScrollView()
+    lazy var scroll = FormulaScrollView()
     override var isFlipped: Bool { true }
     init(_ attachment: InlineMathAttachment) {
         self.attachment = attachment

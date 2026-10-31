@@ -22,12 +22,14 @@ fn cases(source: &str) -> Vec<&str> {
 #[test]
 fn display_math_uses_visible_newlines_and_preserves_code_spaces() {
     let cases = [
-        ("$$x$$ %%a\nb%% tail\n", "\u{fffc}\n  tail\n"),
-        ("前文 %%a\nb%% $$x$$ 后\n", "前文  \n\u{fffc}\n 后\n"),
+        ("$$x$$ %%a\nb%% tail\n", "\u{fffc}\ntail\n"),
+        ("前文 %%a\nb%% $$x$$ 后\n", "前文\n\u{fffc}\n后\n"),
         ("[^1] $$x$$\n\n[^1]: n\n", "[1] \n\u{fffc}\n\n[1] n\n"),
         ("> [!note] $$x$$\n> body\n", "note · \n\u{fffc}\nbody\n"),
-        ("$$x$$\r\rnext\r", "\u{fffc}\n\r\rnext\r"),
-        ("前\r$$x$$\r后\r", "前\r\u{fffc}\n\r后\r"),
+        ("$$x$$\r\rnext\r", "\u{fffc}\r\rnext\r"),
+        ("前\r$$x$$\r后\r", "前\r\u{fffc}\r后\r"),
+        ("> $$x$$\r> t\r", "\u{fffc}\rt\r"),
+        ("1) $$z$$\r2) a\r", "1) \u{fffc}\r2) a\r"),
         ("`a `$$x$$` b`", "a \n\u{fffc}\n b"),
         ("t[^1] $$x$$ x\n\n[^1]: n\n", "t[1]\n\u{fffc}\nx\n\n[1] n\n"),
     ];
@@ -126,6 +128,39 @@ fn display_math_preserves_existing_newlines_and_source_container_prefixes() {
         ("**$$x$$**\n", "\u{fffc}\n"),
         ("$$x$$%%c%%\n", "\u{fffc}\n"),
         ("> $$x$$\r\n> t\r\n", "\u{fffc}\r\nt\r\n"),
+    ] {
+        assert_eq!(
+            output(&Cache::default().model(source, false)),
+            expected,
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn bare_cr_separates_display_math_and_hides_quote_prefixes() {
+    let fixture = include_str!("../../../fixtures/math/display-cr.md");
+    assert!(fixture.contains('\r') && !fixture.contains('\n'));
+    assert_eq!(math::scan(fixture).len(), 2);
+    for (source, expected) in [
+        ("> $$x$$\r> t\r", "\u{fffc}\rt\r"),
+        ("1) $$z$$\r2) a\r", "1) \u{fffc}\r2) a\r"),
+    ] {
+        assert_eq!(
+            output(&Cache::default().model(source, false)),
+            expected,
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn hidden_comment_newlines_hide_adjacent_whitespace() {
+    for (source, expected) in [
+        ("$$z$$ %%hidden\ncomment%% tail.", "\u{fffc}\ntail."),
+        ("前文 %%a\nb%% $$x$$ 后", "前文\n\u{fffc}\n后"),
+        ("$$x$$ %%a\nb%% tail", "\u{fffc}\ntail"),
+        ("- a %%x\n  y%% $$z$$ b", "• a\n\u{fffc}\nb"),
     ] {
         assert_eq!(
             output(&Cache::default().model(source, false)),
