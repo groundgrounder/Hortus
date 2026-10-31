@@ -942,7 +942,11 @@ mod tests {
                 "reading_model_since" => {
                     let actual = session.reading_model_since(revision).unwrap();
                     assert_eq!(actual.delta_index, FULL_READING_MODEL);
+                    assert_eq!(actual.revision, fresh.revision);
+                    assert_eq!(actual.rebuilt, fresh.rebuilt);
                     assert_eq!(actual.text, fresh.text);
+                    assert_eq!(actual.packed_blocks, fresh.packed_blocks);
+                    assert_eq!(actual.packed_runs, fresh.packed_runs);
                 }
                 "source_styles" => {
                     assert_eq!(
