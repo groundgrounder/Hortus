@@ -188,7 +188,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.toolbarFocusGuard = ToolbarFocusGuard(window: window)
             }
         }
-        guard args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
+        var terminalFontInspection = false
+        #if DEBUG
+        terminalFontInspection = TerminalFontInspection.requested
+        #endif
+        guard terminalFontInspection || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
         // 自检只设置两次一次性唤醒，其余等待由界面状态变更触发。
         let deadline = DispatchWorkItem { fputs("Hortus 自检超时\n", stderr); exit(2) }
         inspectionDeadline = deadline
@@ -238,7 +242,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func inspectWhenReady() {
         guard inspectionDeadline != nil, !inspectionStarted, let workspace else { return }
-        let visualInspection = ProcessInfo.processInfo.arguments.contains {
+        var terminalFontInspection = false
+        #if DEBUG
+        terminalFontInspection = TerminalFontInspection.requested
+        #endif
+        let visualInspection = terminalFontInspection || ProcessInfo.processInfo.arguments.contains {
             $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--quick-open-query=") || $0.hasPrefix("--search-query=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || $0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top"
         }
         let settled = withObservationTracking {
@@ -259,6 +267,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let workspace else { return }
         let args = ProcessInfo.processInfo.arguments
         do {
+            #if DEBUG
+            if let arg = args.first(where: { $0.hasPrefix(TerminalFontInspection.argumentPrefix) }), let layout {
+                let result = try await TerminalFontInspection.run(workspace: workspace, layout: layout, arguments: args)
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: URL(fileURLWithPath: String(arg.dropFirst(TerminalFontInspection.argumentPrefix.count))))
+                NSApp.terminate(nil)
+                return
+            }
+            #endif
             if let arg = args.first(where: { $0.hasPrefix("--reading-inspection=") }) {
                 let result = try await ReadingInspection.run(workspace: workspace, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])

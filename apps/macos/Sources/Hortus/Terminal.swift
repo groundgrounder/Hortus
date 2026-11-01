@@ -26,6 +26,21 @@ final class TerminalSession {
     private var view: HortusTerminalView?
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     private var killTask: Task<Void, Never>?
+    private(set) var nerdFonts: TerminalNerdFonts?
+    #if DEBUG
+    private(set) var inspectionFontReadyBeforeShell = false
+    #endif
+
+    init() {
+        let installed = TerminalNerdFonts.installed
+        Task { [weak self] in
+            let catalog = await installed.value
+            guard let self else { return }
+            self.nerdFonts = catalog
+            self.view?.glyphFallbackProvider = catalog.provider
+            self.startIfPossible()
+        }
+    }
 
     var statusText: String {
         switch state {
@@ -40,6 +55,7 @@ final class TerminalSession {
         self.view = view
         view.processDelegate = view.delegateProxy
         view.applyAppearance(fontSize: fontSize)
+        view.glyphFallbackProvider = nerdFonts?.provider
         startIfPossible()
     }
 
@@ -143,7 +159,7 @@ final class TerminalSession {
     }
 
     private func startIfPossible() {
-        guard state == .starting, let root, let view, !view.process.running, !view.process.windingDown else { return }
+        guard nerdFonts != nil, state == .starting, let root, let view, !view.process.running, !view.process.windingDown else { return }
         let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
         var environment = ProcessInfo.processInfo.environment
         environment["TERM"] = "xterm-256color"
@@ -154,6 +170,9 @@ final class TerminalSession {
             environment["LANG"] = Self.utf8Locale()
         }
         let variables = environment.map { "\($0.key)=\($0.value)" }.sorted()
+        #if DEBUG
+        inspectionFontReadyBeforeShell = view.glyphFallbackProvider === nerdFonts?.provider
+        #endif
         state = .running
         view.startProcess(executable: shell, args: ["-l"], environment: variables, currentDirectory: root)
     }
@@ -227,6 +246,7 @@ final class TerminalSession {
 // Used only by TerminalInspection, which runs behind explicit check arguments.
 extension TerminalSession {
     var inspectionShellPid: pid_t { view?.process.running == true ? view?.process.shellPid ?? 0 : 0 }
+    var inspectionView: HortusTerminalView? { view }
     var inspectionViewAttached: Bool { view?.window != nil }
     func inspectionSend(_ text: String) {
         view?.send(Array(text.utf8))
@@ -251,7 +271,9 @@ final class HortusTerminalView: LocalProcessTerminalView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func applyAppearance(fontSize: Double) {
-        font = NSFont.monospacedSystemFont(ofSize: CGFloat(fontSize), weight: .regular)
+        if font.pointSize != CGFloat(fontSize) {
+            font = NSFont.monospacedSystemFont(ofSize: CGFloat(fontSize), weight: .regular)
+        }
         applyNativeColors()
     }
 
