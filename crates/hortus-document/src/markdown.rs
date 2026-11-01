@@ -134,12 +134,7 @@ fn clear_ranges(spans: &mut Vec<(Kind, Range<usize>)>, removed: &[Range<usize>],
     let mut kept = Vec::with_capacity(spans.len());
     for (kind, range) in spans.drain(..) {
         // 这些范围指向完整结构的起点；阅读时不能把注释后的片段当成新结构。
-        if reading
-            && matches!(
-                kind,
-                Kind::Callout | Kind::OrderedList | Kind::UnorderedList
-            )
-        {
+        if reading && kind == Kind::Callout {
             kept.push((kind, range));
             continue;
         }

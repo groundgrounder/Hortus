@@ -203,6 +203,9 @@ fn html_comments_in_other_containers_match_percent_comments() {
         ("> a <!-- c -->\n> b", "a \nb"),
         ("> [!note] a <!-- c -->\n> b", "note · a \nb"),
         ("- ![[image.png]] <!--c--> x", "\n\u{fffc}\n  x"),
+        ("- <!--c-->\n- b", "\n• b"),
+        ("- <!--c--> x", " x"),
+        ("- <!--c-->", ""),
     ] {
         check(source, expected);
         check(&source.replace("<!--", "%%").replace("-->", "%%"), expected);
