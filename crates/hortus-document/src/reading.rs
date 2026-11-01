@@ -756,6 +756,7 @@ fn render_full_inner(
     // 纯注释行连同换行符一起去掉；段落原有的空白间距仍保留。
     let mut line_start = 0;
     let mut leading_comment = false;
+    let mut prefix_suppressed = true;
     for line in markdown::split_lines_inclusive(text) {
         let end = line_start + line.len();
         if !line.trim().is_empty()
@@ -764,7 +765,7 @@ fn render_full_inner(
                 .all(|(index, c)| c.is_whitespace() || suppress[line_start + index])
         {
             suppress[line_start..end].fill(true);
-            if line_start == 0 || suppress[..line_start].iter().all(|value| *value) {
+            if prefix_suppressed {
                 leading_comment = true;
             }
         } else if leading_comment && line.trim().is_empty() {
@@ -772,6 +773,7 @@ fn render_full_inner(
         } else {
             leading_comment = false;
         }
+        prefix_suppressed &= suppress[line_start..end].iter().all(|value| *value);
         line_start = end;
     }
     if !mmd
@@ -886,7 +888,10 @@ fn render_full_inner(
                         }
                         let value = text.get(marker.clone()).unwrap_or_default().trim_start();
                         match kind {
-                            Kind::UnorderedList => value.starts_with(['-', '*', '+']),
+                            Kind::UnorderedList => {
+                                value.starts_with(['-', '*', '+'])
+                                    && value.as_bytes().get(1).is_none_or(u8::is_ascii_whitespace)
+                            }
                             Kind::OrderedList => {
                                 value.as_bytes().first().is_some_and(u8::is_ascii_digit)
                             }

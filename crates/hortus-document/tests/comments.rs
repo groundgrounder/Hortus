@@ -130,13 +130,92 @@ fn comment_splits_keep_other_semantic_ranges_valid() {
         "[link %%comment%% text](target)",
         "😀 %%comment%% ![[中.png]]",
     ] {
-        let full = Cache::default().model(source, false);
-        check(source, &displayed(&full));
-        for block in full.blocks {
-            for run in &block.content.runs {
-                assert!(run.source.end <= block.source.len());
-                assert!(run.display.end <= block.content.display_len());
+        let html = source.replace("%%comment%%", "<!--comment-->");
+        let expected = displayed(&Cache::default().model(source, false));
+        // 脚注标签不允许 HTML：两种定界符都保留在原始标签中，原文字面值应不同。
+        let html_expected = if source.starts_with("ref[^a%%") {
+            expected.replace("%%comment%%", "<!--comment-->")
+        } else {
+            expected.clone()
+        };
+        for (text, expected) in [
+            (source, expected.as_str()),
+            (html.as_str(), html_expected.as_str()),
+        ] {
+            check(text, expected);
+            let full = Cache::default().model(text, false);
+            for block in full.blocks {
+                for run in &block.content.runs {
+                    assert!(run.source.end <= block.source.len());
+                    assert!(run.display.end <= block.content.display_len());
+                }
             }
         }
+    }
+}
+
+macro_rules! list_comment_case {
+    ($name:ident, $source:expr, $expected:expr) => {
+        #[test]
+        fn $name() {
+            check($source, $expected);
+            check(
+                &$source.replace("<!--", "%%").replace("-->", "%%"),
+                $expected,
+            );
+        }
+    };
+}
+
+list_comment_case!(
+    list_html_inline,
+    "- item <!-- c -->\n- next",
+    "• item \n• next"
+);
+list_comment_case!(list_html_asterisk, "* a <!-- c -->\n* b", "• a \n• b");
+list_comment_case!(
+    list_html_task,
+    "- [ ] task <!-- c -->\n- [x] done",
+    "☐  task \n☑  done"
+);
+list_comment_case!(
+    list_html_between_items,
+    "- a\n  <!-- c -->\n- b",
+    "• a\n• b"
+);
+list_comment_case!(list_html_continuation, "- a\n  <!-- c -->\n  b", "• a\n  b");
+list_comment_case!(
+    list_html_loose,
+    "- a\n\n  <!-- c -->\n\n- b",
+    "• a\n\n\n• b"
+);
+list_comment_case!(list_html_wikilink, "- [[a|b]] <!--c--> x", "• b  x");
+list_comment_case!(
+    list_html_footnote,
+    "- x[^1] <!--c-->\n\n[^1]: n",
+    "• x[1] \n\n[1] n"
+);
+
+#[test]
+fn html_comments_in_other_containers_match_percent_comments() {
+    for (source, expected) in [
+        ("1) a <!-- c -->\n2) b", "1) a \n2) b"),
+        ("> a <!-- c -->\n> b", "a \nb"),
+        ("> [!note] a <!-- c -->\n> b", "note · a \nb"),
+        ("- ![[image.png]] <!--c--> x", "\n\u{fffc}\n  x"),
+    ] {
+        check(source, expected);
+        check(&source.replace("<!--", "%%").replace("-->", "%%"), expected);
+    }
+}
+
+#[test]
+fn short_html_comments_match_obsidian_inline_and_as_blocks() {
+    for comment in ["<!-->", "<!--->"] {
+        let inline = format!("before {comment} after");
+        check(&inline, &inline);
+        check(&format!("{comment}\n\nbody"), "body");
+        check(comment, "");
+        check(&format!("`{comment}`"), comment);
     }
 }

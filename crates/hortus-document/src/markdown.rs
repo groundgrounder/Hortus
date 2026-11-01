@@ -108,27 +108,67 @@ pub struct Run {
 
 trait SemanticSink {
     fn insert(&mut self, kind: Kind, range: Range<usize>);
-    fn clear_range(&mut self, range: Range<usize>);
+    fn clear_ranges(&mut self, ranges: &[Range<usize>]);
 }
+
+// 注释按源码顺序互不重叠。字节索引直接定位第一个相交注释，
+// 每个语义范围只访问会切出新片段的注释，不为每条注释重建整个集合。
+fn clear_ranges(spans: &mut Vec<(Kind, Range<usize>)>, removed: &[Range<usize>], reading: bool) {
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in removed {
+        if let Some(last) = merged.last_mut().filter(|last| last.end == range.start) {
+            last.end = range.end;
+        } else {
+            merged.push(range.clone());
+        }
+    }
+    let Some(last) = merged.last() else {
+        return;
+    };
+    let mut next = vec![merged.len(); last.end + 1];
+    let mut end = 0;
+    for (index, range) in merged.iter().enumerate() {
+        next[end..range.end].fill(index);
+        end = range.end;
+    }
+    let mut kept = Vec::with_capacity(spans.len());
+    for (kind, range) in spans.drain(..) {
+        // 这些范围指向完整结构的起点；阅读时不能把注释后的片段当成新结构。
+        if reading
+            && matches!(
+                kind,
+                Kind::Callout | Kind::OrderedList | Kind::UnorderedList
+            )
+        {
+            kept.push((kind, range));
+            continue;
+        }
+        let mut start = range.start;
+        for comment in &merged[next[start.min(next.len() - 1)]..] {
+            if comment.start >= range.end {
+                break;
+            }
+            if start < comment.start {
+                kept.push((kind, start..comment.start));
+            }
+            start = comment.end;
+            if start >= range.end {
+                break;
+            }
+        }
+        if start < range.end {
+            kept.push((kind, start..range.end));
+        }
+    }
+    *spans = kept;
+}
+
 impl SemanticSink for Vec<(Kind, Range<usize>)> {
     fn insert(&mut self, kind: Kind, range: Range<usize>) {
         self.push((kind, range));
     }
-    fn clear_range(&mut self, removed: Range<usize>) {
-        let mut kept = Vec::with_capacity(self.len());
-        for (kind, range) in self.drain(..) {
-            if range.end <= removed.start || range.start >= removed.end {
-                kept.push((kind, range));
-            } else {
-                if range.start < removed.start {
-                    kept.push((kind, range.start..removed.start));
-                }
-                if range.end > removed.end {
-                    kept.push((kind, removed.end..range.end));
-                }
-            }
-        }
-        *self = kept;
+    fn clear_ranges(&mut self, removed: &[Range<usize>]) {
+        clear_ranges(self, removed, false);
     }
 }
 // 阅读中的结构范围不能被注释切开；显示样式仍由普通 sink 清除注释覆盖。
@@ -138,16 +178,8 @@ impl SemanticSink for ReadingSink {
     fn insert(&mut self, kind: Kind, range: Range<usize>) {
         self.0.push((kind, range));
     }
-    fn clear_range(&mut self, range: Range<usize>) {
-        let callouts: Vec<_> = self
-            .0
-            .iter()
-            .filter(|(kind, _)| *kind == Kind::Callout)
-            .cloned()
-            .collect();
-        self.0.retain(|(kind, _)| *kind != Kind::Callout);
-        self.0.clear_range(range);
-        self.0.extend(callouts);
+    fn clear_ranges(&mut self, ranges: &[Range<usize>]) {
+        clear_ranges(&mut self.0, ranges, true);
     }
 }
 /// 显示路径直接叠加掩码，不先分配数十万个带范围的语义对象。
@@ -171,9 +203,11 @@ impl SemanticSink for MaskSink<'_> {
             *value |= mask;
         }
     }
-    fn clear_range(&mut self, range: Range<usize>) {
+    fn clear_ranges(&mut self, ranges: &[Range<usize>]) {
         if !self.exceeded {
-            self.masks[range].fill(0);
+            for range in ranges {
+                self.masks[range.clone()].fill(0);
+            }
         }
     }
 }
@@ -257,11 +291,23 @@ fn analyze_into(
         let r = local.start + body_start..local.end + body_start;
         let source = &text[r.clone()];
         match event {
-            Event::Start(Tag::HtmlBlock) | Event::InlineHtml(_)
+            event @ (Event::Start(Tag::HtmlBlock) | Event::InlineHtml(_))
                 if html_comments && source.starts_with("<!--") =>
             {
-                if let Some(close) = source.find("-->") {
-                    html_ranges.push(r.start..r.start + close + 3);
+                let short = if source.starts_with("<!-->") {
+                    Some(5)
+                } else if source.starts_with("<!--->") {
+                    Some(6)
+                } else {
+                    None
+                };
+                if let Some(length) = short {
+                    // Obsidian 的短注释只在 HTML 块里隐藏，行内保留原文。
+                    if matches!(event, Event::Start(Tag::HtmlBlock)) {
+                        html_ranges.push((r.start..r.start + length, 0, 0));
+                    }
+                } else if let Some(close) = source.find("-->") {
+                    html_ranges.push((r.start..r.start + close + 3, 4, 3));
                 }
             }
             Event::Start(Tag::Heading { level, .. }) => {
@@ -497,37 +543,39 @@ fn analyze_into(
     let mut comments = Vec::new();
     let mut position = body_start;
     let mut html = html_ranges.into_iter().peekable();
+    let mut percent = text[body_start..]
+        .match_indices("%%")
+        .map(|(offset, _)| offset + body_start)
+        .filter(|&offset| !protected[offset] && !escaped(text.as_bytes(), offset))
+        .peekable();
     while position < text.len() {
-        while html.peek().is_some_and(|range| range.start < position) {
+        while html
+            .peek()
+            .is_some_and(|(range, _, _)| range.start < position)
+        {
             html.next();
         }
-        let percent = text[position..].find("%%").map(|offset| position + offset);
+        while percent.peek().is_some_and(|&offset| offset < position) {
+            percent.next();
+        }
         if html
             .peek()
-            .is_some_and(|range| percent.is_none_or(|p| range.start <= p))
+            .is_some_and(|(range, _, _)| percent.peek().is_none_or(|&p| range.start <= p))
         {
-            let range = html.next().unwrap();
-            position = range.end;
-            comments.push((range, 4, 3));
+            let comment = html.next().unwrap();
+            position = comment.0.end;
+            comments.push(comment);
             continue;
         }
-        let Some(start) = percent else {
+        let Some(start) = percent.next() else {
             break;
         };
-        position = start;
-        if !protected[position] && !escaped(text.as_bytes(), position) {
-            let close = text[position + 2..]
-                .match_indices("%%")
-                .map(|(i, _)| i + position + 2)
-                .find(|&i| !protected[i] && !escaped(text.as_bytes(), i));
-            if let Some(close) = close {
-                let end = close + 2;
-                comments.push((position..end, 2, 2));
-                position = end;
-                continue;
-            }
+        if let Some(close) = percent.next() {
+            position = close + 2;
+            comments.push((start..position, 2, 2));
+        } else {
+            position = start + 2;
         }
-        position += 2;
     }
     let mut hidden = vec![false; text.len()];
     for (range, _, _) in &comments {
@@ -539,8 +587,13 @@ fn analyze_into(
             push(spans, Kind::Marker, line.start..line.start + end);
         }
     }
+    spans.clear_ranges(
+        &comments
+            .iter()
+            .map(|(range, _, _)| range.clone())
+            .collect::<Vec<_>>(),
+    );
     for (range, left, right) in comments {
-        spans.clear_range(range.clone());
         if range.len() == left + right {
             push(spans, Kind::Comment, range.clone());
         }
