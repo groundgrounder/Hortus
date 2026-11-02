@@ -2,6 +2,74 @@ use hortus_document::Document;
 use hortus_document::reading::Cache;
 use std::sync::Arc;
 
+#[test]
+fn indented_list_markers_preserve_display_and_source_ranges() {
+    let mut cases = Vec::new();
+    for marker in ['-', '+', '*'] {
+        for indent in 0..=3 {
+            let prefix = " ".repeat(indent);
+            cases.push((format!("{prefix}{marker} a😀\n"), "• a😀\n".to_owned()));
+            for (task, expected) in [("[ ]", "☐"), ("[x]", "☑"), ("[X]", "☑")] {
+                cases.push((
+                    format!("{prefix}{marker} {task} a😀\n"),
+                    format!("{expected}  a😀\n"),
+                ));
+            }
+        }
+        cases.push((format!("{marker}\ta😀\n"), "• a😀\n".to_owned()));
+    }
+    cases.extend([
+        (
+            "- parent\n  - child\n    continuation\n- next\n".into(),
+            "• parent\n  • child\n    continuation\n• next\n".into(),
+        ),
+        ("    - code\n".into(), "    - code\n".into()),
+        ("1. one\n2. two\n".into(), "1. one\n2. two\n".into()),
+        ("1) one\n2) two\n".into(), "1) one\n2) two\n".into()),
+    ]);
+    for indent in 1..=3 {
+        for delimiter in ['.', ')'] {
+            cases.push((
+                format!("{}1{delimiter} one\n", " ".repeat(indent)),
+                format!("1{delimiter} one\n"),
+            ));
+        }
+    }
+    for (source, expected) in cases {
+        let mut cache = Cache::default();
+        cache.model("before\n", false);
+        let actual = cache.model(&source, false);
+        assert_eq!(
+            actual
+                .blocks
+                .iter()
+                .map(|b| b.content.text.as_str())
+                .collect::<String>(),
+            expected,
+            "{source:?}"
+        );
+        assert_same_rendering(&actual, &Cache::default().model(&source, false));
+        for block in &actual.blocks {
+            let source_len = block.source.len();
+            let mut end = 0;
+            for run in &block.content.runs {
+                assert_eq!(run.display.start, end);
+                assert!(run.source.start <= run.source.end && run.source.end <= source_len);
+                end = run.display.end;
+            }
+            assert_eq!(end, block.content.text.encode_utf16().count());
+        }
+        let edited = source.replace("a😀", "b😀");
+        assert_same_rendering(
+            &cache.model(&edited, false),
+            &Cache::default().model(&edited, false),
+        );
+        let mut document = Document::new(&source);
+        document.reading(false).unwrap();
+        assert_eq!(document.text().unwrap(), source);
+    }
+}
+
 fn assert_same_rendering(
     actual: &hortus_document::reading::Model,
     expected: &hortus_document::reading::Model,

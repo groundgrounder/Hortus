@@ -684,7 +684,7 @@ fn render_simple(text: &str, spans: &[(Kind, Range<usize>)]) -> Content {
 }
 
 pub(crate) fn inline(text: &str) -> Content {
-    let mut spans = markdown::reading_spans(text, true);
+    let mut spans = markdown::inline_spans(text);
     for (index, _) in text.match_indices("\\|") {
         if text[..index]
             .bytes()
@@ -802,7 +802,7 @@ fn render_full_inner(
                 16384,
             ),
         );
-    } else if mmd || diagram || mermaid_fence(text) {
+    } else if !inline_context && (mmd || diagram || mermaid_fence(text)) {
         result.diagram = true;
         // 成功的图由平台以单个占位段落绘制；失败时平台放回该块的完整源码。
         replacements.insert(0, (text.len(), "\u{fffc}\n".into(), 0));
@@ -810,8 +810,7 @@ fn render_full_inner(
         for (start, end, value) in refs {
             replacements.insert(*start, (*end, value.clone(), 8192));
         }
-        if let Some((range, table)) = text
-            .contains('|')
+        if let Some((range, table)) = (!inline_context && text.contains('|'))
             .then(|| Table::parse(text))
             .flatten()
             .filter(|(range, _)| !suppress[range.start])
@@ -819,7 +818,7 @@ fn render_full_inner(
             replacements.insert(range.start, (range.end, "\u{fffc}\n".into(), 0));
             attachments.insert(range.start, (range, media::Kind::Table(table)));
         }
-        if text.contains("![") {
+        if !inline_context && text.contains("![") {
             for (event, r) in Parser::new_ext(text, options()).into_offset_iter() {
                 if let Event::Start(Tag::Image { dest_url, .. }) = event {
                     if suppress[r.start] || masks[r.start] & (16 | 32) != 0 {
@@ -853,7 +852,10 @@ fn render_full_inner(
                 }
             }
         }
-        for (_, range) in spans.iter().filter(|(kind, _)| *kind == Kind::Embed) {
+        for (_, range) in spans
+            .iter()
+            .filter(|(kind, _)| !inline_context && *kind == Kind::Embed)
+        {
             let range = range.start.saturating_sub(3)..(range.end + 2).min(text.len());
             let raw = &text[range.clone()];
             if let Some(inner) = raw.strip_prefix("![[").and_then(|s| s.strip_suffix("]]")) {

@@ -218,3 +218,73 @@ fn paths_stay_inside_the_vault_including_missing_symlink_targets() {
     }
     std::fs::remove_dir_all(base).unwrap();
 }
+#[test]
+fn table_cells_parse_only_inline_markdown() {
+    let source = concat!(
+        "| # h | ## h | # $x$ | - a | **b** | normal |\n",
+        "| --- | --- | --- | --- | --- | --- |\n",
+        "| > quote | > [!note] Title | ```code | 1. item | *em* | `code` |\n",
+        "| [link](target) | a %%hidden%% b | a <!--hidden--> b | A\\|B | $a\\|b$ | 😀 |\n",
+    );
+    let (_, table) = Table::parse(source).unwrap();
+    let expected = [
+        ["# h", "## h", "# \u{fffc}", "- a", "b", "normal"],
+        [
+            "> quote",
+            "> [!note] Title",
+            "```code",
+            "1. item",
+            "em",
+            "code",
+        ],
+        ["link", "a  b", "a  b", "A|B", "\u{fffc}", "😀"],
+    ];
+    for (row, expected) in table.rows.iter().zip(expected) {
+        for (cell, expected) in row.iter().zip(expected) {
+            assert_eq!(cell.text, expected, "{:?}", cell.source);
+            let mut end = 0;
+            for run in &cell.runs {
+                assert_eq!(run.display.start, end);
+                assert_eq!(
+                    run.mask & (0xff00_0000 | 32 | 64 | 4096 | 32768 | 65536),
+                    0,
+                    "{:?}",
+                    cell.source
+                );
+                assert!(
+                    run.source.start <= run.source.end
+                        && run.source.end <= cell.source.encode_utf16().count()
+                );
+                end = run.display.end;
+            }
+            assert_eq!(end, cell.text.encode_utf16().count());
+            for formula in &cell.math {
+                assert!(!formula.block);
+                assert_eq!(
+                    cell.text.encode_utf16().nth(formula.display.start),
+                    Some(0xfffc)
+                );
+                let units: Vec<_> = cell.source.encode_utf16().collect();
+                assert!(String::from_utf16_lossy(&units[formula.source.clone()]).starts_with('$'));
+            }
+        }
+    }
+    assert!(table.rows[0][4].runs.iter().any(|run| run.mask & 2 != 0));
+    assert!(table.rows[1][4].runs.iter().any(|run| run.mask & 4 != 0));
+    assert!(table.rows[1][5].runs.iter().any(|run| run.mask & 16 != 0));
+    assert!(table.rows[2][0].runs.iter().any(|run| run.mask & 128 != 0));
+    assert_eq!(table.rows[2][4].math[0].latex, "a|b");
+    let mut cache = Cache::default();
+    cache.model(source, false);
+    let edited = source.replace("# h", "# heading");
+    let actual = cache.model(&edited, false);
+    let full = Cache::default().model(&edited, false);
+    assert_eq!(actual.blocks.len(), full.blocks.len());
+    for (actual, full) in actual.blocks.iter().zip(full.blocks) {
+        assert_eq!(actual.source, full.source);
+        assert_eq!(
+            format!("{:?}", actual.content),
+            format!("{:?}", full.content)
+        );
+    }
+}

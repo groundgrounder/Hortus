@@ -412,11 +412,19 @@ fn analyze_into(
                 }
             }
             Event::Start(Tag::Item) => {
+                // Item 范围包含顶层允许的 1–3 个前导空格；嵌套项的外层缩进
+                // 不在该范围内。把语法缩进与无序标记一起交给阅读投影。
+                let indent = source.bytes().take_while(|b| *b == b' ').count();
+                let leading = if matches!(source.as_bytes().get(indent), Some(b'-' | b'+' | b'*')) {
+                    indent
+                } else {
+                    0
+                };
                 let n = source.bytes().take_while(|b| b.is_ascii_digit()).count();
                 let marker = if n > 0 && matches!(source.as_bytes().get(n), Some(b'.' | b')')) {
                     n + 1
                 } else {
-                    1
+                    leading + 1
                 };
                 let prefix = marker
                     + source[marker..]
@@ -735,6 +743,20 @@ pub(crate) fn reading_spans(text: &str, math: bool) -> Vec<(Kind, Range<usize>)>
     analyze_into(text, &mut sink, &mut Vec::new(), math, true);
     sort_spans(&mut sink.0);
     sink.0
+}
+
+pub(crate) fn inline_spans(text: &str) -> Vec<(Kind, Range<usize>)> {
+    // 表格单元格只有一行。中性段落前缀使解析器从行内上下文开始，
+    // 避免先识别标题、列表或围栏再留下已经吞掉的 Marker。
+    debug_assert!(!text.contains(['\n', '\r']));
+    let paragraph = format!("x {text}");
+    reading_spans(&paragraph, true)
+        .into_iter()
+        .filter_map(|(kind, range)| {
+            let start = range.start.max(2);
+            (range.end > start).then_some((kind, start - 2..range.end - 2))
+        })
+        .collect()
 }
 
 /// 文档持有分析缓冲，避免每次编辑重新分配大型语义片段数组。
