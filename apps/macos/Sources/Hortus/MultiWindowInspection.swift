@@ -13,6 +13,23 @@ enum MultiWindowInspection {
             let args = ProcessInfo.processInfo.arguments
             let restoring = args.contains("--multi-window-restore")
             var result: [String: Any] = [:]
+            if args.contains("--multi-window-edge") {
+                try await settled(application)
+                result["windows"] = application.records.map(describe)
+                result["errors"] = application.records.compactMap { $0.workspace.error }
+                result["frames_visible"] = application.records.allSatisfy { record in
+                    guard let frame = record.window?.frame else { return false }
+                    return NSScreen.screens.contains { $0.visibleFrame.contains(frame) }
+                }
+                result["contexts"] = application.contexts.count
+                result["default_visible"] = application.defaultVisible
+                result["layout"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(application.initial.layout.persistedState))
+                try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: output))
+                // 错误提示只属失败窗口；证据取完后关闭提示，安全结束检查。
+                for record in application.records { record.workspace.error = nil }
+                NSApp.terminate(nil)
+                return
+            }
             if restoring {
                 try await settled(application)
                 result["restored"] = application.records.map(describe)
@@ -42,6 +59,8 @@ enum MultiWindowInspection {
                 await second.workspace.openFolder(alias.path)
                 result["canonical_deduplicated"] = application.records.count == count && application.contexts.count == count && application.active === first
                 result["before_layout"] = application.records.map(describe)
+                stage = "real panel drag"
+                result["real_drag_shared"] = try await dragPanel(application, first: first, second: second)
                 let oldBSize = second.layout.size[.left]
                 first.layout.moveToRegion(.outline, .left)
                 first.layout.visible[.left] = false
@@ -68,6 +87,8 @@ enum MultiWindowInspection {
                 first.workspace.updateQuickOpen(query: "same", marked: false)
                 result["quick_open_isolated"] = first.workspace.quickOpenVisible && !second.workspace.quickOpenVisible
                 first.workspace.dismissQuickOpen()
+                first.workspace.updateSearch(query: "Public", marked: false)
+                result["search_ui_isolated"] = first.workspace.searchQuery == "Public" && second.workspace.searchQuery.isEmpty
                 application.activate(second)
                 try await Task.sleep(for: .milliseconds(150))
                 updateMenus(NSApp.mainMenu)
@@ -95,10 +116,21 @@ enum MultiWindowInspection {
                 try FileManager.default.removeItem(at: aURL.appendingPathComponent("renamed.md"))
                 try await wait { first.workspace.entries["renamed.md"] == nil }
                 result["external_rename_delete_ms"] = (ProcessInfo.processInfo.systemUptime - renameStart) * 1000
+                stage = "window close decisions"
+                result.merge(try await closeDecisions(application, source: first.workspace, path: thirdPath)) { _, new in new }
+                stage = "quit cancel"
+                result["quit_cancel_all_windows"] = try await cancelQuit(application)
+                // 真实并存截图要能同时看到两个窗口；位置也进入下次恢复快照。
+                if let screen = NSScreen.main?.visibleFrame {
+                    first.window?.setFrame(NSRect(x: screen.minX, y: screen.maxY - 650, width: 900, height: 650), display: true)
+                    second.window?.setFrame(NSRect(x: screen.maxX - 900, y: screen.minY, width: 900, height: 650), display: true)
+                }
+                result["latest_size_preserved"] = application.latestSize[.left] == 340
                 await application.persistSession()
             }
             try await settled(application)
             result["visible_windows"] = application.records.filter { $0.window?.isVisible == true }.count
+            result["actual_vault_windows"] = NSApp.windows.filter { $0.isVisible && $0.delegate is VaultWindowDelegate }.count
             result["windows"] = application.records.map(describe)
             result["contexts"] = application.contexts.values.map { ["root": $0.root, "handles": 1, "listeners": $0.listenerCount, "trees": 1, "indexes": 1, "windows": $0.windowCount] as [String: Any] }
             let session = application.snapshot()
@@ -125,8 +157,101 @@ enum MultiWindowInspection {
             result["threads"] = try WorkspaceInspection.threadCount()
             let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: URL(fileURLWithPath: output))
-            NSApp.terminate(nil)
+            if restoring { application.records.first?.window?.performClose(nil) } else { NSApp.terminate(nil) }
         } catch { fputs("Hortus multi-window inspection failed at \(stage): \(error)\n", stderr); exit(1) }
+    }
+
+    private static func permissions(_ root: String, writable: Bool) throws {
+        let url = URL(fileURLWithPath: root)
+        try FileManager.default.setAttributes([.posixPermissions: writable ? 0o755 : 0o555], ofItemAtPath: root)
+        try FileManager.default.setAttributes([.posixPermissions: writable ? 0o644 : 0o444], ofItemAtPath: url.appendingPathComponent("same.md").path)
+    }
+
+    private static func recoveryPermissions(writable: Bool) throws {
+        guard let cache = ProcessInfo.processInfo.environment["HORTUS_CACHE_DIR"] else { throw CocoaError(.fileWriteUnknown) }
+        let path = URL(fileURLWithPath: cache).appendingPathComponent("recovery").path
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: writable ? 0o755 : 0o555], ofItemAtPath: path)
+    }
+
+    private static func closeDecisions(_ application: ApplicationWorkspace, source: Workspace, path: String) async throws -> [String: Any] {
+        await source.openFolder(path)
+        try await settled(application)
+        let record = try require(application.records.last)
+        record.workspace.openNote("same.md")
+        try await settled(application)
+        let document = try require(record.workspace.current?.document)
+        let root = try require(record.workspace.root)
+        defer { try? permissions(root, writable: true); try? recoveryPermissions(writable: true) }
+        document.edited(range: NSRange(location: 0, length: 0), replacement: "Cancel fixture\n")
+        _ = try await document.io.perform { try $0.snapshot() }
+        try permissions(root, writable: false); try recoveryPermissions(writable: false)
+        var prompts = 0
+        record.workspace.promptUnsaved = { _, _ in prompts += 1; return .cancel }
+        record.window?.performClose(nil)
+        try await wait { prompts == 1 && !record.closing }
+        let cancelled = application.records.contains { $0 === record } && record.window?.isVisible == true
+        record.workspace.promptUnsaved = { _, _ in
+            prompts += 1
+            try? permissions(root, writable: true); try? recoveryPermissions(writable: true)
+            document.refresh()
+            return .retry
+        }
+        record.window?.performClose(nil)
+        try await wait { application.records.count == 2 }
+        let savedText = try String(contentsOfFile: root + "/same.md", encoding: .utf8)
+        let retried = prompts >= 2 && document.persistence != .unsaved
+        await source.openFolder(path)
+        try await settled(application)
+        let discard = try require(application.records.last)
+        discard.workspace.openNote("same.md")
+        try await settled(application)
+        let draft = try require(discard.workspace.current?.document)
+        draft.edited(range: NSRange(location: 0, length: 0), replacement: "Discard fixture\n")
+        _ = try await draft.io.perform { try $0.snapshot() }
+        try permissions(root, writable: false); try recoveryPermissions(writable: false)
+        discard.workspace.promptUnsaved = { _, _ in .discard }
+        discard.window?.performClose(nil)
+        try await wait { application.records.count == 2 }
+        let discarded = !(try String(contentsOfFile: root + "/same.md", encoding: .utf8)).contains("Discard fixture")
+        return ["close_cancel": cancelled, "close_retry": retried, "close_discard": discarded,
+                "close_prompts": prompts, "retry_saved_note": savedText.contains("Cancel fixture"),
+                "retry_persistence": String(describing: document.persistence)]
+    }
+
+    private static func cancelQuit(_ application: ApplicationWorkspace) async throws -> Bool {
+        let records = application.records
+        var roots: [String] = []
+        for record in records {
+            let root = try require(record.workspace.root)
+            roots.append(root)
+            let document = try require(record.workspace.current?.document)
+            document.edited(range: NSRange(location: 0, length: 0), replacement: "Quit fixture\n")
+            _ = try await document.io.perform { try $0.snapshot() }
+            try permissions(root, writable: false)
+        }
+        try recoveryPermissions(writable: false)
+        defer {
+            for root in roots { try? permissions(root, writable: true) }
+            try? recoveryPermissions(writable: true)
+            for record in records { record.workspace.promptUnsaved = nil }
+        }
+        var prompted: [String] = []
+        application.initial.workspace.promptUnsaved = { notes, quitting in
+            if quitting { prompted = notes }
+            return .cancel
+        }
+        NSApp.terminate(nil)
+        try await wait { prompted.count == records.count }
+        guard application.records.count == records.count && records.allSatisfy({ $0.window?.isVisible == true }) else { return false }
+        for root in roots { try permissions(root, writable: true) }
+        try recoveryPermissions(writable: true)
+        for record in records {
+            let document = try require(record.workspace.current?.document)
+            document.edited(range: NSRange(location: 0, length: 0), replacement: "After cancel\n")
+            if await document.prepareToClose() != .persisted { return false }
+        }
+        return true
     }
 
     private static func describe(_ record: WindowRecord) -> [String: Any] {
@@ -158,6 +283,49 @@ enum MultiWindowInspection {
     private static func require<T>(_ value: T?) throws -> T {
         guard let value else { throw CocoaError(.coderValueNotFound) }
         return value
+    }
+    private static func findView(_ view: NSView, named name: String) -> NSView? {
+        if view.identifier?.rawValue == name { return view }
+        return view.subviews.lazy.compactMap { findView($0, named: name) }.first
+    }
+
+    private static func dragPanel(_ application: ApplicationWorkspace, first: WindowRecord, second: WindowRecord) async throws -> Bool {
+        application.activate(first)
+        try await Task.sleep(for: .milliseconds(200))
+        let window = try require(first.window)
+        let content = try require(window.contentView)
+        let source = try require(findView(content, named: "panel-tab-outline"))
+        let target = try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "bottom-panel" }?.view)
+        func point(_ view: NSView) -> CGPoint {
+            let rect = window.convertToScreen(view.convert(view.bounds, to: nil))
+            return CGPoint(x: rect.midX, y: (NSScreen.screens.first?.frame.maxY ?? 0) - rect.midY)
+        }
+        let from = point(source), to = point(target)
+        await withCheckedContinuation { continuation in
+            sendDrag(from: from, to: to) { continuation.resume() }
+        }
+        try await wait { first.layout.region(containing: .outline) == .bottom }
+        return second.layout.region(containing: .outline) == .bottom && first.layout.groups(in: .bottom).map(\.tabs) == second.layout.groups(in: .bottom).map(\.tabs)
+    }
+
+    nonisolated private static func sendDrag(from: CGPoint, to: CGPoint, completion: @escaping @Sendable () -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            func post(_ type: CGEventType, _ point: CGPoint) {
+                CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+            }
+            post(.mouseMoved, from)
+            Thread.sleep(forTimeInterval: 0.1)
+            post(.leftMouseDown, from)
+            Thread.sleep(forTimeInterval: 0.15)
+            for step in 1...30 {
+                let fraction = CGFloat(step) / 30
+                post(.leftMouseDragged, CGPoint(x: from.x + (to.x - from.x) * fraction, y: from.y + (to.y - from.y) * fraction))
+                Thread.sleep(forTimeInterval: 0.025)
+            }
+            Thread.sleep(forTimeInterval: 0.3)
+            post(.leftMouseUp, to)
+            completion()
+        }
     }
     private static func key(_ text: String, modifiers: NSEvent.ModifierFlags) -> Bool {
         guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,

@@ -8,10 +8,10 @@ enum EditingInspection {
         guard let document = workspace.current?.document, let path = workspace.selected else { throw CocoaError(.coderValueNotFound) }
         if document.reading { await workspace.toggleCurrentView() }
         for _ in 0..<500 {
-            if DiagramInspection.current()?.isReading == false { break }
+            if DiagramInspection.current(document: workspace.current?.document)?.isReading == false { break }
             try await Task.sleep(for: .milliseconds(10))
         }
-        var view = try await DiagramInspection.settled()
+        var view = try await DiagramInspection.settled(document: workspace.current?.document)
         view.window?.makeFirstResponder(view)
         let mode = arguments.first(where: { $0.hasPrefix("--edit-mode=") }).map { String($0.dropFirst("--edit-mode=".count)) } ?? "lifecycle"
         if mode == "recovery" {
@@ -88,7 +88,7 @@ enum EditingInspection {
                 // 模拟连续输入，把原生布局与后台任务交错放进真实主事件循环。
                 try await Task.sleep(for: .milliseconds(5))
             }
-            view = try await DiagramInspection.settled()
+            view = try await DiagramInspection.settled(document: workspace.current?.document)
             let snapshot = try await document.io.perform { try $0.snapshot() }
             let started = ProcessInfo.processInfo.systemUptime
             await document.saveNow()
@@ -134,8 +134,8 @@ enum EditingInspection {
         workspace.openNote("other.md")
         try await wait { !document.dirty }
         workspace.openNote(path)
-        try await wait { DiagramInspection.current()?.representedPath == path && DiagramInspection.current()?.diagramPending == false }
-        view = try await DiagramInspection.settled()
+        try await wait { DiagramInspection.current(document: workspace.current?.document)?.representedPath == path && DiagramInspection.current(document: workspace.current?.document)?.diagramPending == false }
+        view = try await DiagramInspection.settled(document: workspace.current?.document)
         let switchSave = try diskMatches(document, view)
         fputs("编辑验收：切换标签完成\n", stderr)
         let selected = min(3, view.sourceUTF16Length)
@@ -156,8 +156,8 @@ enum EditingInspection {
         fputs("编辑验收：关闭标签完成\n", stderr)
         workspace.openNote(path)
         try await wait { workspace.current?.document != nil && workspace.current?.loading == false }
-        try await wait { DiagramInspection.current()?.representedDocument == workspace.current?.document.map(ObjectIdentifier.init) && DiagramInspection.current()?.diagramPending == false }
-        view = try await DiagramInspection.settled()
+        try await wait { DiagramInspection.current(document: workspace.current?.document)?.representedDocument == workspace.current?.document.map(ObjectIdentifier.init) && DiagramInspection.current(document: workspace.current?.document)?.diagramPending == false }
+        view = try await DiagramInspection.settled(document: workspace.current?.document)
         guard let reopened = workspace.current?.document, let originalRoot = workspace.root else { throw CocoaError(.coderValueNotFound) }
         view.insertText("切换库", replacementRange: NSRange(location: 0, length: 0))
         let librarySource = view.string
@@ -166,8 +166,8 @@ enum EditingInspection {
         let librarySave = try String(contentsOf: reopened.io.url, encoding: .utf8) == librarySource
         await workspace.openFolder(originalRoot)
         try await wait { workspace.current?.document != nil && workspace.current?.loading == false }
-        try await wait { DiagramInspection.current()?.representedDocument == workspace.current?.document.map(ObjectIdentifier.init) && DiagramInspection.current()?.diagramPending == false }
-        view = try await DiagramInspection.settled()
+        try await wait { DiagramInspection.current(document: workspace.current?.document)?.representedDocument == workspace.current?.document.map(ObjectIdentifier.init) && DiagramInspection.current(document: workspace.current?.document)?.diagramPending == false }
+        view = try await DiagramInspection.settled(document: workspace.current?.document)
         // 给退出留下真实脏内容，由 applicationShouldTerminate 完成最后一次保存。
         view.insertText("退出保存", replacementRange: NSRange(location: 0, length: 0))
         return ["autosave_delay_seconds": autosaveDelay, "command_save": commandSave, "focus_save": focusSave,

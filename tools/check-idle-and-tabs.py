@@ -77,6 +77,16 @@ def main():
                         *[f"--cycle-vault={vault}" for vault in vaults]],
                        env=environment(base / "lifecycle"), check=True, timeout=30)
         lifecycle = json.loads(lifecycle_path.read_text())
+        assert lifecycle["contexts_after_close"] == [0] * 20, lifecycle
+        assert all(lifecycle["released_windows"]) and all(lifecycle["released_workspaces"]), lifecycle
+        assert lifecycle["remaining_windows"] == 1, lifecycle
+        for pid in lifecycle["closed_shells"]:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise AssertionError(("closed shell survived", pid))
         for key in ["open_threads", "switch_threads", "closed_threads"]:
             counts = lifecycle[key]
             assert len(counts) == 20, lifecycle

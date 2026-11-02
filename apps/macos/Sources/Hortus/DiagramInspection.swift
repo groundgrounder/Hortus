@@ -12,8 +12,12 @@ enum DiagramInspection {
     static func textViews(in view: NSView) -> [DiagramTextView] {
         (view as? DiagramTextView).map { [$0] } ?? view.subviews.flatMap { textViews(in: $0) }
     }
-    static func current() -> DiagramTextView? {
-        (NSApp.keyWindow?.contentView).flatMap { textViews(in: $0).first }
+    static func current(document: NoteDocument? = nil) -> DiagramTextView? {
+        let views = NSApp.windows.filter(\.isVisible).compactMap(\.contentView).flatMap { textViews(in: $0) }
+        if let document { return views.first { $0.representedDocument == ObjectIdentifier(document) } }
+        if let view = NSApp.keyWindow?.contentView.flatMap({ textViews(in: $0).first }) { return view }
+        // 显式单窗口检查可能在应用尚未取得 key 状态时开始；多个窗口时不猜测目标。
+        return views.count == 1 ? views.first : nil
     }
     static func finishEvent() {
         // 自动循环没有原生输入事件；结束 AppKit 的事件临时对象池。
@@ -23,9 +27,9 @@ enum DiagramInspection {
             NSApp.postEvent(event, atStart: false)
         }
     }
-    static func settled(source: String? = nil) async throws -> DiagramTextView {
+    static func settled(source: String? = nil, document: NoteDocument? = nil) async throws -> DiagramTextView {
         for _ in 0..<500 {
-            if let view = current(), !view.diagramPending, source == nil || view.string == source {
+            if let view = current(document: document), !view.diagramPending, source == nil || view.string == source {
                 autoreleasepool { view.layoutSubtreeIfNeeded() }
                 return view
             }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """内置终端：真实窗口里经 PTY 输入命令，检查环境、文件树、阅读视图原地刷新、
-切换知识库和退出应用后 shell 及其子进程都已结束，再测三种空闲 CPU。
+新库窗口保留背景终端，关闭窗口和退出应用后 shell 及其子进程都已结束，再测三种空闲 CPU。
 
 shell 用 /bin/zsh，ZDOTDIR 指向空的临时目录，不读用户自己的 rc 文件，也不写用户的历史记录；
 环境里去掉 LANG/LC_*，和从 Finder、程序坞启动时一样。
@@ -99,6 +99,8 @@ def lifecycle(base, output):
     assert long_text.endswith('Paragraph 9999: appended from the terminal.\n'), '追加没有落盘'
     assert result['exit_stays_exited'], 'shell 退出后被界面刷新重新拉起'
     assert result['restarted_pid'] not in (0, result['shell_pid']), result
+    for key in ['old_shell_preserved', 'focus_isolated', 'clear_isolated', 'other_shell_survived_close']:
+        assert result[key], (key, result)
     assert os.path.realpath(result['shell2_cwd']) == real_second and result['shell2_pid'] != result['shell_pid'], result
     assert not result['alive_after_quit'] and not result['leftover_sleeps'], result
     assert result['second_unchanged'], result

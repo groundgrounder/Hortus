@@ -121,6 +121,9 @@ struct TabStrip: View {
                     .contextMenu { menu(for: kind) }
                     .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
                     .accessibilityAction { layout.select(kind, in: group.id) }
+#if DEBUG
+                    .background(ContentFrameProbe(name: "panel-tab-" + kind.rawValue))
+#endif
             }
             Spacer(minLength: 0)
         }

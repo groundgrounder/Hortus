@@ -42,7 +42,6 @@ final class ApplicationWorkspace {
     @ObservationIgnored private var layoutTask: Task<Void, Never>?
     @ObservationIgnored private let saves = DispatchQueue(label: "app.hortus.session")
     @ObservationIgnored private var opening: Task<Void, Never>?
-    @ObservationIgnored private var isolatedLaunch = false
     @ObservationIgnored private var inspectionLaunch = false
 
     init() {
@@ -85,8 +84,7 @@ final class ApplicationWorkspace {
             if let saved = session.default_visible, !saved.isEmpty { defaultVisible = saved }
             configure(initial)
             let args = ProcessInfo.processInfo.arguments
-            isolatedLaunch = args.contains("--empty") || args.contains(where: { $0.hasPrefix("--vault=") })
-            inspectionLaunch = isolatedLaunch && ProcessInfo.processInfo.environment["HORTUS_CACHE_DIR"] == nil
+            inspectionLaunch = !Self.shouldPersistSession(arguments: args, cacheOverride: ProcessInfo.processInfo.environment["HORTUS_CACHE_DIR"] != nil)
             if let arg = args.first(where: { $0.hasPrefix("--vault=") }) {
                 await openNow(String(arg.dropFirst("--vault=".count)), source: initial.workspace)
             } else if !args.contains("--empty") {
@@ -107,10 +105,19 @@ final class ApplicationWorkspace {
         record.layout.size = latestSize
         for region in Region.allCases { record.layout.visible[region] = defaultVisible[region.rawValue] ?? (region != .bottom) }
         record.workspace.configure(application: self, core: core, layout: record.layout)
+        record.layout.onSizeChange = { [weak self, weak record] in
+            guard let self, let record else { return }
+            self.latestSize = record.layout.size
+        }
         record.layout.onChange = { [weak self, weak record] in
             guard let self, let record else { return }
             self.layoutChanged(record.workspace)
         }
+    }
+
+    /// 显式检查启动不能覆盖真实会话；隔离缓存内仍允许检查保存与恢复。
+    static func shouldPersistSession(arguments: [String], cacheOverride: Bool) -> Bool {
+        cacheOverride || !arguments.contains { $0 == "--empty" || $0.hasPrefix("--vault=") }
     }
 
     /// 所有打开请求串行化，规范化路径在创建句柄前去重，返回 root 后再确认。
@@ -174,7 +181,10 @@ final class ApplicationWorkspace {
                 record.layout.visible[region] = saved?.visible?[region.rawValue] ?? defaultVisible[region.rawValue] ?? (region != .bottom)
             }
             await record.workspace.attach(context, state: saved)
-            if record.window == nil { showWindow?(record.id) }
+            if record.window == nil {
+                // 首个 Scene 已由 SwiftUI 创建；注册探针稍晚到达时不能再打开同一窗口。
+                if record !== initial { showWindow?(record.id) }
+            }
             else { restoreFrame(record); activate(record) }
             remember(record)
             scheduleSessionSave()
@@ -196,6 +206,7 @@ final class ApplicationWorkspace {
         record.delegate = delegate
         window.delegate = delegate
         restoreFrame(record)
+        if activeID == record.id { activate(record) }
         if window.toolbar != nil { record.focusGuard = ToolbarFocusGuard(window: window) }
     }
 
@@ -217,7 +228,6 @@ final class ApplicationWorkspace {
 
     func layoutChanged(_ workspace: Workspace) {
         guard let record = records.first(where: { $0.workspace === workspace }) else { return }
-        latestSize = record.layout.size
         remember(record)
         scheduleLayoutSave()
         scheduleSessionSave()

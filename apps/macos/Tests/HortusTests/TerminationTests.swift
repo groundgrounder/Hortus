@@ -4,6 +4,24 @@ import Testing
 
 @Suite @MainActor
 struct TerminationTests {
+    @Test func nestedLoopTimeoutRetainsAllWindowTitlesAndRepeatedQuitRepliesOnce() {
+        let gate = TerminationGate()
+        gate.documentTimeout = 0.05
+        var replies: [TerminationGate.Outcome] = []
+        var cleaned = false
+        let titles = ["vault-a/same.md", "vault-b/same.md"]
+        gate.begin(documentTitles: titles, documents: { _ in }, cleanup: { done in
+            cleaned = true; done()
+        }) { replies.append($0) }
+        gate.begin(documentTitles: ["duplicate request"], documents: { $0([]) }, cleanup: { $0() }) { replies.append($0) }
+        let deadline = Date(timeIntervalSinceNow: 1)
+        while replies.isEmpty && Date() < deadline {
+            _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+        }
+        #expect(replies == [.blocked(unsaved: titles)])
+        #expect(!cleaned)
+    }
+
     @Test func documentsBeyondShortTimeoutStillDelayExit() async throws {
         let gate = TerminationGate()
         gate.shortTimeout = 0.05

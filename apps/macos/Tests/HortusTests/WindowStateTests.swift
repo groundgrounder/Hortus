@@ -4,6 +4,14 @@ import Testing
 
 @Suite @MainActor
 struct WindowStateTests {
+    @Test func explicitLaunchProtectsRealSessionAndIsolatedLaunchCanRoundTrip() {
+        for arguments in [["--empty"], ["--vault=/public", "--note=same.md"]] {
+            #expect(!ApplicationWorkspace.shouldPersistSession(arguments: arguments, cacheOverride: false))
+            #expect(ApplicationWorkspace.shouldPersistSession(arguments: arguments, cacheOverride: true))
+        }
+        #expect(ApplicationWorkspace.shouldPersistSession(arguments: [], cacheOverride: false))
+    }
+
     @Test func groupsAreSharedButSizesAndVisibilityBelongToEachWindow() throws {
         let arrangement = PanelArrangement()
         let a = Layout(arrangement: arrangement), b = Layout(arrangement: arrangement)

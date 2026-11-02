@@ -124,28 +124,50 @@ enum TerminalInspection {
         let restarted = session.inspectionShellPid
         result["restarted_pid"] = Int(restarted)
 
-        // 5. 切换知识库：旧 shell 和它启动的程序都要结束，新 shell 在新库根
+        // 5. 新库开新窗口；旧窗口的 shell、后台任务和缓冲保持不变。
         session.inspectionSend("sh -c 'echo $$ > \(scratch.path)/job1.pid; exec sleep 600.101' &\r")
         let job1 = try await pidFile(scratch.appendingPathComponent("job1.pid"))
+        guard let application = workspace.application,
+              let first = application.records.first(where: { $0.workspace === workspace }) else { throw CocoaError(.coderValueNotFound) }
         started = ProcessInfo.processInfo.systemUptime
         await workspace.openFolder(second)
-        try await wait(seconds: 20, until: "新知识库启动 shell") {
-            session.root == second && session.state == .running && session.inspectionShellPid > 0 && session.inspectionShellPid != restarted
-        }
-        try await wait(seconds: 10, until: "切库后旧 shell 和后台程序结束") { !alive(restarted) && !alive(job1) }
-        let shell2 = session.inspectionShellPid
+        guard let destination = application.records.first(where: { $0.workspace.root == second }) else { throw CocoaError(.coderValueNotFound) }
+        let secondSession = destination.workspace.terminal
+        let shell2 = try await showTerminal(workspace: destination.workspace, layout: destination.layout)
+        result["new_window_ms"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
+        result["old_shell_preserved"] = alive(restarted) && alive(job1) && session.inspectionShellPid == restarted && workspace.root == root
+        application.activate(destination)
+        secondSession.focus()
+        result["focus_isolated"] = destination.window?.firstResponder === secondSession.inspectionView && first.window?.firstResponder !== secondSession.inspectionView
+        secondSession.inspectionSend("printf '\nHORTUS_SECOND_WINDOW_MARKER\n'\r")
+        try await wait(seconds: 10, until: "第二窗口终端显示标记") { screen(secondSession).contains("HORTUS_SECOND_WINDOW_MARKER") }
+        try await Task.sleep(for: .milliseconds(100))
+        let firstScreen = screen(session)
+        let secondScreen = screen(secondSession)
+        secondSession.clearScreen()
+        try await wait(seconds: 10, until: "第二窗口终端清屏") { !screen(secondSession).contains("HORTUS_SECOND_WINDOW_MARKER") }
+        result["clear_isolated"] = screen(session) == firstScreen && screen(secondSession) != secondScreen && alive(restarted)
+        started = ProcessInfo.processInfo.systemUptime
+        first.window?.performClose(nil)
+        try await wait(seconds: 10, until: "关闭第一窗口后旧 shell 和后台程序结束") { !alive(restarted) && !alive(job1) && application.records.count == 1 }
         result["switch_old_exit_ms"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
+        result["other_shell_survived_close"] = alive(shell2) && secondSession.inspectionShellPid == shell2
         result["job1_pid"] = Int(job1)
         result["shell2_pid"] = Int(shell2)
         result["shell2_cwd"] = currentDirectory(shell2) ?? ""
 
         // 6. 新 shell 里留一个后台程序、一个前台程序，退出应用后由脚本检查它们都已结束
-        session.inspectionSend("sh -c 'echo $$ > \(scratch.path)/job2.pid; exec sleep 600.202' &\r")
+        secondSession.inspectionSend("sh -c 'echo $$ > \(scratch.path)/job2.pid; exec sleep 600.202' &\r")
         result["job2_pid"] = Int(try await pidFile(scratch.appendingPathComponent("job2.pid")))
-        session.inspectionSend("sh -c 'echo $$ > \(scratch.path)/job3.pid; exec sleep 600.303'\r")
+        secondSession.inspectionSend("sh -c 'echo $$ > \(scratch.path)/job3.pid; exec sleep 600.303'\r")
         result["job3_pid"] = Int(try await pidFile(scratch.appendingPathComponent("job3.pid")))
         result["app_pid"] = Int(getpid())
         return result
+    }
+
+    private static func screen(_ session: TerminalSession) -> String {
+        guard let view = session.inspectionView else { return "" }
+        return view.visibleRowsText(0..<view.terminalDimensions.rows).joined(separator: "\n")
     }
 
     /// 空闲 CPU 的三种状态：hidden（终端在后台）、unfocused（窗口失去焦点，由脚本切到别的应用）、focused

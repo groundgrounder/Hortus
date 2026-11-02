@@ -18,7 +18,7 @@ enum ReadingInspection {
     }
     static func settled(_ reading: Bool, document: NoteDocument) async throws -> DiagramTextView {
         for _ in 0..<10000 {
-            if let view = DiagramInspection.current(), view.isReading == reading,
+            if let view = DiagramInspection.current(document: document), view.isReading == reading,
                view.representedDocument == ObjectIdentifier(document), !view.diagramPending,
                reading ? view.readingCoordinator?.pending == false && view.readingCoordinator?.revealPending == false
                     && view.readingCoordinator?.model?.revision == document.revision

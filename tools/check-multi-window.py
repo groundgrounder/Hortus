@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,6 +11,43 @@ import tomllib
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def edges(app, base, output, env, saved):
+    session_path = base / 'cache/session.toml'
+    layout_path = base / 'config/layout.toml'
+    def run(name):
+        target = output / (name + '.json')
+        completed = subprocess.run([str(app.resolve()), '--multi-window-edge',
+                                    f'--multi-window-inspection={target}'], env=env, capture_output=True, timeout=30)
+        (output / (name + '.log')).write_bytes(completed.stdout + completed.stderr)
+        assert completed.returncode == 0, completed.stderr.decode(errors='replace')
+        return json.loads(target.read_text())
+    session_path.write_text(re.sub(r'(?m)^([xy]) = .*$', r'\1 = 999999.0', saved))
+    offscreen = run('offscreen')
+    assert offscreen['frames_visible'] and offscreen['contexts'] == 2, offscreen
+    session_path.write_text(saved.replace(str(base / 'b'), str(base / 'missing')))
+    missing = run('missing-vault')
+    assert missing['contexts'] == 1 and len(missing['errors']) == 1, missing
+    root = json.dumps(str((base / 'a').resolve()))
+    legacy = f'last_vault = {root}\n[[recent]]\npath = {root}\ntabs = ["same.md"]\nselected = "same.md"\n[recent.views]\n"same.md" = "editing"\n[[diagrams]]\nvault = {root}\nnote = "same.md"\nblock = 7\ncollapsed = ["public-node"]\n'
+    old_layout = layout_path.read_text().replace('[regions.left]', '[regions.left]\nvisible = false')
+    old_layout = old_layout.replace('[regions.right]', '[regions.right]\nvisible = true')
+    old_layout = old_layout.replace('[regions.bottom]', '[regions.bottom]\nvisible = false')
+    layout_path.write_text(old_layout)
+    session_path.write_text(legacy)
+    migrated = run('legacy-migration')
+    assert migrated['contexts'] == 1 and len(migrated['windows']) == 1, migrated
+    assert migrated['windows'][0]['views']['same.md'] == 'editing', migrated
+    assert migrated['windows'][0]['left_visible'] is False, migrated
+    session = tomllib.loads(session_path.read_text())
+    assert session['diagrams'][0]['collapsed'] == ['public-node'], session
+    assert session['recent'][0]['visible']['left'] is False, session
+    assert 'visible' not in layout_path.read_text(), layout_path.read_text()
+    (output / 'migrated-session.json').write_text(json.dumps(session, indent=2) + '\n')
+    # 后续打开新库继承迁移默认值，旧 layout.visible 不再作为真相。
+    assert session['default_visible']['left'] is False, session
+    print(json.dumps({'offscreen': offscreen, 'missing': missing, 'migration': migrated}, indent=2))
 
 
 def main():
@@ -36,10 +74,12 @@ def main():
         (output / 'application.log').write_bytes(completed.stdout + completed.stderr)
         assert completed.returncode == 0, (completed.returncode, completed.stderr.decode(errors='replace'))
         data = json.loads(result.read_text())
-        assert data['visible_windows'] == 2 and data['original_preserved'], data
+        assert data['visible_windows'] == 2 and data['actual_vault_windows'] == 2 and data['original_preserved'], data
         for field in ['documents_isolated', 'existing_activated', 'canonical_deduplicated', 'groups_shared',
                       'size_existing_unchanged', 'visible_isolated', 'quick_open_isolated',
-                      'key_window_command', 'background_terminal_preserved', 'external_isolated']:
+                      'key_window_command', 'background_terminal_preserved', 'external_isolated',
+                      'close_cancel', 'close_retry', 'close_discard', 'quit_cancel_all_windows', 'latest_size_preserved',
+                      'real_drag_shared', 'search_ui_isolated']:
             assert data[field], (field, data)
         assert data['new_size'] == 340, data
         assert data['external_update_ms'] < 1000 and data['external_rename_delete_ms'] < 1000, data
@@ -53,7 +93,8 @@ def main():
                 pass
             else:
                 raise AssertionError(('shell survived application exit', pid))
-        session = tomllib.loads((base / 'cache/session.toml').read_text())
+        saved = (base / 'cache/session.toml').read_text()
+        session = tomllib.loads(saved)
         assert len(session['windows']) == 2, session
         (output / 'saved-session.json').write_text(json.dumps(session, indent=2) + '\n')
         restored = output / 'restored.json'
@@ -70,6 +111,7 @@ def main():
         assert [w['tabs'] for w in restore['windows']] == [w['tabs'] for w in data['windows']], restore
         assert [w['views'] for w in restore['windows']] == [w['views'] for w in data['windows']], restore
         assert [w['left_visible'] for w in restore['windows']] == [w['left_visible'] for w in data['windows']], restore
+        assert [w['frame'] for w in restore['session']['windows']] == [w['frame'] for w in data['session']['windows']], restore
         for window in restore['windows']:
             try:
                 os.kill(window['terminal_pid'], 0)
@@ -78,6 +120,8 @@ def main():
             else:
                 raise AssertionError(('restored shell survived exit', window))
         print(json.dumps({'windows': data, 'restore': restore}, indent=2))
+        assert restore['windows'][0]['left_size'] == 340, restore
+        edges(args.app, base, output, env, saved)
 
 
 if __name__ == '__main__':

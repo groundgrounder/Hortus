@@ -69,8 +69,9 @@ final class Layout {
         set { arrangement.groups = newValue }
     }
     var visible: [Region: Bool] = [:] { didSet { onChange?() } }
-    var size: [Region: CGFloat] = [:] { didSet { onChange?() } }
+    var size: [Region: CGFloat] = [:] { didSet { onSizeChange?(); onChange?() } }
     @ObservationIgnored var onChange: (() -> Void)?
+    @ObservationIgnored var onSizeChange: (() -> Void)?
     /// 正在拖动的视图；不为空时显示所有可放置的位置
     var dragging: ViewKind?
 
