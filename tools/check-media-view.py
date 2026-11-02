@@ -47,14 +47,17 @@ def main():
             'image': '# 本地图片\n\n![山与日光](media/landscape.png)\n\n![[media/landscape.svg]]\n',
             'remote': '# 远程图片\n\n![示例链接](https://example.invalid/remote.png)\n',
             'editing': '# 编辑表格\n\n' + chinese + '\n光标离开表格时显示预览。\n',
+            'inline-table': (ROOT / 'fixtures/math/inline-table-context.md').read_text(),
         }
         for name, source in sources.items():
             (vault / f'{name}.md').write_text(source)
         for appearance in ['light', 'dark']:
             for name in sources:
                 target = f'{name}-{appearance}'
-                READING.run(base / target, output, target, vault, f'{name}.md', editing=name == 'editing',
-                    extra=[f'--{appearance}', f'--snapshot={output / (target + ".png")}'])
+                data = READING.run(base / target, output, target, vault, f'{name}.md', editing=name == 'editing',
+                    extra=[f'--{appearance}', '--inspect-reading-text', f'--snapshot={output / (target + ".png")}'])
+                if name == 'inline-table':
+                    READING.check_inline_table(data)
             target = f'editing-source-{appearance}'
             READING.run(base / target, output, target, vault, 'editing.md', editing=True,
                 extra=[f'--{appearance}', '--media-source', f'--snapshot={output / (target + ".png")}'])

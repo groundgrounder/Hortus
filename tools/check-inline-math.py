@@ -50,11 +50,13 @@ def main():
             for section, note in [('CRLF', 'inline-crlf.md'), ('Parenthesis list', 'inline-fixes.md'),
                     ('Table fixes', 'inline-fixes.md'), ('Callout display', 'display-callout.md'),
                     ('Footnote display', 'display-footnote.md'), ('Comment display', 'display-comment.md'),
-                    ('CR quote and list', 'display-cr.md')]:
+                    ('CR quote and list', 'display-cr.md'), ('Inline table context', 'inline-table-context.md')]:
                 name = section.lower().replace(' ', '-') + '-' + appearance
                 data = READING.run(base / name, target, name, ROOT / 'fixtures/math', note, 'math',
                     extra=[f'--{appearance}', '--inspect-reading-text', f'--math-reveal=## {section}', f'--snapshot={target / (name + ".png")}'])
                 assert data['missing_glyphs'] == 0, data
+                if note == 'inline-table-context.md':
+                    READING.check_inline_table(data)
                 if note == 'display-comment.md':
                     assert 'SPDX' not in data['display_text'] and '<!--' not in data['display_text'], data
                 if note.startswith('display-'):

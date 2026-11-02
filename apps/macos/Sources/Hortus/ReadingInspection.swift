@@ -63,6 +63,14 @@ enum ReadingInspection {
         result["media"] = view.mediaBlocks.count
         if arguments.contains("--inspect-reading-text") {
             result["display_text"] = view.string
+            result["table_cells"] = view.mediaBlocks.flatMap { item in
+                item.prepared.block.cells.map { cell in
+                    ["source": cell.source, "text": cell.text,
+                     "masks": cell.runs.map(\.mask),
+                     "formulas": cell.math.map { ["latex": $0.latex, "block": $0.block] as [String: Any] }] as [String: Any]
+                }
+            }
+            result["table_drawn_cells"] = view.mediaViews.flatMap(\.tableInspectionCells)
         }
         if mode.hasPrefix("math") {
             return try await MathInspection.run(workspace: workspace, document: document, view: view,

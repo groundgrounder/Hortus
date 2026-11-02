@@ -170,6 +170,18 @@ private final class TableCanvas: NSView {
         setAccessibilityHelp(toolTip)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    var inspectionCells: [[String: Any]] {
+        texts.map { text in
+            var sizes: [Double] = [], bold: [Bool] = []
+            text.enumerateAttribute(.font, in: NSRange(location: 0, length: text.length)) { value, _, _ in
+                if let font = value as? NSFont {
+                    sizes.append(font.pointSize)
+                    bold.append(NSFontManager.shared.traits(of: font).contains(.boldFontMask))
+                }
+            }
+            return ["text": text.string, "font_sizes": sizes, "bold": bold]
+        }
+    }
     override func accessibilityHitTest(_ point: NSPoint) -> Any? {
         let hit = MainActor.assumeIsolated { AccessibilityHitResult(value: cachedFormulaAccessibility(at: point)) }
         return hit.value ?? super.accessibilityHitTest(point)
@@ -284,6 +296,7 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
     }
 
     var tableCanvasView: NSView? { tableCanvas }
+    var tableInspectionCells: [[String: Any]] { tableCanvas?.inspectionCells ?? [] }
     func formulaFrame(row: Int, column: Int, formulaIndex: Int) -> NSRect? {
         tableCanvas?.formulaFrame(row: row, column: column, formulaIndex: formulaIndex)
     }

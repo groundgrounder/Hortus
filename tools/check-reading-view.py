@@ -29,6 +29,25 @@ def run(base, output, name, vault, note, mode='visual', editing=False, extra=())
     return result
 
 
+def check_inline_table(data):
+    cells = data['table_cells']
+    assert [cell['text'] for cell in cells] == [
+        '# h', '# \ufffc', '- a', 'b', 'normal',
+        '## h', '\ufffc', '> quote', 'em', 'code',
+        '# h', '# \ufffc', '- a', 'b', 'normal'], data
+    for cell in cells:
+        assert all(mask & (0xff000000 | 32 | 64 | 4096 | 32768 | 65536) == 0 for mask in cell['masks']), cell
+        assert all(not formula['block'] for formula in cell['formulas']), cell
+    assert cells[1]['formulas'] == [{'latex': 'x', 'block': False}], data
+    assert cells[6]['formulas'] == [{'latex': 'a|b', 'block': False}], data
+    drawn = data['table_drawn_cells']
+    assert len(drawn) == len(cells), data
+    assert all(size == 15 for cell in drawn for size in cell['font_sizes']), data
+    assert all(all(cell['bold']) for cell in drawn[:5]), data
+    assert not any(drawn[10]['bold']) and all(drawn[13]['bold']), data
+    assert '• ordinary list' in data['display_text'], data
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/reading-view')
@@ -55,6 +74,10 @@ def main():
         for name, appearance in ([('light', '--light'), ('dark', '--dark')] if args.checks == 'all' else []):
             run(base / name, output, name, sample, '样式化源码.md',
                 extra=[appearance, f'--snapshot={output / (name + ".png")}'])
+            name = 'inline-table-' + name
+            data = run(base / name, output, name, ROOT / 'fixtures/math', 'inline-table-context.md',
+                extra=[appearance, '--inspect-reading-text', f'--snapshot={output / (name + ".png")}'])
+            check_inline_table(data)
         vault = base / 'vault'
         vault.mkdir()
         quotes = '> Quote one\n> Quote two\n> Quote three\n\n> [!note] Title\n> Callout two\n> Callout three\n'
