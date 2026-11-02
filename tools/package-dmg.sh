@@ -3,13 +3,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+version="$(plutil -extract CFBundleShortVersionString raw -o - apps/macos/Info.plist)"
+
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage: tools/package-dmg.sh [--skip-build] [--app PATH] [--output PATH]
        [--developer-id "Developer ID Application: …"] [--notary-profile NAME]
        [--validate-only]
 
-Defaults: ad-hoc signing, build/Hortus.app, build/Hortus-0.1.0-arm64.dmg.
+Defaults: ad-hoc signing, build/Hortus.app, build/Hortus-${version}-arm64.dmg (version from apps/macos/Info.plist).
 Developer ID mode requires a notarytool keychain profile created beforehand with
 xcrun notarytool store-credentials. Credentials are never passed on this command line.
 --validate-only checks arguments and tool availability without building, signing,
@@ -18,7 +20,7 @@ EOF
 }
 fail() { printf '%s\n' "$*" >&2; exit 2; }
 app="build/Hortus.app"
-output="build/Hortus-0.1.0-arm64.dmg"
+output="build/Hortus-${version}-arm64.dmg"
 identity=""
 profile=""
 skip_build=false

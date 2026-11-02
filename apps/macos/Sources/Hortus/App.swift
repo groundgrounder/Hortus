@@ -135,7 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func showAboutPanel() {
         let info = Bundle.main.infoDictionary ?? [:]
-        let version = info["CFBundleShortVersionString"] as? String ?? "0.1.0"
+        let version = info["CFBundleShortVersionString"] as? String ?? "0.1.2"
         let build = info["CFBundleVersion"] as? String ?? ""
         // 居中和标题对齐；显式用 labelColor，否则深色模式下默认黑字看不清
         let paragraph = NSMutableParagraphStyle()

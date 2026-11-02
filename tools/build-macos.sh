@@ -52,7 +52,8 @@ cp -R apps/macos/Resources/Fonts/KaTeX build/Hortus.app/Contents/Resources/Fonts
 # 应用自身的许可证和第三方许可证声明随包分发，关于窗口里有入口
 cp apps/LICENSE build/Hortus.app/Contents/Resources/LICENSE.txt
 python3 -B tools/third-party-notices.py --output build/Hortus.app/Contents/Resources/ThirdPartyNotices.txt
-build_number="$(git rev-parse --short HEAD)"
+# 用当前提交的历史提交数生成纯数字构建号。
+build_number="$(git rev-list --count HEAD)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" build/Hortus.app/Contents/Info.plist
 codesign --force --sign - build/Hortus.app
 print "构建完成：$PWD/build/Hortus.app"
