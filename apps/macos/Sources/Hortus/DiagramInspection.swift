@@ -13,7 +13,7 @@ enum DiagramInspection {
         (view as? DiagramTextView).map { [$0] } ?? view.subviews.flatMap { textViews(in: $0) }
     }
     static func current() -> DiagramTextView? {
-        NSApp.windows.compactMap(\.contentView).flatMap { textViews(in: $0) }.first
+        (NSApp.keyWindow?.contentView).flatMap { textViews(in: $0).first }
     }
     static func finishEvent() {
         // 自动循环没有原生输入事件；结束 AppKit 的事件临时对象池。

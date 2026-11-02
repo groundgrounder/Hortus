@@ -147,7 +147,9 @@ pub struct PanelGroup {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RegionLayout {
     pub groups: Vec<PanelGroup>,
-    pub visible: bool,
+    /// 仅供旧布局迁移；新布局不再存储窗口可见性。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
     pub size: f64,
 }
 
@@ -211,6 +213,29 @@ pub struct VaultState {
     pub selected: Option<String>,
     #[serde(default)]
     pub views: BTreeMap<String, ViewMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<BTreeMap<String, bool>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WindowFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub screen: Option<String>,
+}
+
+/// 窗口身份独立于库路径，保留顺序并为后续同库窗口留出边界。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct WindowState {
+    pub id: String,
+    pub path: String,
+    pub tabs: Vec<String>,
+    pub selected: Option<String>,
+    #[serde(default)]
+    pub views: BTreeMap<String, ViewMode>,
+    pub frame: Option<WindowFrame>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -228,6 +253,11 @@ pub struct SessionState {
     pub last_vault: Option<String>,
     #[serde(default)]
     pub recent: Vec<VaultState>,
+    /// None 是旧格式，Some([]) 是明确没有打开的窗口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<Vec<WindowState>>,
+    #[serde(default)]
+    pub default_visible: BTreeMap<String, bool>,
 }
 
 pub struct Store {
@@ -296,10 +326,45 @@ impl Store {
     pub fn session(&self) -> io::Result<SessionState> {
         let path = self.directories.cache.join("session.toml");
         if path.exists() {
-            read_toml(&path)
+            let mut state: SessionState = read_toml(&path)?;
+            if state.windows.is_none() {
+                state.windows = Some(
+                    state
+                        .last_vault
+                        .as_ref()
+                        .map(|path| {
+                            let saved = state.recent.iter().find(|v| &v.path == path);
+                            WindowState {
+                                id: "legacy".into(),
+                                path: path.clone(),
+                                tabs: saved.map(|v| v.tabs.clone()).unwrap_or_default(),
+                                selected: saved.and_then(|v| v.selected.clone()),
+                                views: saved.map(|v| v.views.clone()).unwrap_or_default(),
+                                frame: None,
+                            }
+                        })
+                        .into_iter()
+                        .collect(),
+                );
+            }
+            Ok(state)
         } else {
             Ok(SessionState::default())
         }
+    }
+
+    /// 应用级单一写入者提交完整窗口快照；图状态由同一 Store 锁保护并保留。
+    pub fn save_windows(&self, snapshot: SessionState) -> io::Result<()> {
+        let mut state = self.session()?;
+        state.windows = Some(snapshot.windows.unwrap_or_default());
+        state.default_visible = snapshot.default_visible;
+        state.last_vault = snapshot.last_vault.or(state.last_vault);
+        for vault in snapshot.recent.into_iter().rev() {
+            state.recent.retain(|old| old.path != vault.path);
+            state.recent.insert(0, vault);
+        }
+        state.recent.truncate(20);
+        write_toml(&self.directories.cache.join("session.toml"), &state)
     }
 
     pub fn remember(&self, state: VaultState) -> io::Result<SessionState> {
@@ -309,7 +374,7 @@ impl Store {
         session.recent.insert(0, state);
         session.recent.truncate(20);
         write_toml(&self.directories.cache.join("session.toml"), &session)?;
-        Ok(session)
+        self.session()
     }
 
     pub fn remember_diagram(&self, state: DiagramState) -> io::Result<()> {

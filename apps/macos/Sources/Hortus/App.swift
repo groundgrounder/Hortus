@@ -6,52 +6,15 @@ import CoreGraphics
 @main
 struct HortusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @State private var layout = Layout()
-    @State private var workspace = Workspace()
+    @State private var application = ApplicationWorkspace()
+    private var workspace: Workspace { application.active?.workspace ?? application.initial.workspace }
+    private var layout: Layout { application.active?.layout ?? application.initial.layout }
 
     var body: some Scene {
-        Window("Hortus", id: "main") {
-            ShellView()
-                .environment(layout).environment(workspace)
-                .frame(minWidth: 900, minHeight: 560)
-                .task {
-                    delegate.workspace = workspace
-                    delegate.layout = layout
-                    await workspace.start(layout: layout)
-                    let args = ProcessInfo.processInfo.arguments
-                    if args.contains("--reading-wait-for-scan") || args.contains("--search-wait-for-scan") {
-                        while workspace.scanning { try? await Task.sleep(for: .milliseconds(10)) }
-                    }
-                    for arg in args where arg.hasPrefix("--note=") {
-                        workspace.openNote(String(arg.dropFirst("--note=".count)))
-                    }
-                    if let arg = args.first(where: { $0.hasPrefix("--quick-open-query=") }) {
-                        workspace.presentQuickOpen()
-                        workspace.updateQuickOpen(query: String(arg.dropFirst("--quick-open-query=".count)), marked: false)
-                    }
-                    if let arg = args.first(where: { $0.hasPrefix("--search-query=") }) {
-                        workspace.showSearchPanel()
-                        workspace.updateSearch(query: String(arg.dropFirst("--search-query=".count)), marked: false)
-                    }
-                    if args.contains("--search-wait-for-scan") { await workspace.waitForSearchTasks() }
-                    if args.contains("--inspect-hide-left") { layout.visible[.left] = false }
-                    if let arg = args.first(where: { $0.hasPrefix("--inspect-left-width=") }),
-                       let width = Double(arg.dropFirst("--inspect-left-width=".count)) { layout.size[.left] = width }
-                    delegate.ready = true
-                    #if DEBUG
-                    if let argument = args.first(where: { $0.hasPrefix("--multi-window-inspection=") }) {
-                        await MultiWindowInspection.baseline(workspace: workspace, output: String(argument.dropFirst("--multi-window-inspection=".count)))
-                        return
-                    }
-                    #endif
-                    if let arg = args.first(where: { $0.hasPrefix("--check-vault-lifecycle=") }) {
-                        await WorkspaceInspection.checkLifecycle(workspace, output: String(arg.dropFirst("--check-vault-lifecycle=".count)))
-                    }
-                    delegate.inspectWhenReady()
-                }
-                .alert("Error", isPresented: Binding(get: { workspace.error != nil }, set: { if !$0 { workspace.error = nil } })) {
-                    Button("OK") { workspace.error = nil }
-                } message: { Text(workspace.error ?? "") }
+        WindowGroup("Hortus", id: "main", for: String.self) { $id in
+            if let record = application.record(id) {
+                VaultWindowRoot(application: application, record: record, delegate: delegate)
+            }
         }
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified(showsTitle: false))
@@ -126,8 +89,9 @@ struct HortusApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    var workspace: Workspace?
-    var layout: Layout?
+    var application: ApplicationWorkspace?
+    var workspace: Workspace? { application?.initial.workspace }
+    var layout: Layout? { application?.initial.layout }
     var ready = false
     private let termination = TerminationGate()
     /// 用户已明确放弃未保存的正文；之后的 terminate 不再拦截。
@@ -137,7 +101,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var launchTime = ContinuousClock.now
     private var focusObserver: NSObjectProtocol?
     private var toolbarFocusObserver: NSObjectProtocol?
-    private var toolbarFocusGuard: ToolbarFocusGuard?
 
     func showAboutPanel() {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -177,21 +140,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
         let args = ProcessInfo.processInfo.arguments
         if args.contains("--dark") { NSApp.appearance = NSAppearance(named: .darkAqua) }
         if args.contains("--light") { NSApp.appearance = NSAppearance(named: .aqua) }
         if args.contains("--simulate-high-contrast") { NSApp.appearance = NSAppearance(named: .aqua) }
         NSApp.activate()
-        focusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in await self?.workspace?.saveAllDocuments() }
+        focusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
+            nonisolated(unsafe) let object = note.object
+            Task { @MainActor in
+                guard let window = object as? NSWindow,
+                      let workspace = self?.application?.records.first(where: { $0.window === window })?.workspace else { return }
+                await workspace.saveAllDocuments()
+            }
         }
         toolbarFocusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] note in
             // 观察者在主队列上回调；窗口对象只在主线程使用。
             nonisolated(unsafe) let object = note.object
             MainActor.assumeIsolated {
-                guard let self, self.toolbarFocusGuard == nil, let window = object as? NSWindow, window.toolbar != nil else { return }
-                self.toolbarFocusGuard = ToolbarFocusGuard(window: window)
+                guard let self, let window = object as? NSWindow, window.toolbar != nil,
+                      let record = self.application?.records.first(where: { $0.window === window }) else { return }
+                if record.focusGuard == nil { record.focusGuard = ToolbarFocusGuard(window: window) }
             }
         }
         var terminalFontInspection = false
@@ -207,15 +177,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let workspace else { return .terminateNow }
+        guard let application, let workspace else { return .terminateNow }
         // 用户已放弃未保存的正文时跳过文档阶段，但终端、监听与会话仍照常清理。
         let abandoned = allowTermination
         termination.begin(
-            documentTitles: workspace.tabs.map(\.path),
+            documentTitles: application.records.flatMap { record in record.workspace.tabs.map { (record.workspace.root ?? record.id) + "/" + $0.path } },
             documents: { completion in
-                if abandoned { completion([]) } else { workspace.prepareShutdown(completion: completion) }
+                if abandoned { completion([]) } else { application.prepareShutdown(completion: completion) }
             },
-            cleanup: { completion in workspace.beginShutdownCleanup(completion: completion) }
+            cleanup: { completion in application.beginShutdownCleanup(completion: completion) }
         ) { [weak self] outcome in
             switch outcome {
             case .allowed:
@@ -238,7 +208,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .discard:
             // 用户明确放弃：清理这些文档的恢复稿，然后不再拦截后续 terminate。
             allowTermination = true
-            workspace.abandonDocuments(unsaved) { NSApp.terminate(nil) }
+            let group = DispatchGroup()
+            for record in application?.records ?? [] {
+                let root = record.workspace.root ?? record.id
+                let paths = record.workspace.tabs.map(\.path).filter { unsaved.contains(root + "/" + $0) }
+                group.enter()
+                record.workspace.abandonDocuments(paths) { group.leave() }
+            }
+            group.notify(queue: .main) { NSApp.terminate(nil) }
         case .cancel:
             break
         }
@@ -426,5 +403,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let rep = NSBitmapImageRep(cgImage: image)
         guard let data = rep.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
         try await Task.detached { try data.write(to: URL(fileURLWithPath: path)) }.value
+    }
+}
+
+private struct VaultWindowRoot: View {
+    let application: ApplicationWorkspace
+    let record: WindowRecord
+    let delegate: AppDelegate
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        ShellView()
+            .environment(record.layout).environment(record.workspace)
+            .frame(minWidth: 900, minHeight: 560)
+            .background(WindowRegistration(application: application, record: record))
+            .alert("Error", isPresented: Binding(get: { record.workspace.error != nil },
+                                                set: { if !$0 { record.workspace.error = nil } })) {
+                Button("OK") { record.workspace.error = nil }
+            } message: { Text(record.workspace.error ?? "") }
+            .task {
+                let open = openWindow
+                application.showWindow = { id in open(id: "main", value: id) }
+                delegate.application = application
+                let first = record === application.initial
+                if first {
+                    await application.start()
+                    let workspace = record.workspace
+                    let layout = record.layout
+                    let args = ProcessInfo.processInfo.arguments
+                    if args.contains("--reading-wait-for-scan") || args.contains("--search-wait-for-scan") {
+                        while workspace.scanning { try? await Task.sleep(for: .milliseconds(10)) }
+                    }
+                    for arg in args where arg.hasPrefix("--note=") { workspace.openNote(String(arg.dropFirst("--note=".count))) }
+                    if let arg = args.first(where: { $0.hasPrefix("--quick-open-query=") }) {
+                        workspace.presentQuickOpen()
+                        workspace.updateQuickOpen(query: String(arg.dropFirst("--quick-open-query=".count)), marked: false)
+                    }
+                    if let arg = args.first(where: { $0.hasPrefix("--search-query=") }) {
+                        workspace.showSearchPanel()
+                        workspace.updateSearch(query: String(arg.dropFirst("--search-query=".count)), marked: false)
+                    }
+                    if args.contains("--search-wait-for-scan") { await workspace.waitForSearchTasks() }
+                    if args.contains("--inspect-hide-left") { layout.visible[.left] = false }
+                    if let arg = args.first(where: { $0.hasPrefix("--inspect-left-width=") }), let width = Double(arg.dropFirst("--inspect-left-width=".count)) { layout.size[.left] = width }
+                    delegate.ready = true
+                    #if DEBUG
+                    if let arg = args.first(where: { $0.hasPrefix("--multi-window-inspection=") }) {
+                        await MultiWindowInspection.baseline(workspace: workspace, output: String(arg.dropFirst("--multi-window-inspection=".count)))
+                        return
+                    }
+                    #endif
+                    if let arg = args.first(where: { $0.hasPrefix("--check-vault-lifecycle=") }) {
+                        await WorkspaceInspection.checkLifecycle(workspace, output: String(arg.dropFirst("--check-vault-lifecycle=".count)))
+                    }
+                    delegate.inspectWhenReady()
+                }
+            }
     }
 }

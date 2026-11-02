@@ -170,6 +170,12 @@ impl WorkspaceCore {
         )?)
     }
 
+    /// 完整窗口列表只由应用协调器写入，不能由单个窗口覆盖。
+    pub fn save_window_session(&self, json: String) -> Result<(), CoreError> {
+        let snapshot: hortus_config::SessionState = serde_json::from_str(&json)?;
+        Ok(self.store.lock().unwrap().save_windows(snapshot)?)
+    }
+
     pub fn default_view(&self) -> Result<String, CoreError> {
         Ok(match self.store.lock().unwrap().settings()?.default_view {
             hortus_config::ViewMode::Reading => "reading",
@@ -232,6 +238,7 @@ impl WorkspaceCore {
             tabs,
             selected,
             views,
+            visible: None,
         })?;
         Ok(())
     }
@@ -250,6 +257,7 @@ impl WorkspaceCore {
             path,
             tabs,
             selected,
+            visible: None,
             views: views
                 .into_iter()
                 .map(|(note, mode)| {

@@ -51,16 +51,33 @@ struct PanelGroup: Identifiable, Codable {
 }
 
 @Observable @MainActor
+final class PanelArrangement {
+    var groups: [Region: [PanelGroup]] = [
+        .left: [PanelGroup(tabs: [.files, .search, .tags], selected: .files)],
+        .right: [PanelGroup(tabs: [.outline, .backlinks], selected: .outline)],
+        .bottom: [PanelGroup(tabs: [.terminal, .changes], selected: .terminal)],
+    ] { didSet { onChange?() } }
+    @ObservationIgnored var onChange: (() -> Void)?
+}
+
+@Observable @MainActor
 final class Layout {
-    var groups: [Region: [PanelGroup]] = [:] { didSet { onChange?() } }
+    let arrangement: PanelArrangement
+    /// 排布由应用共享；窗口仅持有尺寸与可见性。
+    var groups: [Region: [PanelGroup]] {
+        get { arrangement.groups }
+        set { arrangement.groups = newValue }
+    }
     var visible: [Region: Bool] = [:] { didSet { onChange?() } }
     var size: [Region: CGFloat] = [:] { didSet { onChange?() } }
     @ObservationIgnored var onChange: (() -> Void)?
     /// 正在拖动的视图；不为空时显示所有可放置的位置
     var dragging: ViewKind?
 
-    init() {
-        reset()
+    init(arrangement: PanelArrangement = PanelArrangement()) {
+        self.arrangement = arrangement
+        visible = [.left: true, .right: true, .bottom: false]
+        size = [.left: 260, .right: 250, .bottom: 230]
     }
 
     func reset() {
@@ -189,13 +206,20 @@ struct LayoutState: Codable, Equatable {
     }
     struct RegionState: Codable, Equatable {
         var groups: [Group]
-        var visible: Bool
+        var visible: Bool?
         var size: Double
     }
     var regions: [String: RegionState]
 }
 
 extension Layout {
+    /// 新配置只保存共享排布和最新尺寸；旧 visible 只用于迁移。
+    var persistedState: LayoutState {
+        var result = state
+        for key in result.regions.keys { result.regions[key]?.visible = nil }
+        return result
+    }
+
     var state: LayoutState {
         LayoutState(regions: Dictionary(uniqueKeysWithValues: Region.allCases.map { region in
             (region.rawValue, LayoutState.RegionState(
@@ -208,7 +232,7 @@ extension Layout {
         for region in Region.allCases {
             guard let value = state.regions[region.rawValue] else { continue }
             groups[region] = value.groups.map { PanelGroup(id: $0.id, tabs: $0.tabs, selected: $0.selected) }
-            visible[region] = value.visible
+            if let shown = value.visible { visible[region] = shown }
             size[region] = CGFloat(value.size)
         }
     }

@@ -36,8 +36,14 @@ selected = 'other.md'
     fs::write(store.directories.cache.join("session.toml"), text).unwrap();
     let session = store.session().unwrap();
     let encoded = toml_edit::ser::to_string_pretty(&session).unwrap();
-    assert!(encoded.contains("[[windows]]"), "ordered windows were discarded: {encoded}");
-    assert!(encoded.contains("[recent.visible]"), "vault visibility was discarded");
+    assert!(
+        encoded.contains("[[windows]]"),
+        "ordered windows were discarded: {encoded}"
+    );
+    assert!(
+        encoded.contains("[recent.visible]"),
+        "vault visibility was discarded"
+    );
     let decoded: SessionState = toml_edit::de::from_str(&encoded).unwrap();
     assert_eq!(decoded, session);
 }
@@ -61,7 +67,7 @@ fn layout() -> LayoutState {
                         tabs: vec!["files".into(), "search".into(), "tags".into()],
                         selected: "files".into(),
                     }],
-                    visible: true,
+                    visible: None,
                     size: 260.0,
                 },
             ),
@@ -73,7 +79,7 @@ fn layout() -> LayoutState {
                         tabs: vec!["outline".into(), "backlinks".into()],
                         selected: "outline".into(),
                     }],
-                    visible: true,
+                    visible: None,
                     size: 250.0,
                 },
             ),
@@ -85,7 +91,7 @@ fn layout() -> LayoutState {
                         tabs: vec!["terminal".into(), "changes".into()],
                         selected: "terminal".into(),
                     }],
-                    visible: false,
+                    visible: None,
                     size: 230.0,
                 },
             ),
@@ -128,6 +134,7 @@ fn settings_layout_and_session_round_trip_and_preserve_comments() {
         tabs: vec!["2.md".into(), "10.md".into()],
         selected: Some("10.md".into()),
         views: BTreeMap::new(),
+        visible: None,
     };
     let expected = store.remember(vault.clone()).unwrap();
     store.remember(vault).unwrap();
@@ -459,4 +466,72 @@ fn diagram_state_survives_session_saves_and_is_scoped_to_vault_note_and_block() 
         .unwrap();
     assert_eq!(store.session().unwrap().diagrams.len(), 3);
     assert_eq!(fs::read_dir(&store.directories.cache).unwrap().count(), 1);
+}
+
+#[test]
+fn legacy_session_migrates_once_and_full_snapshot_preserves_diagrams() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    let path = store.directories.cache.join("session.toml");
+    fs::write(&path, "last_vault = '/a'\n[[recent]]\npath = '/a'\ntabs = ['same.md']\nselected = 'same.md'\n[recent.views]\n'same.md' = 'editing'\n[[diagrams]]\nvault = '/a'\nnote = 'same.md'\nblock = 0\ncollapsed = ['root']\n").unwrap();
+    let mut session = store.session().unwrap();
+    let windows = session.windows.as_ref().unwrap();
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].views["same.md"], ViewMode::Editing);
+    session.windows.as_mut().unwrap().push(WindowState {
+        id: "second".into(),
+        path: "/b".into(),
+        tabs: vec!["same.md".into()],
+        selected: Some("same.md".into()),
+        views: BTreeMap::new(),
+        frame: Some(WindowFrame {
+            x: -10000.0,
+            y: 10.0,
+            width: 1320.0,
+            height: 840.0,
+            screen: Some("2".into()),
+        }),
+    });
+    session.default_visible = BTreeMap::from([("left".into(), false)]);
+    session.recent[0].visible = Some(session.default_visible.clone());
+    store.save_windows(session.clone()).unwrap();
+    let restored = store.session().unwrap();
+    assert_eq!(restored, session);
+    store
+        .remember_diagram(DiagramState {
+            vault: "/b".into(),
+            note: "same.md".into(),
+            block: 1,
+            collapsed: vec!["node".into()],
+        })
+        .unwrap();
+    session.windows = Some(vec![]);
+    session.diagrams.clear();
+    store.save_windows(session).unwrap();
+    let empty = store.session().unwrap();
+    assert!(empty.windows.unwrap().is_empty());
+    assert_eq!(empty.diagrams.len(), 2);
+    assert!(!empty.recent[0].visible.as_ref().unwrap()["left"]);
+}
+
+#[test]
+fn legacy_layout_visible_is_accepted_but_new_snapshot_omits_it() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    let mut state = layout();
+    state.regions.get_mut("left").unwrap().visible = Some(false);
+    store.save_layout(&state).unwrap();
+    assert_eq!(
+        store.layout().unwrap().unwrap().regions["left"].visible,
+        Some(false)
+    );
+    for region in state.regions.values_mut() {
+        region.visible = None;
+    }
+    store.save_layout(&state).unwrap();
+    assert!(
+        !fs::read_to_string(store.directories.config.join("layout.toml"))
+            .unwrap()
+            .contains("visible")
+    );
 }

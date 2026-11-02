@@ -12,25 +12,33 @@ enum WorkspaceInspection {
             var openCounts: [Int] = []
             var closedCounts: [Int] = []
             var switchCounts: [Int] = []
+            guard let application = workspace.application else { throw CocoaError(.coderValueNotFound) }
+            var closedShells: [Int32] = []
+            var releasedWindows: [Bool] = []
+            var releasedWorkspaces: [Bool] = []
+            var contextCounts: [Int] = []
             for index in 0..<20 {
                 await workspace.openFolder(paths[index % paths.count])
                 try await Task.sleep(for: .milliseconds(150))
-                guard workspace.error == nil, workspace.root != nil, !workspace.scanning else {
-                    throw CocoaError(.fileReadUnknown)
-                }
+                guard workspace.error == nil, workspace.root != nil, !workspace.scanning else { throw CocoaError(.fileReadUnknown) }
                 openCounts.append(try threadCount())
-                // 同一次打开中再切换库，覆盖旧批次已排入主队列的情形。
-                await workspace.openFolder(paths[(index + 1) % paths.count])
-                try await Task.sleep(for: .milliseconds(150))
-                switchCounts.append(try threadCount())
+                let probes = try await cycle(application, source: workspace, path: paths[(index + 1) % paths.count])
+                switchCounts.append(probes.threads)
+                closedShells.append(probes.pid)
                 await workspace.closeFolder()
                 try await Task.sleep(for: .milliseconds(150))
-                guard workspace.root == nil, workspace.entries.isEmpty else { throw CocoaError(.fileReadUnknown) }
+                guard workspace.root == nil, workspace.entries.isEmpty, application.contexts.isEmpty else { throw CocoaError(.fileReadUnknown) }
                 closedCounts.append(try threadCount())
+                contextCounts.append(application.contexts.count)
+                releasedWindows.append(probes.window.value == nil)
+                releasedWorkspaces.append(probes.workspace.value == nil)
             }
             let result: [String: Any] = [
                 "cycles": 20, "open_threads": openCounts, "switch_threads": switchCounts,
-                "closed_threads": closedCounts,
+                "closed_threads": closedCounts, "contexts_after_close": contextCounts,
+                "closed_shells": closedShells, "released_windows": releasedWindows,
+                "released_workspaces": releasedWorkspaces, "remaining_windows": application.records.count,
+
             ]
             let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
             try await Task.detached { try data.write(to: URL(fileURLWithPath: output)) }.value
@@ -38,7 +46,31 @@ enum WorkspaceInspection {
         } catch { fputs("Hortus 库切换自检失败：\(error)\n", stderr); exit(1) }
     }
 
-    private static func threadCount() throws -> Int {
+    private final class WeakObject {
+        weak var value: AnyObject?
+        init(_ value: AnyObject?) { self.value = value }
+    }
+
+    private static func cycle(_ application: ApplicationWorkspace, source: Workspace, path: String) async throws
+        -> (window: WeakObject, workspace: WeakObject, pid: Int32, threads: Int) {
+        await source.openFolder(path)
+        for _ in 0..<300 where application.records.last?.window == nil || application.records.last?.workspace.scanning == true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard application.records.count == 2, let record = application.records.last else { throw CocoaError(.coderValueNotFound) }
+        record.layout.setTerminalVisible(true)
+        for _ in 0..<300 where record.workspace.terminal.inspectionShellPid == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        let pid = record.workspace.terminal.inspectionShellPid
+        guard pid > 0 else { throw CocoaError(.coderValueNotFound) }
+        let window = WeakObject(record.window), workspace = WeakObject(record.workspace)
+        let threads = try threadCount()
+        record.window?.performClose(nil)
+        for _ in 0..<300 where application.records.count > 1 { try await Task.sleep(for: .milliseconds(10)) }
+        guard application.records.count == 1 else { throw CocoaError(.coderValueNotFound) }
+        return (window, workspace, pid, threads)
+    }
+
+    static func threadCount() throws -> Int {
         var info = proc_taskinfo()
         let size = Int32(MemoryLayout.size(ofValue: info))
         guard proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &info, size) == size else {

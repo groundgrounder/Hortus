@@ -3,17 +3,13 @@ import SwiftUI
 import Darwin
 import HortusCore
 
-struct VaultState: Codable, Identifiable {
+struct VaultState: Codable, Identifiable, Sendable {
     var path: String
     var tabs: [String]
     var selected: String?
     var views: [String: String]?
+    var visible: [String: Bool]?
     var id: String { path }
-}
-
-private struct SessionState: Codable {
-    var last_vault: String?
-    var recent: [VaultState]
 }
 
 struct NoteTab: Identifiable {
@@ -47,33 +43,6 @@ private final class UnsavedNotes: @unchecked Sendable {
     }
 }
 
-/// 每个库只有一个阻塞消费者；关闭后等待它真正退出，避免切库积累线程。
-private final class VaultSubscription: Sendable {
-    let handle: VaultHandle
-    private let finished = DispatchGroup()
-
-    init(handle: VaultHandle, receive: @escaping @Sendable ([TreeBatch]) -> Void) {
-        self.handle = handle
-        let finished = finished
-        finished.enter()
-        let thread = Thread {
-            defer { finished.leave() }
-            while true {
-                let batches = handle.waitForBatches()
-                guard !batches.isEmpty else { return }
-                receive(batches)
-            }
-        }
-        thread.name = "hortus-batches"
-        thread.start()
-    }
-
-    func close() {
-        handle.close()
-        finished.wait()
-    }
-}
-
 /// 主线程仅维护界面状态；文件、配置和绑定初始化在后台执行。
 @Observable @MainActor
 final class Workspace {
@@ -84,13 +53,20 @@ final class Workspace {
     @ObservationIgnored var noteOpenStartedAt = 0.0
     @ObservationIgnored var noteOpenPhases: [String: Double] = [:]
     var diagramCore: WorkspaceCore? { core }
-    var root: String?
-    var entries: [String: TreeEntry] = [:]
-    var treeVersion = 0
+    let id = UUID()
+    weak var application: ApplicationWorkspace?
+    var context: VaultContext?
+    var root: String? { context?.root }
+    private var fixtureEntries: [String: TreeEntry] = [:]
+    var entries: [String: TreeEntry] {
+        get { context?.entries ?? fixtureEntries }
+        set { fixtureEntries = newValue }
+    }
+    var treeVersion: Int { context?.treeVersion ?? 0 }
     var tabs: [NoteTab] = []
     var selected: String?
-    var recent: [VaultState] = []
-    var scanning = false
+    var recent: [VaultState] { application?.recent ?? [] }
+    var scanning: Bool { context?.scanning ?? false }
     var opening = false
     var error: String?
     var terminal = TerminalSession()
@@ -98,9 +74,10 @@ final class Workspace {
         didSet { terminal.update(fontSize: fontSize) }
     }
     var defaultView = "reading"
-    var scanMicros: UInt64 = 0
-    var searchIndexReadyMilliseconds: Double?
-    var searchIndexPeakRSSDeltaBytes: Int64?
+    var scanMicros: UInt64 { context?.scanMicros ?? 0 }
+    var searchIndexReadyMilliseconds: Double? { context?.searchIndexReadyMilliseconds }
+    var searchIndexPeakRSSDeltaBytes: Int64? { context?.searchIndexPeakRSSDeltaBytes }
+    var restoredViews: [String: String] = [:]
     var firstDrawMilliseconds: Double?
     var scanDisplayMilliseconds: Double?
     var quickOpenVisible = false
@@ -111,15 +88,10 @@ final class Workspace {
     var searchResults: [SearchResult] = []
     var searchLoading = false
     @ObservationIgnored private var core: WorkspaceCore?
-    @ObservationIgnored private var subscription: VaultSubscription?
-    @ObservationIgnored private var layoutTask: Task<Void, Never>?
-    @ObservationIgnored private var sessionTask: Task<Void, Never>?
     @ObservationIgnored private var epoch = UUID()
     @ObservationIgnored private var openingRequest = UUID()
     @ObservationIgnored private var loads: [String: UUID] = [:]
-    @ObservationIgnored private var started = false
     @ObservationIgnored private var openedAt = ContinuousClock.now
-    @ObservationIgnored private var searchIndexBaselineRSS: Int64 = 0
     @ObservationIgnored private var layout: Layout?
     @ObservationIgnored private let saves = DispatchQueue(label: "app.hortus.state")
     @ObservationIgnored private var quickOpenTask: Task<Void, Never>?
@@ -131,33 +103,24 @@ final class Workspace {
 
     var current: NoteTab? { tabs.first { $0.path == selected } }
     var title: String { current?.title ?? root.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Hortus" }
-    private var vault: VaultHandle? { subscription?.handle }
+    private var vault: VaultHandle? { context?.handle }
 
-    func start(layout: Layout) async {
-        guard !started else { return }
-        started = true
+    func configure(application: ApplicationWorkspace, core: WorkspaceCore, layout: Layout) {
+        self.application = application
+        self.core = core
         self.layout = layout
-        do {
-            let service = try await Task.detached { try WorkspaceCore() }.value
-            core = service
-            let (layoutJSON, sessionJSON, font) = try await Task.detached {
-                (try service.layoutJson(), try service.sessionJson(), try service.fontSize())
-            }.value
-            if let layoutJSON {
-                layout.restore(try JSONDecoder().decode(LayoutState.self, from: Data(layoutJSON.utf8)))
-            }
-            fontSize = font
-            defaultView = try await Task.detached { try service.defaultView() }.value
-            let session = try JSONDecoder().decode(SessionState.self, from: Data(sessionJSON.utf8))
-            recent = session.recent
-            layout.onChange = { [weak self] in self?.scheduleLayoutSave() }
-            let args = ProcessInfo.processInfo.arguments
-            if let arg = args.first(where: { $0.hasPrefix("--vault=") }) {
-                await openFolder(String(arg.dropFirst("--vault=".count)))
-            } else if !args.contains("--empty"), let path = session.last_vault {
-                await openFolder(path)
-            }
-        } catch { self.error = L10n.error(error) }
+        fontSize = application.fontSize
+        defaultView = application.defaultView
+    }
+
+    func attach(_ context: VaultContext, state: VaultState?) async {
+        self.context = context
+        openedAt = .now
+        restoredViews = state?.views ?? [:]
+        context.attach(self)
+        await terminal.setRootAndWait(context.root)
+        for path in state?.tabs ?? [] { openNote(path) }
+        if let selected = state?.selected, tabs.contains(where: { $0.path == selected }) { self.selected = selected }
     }
 
     func chooseFolder() {
@@ -172,129 +135,33 @@ final class Workspace {
         }
     }
 
-    func openFolder(_ path: String) async {
-        guard let core else { return }
-        // 切换知识库前先把当前库的文档持久化；任一失败就保持当前界面。
-        if root != nil, await prepareDocumentsForClose() == .cancelled { return }
-        let request = UUID()
-        openingRequest = request
-        opening = true
-        let requestStarted = ContinuousClock.now
-        var usage = rusage()
-        getrusage(RUSAGE_SELF, &usage)
-        searchIndexBaselineRSS = Int64(usage.ru_maxrss)
-        searchIndexReadyMilliseconds = nil
-        searchIndexPeakRSSDeltaBytes = nil
-        defer { if openingRequest == request { opening = false } }
-        do {
-            let handle = try await Task.detached { try core.openVault(path: path) }.value
-            guard openingRequest == request else { await Task.detached { handle.close() }.value; return }
-            await persistSession()
-            guard openingRequest == request else { await Task.detached { handle.close() }.value; return }
-            epoch = request
-            // 旧文档已经确认持久化；进入新库后不再接收它们的自动保存。
-            for tab in tabs { tab.document?.stopForShutdown() }
-            await terminal.setRootAndWait(nil)
-            // 切换状态期间不挂起主线程任务，避免后来的打开请求留下已关闭的旧库。
-            if let old = subscription { Task.detached { old.close() } }
-            subscription = VaultSubscription(handle: handle) { [weak self] batches in
-                // 先把树交给主线程显示，再在这条后台线程读正文更新搜索；读文件不能挡住文件树
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.epoch == request else { return }
-                    self.apply(batches)
-                }
-                let upserted = batches.flatMap { batch in
-                    batch.upserted.filter { !$0.directory }.map(\.path)
-                }
-                let removed = batches.flatMap(\.removed)
-                handle.updateSearchIndex(upserted: upserted, removed: removed)
-                let changed = !upserted.isEmpty || !removed.isEmpty
-                let scanFinished = batches.contains(where: \.scanComplete)
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.epoch == request else { return }
-                    self.searchIndexUpdated(changed: changed, scanFinished: scanFinished)
-                }
-            }
-            root = handle.root()
-            await terminal.setRootAndWait(root)
-            entries = [:]
-            treeVersion += 1
-            tabs = []
-            selected = nil
-            scanning = true
-            scanMicros = 0
-            firstDrawMilliseconds = nil
-            scanDisplayMilliseconds = nil
-            openedAt = requestStarted
-            loads = [:]
-            quickOpenTask?.cancel()
-            searchTask?.cancel()
-            searchCancellation?.cancel()
-            quickOpenResults = []
-            searchResults = []
-            searchQuery = ""
-            searchLoading = false
-            searchCancellation?.cancel()
-            if let saved = recent.first(where: { $0.path == root }) {
-                for note in saved.tabs { openNote(note) }
-                if let selection = saved.selected, tabs.contains(where: { $0.path == selection }) { selected = selection }
-            }
-            scheduleSessionSave()
-        } catch { if openingRequest == request { self.error = L10n.error(error) } }
-    }
+    func openFolder(_ path: String) async { await application?.openFolder(path, source: self) }
 
     func closeFolder() async {
-        // 任一文档没有持久化就中止关闭，界面保持原状。
         guard await prepareDocumentsForClose() == .ready else { return }
-        for tab in tabs { tab.document?.stopForShutdown() }
-        await terminal.setRootAndWait(nil)
-        let request = UUID()
-        openingRequest = request
-        epoch = request
-        sessionTask?.cancel()
-        let old = subscription
-        subscription = nil
-        await persistSession()
-        guard openingRequest == request else {
-            await Task.detached { old?.close() }.value
-            return
-        }
-        root = nil
-        entries = [:]
-        treeVersion += 1
-        tabs = []
-        selected = nil
-        loads = [:]
-        quickOpenTask?.cancel()
-        searchTask?.cancel()
-        searchCancellation?.cancel()
-        quickOpenResults = []
-        searchResults = []
-        searchLoading = false
-        quickOpenVisible = false
-        scanning = false
-        opening = false
-        await Task.detached { old?.close() }.value
+        await application?.detach(self)
     }
 
-    private func apply(_ batches: [TreeBatch]) {
+    /// 非最后窗口关闭时先持久化，再释放本窗口文档和 PTY。
+    func releaseDocuments() async {
+        epoch = UUID()
+        openingRequest = UUID()
+        for tab in tabs { tab.document?.stopForShutdown() }
+        await terminal.setRootAndWait(nil)
+        quickOpenTask?.cancel(); searchTask?.cancel(); searchCancellation?.cancel()
+        context?.detach(self)
+        context = nil
+        tabs = []; selected = nil; loads = [:]
+        quickOpenVisible = false; quickOpenResults = []; searchResults = []; searchLoading = false
+    }
+
+    func applyVaultEvents(_ batches: [TreeBatch]) {
         var refresh = Set<String>()
         for batch in batches {
-            for path in batch.removed {
-                entries.removeValue(forKey: path)
-                if tabs.contains(where: { $0.path == path }) { refresh.insert(path) }
-            }
-            for item in batch.upserted {
-                entries[item.path] = item
-                if tabs.contains(where: { $0.path == item.path }) { refresh.insert(item.path) }
-            }
-            if batch.scanComplete {
-                scanning = false
-                scanMicros = batch.scanMicros
-            }
+            for path in batch.removed where tabs.contains(where: { $0.path == path }) { refresh.insert(path) }
+            for item in batch.upserted where tabs.contains(where: { $0.path == item.path }) { refresh.insert(item.path) }
             if let issue = batch.errors.first { error = L10n.errorKey(issue) }
         }
-        treeVersion += 1
         for path in refresh {
             if let document = tabs.first(where: { $0.path == path })?.document { document.refresh() }
             else { load(path) }
@@ -302,15 +169,7 @@ final class Workspace {
     }
 
     /// 后台线程更新完搜索内容后回到主线程：记录索引就绪，刷新正在显示的搜索结果
-    private func searchIndexUpdated(changed: Bool, scanFinished: Bool) {
-        if scanFinished {
-            let elapsed = openedAt.duration(to: .now).components
-            searchIndexReadyMilliseconds = Double(elapsed.seconds) * 1000
-                + Double(elapsed.attoseconds) / 1_000_000_000_000_000
-            var usage = rusage()
-            getrusage(RUSAGE_SELF, &usage)
-            searchIndexPeakRSSDeltaBytes = max(0, Int64(usage.ru_maxrss) - searchIndexBaselineRSS)
-        }
+    func searchIndexUpdated(changed: Bool, scanFinished: Bool) {
         guard changed || scanFinished, !scanning else { return }
         if quickOpenVisible, !quickOpenMarked { updateQuickOpen(query: quickOpenQuery, marked: false) }
         if !searchMarked, !searchQuery.isEmpty { updateSearch(query: searchQuery, marked: false) }
@@ -494,7 +353,7 @@ final class Workspace {
             self.tabs[index].loading = false
             switch result {
             case .success(let loaded):
-                let reading = (recent.first(where: { $0.path == root })?.views?[path] ?? defaultView) != "editing"
+                let reading = (restoredViews[path] ?? recent.first(where: { $0.path == root })?.views?[path] ?? defaultView) != "editing"
                 let document = NoteDocument(io: loaded.0, initial: loaded.1, prepareSourceStyles: !reading)
                 if let reveal = pendingSearchReveals.removeValue(forKey: path) {
                     document.sourceAnchor = reveal.start
@@ -503,6 +362,7 @@ final class Workspace {
                 document.reading = reading
                 document.onCopy = { [weak self] copy in self?.openNote(copy) }
                 self.tabs[index].document = document; self.tabs[index].error = nil
+                self.scheduleSessionSave()
                 self.noteOpenPhases = ["load_task_wait_ms": max(0, loaded.4 - queuedAt - loaded.2 - loaded.3) * 1000,
                                        "open_document_ms": loaded.2 * 1000,
                                        "initial_snapshot_ms": loaded.3 * 1000,
@@ -539,8 +399,8 @@ final class Workspace {
     }
 
     /// 批量准备关闭或切换知识库；全部文档都持久化后才返回 `.ready`。
-    private enum DocumentsCloseResult: Equatable { case ready, cancelled }
-    private func prepareDocumentsForClose() async -> DocumentsCloseResult {
+    enum DocumentsCloseResult: Equatable { case ready, cancelled }
+    func prepareDocumentsForClose() async -> DocumentsCloseResult {
         let requestEpoch = epoch
         while true {
             var unsaved: [(String, NoteDocument)] = []
@@ -595,17 +455,23 @@ final class Workspace {
         scheduleSessionSave()
     }
 
+    var textView: DiagramTextView? {
+        guard let document = current?.document else { return nil }
+        return NSApp.windows.compactMap(\.contentView).flatMap { DiagramInspection.textViews(in: $0) }
+            .first { $0.representedDocument == ObjectIdentifier(document) }
+    }
+
     func toggleView() { Task { await toggleCurrentView() } }
     func toggleCurrentView() async {
         guard let document = current?.document, !document.marked else { return }
         if document.reading {
-            if let view = DiagramInspection.current(), let coordinator = view.readingCoordinator {
+            if let view = textView, let coordinator = view.readingCoordinator {
                 let position = view.selectedRange().length > 0 ? view.selectedRange().location
                     : view.characterIndexForInsertion(at: CGPoint(x: 31, y: view.visibleRect.minY + 1))
                 document.sourceAnchor = coordinator.sourcePosition(at: position)
             }
         } else {
-            document.sourceAnchor = DiagramInspection.current()?.selectedRange().location ?? 0
+            document.sourceAnchor = textView?.selectedRange().location ?? 0
             await document.saveNow()
             guard !document.dirty, document.issue != .saveFailed, document.issue != .conflict else { return }
         }
@@ -624,52 +490,13 @@ final class Workspace {
         }
     }
 
-    func scheduleLayoutSave() {
-        layoutTask?.cancel()
-        guard let core, let state = layout?.state else { return }
-        layoutTask = Task { [weak self] in
-            do {
-                try await Task.sleep(for: .milliseconds(250))
-                let json = String(decoding: try JSONEncoder().encode(state), as: UTF8.self)
-                guard let self else { return }
-                try await self.save { try core.saveLayout(json: json) }
-            } catch is CancellationError {} catch { self?.error = L10n.error(error) }
-        }
-    }
+    func scheduleLayoutSave() { application?.layoutChanged(self) }
+    func scheduleSessionSave() { application?.scheduleSessionSave() }
 
-    func scheduleSessionSave() {
-        sessionTask?.cancel()
-        sessionTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-            await self?.persistSession()
-        }
-    }
-
-    private func persistSession() async {
-        guard let core, let root else { return }
-        let paths = tabs.map(\.path)
-        let selection = selected
-        let views = sessionViews()
-        do {
-            let json = try await save {
-                try core.rememberSession(path: root, tabs: paths, selected: selection, views: views)
-                return try core.sessionJson()
-            }
-            recent = try JSONDecoder().decode(SessionState.self, from: Data(json.utf8)).recent
-        } catch { self.error = L10n.error(error) }
-    }
-
-    private func sessionViews() -> [String: String] {
-        Dictionary(uniqueKeysWithValues: tabs.compactMap { tab in
-            tab.document.map { (tab.path, $0.reading ? "reading" : "editing") }
+    func sessionViews() -> [String: String] {
+        Dictionary(uniqueKeysWithValues: tabs.map { tab in
+            (tab.path, tab.document.map { $0.reading ? "reading" : "editing" } ?? restoredViews[tab.path] ?? defaultView)
         })
-    }
-
-    /// 同一队列串行写入，退出保存也排在所有已提交的后台保存之后。
-    private func save<T: Sendable>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
-        try await withCheckedThrowingContinuation { continuation in
-            saves.async { continuation.resume(with: Result(catching: operation)) }
-        }
     }
 
     /// 退出第一阶段：等待所有文档把最新正文写到笔记或恢复稿。
@@ -708,45 +535,18 @@ final class Workspace {
     /// 退出第二阶段：文档已确认持久化后才做不可逆清理。
     /// 布局与会话用与常规保存相同的完整入口一次写入。
     func beginShutdownCleanup(completion: @escaping @Sendable () -> Void) {
-        openingRequest = UUID()
-        epoch = UUID()
-        layoutTask?.cancel(); sessionTask?.cancel()
-        let state = layout?.state
-        let core = core
-        let root = root
-        let paths = tabs.map(\.path)
-        let selection = selected
-        let views = sessionViews()
-        let old = subscription
-        subscription = nil
-        let delay = shutdownDelayForInspection
+        epoch = UUID(); openingRequest = UUID()
+        quickOpenTask?.cancel(); searchTask?.cancel(); searchCancellation?.cancel()
         for document in tabs.compactMap(\.document) { document.stopForShutdown() }
         let group = DispatchGroup()
         group.enter()
         terminal.stopForShutdown { group.leave() }
-        Self.finishShutdown(group: group, queue: saves, core: core, state: state, root: root,
-                            paths: paths, selection: selection, views: views, old: old,
-                            delay: delay, completion: completion)
+        Self.drainStateWrites(queue: saves, group: group, completion: completion)
     }
 
-    nonisolated private static func finishShutdown(
-        group: DispatchGroup, queue: DispatchQueue, core: WorkspaceCore?, state: LayoutState?,
-        root: String?, paths: [String], selection: String?, views: [String: String],
-        old: VaultSubscription?, delay: TimeInterval,
-        completion: @escaping @Sendable () -> Void
-    ) {
-        queue.async {
-            group.wait()
-            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
-            do {
-                if let core, let state { try core.saveLayout(json: String(decoding: JSONEncoder().encode(state), as: UTF8.self)) }
-                if let core, let root { try core.rememberSession(path: root, tabs: paths, selected: selection, views: views) }
-            } catch { fputs("Hortus session save failed: \(error)\n", stderr) }
-            old?.close()
-            RunLoop.main.perform(inModes: [.common]) {
-                MainActor.assumeIsolated { completion() }
-            }
-        }
+    nonisolated private static func drainStateWrites(queue: DispatchQueue, group: DispatchGroup,
+                                                     completion: @escaping @Sendable () -> Void) {
+        queue.async { group.wait(); completion() }
     }
 
     /// 用户明确放弃退出：清理这些文档的恢复稿后再让进程结束。
