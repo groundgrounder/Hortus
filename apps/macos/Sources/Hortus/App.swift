@@ -38,6 +38,12 @@ struct HortusApp: App {
                     if let arg = args.first(where: { $0.hasPrefix("--inspect-left-width=") }),
                        let width = Double(arg.dropFirst("--inspect-left-width=".count)) { layout.size[.left] = width }
                     delegate.ready = true
+                    #if DEBUG
+                    if let argument = args.first(where: { $0.hasPrefix("--multi-window-inspection=") }) {
+                        await MultiWindowInspection.baseline(workspace: workspace, output: String(argument.dropFirst("--multi-window-inspection=".count)))
+                        return
+                    }
+                    #endif
                     if let arg = args.first(where: { $0.hasPrefix("--check-vault-lifecycle=") }) {
                         await WorkspaceInspection.checkLifecycle(workspace, output: String(arg.dropFirst("--check-vault-lifecycle=".count)))
                     }

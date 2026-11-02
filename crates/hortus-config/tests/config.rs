@@ -7,6 +7,41 @@ use tempfile::TempDir;
 const LEGACY_CONFIG_ENV: &str = "MARKNOTE_CONFIG_DIR";
 const LEGACY_CACHE_ENV: &str = "MARKNOTE_CACHE_DIR";
 
+#[test]
+fn ordered_windows_survive_session_round_trip() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    let text = r#"last_vault = '/vault/b'
+[[recent]]
+path = '/vault/a'
+tabs = ['same.md']
+selected = 'same.md'
+[recent.visible]
+left = false
+right = true
+bottom = true
+[[windows]]
+id = 'first'
+path = '/vault/a'
+tabs = ['same.md']
+selected = 'same.md'
+[windows.views]
+'same.md' = 'editing'
+[[windows]]
+id = 'second'
+path = '/vault/b'
+tabs = ['same.md', 'other.md']
+selected = 'other.md'
+"#;
+    fs::write(store.directories.cache.join("session.toml"), text).unwrap();
+    let session = store.session().unwrap();
+    let encoded = toml_edit::ser::to_string_pretty(&session).unwrap();
+    assert!(encoded.contains("[[windows]]"), "ordered windows were discarded: {encoded}");
+    assert!(encoded.contains("[recent.visible]"), "vault visibility was discarded");
+    let decoded: SessionState = toml_edit::de::from_str(&encoded).unwrap();
+    assert_eq!(decoded, session);
+}
+
 fn store(root: &TempDir) -> Store {
     Store::open(Directories {
         config: root.path().join("config"),
