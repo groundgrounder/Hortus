@@ -96,7 +96,12 @@ enum TerminalFontInspection {
         layout.size[.bottom] = 520
         try await wait { workspace.terminal.state == .running && workspace.terminal.inspectionViewAttached }
         let session = workspace.terminal
-        guard let view = session.inspectionView, let catalog = session.nerdFonts else { throw CocoaError(.coderValueNotFound) }
+        guard let view = session.inspectionView, let catalog = session.nerdFonts,
+              let window = view.window else { throw CocoaError(.coderValueNotFound) }
+        // The complete fixture needs 92 columns at the product's default 15 pt.
+        // Only this Debug inspection owns the larger window; normal launch is unchanged.
+        window.setContentSize(NSSize(width: 1710, height: 979))
+        try await wait { view.terminalDimensions.cols >= 92 && view.terminalDimensions.rows >= 21 }
         let before = view.cellDimension!
         let provider = view.glyphFallbackProvider
         let size = workspace.fontSize
@@ -108,6 +113,7 @@ enum TerminalFontInspection {
         layout.moveToRegion(.terminal, .bottom)
         layout.size[.bottom] = 520
         try await Task.sleep(for: .milliseconds(150))
+        try await wait { view.terminalDimensions.cols >= 92 && view.terminalDimensions.rows >= 21 }
         let after = view.cellDimension!
         let sameCatalog = session.nerdFonts === catalog && view.glyphFallbackProvider === provider
         let realShell = arguments.contains("--terminal-font-login-shell")
@@ -135,6 +141,8 @@ enum TerminalFontInspection {
             "visible_text": view.visibleRowsText(0..<view.terminalDimensions.rows),
             "font_ready_before_shell": session.inspectionFontReadyBeforeShell,
             "custom_block_glyphs": view.customBlockGlyphs,
+            "font_size": size, "columns": view.terminalDimensions.cols, "rows": view.terminalDimensions.rows,
+            "window_content_size": [window.contentLayoutRect.width, window.contentLayoutRect.height],
         ]
         return result
     }
