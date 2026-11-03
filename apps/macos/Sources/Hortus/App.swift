@@ -8,8 +8,6 @@ struct HortusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var application = ApplicationWorkspace()
     @Environment(\.openWindow) private var openWindow
-    private var workspace: Workspace { application.active?.workspace ?? application.initial.workspace }
-    private var layout: Layout { application.active?.layout ?? application.initial.layout }
 
     var body: some Scene {
         let open = openWindow
@@ -22,64 +20,7 @@ struct HortusApp: App {
         .restorationBehavior(.disabled)
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified(showsTitle: false))
-        .commands {
-            CommandGroup(replacing: .appInfo) {
-                Button("About Hortus") { delegate.showAboutPanel() }
-            }
-            CommandGroup(replacing: .newItem) {
-                Button("Open Folder…") { workspace.chooseFolder() }.keyboardShortcut("o", modifiers: .command)
-                Menu("Recent") {
-                    if workspace.recent.isEmpty { Text("No recently opened folders") }
-                    ForEach(workspace.recent) { recent in
-                        Button(recent.path) { Task { await workspace.openFolder(recent.path) } }
-                    }
-                }
-                Divider()
-                Button("Close Tab") { workspace.closeTab() }.keyboardShortcut("w", modifiers: .command)
-                    .disabled(workspace.selected == nil)
-            }
-            CommandGroup(replacing: .saveItem) {
-                Button("Save") { workspace.saveCurrent() }.keyboardShortcut("s", modifiers: .command)
-                    .disabled(workspace.current?.document == nil)
-            }
-            CommandGroup(after: .textEditing) {
-                Button("Align Table Source") { NSApp.sendAction(#selector(DiagramTextView.alignTableSource(_:)), to: nil, from: nil) }
-                    .keyboardShortcut("t", modifiers: [.option, .command])
-                    .disabled(workspace.current?.document?.reading != false)
-                Button("Find…") { find(.showFindInterface) }.keyboardShortcut("f", modifiers: .command)
-                Button("Find Next") { find(.nextMatch) }.keyboardShortcut("g", modifiers: .command)
-                Button("Find Previous") { find(.previousMatch) }.keyboardShortcut("g", modifiers: [.shift, .command])
-                Button("Find and Replace…") { find(.showReplaceInterface) }.keyboardShortcut("f", modifiers: [.option, .command])
-                Divider()
-                Button(L10n.string("Quick Open")) { workspace.presentQuickOpen() }
-                    .keyboardShortcut("p", modifiers: .command)
-                Button(L10n.string("Search Notes")) { workspace.showSearchPanel() }
-                    .keyboardShortcut("f", modifiers: [.shift, .command])
-            }
-            CommandGroup(after: .toolbar) {
-                Button(workspace.current?.document?.reading == true ? "Switch to Editing" : "Switch to Reading") { workspace.toggleView() }
-                    .keyboardShortcut("e", modifiers: .command).disabled(workspace.current?.document == nil)
-            }
-            CommandMenu("View") {
-                Toggle(L10n.string("Show Terminal"), isOn: Binding(
-                    get: { layout.terminalVisible },
-                    set: { shown in
-                        layout.setTerminalVisible(shown)
-                        if shown { DispatchQueue.main.async { workspace.terminal.focus() } }
-                    }))
-                    .keyboardShortcut("`", modifiers: .control)
-                Button(L10n.string("Clear Terminal")) { workspace.terminal.clearScreen() }
-                    .keyboardShortcut("k", modifiers: .command)
-                    .disabled(workspace.terminal.state != .running)
-            }
-            CommandMenu("Panels") {
-                Toggle("Left Sidebar", isOn: shown(.left)).keyboardShortcut("s", modifiers: [.control, .command])
-                Toggle("Right Sidebar", isOn: shown(.right)).keyboardShortcut("i", modifiers: [.option, .command])
-                Toggle("Bottom Panel", isOn: shown(.bottom)).keyboardShortcut("j", modifiers: .command)
-                Divider()
-                Button("Reset Layout") { layout.reset() }
-            }
-        }
+        .commands { HortusCommands(application: application, delegate: delegate) }
 
         WindowGroup("Hortus", id: "vault", for: String.self) { $id in
             if let record = application.record(id) {
@@ -90,6 +31,73 @@ struct HortusApp: App {
         .restorationBehavior(.disabled)
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified(showsTitle: false))
+        .commands { HortusCommands(application: application, delegate: delegate) }
+    }
+}
+
+private struct HortusCommands: Commands {
+    @Bindable var application: ApplicationWorkspace
+    let delegate: AppDelegate
+    private var workspace: Workspace { application.active?.workspace ?? application.initial.workspace }
+    private var layout: Layout { application.active?.layout ?? application.initial.layout }
+
+    var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About Hortus") { delegate.showAboutPanel() }
+        }
+        CommandGroup(replacing: .newItem) {
+            Button("Open Folder…") { workspace.chooseFolder() }.keyboardShortcut("o", modifiers: .command)
+            Menu("Recent") {
+                if workspace.recent.isEmpty { Text("No recently opened folders") }
+                ForEach(workspace.recent) { recent in
+                    Button(recent.path) { Task { await workspace.openFolder(recent.path) } }
+                }
+            }
+            Divider()
+            Button("Close Tab") { workspace.closeTab() }.keyboardShortcut("w", modifiers: .command)
+                .disabled(workspace.selected == nil)
+        }
+        CommandGroup(after: .newItem) {
+            Button("Save") { workspace.saveCurrent() }.keyboardShortcut("s", modifiers: .command)
+                .disabled(workspace.current?.document == nil)
+        }
+        CommandGroup(after: .textEditing) {
+            Button("Align Table Source") { NSApp.sendAction(#selector(DiagramTextView.alignTableSource(_:)), to: nil, from: nil) }
+                .keyboardShortcut("t", modifiers: [.option, .command])
+                .disabled(workspace.current?.document?.reading != false)
+            Button("Find…") { find(.showFindInterface) }.keyboardShortcut("f", modifiers: .command)
+            Button("Find Next") { find(.nextMatch) }.keyboardShortcut("g", modifiers: .command)
+            Button("Find Previous") { find(.previousMatch) }.keyboardShortcut("g", modifiers: [.shift, .command])
+            Button("Find and Replace…") { find(.showReplaceInterface) }.keyboardShortcut("f", modifiers: [.option, .command])
+            Divider()
+            Button(L10n.string("Quick Open")) { workspace.presentQuickOpen() }
+                .keyboardShortcut("p", modifiers: .command)
+            Button(L10n.string("Search Notes")) { workspace.showSearchPanel() }
+                .keyboardShortcut("f", modifiers: [.shift, .command])
+        }
+        CommandGroup(after: .toolbar) {
+            Button(workspace.current?.document?.reading == true ? "Switch to Editing" : "Switch to Reading") { workspace.toggleView() }
+                .keyboardShortcut("e", modifiers: .command).disabled(workspace.current?.document == nil)
+        }
+        CommandMenu("View") {
+            Toggle(L10n.string("Show Terminal"), isOn: Binding(
+                get: { layout.terminalVisible },
+                set: { shown in
+                    layout.setTerminalVisible(shown)
+                    if shown { DispatchQueue.main.async { workspace.terminal.focus() } }
+                }))
+                .keyboardShortcut("`", modifiers: .control)
+            Button(L10n.string("Clear Terminal")) { workspace.terminal.clearScreen() }
+                .keyboardShortcut("k", modifiers: .command)
+                .disabled(workspace.terminal.state != .running)
+        }
+        CommandMenu("Panels") {
+            Toggle("Left Sidebar", isOn: shown(.left)).keyboardShortcut("s", modifiers: [.control, .command])
+            Toggle("Right Sidebar", isOn: shown(.right)).keyboardShortcut("i", modifiers: [.option, .command])
+            Toggle("Bottom Panel", isOn: shown(.bottom)).keyboardShortcut("j", modifiers: .command)
+            Divider()
+            Button("Reset Layout") { layout.reset() }
+        }
     }
 
     private func find(_ action: NSTextFinder.Action) {

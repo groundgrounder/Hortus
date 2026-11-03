@@ -295,7 +295,12 @@ enum MultiWindowInspection {
 
     private static func dragPanel(_ application: ApplicationWorkspace, first: WindowRecord, second: WindowRecord) async throws -> Bool {
         application.activate(first)
-        try await Task.sleep(for: .milliseconds(200))
+        // 等实际拖动源与工具栏落点安装完毕，再发送真实鼠标事件。
+        try await wait {
+            guard let window = first.window, let content = window.contentView else { return false }
+            return findView(content, named: "panel-tab-outline") != nil
+                && window.toolbar?.items.first { $0.itemIdentifier.rawValue == "bottom-panel" }?.view != nil
+        }
         let window = try require(first.window)
         let content = try require(window.contentView)
         let source = try require(findView(content, named: "panel-tab-outline"))
