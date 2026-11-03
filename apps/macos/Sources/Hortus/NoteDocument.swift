@@ -80,6 +80,7 @@ final class NoteDocument {
     var sourceSelectionLength = 0
     var marked = false
     @ObservationIgnored weak var viewOwner: AnyObject?
+    @ObservationIgnored var transferredEditor: NoteText.Surface?
     @ObservationIgnored var refreshStartedAt = 0.0
     @ObservationIgnored var refreshIOMilliseconds = 0.0
     @ObservationIgnored var externalAcceptMilliseconds = 0.0
@@ -208,6 +209,7 @@ final class NoteDocument {
     func stopForShutdown() {
         closed = true; autoSave?.cancel(); outlineTask?.cancel()
         initialSourceStyles?.cancel(); initialSourceStyles = nil; onClosing?()
+        transferredEditor?.dispose(); transferredEditor = nil
     }
     private func apply(_ update: DocumentUpdate, external: Bool = false) {
         saveMilliseconds = Double(update.saveMicros) / 1000

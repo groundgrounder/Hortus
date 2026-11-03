@@ -12,7 +12,7 @@ struct OutlinePanel: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(document.headings, id: \.start) { heading in
-                            Button { workspace.revealHeading(heading) } label: {
+                            Button { workspace.revealHeading(heading, path: workspace.current?.path) } label: {
                                 Text(verbatim: heading.title)
                                     .font(.callout.weight(heading.level <= 2 ? .medium : .regular))
                                     .foregroundStyle(heading.level <= 2 ? .primary : .secondary)

@@ -63,7 +63,7 @@ struct DiagramTests {
         window.contentView = scroll
         window.orderFront(nil)
         defer { window.close() }
-        let coordinator = NoteText.Coordinator()
+        let coordinator = NoteText.EditorCoordinator()
         coordinator.view = view
         view.textLayoutManager?.delegate = coordinator
         var toggled = false
@@ -125,7 +125,7 @@ struct DiagramTests {
         window.contentView = scroll
         window.orderFront(nil)
         defer { window.close() }
-        let coordinator = NoteText.Coordinator()
+        let coordinator = NoteText.EditorCoordinator()
         coordinator.view = view
         view.textLayoutManager?.delegate = coordinator
         let service = DiagramService()

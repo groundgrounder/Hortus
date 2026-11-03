@@ -236,6 +236,8 @@ pub struct WindowState {
     #[serde(default)]
     pub views: BTreeMap<String, ViewMode>,
     pub frame: Option<WindowFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<BTreeMap<String, bool>>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -341,6 +343,7 @@ impl Store {
                                 selected: saved.and_then(|v| v.selected.clone()),
                                 views: saved.map(|v| v.views.clone()).unwrap_or_default(),
                                 frame: None,
+                                visible: saved.and_then(|v| v.visible.clone()),
                             }
                         })
                         .into_iter()

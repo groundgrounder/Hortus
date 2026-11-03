@@ -33,6 +33,7 @@ struct WindowState: Codable, Equatable, Sendable {
     var selected: String?
     var views: [String: String]
     var frame: WindowFrame?
+    var visible: [String: Bool]? = nil
 }
 
 struct SessionState: Codable, Sendable {

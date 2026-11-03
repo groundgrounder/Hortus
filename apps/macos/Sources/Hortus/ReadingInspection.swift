@@ -10,7 +10,7 @@ enum ReadingInspection {
         weak var value: DiagramTextView?
         weak var readingCoordinator: ReadingText.Coordinator?
         weak var sourceStyling: SourceStyling?
-        weak var editingCoordinator: NoteText.Coordinator?
+        weak var editingCoordinator: NoteText.EditorCoordinator?
         init(_ value: DiagramTextView) {
             self.value = value; readingCoordinator = value.readingCoordinator
             sourceStyling = value.sourceStyling; editingCoordinator = value.editingCoordinator

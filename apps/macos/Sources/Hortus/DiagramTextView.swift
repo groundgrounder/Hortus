@@ -10,8 +10,55 @@ struct NoteText: NSViewRepresentable {
     var document: NoteDocument? = nil
     let remember: (UInt32, [String]) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
-    func makeNSView(context: Context) -> NSScrollView {
+    func makeCoordinator() -> Host { Host() }
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        context.coordinator.container = container
+        context.coordinator.update(self)
+        return container
+    }
+    func updateNSView(_ container: NSView, context: Context) { context.coordinator.update(self) }
+    static func dismantleNSView(_ container: NSView, coordinator: Host) { coordinator.destroy() }
+
+    /// SwiftUI 只持有容器；移动时实际 NSTextView、协调器和撤销管理器一起换容器。
+    @MainActor final class Surface {
+        let scroll: NSScrollView
+        let editor: EditorCoordinator
+        init(scroll: NSScrollView, editor: EditorCoordinator) { self.scroll = scroll; self.editor = editor }
+        func dispose() { NoteText.destroy(self) }
+    }
+    @MainActor final class Host {
+        weak var container: NSView?
+        var surface: Surface?
+        weak var transferred: NoteDocument?
+        func update(_ input: NoteText) {
+            guard transferred == nil || transferred !== input.document else { return }
+            if surface == nil {
+                surface = input.document?.transferredEditor ?? NoteText.makeSurface()
+                input.document?.transferredEditor = nil
+                guard let surface, let container else { return }
+                surface.editor.host = self
+                surface.scroll.frame = container.bounds
+                surface.scroll.autoresizingMask = [.width, .height]
+                container.addSubview(surface.scroll)
+            }
+            surface?.editor.update(input)
+        }
+        func take() -> Surface? {
+            let value = surface
+            transferred = value?.editor.document
+            value?.scroll.removeFromSuperview()
+            value?.editor.host = nil
+            surface = nil
+            return value
+        }
+        func destroy() {
+            if let surface { NoteText.destroy(surface) }
+            surface = nil
+        }
+    }
+    private static func makeSurface() -> Surface {
+        let coordinator = EditorCoordinator()
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -34,14 +81,15 @@ struct NoteText: NSViewRepresentable {
         view.textContainer?.widthTracksTextView = true
         view.autoresizingMask = [.width]
         scroll.documentView = view
-        context.coordinator.view = view
-        view.editingCoordinator = context.coordinator
-        return scroll
+        coordinator.view = view
+        view.editingCoordinator = coordinator
+        return Surface(scroll: scroll, editor: coordinator)
     }
-    func updateNSView(_ scroll: NSScrollView, context: Context) { context.coordinator.update(self) }
-    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+    private static func destroy(_ surface: Surface) {
+        let scroll = surface.scroll, coordinator = surface.editor
         coordinator.detach()
         guard let view = scroll.documentView as? DiagramTextView else { return }
+        view.undoManager?.removeAllActions()
         view.editingCoordinator = nil
         view.onWidthOrThemeChange = nil; view.onToggle = nil; view.onEditSource = nil
         view.onCompositionState = nil; view.onCommit = nil
@@ -60,9 +108,10 @@ struct NoteText: NSViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, @preconcurrency NSTextLayoutManagerDelegate,
+    final class EditorCoordinator: NSObject, @preconcurrency NSTextLayoutManagerDelegate,
                              @preconcurrency NSTextStorageDelegate, NSTextViewDelegate {
         weak var view: DiagramTextView?
+        weak var host: Host?
         var task: Task<Void, Never>?
         let styling = SourceStyling()
         private var input: NoteText?
@@ -98,6 +147,7 @@ struct NoteText: NSViewRepresentable {
             if changed, self.input?.document?.viewOwner === self {
                 self.input?.document?.onReload = nil
                 self.input?.document?.onClosing = nil; self.input?.document?.onStateChange = nil
+                self.input?.document?.viewOwner = nil
             }
             self.input = input
             input.document?.viewOwner = self
@@ -506,6 +556,8 @@ final class TableFormulaAccessibilityElement: NSAccessibilityElement {
 
 @MainActor
 final class DiagramTextView: NSTextView {
+    private let noteUndo = UndoManager()
+    override var undoManager: UndoManager? { isReading ? super.undoManager : noteUndo }
     override func copy(_ sender: Any?) {
         if isReading {
             _ = writeSelection(to: .general, types: [.string])
@@ -557,7 +609,7 @@ final class DiagramTextView: NSTextView {
     var mathParagraphs: [Int: MathBlockView] = [:]
     var isReading = false
     weak var readingCoordinator: ReadingText.Coordinator?
-    weak var editingCoordinator: NoteText.Coordinator?
+    weak var editingCoordinator: NoteText.EditorCoordinator?
     var representedPath = ""
     var representedDocument: ObjectIdentifier?
     var sourceTypingAttributes: [NSAttributedString.Key: Any]?

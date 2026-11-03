@@ -12,7 +12,7 @@ struct EditingTests {
         let document: NoteDocument
         let view: DiagramTextView
         let window: NSWindow
-        let coordinator = NoteText.Coordinator()
+        let coordinator = NoteText.EditorCoordinator()
         let service = DiagramService()
         init(_ source: String) throws {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -102,6 +102,14 @@ final class TerminalSession {
         Task { @MainActor [weak self] in await self?.setRootAndWait(root) }
     }
 
+    /// A new window has no old PTY to drain. Set its root before any close can interleave.
+    func setInitialRoot(_ root: String) {
+        guard self.root == nil, state == .empty else { return }
+        self.root = root
+        state = .starting
+        startIfPossible()
+    }
+
     func setRootAndWait(_ root: String?) async {
         // Reopening the same vault keeps the running shell.
         if self.root == root, state == .running { return }

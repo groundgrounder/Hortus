@@ -12,6 +12,8 @@ final class WindowRecord: @MainActor Identifiable {
     @ObservationIgnored var focusGuard: ToolbarFocusGuard?
     var closing = false
     var restoredFrame: WindowFrame?
+    var lastUsed: UInt64 = 0
+    var lastVisible: [String: Bool] = [:]
 
     init(id: String = UUID().uuidString, layout: Layout) {
         self.id = id
@@ -28,6 +30,12 @@ final class ApplicationWorkspace {
     var contexts: [String: VaultContext] = [:]
     var recent: [VaultState] = []
     var activeID: String?
+    var restorationDiagnostics: [String] = []
+    @ObservationIgnored private var activation: UInt64 = 0
+    @ObservationIgnored var tabDrags: [UUID: (TabDragPayload, NoteDocument)] = [:]
+    #if DEBUG
+    @ObservationIgnored var tabDragTrace: [String] = []
+    #endif
     private var bootstrapID: String = ""
     var ready = false
     var fontSize = 15.0
@@ -100,10 +108,11 @@ final class ApplicationWorkspace {
         } catch { initial.workspace.error = L10n.error(error) }
     }
 
-    private func configure(_ record: WindowRecord) {
+    func configure(_ record: WindowRecord) {
         guard let core else { return }
         record.layout.size = latestSize
         for region in Region.allCases { record.layout.visible[region] = defaultVisible[region.rawValue] ?? (region != .bottom) }
+        record.lastVisible = visibility(record)
         record.workspace.configure(application: self, core: core, layout: record.layout)
         record.layout.onSizeChange = { [weak self, weak record] in
             guard let self, let record else { return }
@@ -143,7 +152,7 @@ final class ApplicationWorkspace {
                 }
                 return url.path
             }.value
-            if let record = records.first(where: { $0.workspace.root == canonical }) {
+            if state == nil, let record = mostRecentWindow(root: canonical) {
                 activate(record)
                 return
             }
@@ -160,7 +169,7 @@ final class ApplicationWorkspace {
                     contexts[root] = context
                 }
             }
-            if let existing = records.first(where: { $0.workspace.root == context.root }) { activate(existing); return }
+            if state == nil, let existing = mostRecentWindow(root: context.root) { activate(existing); return }
             let record: WindowRecord
             if let source, source.root == nil, let empty = records.first(where: { $0.workspace === source }) {
                 record = empty
@@ -176,10 +185,11 @@ final class ApplicationWorkspace {
             }
             let old = recent.first { $0.path == context.root }
             let saved = state.map { VaultState(path: context.root, tabs: $0.tabs, selected: $0.selected,
-                                               views: $0.views, visible: old?.visible) } ?? old
+                                               views: $0.views, visible: $0.visible ?? old?.visible) } ?? old
             for region in Region.allCases {
                 record.layout.visible[region] = saved?.visible?[region.rawValue] ?? defaultVisible[region.rawValue] ?? (region != .bottom)
             }
+            record.lastVisible = visibility(record)
             await record.workspace.attach(context, state: saved)
             if record.window == nil {
                 // 首个 Scene 已由 SwiftUI 创建；注册探针稍晚到达时不能再打开同一窗口。
@@ -221,23 +231,56 @@ final class ApplicationWorkspace {
     }
 
     func activate(_ record: WindowRecord) {
-        activeID = record.id
+        becameActive(record)
         record.window?.makeKeyAndOrderFront(nil)
         NSApp.activate()
     }
 
+    func becameActive(_ record: WindowRecord) {
+        activeID = record.id
+        activation += 1; record.lastUsed = activation
+        remember(record, promote: true)
+    }
+
+    private func mostRecentWindow(root: String) -> WindowRecord? {
+        records.filter { !$0.closing && $0.workspace.root == root }.max { $0.lastUsed < $1.lastUsed }
+    }
+
+    /// 占位加载标签也预留唯一性；不能在异步打开完成前再创建一份会话。
+    func owner(of path: String, from workspace: Workspace) -> WindowRecord? {
+        guard let root = workspace.root else { return nil }
+        return records.first { $0.workspace.root == root && $0.workspace.tabs.contains { $0.path == path } }
+    }
+
+    func recordDuplicate(_ path: String, window: Workspace) {
+        let message = "Hortus session: duplicate note skipped in window \(records.first { $0.workspace === window }?.id ?? "?"): \(path)"
+        restorationDiagnostics.append(message)
+        fputs(message + "\n", stderr)
+    }
+
+    private func visibility(_ record: WindowRecord) -> [String: Bool] {
+        Dictionary(uniqueKeysWithValues: record.layout.visible.map { ($0.key.rawValue, $0.value) })
+    }
+
     func layoutChanged(_ workspace: Workspace) {
         guard let record = records.first(where: { $0.workspace === workspace }) else { return }
-        remember(record)
+        let visible = visibility(record)
+        let changed = visible != record.lastVisible
+        record.lastVisible = visible
+        remember(record, visibleWrite: changed)
         scheduleLayoutSave()
         scheduleSessionSave()
     }
 
-    private func remember(_ record: WindowRecord) {
+    private func remember(_ record: WindowRecord, visibleWrite: Bool = false, promote: Bool = false) {
         guard let root = record.workspace.root else { return }
+        let previous = recent.first { $0.path == root }
         let state = VaultState(path: root, tabs: record.workspace.tabs.map(\.path), selected: record.workspace.selected,
-                               views: record.workspace.sessionViews(), visible: Dictionary(uniqueKeysWithValues: record.layout.visible.map { ($0.key.rawValue, $0.value) }))
-        recent.removeAll { $0.path == root }; recent.insert(state, at: 0)
+                               views: record.workspace.sessionViews(), visible: visibleWrite ? visibility(record) : previous?.visible ?? visibility(record))
+        if let index = recent.firstIndex(where: { $0.path == root }) {
+            recent.remove(at: index)
+            recent.insert(state, at: promote ? 0 : index)
+        } else { recent.insert(state, at: 0) }
         recent = Array(recent.prefix(20))
     }
 
@@ -247,7 +290,7 @@ final class ApplicationWorkspace {
             guard let root = record.workspace.root else { return nil }
             return WindowState(id: record.id, path: root, tabs: record.workspace.tabs.map(\.path),
                                selected: record.workspace.selected, views: record.workspace.sessionViews(),
-                               frame: record.window.map { WindowFrame(window: $0) })
+                               frame: record.window.map { WindowFrame(window: $0) }, visible: visibility(record))
         }
         return SessionState(last_vault: active?.workspace.root ?? recent.first?.path, recent: recent,
                             windows: windows, default_visible: defaultVisible)
@@ -300,6 +343,7 @@ final class ApplicationWorkspace {
         guard !record.closing else { return }
         if records.count == 1 { NSApp.terminate(nil); return }
         record.closing = true
+        cancelTabDrags(in: record.workspace)
         Task {
             guard await record.workspace.prepareDocumentsForClose() == .ready else { record.closing = false; return }
             remember(record)
@@ -345,6 +389,7 @@ final class ApplicationWorkspace {
 
     func beginShutdownCleanup(completion: @escaping @Sendable () -> Void) {
         sessionTask?.cancel(); layoutTask?.cancel()
+        tabDrags = [:]
         let core = core
         let session = inspectionLaunch ? nil : try? JSONEncoder().encode(snapshot())
         let layout = try? JSONEncoder().encode(layoutState())
@@ -398,7 +443,7 @@ final class VaultWindowDelegate: NSObject, NSWindowDelegate {
         return false
     }
     func windowDidBecomeKey(_ notification: Notification) {
-        if let record { application?.activeID = record.id }
+        if let record { application?.becameActive(record) }
         forwarding?.windowDidBecomeKey?(notification)
     }
     func windowDidMove(_ notification: Notification) { application?.scheduleSessionSave(); forwarding?.windowDidMove?(notification) }

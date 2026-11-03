@@ -480,6 +480,7 @@ fn legacy_session_migrates_once_and_full_snapshot_preserves_diagrams() {
     assert_eq!(windows[0].views["same.md"], ViewMode::Editing);
     session.windows.as_mut().unwrap().push(WindowState {
         id: "second".into(),
+        visible: Some(BTreeMap::from([("left".into(), true)])),
         path: "/b".into(),
         tabs: vec!["same.md".into()],
         selected: Some("same.md".into()),

@@ -38,12 +38,8 @@ struct EditorTabs: View {
         HStack(spacing: 2) {
             ForEach(workspace.tabs) { tab in
                 HStack(spacing: 7) {
-                    Button { workspace.openNote(tab.path) } label: {
-                        Text(tab.title).lineLimit(1)
-                            .font(.callout.weight(tab.path == workspace.selected ? .medium : .regular))
-                            .foregroundStyle(tab.path == workspace.selected ? .primary : .secondary)
-                    }
-                    .buttonStyle(.plain)
+                    TabDragButton(workspace: workspace, path: tab.path, title: tab.title, selected: tab.path == workspace.selected)
+                    .fixedSize()
                     .accessibilityLabel(L10n.string("Open note %@", tab.title))
                     .accessibilityAddTraits(tab.path == workspace.selected ? .isSelected : [])
                     Button { workspace.closeTab(tab.path) } label: {

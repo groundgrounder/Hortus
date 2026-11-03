@@ -91,6 +91,8 @@ final class Workspace {
     @ObservationIgnored private var epoch = UUID()
     @ObservationIgnored private var openingRequest = UUID()
     @ObservationIgnored private var loads: [String: UUID] = [:]
+    @ObservationIgnored private var loadTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var releasing = false
     @ObservationIgnored private var openedAt = ContinuousClock.now
     @ObservationIgnored private var layout: Layout?
     @ObservationIgnored private let saves = DispatchQueue(label: "app.hortus.state")
@@ -119,7 +121,11 @@ final class Workspace {
         restoredViews = state?.views ?? [:]
         context.attach(self)
         await terminal.setRootAndWait(context.root)
-        for path in state?.tabs ?? [] { openNote(path) }
+        for path in state?.tabs ?? [] {
+            if application?.owner(of: path, from: self) != nil {
+                application?.recordDuplicate(path, window: self)
+            } else { openNote(path) }
+        }
         if let selected = state?.selected, tabs.contains(where: { $0.path == selected }) { self.selected = selected }
     }
 
@@ -144,6 +150,11 @@ final class Workspace {
 
     /// 非最后窗口关闭时先持久化，再释放本窗口文档和 PTY。
     func releaseDocuments() async {
+        releasing = true
+        defer { releasing = false }
+        application?.cancelTabDrags(in: self)
+        // 加载占位在打开完成前保留；库关闭与再次打开也不能重叠创建会话。
+        for task in loadTasks.values { await task.value }
         epoch = UUID()
         openingRequest = UUID()
         for tab in tabs { tab.document?.stopForShutdown() }
@@ -152,6 +163,7 @@ final class Workspace {
         context?.detach(self)
         context = nil
         tabs = []; selected = nil; loads = [:]
+        closingTabs = []; pendingSearchReveals = [:]; restoredViews = [:]
         quickOpenVisible = false; quickOpenResults = []; searchResults = []; searchLoading = false
     }
 
@@ -176,7 +188,12 @@ final class Workspace {
     }
 
     func openNote(_ path: String) {
-        guard vault != nil else { return }
+        guard vault != nil, !releasing, !preparingClose else { return }
+        if let owner = application?.owner(of: path, from: self), owner.workspace !== self {
+            owner.workspace.openNote(path)
+            application?.activate(owner)
+            return
+        }
         if selected != path || current?.document == nil {
             noteOpenStartedAt = ProcessInfo.processInfo.systemUptime
             noteOpenPhases = [:]
@@ -274,6 +291,11 @@ final class Workspace {
     }
 
     func openSearchResult(path: String, start: Int, length: Int) {
+        if let owner = application?.owner(of: path, from: self), owner.workspace !== self {
+            owner.workspace.openSearchResult(path: path, start: start, length: length)
+            application?.activate(owner)
+            return
+        }
         pendingSearchReveals[path] = (start, length)
         if selected == path, let document = current?.document {
             revealSearch(document: document, start: start, length: length)
@@ -288,9 +310,13 @@ final class Workspace {
         }
     }
 
-    func revealHeading(_ heading: DocumentHeading) {
-        guard let document = current?.document, document.outlineRevision == document.revision else { return }
-        revealSearch(document: document, start: Int(heading.start), length: 0)
+    func revealHeading(_ heading: DocumentHeading, path: String? = nil) {
+        let path = path ?? current?.path
+        guard let path else { return }
+        let owner = application?.owner(of: path, from: self)?.workspace ?? self
+        guard let document = owner.tabs.first(where: { $0.path == path })?.document,
+              document.outlineRevision == document.revision else { return }
+        openSearchResult(path: path, start: Int(heading.start), length: 0)
     }
 
     private func revealSearch(document: NoteDocument, start: Int, length: Int) {
@@ -334,12 +360,12 @@ final class Workspace {
     }
 
     private func load(_ path: String) {
-        guard let core, let root else { return }
+        guard let core, let root, loads[path] == nil, !releasing else { return }
         let request = epoch
         let revision = UUID()
         let queuedAt = ProcessInfo.processInfo.systemUptime
         loads[path] = revision
-        Task { [weak self] in
+        loadTasks[path] = Task { [weak self] in
             let result = await Task.detached { Result {
                 let openStarted = ProcessInfo.processInfo.systemUptime
                 let session = try core.openDocument(vault: root, path: path)
@@ -350,6 +376,7 @@ final class Workspace {
                         openFinished - openStarted, initialFinished - openFinished, initialFinished)
             } }.value
             guard let self, self.epoch == request, self.loads[path] == revision, let index = self.tabs.firstIndex(where: { $0.path == path }) else { return }
+            self.loads[path] = nil; self.loadTasks[path] = nil
             self.tabs[index].loading = false
             switch result {
             case .success(let loaded):
@@ -360,7 +387,7 @@ final class Workspace {
                     document.sourceSelectionLength = reveal.length
                 }
                 document.reading = reading
-                document.onCopy = { [weak self] copy in self?.openNote(copy) }
+                self.bind(document)
                 self.tabs[index].document = document; self.tabs[index].error = nil
                 self.scheduleSessionSave()
                 self.noteOpenPhases = ["load_task_wait_ms": max(0, loaded.4 - queuedAt - loaded.2 - loaded.3) * 1000,
@@ -369,20 +396,31 @@ final class Workspace {
                                        "main_actor_handoff_ms": max(0, ProcessInfo.processInfo.systemUptime - loaded.4) * 1000]
             case .failure(let error): self.tabs[index].error = L10n.error(error)
             }
+            if self.closingTabs.contains(path) {
+                if let document = self.tabs.first(where: { $0.path == path })?.document {
+                    self.closeTabWhenPersisted(path, document, epoch: request)
+                } else { self.removeTab(path) }
+            }
         }
     }
 
     func closeTab(_ path: String? = nil) {
         guard let target = path ?? selected, let index = tabs.firstIndex(where: { $0.path == target }) else { return }
+        application?.cancelTabDrags(in: self, path: target)
+        if tabs[index].loading { closingTabs.insert(target); return }
         guard let document = tabs[index].document else { removeTab(target); return }
+        guard !closingTabs.contains(target) else { return }
+        closingTabs.insert(target)
         closeTabWhenPersisted(target, document, epoch: epoch)
     }
 
     /// 只有最新正文至少落盘一处后才移除标签；失败时保留标签和可编辑状态。
     private func closeTabWhenPersisted(_ target: String, _ document: NoteDocument, epoch: UUID) {
         Task { [weak self] in
-            let persistence = await document.prepareToClose()
             guard let self, self.epoch == epoch,
+                  self.tabs.contains(where: { $0.path == target && $0.document === document }) else { return }
+            let persistence = await document.prepareToClose()
+            guard self.epoch == epoch,
                   let index = self.tabs.firstIndex(where: { $0.path == target && $0.document === document })
             else { return }
             if persistence != .unsaved {
@@ -393,7 +431,7 @@ final class Workspace {
             switch self.decideUnsaved([target], quitting: false) {
             case .retry: self.closeTabWhenPersisted(target, document, epoch: epoch)
             case .discard: document.abandon(); self.removeTab(target)
-            case .cancel: break
+            case .cancel: self.closingTabs.remove(target)
             }
         }
     }
@@ -401,6 +439,9 @@ final class Workspace {
     /// 批量准备关闭或切换知识库；全部文档都持久化后才返回 `.ready`。
     enum DocumentsCloseResult: Equatable { case ready, cancelled }
     func prepareDocumentsForClose() async -> DocumentsCloseResult {
+        guard !preparingClose else { return .cancelled }
+        preparingClose = true
+        defer { preparingClose = false }
         let requestEpoch = epoch
         while true {
             var unsaved: [(String, NoteDocument)] = []
@@ -451,8 +492,30 @@ final class Workspace {
     private func removeTab(_ target: String) {
         guard let index = tabs.firstIndex(where: { $0.path == target }) else { return }
         tabs.remove(at: index)
+        closingTabs.remove(target)
         if selected == target { selected = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].path }
         scheduleSessionSave()
+    }
+
+    @ObservationIgnored var closingTabs: Set<String> = []
+    @ObservationIgnored var preparingClose = false
+
+    func bind(_ document: NoteDocument) {
+        document.onCopy = { [weak self] copy in self?.openNote(copy) }
+    }
+
+    /// 转移不停止文档队列，也不按路径重新载入。原生编辑表面携带正文与撤销栈。
+    func takeTab(_ path: String) -> NoteTab? {
+        guard let tab = tabs.first(where: { $0.path == path }), !tab.loading,
+              let document = tab.document, !document.marked, !closingTabs.contains(path), !preparingClose else { return nil }
+        if let coordinator = document.viewOwner as? NoteText.EditorCoordinator {
+            document.transferredEditor = coordinator.host?.take()
+        } else if let coordinator = document.viewOwner as? ReadingText.Coordinator {
+            coordinator.detach()
+        }
+        pendingSearchReveals.removeValue(forKey: path)
+        removeTab(path)
+        return tab
     }
 
     var textView: DiagramTextView? {
