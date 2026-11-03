@@ -7,7 +7,7 @@ import Testing
 struct EditorTabsTests {
     @Test func capsuleFitsContentAndOverflowScrollsWithinTheColumn() async throws {
         let workspace = Workspace()
-        workspace.tabs = [NoteTab(path: "note.md")]
+        workspace.tabs = [NoteTab(path: "note.md", loading: false)]
         workspace.selected = "note.md"
         var width: CGFloat = 0
         let host = NSHostingView(rootView: HStack(spacing: 0) {
@@ -25,7 +25,7 @@ struct EditorTabsTests {
         #expect(width > 50 && width < 200)
 
         workspace.selected = "long-note-title-11.md"
-        workspace.tabs = (0..<12).map { NoteTab(path: "long-note-title-\($0).md") }
+        workspace.tabs = (0..<12).map { NoteTab(path: "long-note-title-\($0).md", loading: false) }
         try await settle(host)
         #expect(width > 490 && width <= 500)
         let scroll = try #require(scrollViews(in: host).first { ($0.documentView?.frame.width ?? 0) > $0.contentSize.width })
