@@ -15,6 +15,7 @@ struct HortusApp: App {
         Window("Hortus", id: "main") {
             VaultWindowRoot(application: application, record: application.initial, delegate: delegate)
         }
+        .defaultLaunchBehavior(.presented)
         .restorationBehavior(.disabled)
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified(showsTitle: false))

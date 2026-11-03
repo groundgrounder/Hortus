@@ -56,16 +56,24 @@ def main():
         cases = [(f'explicit-{index}', [f'--vault={vaults[0]}', '--note=a.md'], ['a.md']) for index in range(1, 4)]
         cases += [('restore-two-1', [], ['a.md', 'b.md']), ('restore-two-2', [], ['a.md', 'b.md']),
                   ('empty', ['--empty'], ['Hortus'])]
+        # 直接启动也必须创建首窗；不能依赖 LaunchServices 的激活事件。
+        cases += [(f'direct-{index}', [f'--vault={vaults[0]}', '--note=a.md'], ['a.md']) for index in range(1, 4)]
         for name, arguments, titles in cases:
             if name in ('restore-two-1', 'empty'):
                 seed_two()
             command = ['open', '-n', '-a', str(app), '--env', f'HORTUS_CONFIG_DIR={state / "config"}',
                        '--env', f'HORTUS_CACHE_DIR={state / "cache"}', '--args', *arguments, '--light']
-            subprocess.run(command, check=True)
-            pid = None
+            process = None
+            if name.startswith('direct-'):
+                command = [str(executable), *arguments, '--light']
+                process = subprocess.Popen(command, env=dict(os.environ,
+                    HORTUS_CONFIG_DIR=str(state / 'config'), HORTUS_CACHE_DIR=str(state / 'cache')))
+            else:
+                subprocess.run(command, check=True)
+            pid = process.pid if process else None
             try:
                 deadline = time.monotonic() + 15
-                while time.monotonic() < deadline:
+                while pid is None and time.monotonic() < deadline:
                     found = subprocess.run(['pgrep', '-f', str(executable)], capture_output=True, text=True)
                     if found.returncode == 0:
                         pids = found.stdout.split()
@@ -87,7 +95,8 @@ def main():
                 assert all(sorted(w['AXTitle'] for w in sample) == sorted(titles) for sample in standard[-10:]), data
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
-                    if subprocess.run(['kill', '-0', str(pid)], capture_output=True).returncode:
+                    exited = process.poll() is not None if process else subprocess.run(['kill', '-0', str(pid)], capture_output=True).returncode != 0
+                    if exited:
                         pid = None
                         break
                     time.sleep(.1)
@@ -99,6 +108,8 @@ def main():
                         os.kill(pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
+                    if process:
+                        process.wait(timeout=15)
         summary = {'app': str(source), 'executable_sha256': hashlib.sha256(executable.read_bytes()).hexdigest(),
                    'empty_behavior': '--empty opens one empty user window and ignores saved vault windows',
                    'cases': [{'name': d['name'], 'final_titles': d['final_titles'],
