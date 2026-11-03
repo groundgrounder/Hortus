@@ -1,6 +1,7 @@
 import AppKit
 import CoreText
 import Darwin
+import HortusCore
 
 /// 所有循环、等待、离屏计量都只在显式验收参数下执行。
 @MainActor
@@ -36,9 +37,16 @@ enum DiagramInspection {
         throw CocoaError(.coderValueNotFound)
     }
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
-        if workspace.current?.document?.reading == true { await workspace.toggleCurrentView() }
+        let reading = arguments.contains("--diagram-reading")
+        let originalSource = workspace.current?.text
+        if workspace.current?.document?.reading != reading { await workspace.toggleCurrentView() }
         let memory = arguments.contains("--diagram-memory") ? try await memorySamples(workspace: workspace) : []
-        var view = try await settled(source: workspace.current?.text, document: workspace.current?.document)
+        var view: DiagramTextView
+        if reading, let document = workspace.current?.document {
+            view = try await ReadingInspection.settled(true, document: document)
+        } else {
+            view = try await settled(source: workspace.current?.text, document: workspace.current?.document)
+        }
         let firstMain = view.maximumMainWorkMilliseconds
         if let argument = arguments.first(where: { $0.hasPrefix("--diagram-width=") }),
            let width = Double(argument.dropFirst("--diagram-width=".count)), width >= 120,
@@ -48,6 +56,10 @@ enum DiagramInspection {
             window.setFrame(frame, display: true)
             try await Task.sleep(for: .milliseconds(50))
             view = try await settled(document: workspace.current?.document)
+        }
+        if arguments.contains("--diagram-reveal"), let diagram = view.diagramViews.values.min(by: { $0.frame.minY < $1.frame.minY }) {
+            view.scrollToVisible(CGRect(x: diagram.frame.minX, y: diagram.frame.minY, width: diagram.frame.width, height: min(500, diagram.frame.height)))
+            view.displayIfNeeded()
         }
         var beforeClick = 0
         if arguments.contains("--diagram-click") {
@@ -123,12 +135,35 @@ enum DiagramInspection {
         }
         errors.sort()
         let hits = diagrams.reduce(0) { $0 + $1.prepared.scene.hitRegions.count }
-        return ["diagrams": diagrams.count, "blocks": view.blocks.count,
+        let sourcePreserved: Bool
+        if reading, let document = workspace.current?.document {
+            sourcePreserved = try await document.io.perform { try $0.snapshot().text } == originalSource
+                && view.blocks.allSatisfy { $0.revision == document.revision }
+        } else { sourcePreserved = view.string == originalSource }
+        let graphMetrics = diagrams.compactMap { $0.prepared.scene.graphMetrics }.map {
+            ["roots": Int($0.roots), "edges": Int($0.edges), "node_overlaps": Int($0.nodeOverlaps),
+             "edge_crossings": Int($0.edgeCrossings), "horizontal_overflow": $0.horizontalOverflow ? 1 : 0]
+        }
+        let fillCount = Set(diagrams.flatMap { diagram in
+            diagram.prepared.scene.primitives.compactMap { primitive -> SceneColor? in
+                if case let .graphShape(_, _, _, _, fill, _, _) = primitive { return fill }
+                return nil
+            }
+        }).count
+        return ["diagrams": diagrams.count, "blocks": view.blocks.count, "reading": view.isReading,
+                "graph_metrics": graphMetrics, "graph_fill_count": fillCount,
+                "scene_heights": diagrams.map { $0.prepared.scene.height },
+                "row_counts": diagrams.map { diagram in
+                    var rows: [Double: Int] = [:]
+                    for hit in diagram.prepared.scene.hitRegions { rows[hit.rect.y, default: 0] += 1 }
+                    return rows.sorted { $0.key < $1.key }.map(\.value)
+                },
                 "dark": view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
                 "custom_fragments": customFragments, "error_fragments": errorFragments,
-                "source_preserved": view.string == workspace.current?.text, "textkit2": view.textLayoutManager != nil,
+                "source_preserved": sourcePreserved, "textkit2": view.textLayoutManager != nil,
                 "visible_nodes": hits, "accessibility_nodes": accessible, "accessibility_expanded_valid": expandedValid,
                 "accessibility_edges": accessibleEdges,
+                "source_hits": sourceHits(diagrams, source: workspace.current?.text ?? ""),
                 "before_click_nodes": beforeClick,
                 "collapsed_nodes": view.blocks.flatMap { Array($0.collapsed) }.count,
                 "badge_count": diagrams.flatMap { $0.prepared.lines }.filter { $0.0.text.hasPrefix("+") }.count,
@@ -140,6 +175,35 @@ enum DiagramInspection {
                 "scene_widths": diagrams.map { $0.prepared.scene.width },
                 "resize": resize, "memory": memory]
     }
+    /// 检查真实窗口中每个节点和边都有可回查的源码命中；公开结果只输出计数。
+    private static func sourceHits(_ diagrams: [DiagramView], source: String) -> [String: Any] {
+        var nodes = 0, nodeMatches = 0, edges = 0, edgeMatches = 0
+        for diagram in diagrams where diagram.prepared.acceptsInteraction {
+            let prepared = diagram.prepared
+            for hit in prepared.scene.hitRegions {
+                nodes += 1
+                let point = CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY)
+                if let range = prepared.sourceRanges[hit.nodeId], diagram.sourceRange(at: point) == range,
+                   DiagramService.byteRange(range, in: source) == (Int(hit.sourceStart)..<Int(hit.sourceEnd)) {
+                    nodeMatches += 1
+                }
+            }
+            for primitive in prepared.scene.primitives {
+                guard case let .graphPath(id, _, points, start, end, _, _, _, _, _, _, _) = primitive else { continue }
+                edges += 1
+                guard let range = prepared.edgeRanges[id],
+                      DiagramService.byteRange(range, in: source) == (Int(start)..<Int(end)) else { continue }
+                let matched = zip(points, points.dropFirst()).contains { a, b in
+                    [0.2, 0.5, 0.8].contains { t in
+                        diagram.sourceRange(at: CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)) == range
+                    }
+                }
+                if matched { edgeMatches += 1 }
+            }
+        }
+        return ["nodes": nodes, "node_matches": nodeMatches, "edges": edges, "edge_matches": edgeMatches]
+    }
+
     private static func memorySamples(workspace: Workspace) async throws -> [[String: Any]] {
         guard let path = workspace.selected else { throw CocoaError(.coderValueNotFound) }
         var memory: [[String: Any]] = [], oldText: [WeakView] = [], oldDiagrams: [WeakView] = []

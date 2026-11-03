@@ -214,6 +214,7 @@ pub fn layout_graph(
         options.width,
         height,
         &label_widths,
+        options.previous.as_ref().filter(|_| retained_nodes > 0),
     )?;
     let edge_paths = routed.paths;
     for (edge, points) in graph.edges.iter().zip(&edge_paths) {
@@ -361,6 +362,7 @@ pub fn layout_graph(
         .count();
     Ok(GraphScene {
         previous: crate::PreviousGraph {
+            direction: graph.direction,
             width: options.width,
             edges: graph
                 .edges
@@ -856,6 +858,27 @@ fn retain_positions(
     let Some(previous) = &options.previous else {
         return (0, "initial".into());
     };
+    if previous.direction != graph.direction {
+        return (0, "direction_changed".into());
+    }
+    // 横向图改宽会改变换行和节点高度；以完整物理行重新排版，避免逐节点锚定成阶梯。
+    if (previous.width - options.width).abs() > 0.01
+        && matches!(
+            graph.direction,
+            Direction::LeftToRight | Direction::RightToLeft
+        )
+    {
+        return (0, "width_changed_horizontal_rows".into());
+    }
+    // 窗口收窄后旧行不能只保留一部分。
+    if (previous.width - options.width).abs() > 0.01
+        && previous.nodes.iter().any(|node| {
+            node.rect.x < OUTER - 0.01
+                || node.rect.x + node.rect.width > options.width - OUTER + 0.01
+        })
+    {
+        return (0, "width_invalidated_previous_rows".into());
+    }
     let old: Vec<_> = graph
         .nodes
         .iter()
@@ -888,7 +911,42 @@ fn retain_positions(
     let mut group_rows = Vec::<(f64, usize)>::new();
     for index in order {
         let initial = boxes[index].rect;
-        let desired = old[index].map_or(initial, |anchor| Rect {
+        let new_leaf = old[index].is_none() && !graph.edges.iter().any(|edge| edge.from == index);
+        let parent = new_leaf
+            .then(|| {
+                graph
+                    .edges
+                    .iter()
+                    .find(|edge| edge.to == index)
+                    .and_then(|edge| old[edge.from])
+            })
+            .flatten();
+        let preferred = parent.map_or(initial, |parent| {
+            let r = parent.rect;
+            match graph.direction {
+                Direction::TopToBottom => Rect {
+                    x: r.x + (r.width - initial.width) / 2.0,
+                    y: r.y + r.height + RANK_GAP,
+                    ..initial
+                },
+                Direction::BottomToTop => Rect {
+                    x: r.x + (r.width - initial.width) / 2.0,
+                    y: r.y - initial.height - RANK_GAP,
+                    ..initial
+                },
+                Direction::LeftToRight => Rect {
+                    x: r.x + r.width + NODE_GAP,
+                    y: r.y + (r.height - initial.height) / 2.0,
+                    ..initial
+                },
+                Direction::RightToLeft => Rect {
+                    x: r.x - initial.width - NODE_GAP,
+                    y: r.y + (r.height - initial.height) / 2.0,
+                    ..initial
+                },
+            }
+        });
+        let desired = old[index].map_or(preferred, |anchor| Rect {
             x: anchor.rect.x + (anchor.rect.width - initial.width) / 2.0,
             y: anchor.rect.y + (anchor.rect.height - initial.height) / 2.0,
             ..initial
@@ -897,6 +955,30 @@ fn retain_positions(
             r.x >= OUTER - 0.01
                 && r.x + r.width <= options.width - OUTER + 0.01
                 && r.y >= OUTER - 0.01
+                && (old[index]
+                    .is_some_and(|old| old.rect.width == r.width && old.rect.height == r.height)
+                    || !previous.edges.iter().any(|old_edge| {
+                        graph
+                            .edges
+                            .iter()
+                            .find(|edge| edge.id == old_edge.edge_id)
+                            .is_some_and(|edge| {
+                                edge.from != index
+                                    && edge.to != index
+                                    && old_edge.points.windows(2).any(|pair| {
+                                        segment_hits_rect(
+                                            pair[0],
+                                            pair[1],
+                                            Rect {
+                                                x: r.x - 8.0,
+                                                y: r.y - 8.0,
+                                                width: r.width + 16.0,
+                                                height: r.height + 16.0,
+                                            },
+                                        )
+                                    })
+                            })
+                    }))
                 && !placed.iter().any(|other| {
                     Rect {
                         x: r.x - 8.0,

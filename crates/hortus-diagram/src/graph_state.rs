@@ -4,6 +4,7 @@ use serde::Serialize;
 /// 上一场景只由当前调用方传入；不保存在解析缓存中。
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PreviousGraph {
+    pub direction: crate::Direction,
     pub width: f64,
     pub nodes: Vec<GraphAnchor>,
     pub edges: Vec<EdgeAnchor>,

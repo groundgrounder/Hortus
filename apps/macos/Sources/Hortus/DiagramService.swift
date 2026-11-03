@@ -2,6 +2,29 @@ import Foundation
 import CoreText
 import HortusCore
 
+/// 按 Unicode scalar 边界一次建立映射；同一 revision 的所有节点和边共用。
+struct DiagramSourceOffsets {
+    let utf16: [Int]
+    init(_ source: String) {
+        var values = [Int](repeating: -1, count: source.utf8.count + 1)
+        var byte = 0, unit = 0
+        values[0] = 0
+        for scalar in source.unicodeScalars {
+            let value = scalar.value
+            byte += value < 0x80 ? 1 : (value < 0x800 ? 2 : (value < 0x10000 ? 3 : 4))
+            unit += value < 0x10000 ? 1 : 2
+            values[byte] = unit
+        }
+        utf16 = values
+    }
+    func range(start: UInt64, end: UInt64) -> NSRange? {
+        guard start <= end, end < utf16.count else { return nil }
+        let a = utf16[Int(start)], b = utf16[Int(end)]
+        guard a >= 0, b >= a else { return nil }
+        return NSRange(location: a, length: b - a)
+    }
+}
+
 struct NoteDiagram: Sendable {
     let ordinal: UInt32
     var range: NSRange
@@ -31,6 +54,7 @@ struct NoteDiagram: Sendable {
 actor DiagramService {
     private var lineCache: [DiagramLineKey: CTLine] = [:]
     private var cachedSource: String?
+    private var sourceOffsets: DiagramSourceOffsets?
     private var activeDocument = ""
     private var previousBlocks: [UInt32: NoteDiagram] = [:]
     private let engine = Task.detached(priority: .userInitiated) { try DiagramEngine() }
@@ -69,7 +93,12 @@ actor DiagramService {
         do {
             let engine = try await engine.value
             return autoreleasepool {
-                if cachedSource != source { lineCache = [:]; cachedSource = source }
+                if cachedSource != source {
+                    lineCache = [:]; cachedSource = source
+                    sourceOffsets = DiagramSourceOffsets(source)
+                }
+                guard let sourceOffsets else { return blocks }
+                let original = source as NSString
                 let document = result[0].documentIdentity
                 if activeDocument != document { previousBlocks = [:]; activeDocument = document }
                 for index in result.indices {
@@ -92,16 +121,16 @@ actor DiagramService {
                         guard scene.identity == identity, abs(scene.width - width) < 0.001 else { throw DiagramSceneFailure.staleRequest }
                         var ranges: [String: NSRange] = [:]
                         for hit in scene.hitRegions {
-                            guard let range = Self.sourceRange(start: hit.sourceStart, end: hit.sourceEnd, in: source) else { throw DiagramSceneFailure.sourceRange }
+                            guard let range = sourceOffsets.range(start: hit.sourceStart, end: hit.sourceEnd) else { throw DiagramSceneFailure.sourceRange }
                             ranges[hit.nodeId] = range
                         }
                         var edgeRanges: [UInt64: NSRange] = [:]
                         var edgeLabels: [UInt64: String] = [:]
                         for primitive in scene.primitives {
                             if case let .graphPath(id, _, _, start, end, _, _, _, _, _, _, _) = primitive {
-                                guard let range = Self.sourceRange(start: start, end: end, in: source) else { throw DiagramSceneFailure.sourceRange }
+                                guard let range = sourceOffsets.range(start: start, end: end) else { throw DiagramSceneFailure.sourceRange }
                                 edgeRanges[id] = range
-                                edgeLabels[id] = (source as NSString).substring(with: range)
+                                edgeLabels[id] = original.substring(with: range)
                             }
                         }
                         let transferred = ProcessInfo.processInfo.systemUptime

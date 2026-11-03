@@ -56,8 +56,11 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
                 process.wait(timeout=10)
     data = json.loads(target.read_text())
     assert data['source_preserved'] and data['textkit2'], data
+    assert data['reading'] == ('--diagram-reading' in extra), data
     assert data['accessibility_nodes'] == data['visible_nodes'], data
     assert data['accessibility_edges'] >= 0, data
+    hits = data['source_hits']
+    assert hits['node_matches'] == hits['nodes'] and hits['edge_matches'] == hits['edges'], hits
     assert data['accessibility_expanded_valid'], data
     assert data['custom_fragments'] >= data['diagrams'], data
     assert data['error_fragments'] == len(data['reasons']), data
@@ -108,16 +111,20 @@ def scenarios(base, output):
         sample = ROOT / 'fixtures/mermaid/flowchart' / name
         for width in [700, 1100]:
             for theme in ['light', 'dark']:
-                tag = f'{sample.stem}-{width}-{theme}'
-                data, _ = inspect(base / tag, flowchart_output, tag, sample.parent, sample.name,
-                                  [f'--{theme}', f'--diagram-width={width}'], screenshot=True)
-                if name == 'class-styles.mmd':
-                    # stroke-width/dash 超出基本 hex fill/stroke 范围，须明确报错。
-                    assert data['diagrams'] == 0 and data['reasons'], data
-                else:
-                    assert data['diagrams'] == 1 and data['visible_nodes'] > 0 and not data['reasons'], data
-                    assert all(abs(w - width) < .5 for w in data['scene_widths']), data
-                    assert data['accessibility_nodes'] == data['visible_nodes'], data
+                for mode in ['editing', 'reading']:
+                    tag = f'{sample.stem}-{width}-{theme}-{mode}'
+                    extra = [f'--{theme}', f'--diagram-width={width}']
+                    if mode == 'reading': extra.append('--diagram-reading')
+                    data, _ = inspect(base / tag, flowchart_output, tag, sample.parent, sample.name,
+                                      extra, screenshot=True)
+                    if name == 'class-styles.mmd':
+                        # stroke-width/dash 超出基本 hex fill/stroke 范围，须明确报错。
+                        assert data['diagrams'] == 0 and data['reasons'], data
+                    else:
+                        assert data['diagrams'] == 1 and data['visible_nodes'] > 0 and not data['reasons'], data
+                        assert all(abs(w - width) < .5 for w in data['scene_widths']), data
+                        assert data['accessibility_nodes'] == data['visible_nodes'], data
+                        if name == 'erikson.mmd': assert data['row_counts'] == [[4, 4]], data
     private = ROOT / 'fixtures/mermaid/tree'
     files = sorted(private.glob('04-*.md')) if private.exists() else []
     if files:

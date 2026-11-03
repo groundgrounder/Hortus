@@ -52,64 +52,176 @@ pub(crate) fn route(
     width: f64,
     height: f64,
     label_widths: &[Option<f64>],
+    previous: Option<&crate::PreviousGraph>,
 ) -> Result<Routes, LayoutError> {
-    if let Some(paths) = branch_routes(graph, nodes, width) {
+    let seeds = retained_paths(graph, nodes, width, height, previous);
+    if seeds.iter().all(Option::is_some) {
+        return Ok(Routes {
+            paths: seeds.into_iter().map(Option::unwrap).collect(),
+            labels: vec![None; graph.edges.len()],
+        });
+    }
+    if seeds.iter().all(Option::is_none)
+        && let Some(paths) = branch_routes(graph, nodes, width)
+    {
         return Ok(Routes {
             paths,
             labels: vec![None; graph.edges.len()],
         });
     }
-    let mut best = route_grid(graph, nodes, accepted, width, height, label_widths, None)?;
+    let mut best = route_grid(
+        graph,
+        nodes,
+        accepted,
+        (width, height),
+        label_widths,
+        &seeds,
+        None,
+    )?;
     if nodes.len() <= 24 && graph.edges.len() <= 48 {
-        let (mut score, conflicts) = route_conflicts(&best.paths);
-        // 贪心通道可能挡住后来的跨层边。只对冲突边局部提升优先级，保留更清晰的结果。
-        for edge in conflicts.into_iter().take(8) {
-            if score == 0 {
+        let mut score = route_conflicts(graph, &best.paths).0;
+        for _ in 0..3 {
+            let initial_score = score;
+            let conflicts = route_conflicts(graph, &best.paths).1;
+            // 只拆除冲突边；其它有效通道显式传回路由器，避免全图反复搜索。
+            for edge in conflicts.into_iter().rev().take(8) {
+                if score == 0 {
+                    break;
+                }
+                for side in 0..16 {
+                    let fixed = best
+                        .paths
+                        .iter()
+                        .enumerate()
+                        .map(|(i, path)| {
+                            (i != edge && label_widths[i].is_none()).then(|| path.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    if let Ok(candidate) = route_grid(
+                        graph,
+                        nodes,
+                        accepted,
+                        (width, height),
+                        label_widths,
+                        &fixed,
+                        Some((edge, side)),
+                    ) {
+                        let next = route_conflicts(graph, &candidate.paths).0;
+                        if next < score {
+                            best = candidate;
+                            score = next;
+                        }
+                        if score == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if score == initial_score {
                 break;
-            }
-            if let Ok(candidate) = route_grid(
-                graph,
-                nodes,
-                accepted,
-                width,
-                height,
-                label_widths,
-                Some(edge),
-            ) {
-                let next = route_conflicts(&candidate.paths).0;
-                if next < score {
-                    best = candidate;
-                    score = next;
-                }
-            }
-        }
-        if score > 0 {
-            for edge in 0..graph.edges.len() {
-                if let Ok(candidate) = route_grid(
-                    graph,
-                    nodes,
-                    accepted,
-                    width,
-                    height,
-                    label_widths,
-                    Some(edge + graph.edges.len()),
-                ) {
-                    let next = route_conflicts(&candidate.paths).0;
-                    if next < score {
-                        best = candidate;
-                        score = next;
-                    }
-                    if score == 0 {
-                        break;
-                    }
-                }
             }
         }
     }
     Ok(best)
 }
 
-fn route_conflicts(paths: &[Vec<Point>]) -> (usize, Vec<usize>) {
+/// 旧通道只有在端点、真实轮廓和当前全部障碍仍有效时才能复用。
+fn retained_paths(
+    graph: &Graph,
+    nodes: &[(Rect, Shape)],
+    width: f64,
+    height: f64,
+    previous: Option<&crate::PreviousGraph>,
+) -> Vec<Option<Vec<Point>>> {
+    let Some(previous) = previous.filter(|old| {
+        old.direction == graph.direction && !graph.edges.iter().any(|edge| edge.label.is_some())
+    }) else {
+        return vec![None; graph.edges.len()];
+    };
+    graph
+        .edges
+        .iter()
+        .map(|edge| {
+            if edge.label.is_some() {
+                return None;
+            }
+            let mut points = previous
+                .edges
+                .iter()
+                .find(|old| old.edge_id == edge.id)?
+                .points
+                .clone();
+            if points.len() < 2 {
+                return None;
+            }
+            for (node, at, adjacent) in [
+                (edge.from, 0, 1),
+                (edge.to, points.len() - 1, points.len() - 2),
+            ] {
+                let old = previous
+                    .nodes
+                    .iter()
+                    .find(|n| n.node_id == graph.nodes[node].id)?
+                    .rect;
+                let (rect, shape) = nodes[node];
+                let tip = points[at];
+                let next = points[adjacent];
+                let vertical = (tip.x - next.x).abs() < 0.001;
+                let positive = if vertical {
+                    next.y > tip.y
+                } else {
+                    next.x > tip.x
+                };
+                let fixed = if vertical {
+                    rect.x + (tip.x - old.x) / old.width * rect.width
+                } else {
+                    rect.y + (tip.y - old.y) / old.height * rect.height
+                };
+                let tip = crate::shape::port(shape, rect, vertical, fixed, positive);
+                points[at] = tip;
+                if points.len() > 2 {
+                    if vertical {
+                        points[adjacent].x = tip.x;
+                    } else {
+                        points[adjacent].y = tip.y;
+                    }
+                }
+                let next = points[adjacent];
+                if if vertical {
+                    (next.y - tip.y) * if positive { 1.0 } else { -1.0 } <= 0.0
+                } else {
+                    (next.x - tip.x) * if positive { 1.0 } else { -1.0 } <= 0.0
+                } {
+                    return None;
+                }
+            }
+            if points.iter().any(|p| {
+                !p.x.is_finite()
+                    || !p.y.is_finite()
+                    || p.x < 1.0
+                    || p.x > width - 1.0
+                    || p.y < 1.0
+                    || p.y > height - 1.0
+            }) {
+                return None;
+            }
+            for (i, pair) in points.windows(2).enumerate() {
+                if (pair[0].x - pair[1].x).abs() > 0.001 && (pair[0].y - pair[1].y).abs() > 0.001 {
+                    return None;
+                }
+                if nodes.iter().enumerate().any(|(n, (rect, _))| {
+                    !(i == 0 && n == edge.from || i == points.len() - 2 && n == edge.to)
+                        && segment_intersects(pair[0], pair[1], *rect)
+                }) {
+                    return None;
+                }
+            }
+            Some(points)
+        })
+        .collect()
+}
+
+fn route_conflicts(graph: &Graph, paths: &[Vec<Point>]) -> (usize, Vec<usize>) {
     let mut score = 0;
     let mut conflicts = Vec::new();
     for (i, a) in paths.iter().enumerate() {
@@ -119,6 +231,29 @@ fn route_conflicts(paths: &[Vec<Point>]) -> (usize, Vec<usize>) {
                     let ah = (a[0].y - a[1].y).abs() < 0.001;
                     let bh = (b[0].y - b[1].y).abs() < 0.001;
                     if ah == bh {
+                        let overlap = if ah {
+                            (a[0].y - b[0].y).abs() < 0.001
+                                && a[0].x.min(a[1].x) < b[0].x.max(b[1].x) - 0.001
+                                && b[0].x.min(b[1].x) < a[0].x.max(a[1].x) - 0.001
+                        } else {
+                            (a[0].x - b[0].x).abs() < 0.001
+                                && a[0].y.min(a[1].y) < b[0].y.max(b[1].y) - 0.001
+                                && b[0].y.min(b[1].y) < a[0].y.max(a[1].y) - 0.001
+                        };
+                        let (first, second) = (&graph.edges[i], &graph.edges[j]);
+                        if overlap
+                            && (first.label.is_some()
+                                || second.label.is_some()
+                                || first.from != second.from && first.to != second.to
+                                || first.from == second.from && first.to == second.to)
+                        {
+                            score += 1000;
+                            for edge in [i, j] {
+                                if !conflicts.contains(&edge) {
+                                    conflicts.push(edge);
+                                }
+                            }
+                        }
                         continue;
                     }
                     let (h, v) = if ah { (a, b) } else { (b, a) };
@@ -145,11 +280,12 @@ fn route_grid(
     graph: &Graph,
     nodes: &[(Rect, Shape)],
     accepted: &[bool],
-    width: f64,
-    height: f64,
+    size: (f64, f64),
     label_widths: &[Option<f64>],
-    preferred: Option<usize>,
+    seeds: &[Option<Vec<Point>>],
+    preferred: Option<(usize, usize)>,
 ) -> Result<Routes, LayoutError> {
+    let (width, height) = size;
     let vertical = matches!(
         graph.direction,
         Direction::TopToBottom | Direction::BottomToTop
@@ -189,13 +325,6 @@ fn route_grid(
             b_vertical = false;
             a_positive = from.x < to.x;
             b_positive = !a_positive;
-        }
-        if preferred == Some(index) && vertical && accepted[index] {
-            // 冲突边改用外侧端口，解除固定上下端口对平面嵌入的限制。
-            a_vertical = false;
-            b_vertical = false;
-            a_positive = from.x >= width / 2.0;
-            b_positive = a_positive;
         }
         let long_edge = nodes.len() <= 48
             && vertical
@@ -238,6 +367,21 @@ fn route_grid(
             {
                 b_vertical = false;
                 b_positive = true;
+            }
+        }
+        if let Some((selected, sides)) = preferred
+            && selected == index
+        {
+            if nodes.len() <= 24 {
+                a_vertical = if sides & 2 == 0 { vertical } else { !vertical };
+                b_vertical = if sides & 8 == 0 { vertical } else { !vertical };
+                a_positive = sides & 1 != 0;
+                b_positive = sides & 4 != 0;
+            } else {
+                a_vertical = !vertical;
+                b_vertical = !vertical;
+                a_positive = sides & 1 != 0;
+                b_positive = sides & 2 != 0;
             }
         }
         // 重复边不合并成一条线。不同目标的同源前缀和同目的后缀允许共用端口。
@@ -403,6 +547,12 @@ fn route_grid(
         xs.extend([source.x, a.x, target.x, b.x]);
         ys.extend([source.y, a.y, target.y, b.y]);
     }
+    for path in seeds.iter().flatten() {
+        for point in path {
+            xs.push(point.x);
+            ys.push(point.y);
+        }
+    }
     let sort = |values: &mut Vec<f64>| {
         values.sort_by(f64::total_cmp);
         values.dedup_by(|a, b| (*a - *b).abs() < 0.001);
@@ -489,6 +639,9 @@ fn route_grid(
     };
     // 端口到网格的短段也占用通道；提前登记，防止较早的边遮住后续边的端点身份。
     for (edge_index, ((source, a), (target, b))) in ends.iter().enumerate() {
+        if seeds[edge_index].is_some() {
+            continue;
+        }
         for (p, q) in [(*source, *a), (*target, *b)] {
             let (from, to) = (locate(p), locate(q));
             let h = from / nx == to / nx;
@@ -505,11 +658,37 @@ fn route_grid(
             }
         }
     }
-    let mut result = vec![Vec::new(); ends.len()];
+    for (edge_index, path) in seeds
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.as_ref().map(|p| (i, p)))
+    {
+        for pair in path.windows(2) {
+            let (from, to) = (locate(pair[0]), locate(pair[1]));
+            let h = from / nx == to / nx;
+            let mut i = from.min(to);
+            while i < from.max(to) {
+                if h {
+                    h_use[i] = h_use[i].saturating_add(1);
+                    h_owner[i].occupy(edge_index, graph);
+                } else {
+                    v_use[i] = v_use[i].saturating_add(1);
+                    v_owner[i].occupy(edge_index, graph);
+                }
+                i += if h { 1 } else { nx };
+            }
+        }
+    }
+    let mut result = seeds
+        .iter()
+        .map(|p| p.clone().unwrap_or_default())
+        .collect::<Vec<_>>();
     let mut label_rects = vec![None; ends.len()];
     let rects = nodes.iter().map(|(rect, _)| *rect).collect::<Vec<_>>();
     let mut protected = Vec::<Rect>::new();
-    let mut routing_order = (0..ends.len()).collect::<Vec<_>>();
+    let mut routing_order = (0..ends.len())
+        .filter(|i| seeds[*i].is_none())
+        .collect::<Vec<_>>();
     routing_order.sort_by(|a, b| {
         label_widths[*a]
             .is_none()
@@ -522,19 +701,12 @@ fn route_grid(
                     let ((_, a), (_, b)) = ends[i];
                     (a.x - b.x).abs() + (a.y - b.y).abs()
                 };
-                (Some(*a) == preferred)
-                    .cmp(&(Some(*b) == preferred))
+                (Some(*a) == preferred.map(|(i, _)| i))
+                    .cmp(&(Some(*b) == preferred.map(|(i, _)| i)))
                     .then_with(|| distance(*a).total_cmp(&distance(*b)))
                     .then(a.cmp(b))
             })
     });
-    if let Some(first) = preferred.filter(|i| *i >= graph.edges.len()) {
-        let index = routing_order
-            .iter()
-            .position(|i| *i == first - graph.edges.len())
-            .unwrap_or(0);
-        routing_order.rotate_left(index);
-    }
     for edge_index in routing_order {
         let (source, a) = clear_label_port(
             nodes[graph.edges[edge_index].from],
@@ -598,9 +770,7 @@ fn route_grid(
             }
             let p = point(a);
             let q = point(b);
-            if current.label.is_some()
-                && protected.iter().any(|rect| segment_intersects(p, q, *rect))
-            {
+            if protected.iter().any(|rect| segment_intersects(p, q, *rect)) {
                 return None;
             }
             let mut cost = (p.x - q.x).abs() + (p.y - q.y).abs();
@@ -741,9 +911,7 @@ fn route_grid(
                     }
                     let p = point(index);
                     let q = point(next);
-                    if current.label.is_some()
-                        && protected.iter().any(|rect| segment_intersects(p, q, *rect))
-                    {
+                    if protected.iter().any(|rect| segment_intersects(p, q, *rect)) {
                         continue;
                     }
                     let owner = if next_axis == 1 {
@@ -802,10 +970,9 @@ fn route_grid(
                             index != current.from
                                 && index != current.to
                                 && segment_intersects(segment[0], segment[1], *rect)
-                        }) && (current.label.is_none()
-                            || !protected
-                                .iter()
-                                .any(|rect| segment_intersects(segment[0], segment[1], *rect)))
+                        }) && !protected
+                            .iter()
+                            .any(|rect| segment_intersects(segment[0], segment[1], *rect))
                     })
                 };
                 if let Some(elbow) = elbows.iter().find(|elbow| {
@@ -1100,4 +1267,86 @@ fn simplify(points: Vec<Point>) -> Vec<Point> {
         result.push(point);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unchanged_fanout_channels_are_reusable() {
+        let crate::Diagram::Graph(graph) = crate::parse_diagram(include_str!(
+            "../../../fixtures/mermaid/flowchart/fanout.mmd"
+        ))
+        .unwrap() else {
+            panic!("expected graph")
+        };
+        let before = crate::layout_graph(
+            &graph,
+            &crate::LayoutOptions::default(),
+            &mut crate::SystemFonts::new().unwrap(),
+        )
+        .unwrap();
+        let nodes = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (before.previous.nodes[i].rect, node.shape))
+            .collect::<Vec<_>>();
+        let seeds = retained_paths(
+            &graph,
+            &nodes,
+            before.scene.width,
+            before.scene.height,
+            Some(&before.previous),
+        );
+        assert_eq!(
+            seeds.iter().filter(|p| p.is_some()).count(),
+            graph.edges.len()
+        );
+    }
+    #[test]
+    fn fanout_edits_preserve_clear_channels() {
+        let source = include_str!("../../../fixtures/mermaid/flowchart/fanout.mmd");
+        let crate::Diagram::Graph(graph) = crate::parse_diagram(source).unwrap() else {
+            panic!("expected graph")
+        };
+        let mut fonts = crate::SystemFonts::new().unwrap();
+        for width in [700.0, 1100.0] {
+            let before = crate::layout_graph(
+                &graph,
+                &crate::LayoutOptions {
+                    width,
+                    ..Default::default()
+                },
+                &mut fonts,
+            )
+            .unwrap();
+            for edited in [
+                format!("{source}\nJ1 --> added[新增叶]\n"),
+                source.replacen("J1 --> done([汇合])", "", 1),
+            ] {
+                let crate::Diagram::Graph(graph) = crate::parse_diagram(&edited).unwrap() else {
+                    panic!("expected graph")
+                };
+                let after = crate::layout_graph(
+                    &graph,
+                    &crate::LayoutOptions {
+                        width,
+                        previous: Some(before.previous.clone()),
+                        ..Default::default()
+                    },
+                    &mut fonts,
+                )
+                .unwrap();
+                let paths = after
+                    .previous
+                    .edges
+                    .iter()
+                    .map(|edge| edge.points.clone())
+                    .collect::<Vec<_>>();
+                let (score, _) = route_conflicts(&graph, &paths);
+                assert_eq!(score, 0);
+            }
+        }
+    }
 }

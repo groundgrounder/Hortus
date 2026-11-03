@@ -225,6 +225,56 @@ struct DiagramTests {
         #expect(other[0].prepared == nil)
     }
 
+    @Test func graphWindowServicesAndRapidGenerationsStayIsolated() async throws {
+        let source = "flowchart LR\nA[甲😀] --> C((汇合))\nB[乙] --> C\n"
+        func surface(width: Double) -> (NSWindow, DiagramTextView, NoteText.EditorCoordinator) {
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: 500))
+            let view = DiagramTextView(diagramLayout: true)
+            view.frame = scroll.bounds
+            view.textContainer?.widthTracksTextView = true
+            scroll.documentView = view
+            let window = NSWindow(contentRect: scroll.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = scroll
+            window.orderFront(nil)
+            let coordinator = NoteText.EditorCoordinator()
+            coordinator.view = view
+            return (window, view, coordinator)
+        }
+        let (leftWindow, left, leftCoordinator) = surface(width: 700)
+        let (rightWindow, right, rightCoordinator) = surface(width: 1100)
+        let leftService = DiagramService(), rightService = DiagramService()
+        defer {
+            leftCoordinator.detach(); rightCoordinator.detach()
+            leftWindow.close(); rightWindow.close()
+        }
+        func input(_ source: String, service: DiagramService) -> NoteText {
+            NoteText(text: source, path: "same.mmd", vault: "test", fontSize: 15, service: service, core: nil) { _, _ in }
+        }
+        leftCoordinator.update(input(source, service: leftService))
+        rightCoordinator.update(input(source, service: rightService))
+        try await wait(left); try await wait(right)
+        let rightScene = try #require(right.blocks.first?.prepared)
+        for generation in 0..<10 {
+            let changed = source.replacingOccurrences(of: "甲😀", with: "更新😀\(generation)")
+            leftCoordinator.update(input(changed, service: leftService))
+            leftCoordinator.schedule(force: true)
+            await Task.yield()
+        }
+        try await wait(left)
+        #expect(left.string.contains("更新😀9"))
+        #expect(left.blocks.first?.prepared?.scene.hitRegions.contains(where: { $0.label == "更新😀9" }) == true)
+        #expect(right.string == source)
+        #expect(right.blocks.first?.prepared === rightScene)
+        #expect(left.blocks.first?.prepared?.scene.width != rightScene.scene.width)
+        leftCoordinator.schedule(force: true)
+        leftCoordinator.detach()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(left.blocks.isEmpty)
+        #expect(leftCoordinator.retainedBlockCount == 0)
+        #expect(right.blocks.first?.prepared === rightScene)
+    }
+
     @Test func utfRangesRejectTruncatedScalarsAndSurrogates() {
         let source = "甲😀\r\né乙"
         let bytes = source.utf8.count
@@ -235,6 +285,22 @@ struct DiagramTests {
         #expect(DiagramService.sourceRange(start: 7, end: UInt64(bytes + 1), in: source) == nil)
         #expect(DiagramService.byteRange(NSRange(location: 2, length: 1), in: source) == nil)
         #expect(DiagramService.byteRange(NSRange(location: 0, length: (source as NSString).length), in: source) == 0..<bytes)
+    }
+
+    @Test func cachedSourceOffsetsValidateEveryScalarBoundary() {
+        let source = "甲😀\r\né乙"
+        let offsets = DiagramSourceOffsets(source)
+        var byte: UInt64 = 0, unit = 0
+        for scalar in source.unicodeScalars {
+            let bytes = UInt64(scalar.utf8.count), units = scalar.utf16.count
+            #expect(offsets.range(start: byte, end: byte + bytes) == NSRange(location: unit, length: units))
+            if bytes > 1 { #expect(offsets.range(start: byte + 1, end: byte + bytes) == nil) }
+            byte += bytes; unit += units
+        }
+        #expect(offsets.range(start: 0, end: byte) == NSRange(location: 0, length: unit))
+        #expect(offsets.range(start: byte, end: byte + 1) == nil)
+        #expect(offsets.range(start: 2, end: 1) == nil)
+        #expect(offsets.range(start: UInt64.max, end: UInt64.max) == nil)
     }
 
     private func wait(_ view: DiagramTextView) async throws {

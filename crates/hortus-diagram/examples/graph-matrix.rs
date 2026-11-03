@@ -12,30 +12,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fonts = SystemFonts::new()?;
     let mut rows = Vec::new();
     let mut stability_rows = Vec::new();
+    let mut window_rows = Vec::new();
     let mut files = fs::read_dir("fixtures/mermaid/flowchart")?
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|s| s == "mmd"))
         .collect::<Vec<_>>();
     files.sort();
-    for file in files {
-        let source = fs::read_to_string(&file)?;
-        let name = file.file_stem().unwrap().to_str().unwrap();
-        if let Ok(Diagram::Graph(graph)) = parse_diagram(&source) {
-            for width in [700.0, 1100.0] {
-                stability_rows.extend(stability(name, &graph, width, &mut fonts));
+    if !args.iter().any(|arg| arg == "--bench-only") {
+        for file in files {
+            let source = fs::read_to_string(&file)?;
+            let name = file.file_stem().unwrap().to_str().unwrap();
+            if let Ok(Diagram::Graph(graph)) = parse_diagram(&source) {
+                window_rows.extend(window_stability(name, &graph, &mut fonts));
+                for width in [700.0, 1100.0] {
+                    stability_rows.extend(stability(name, &graph, width, &mut fonts));
+                }
             }
-        }
-        for width in [700.0, 900.0, 1100.0] {
-            for theme in [Theme::Light, Theme::Dark] {
-                let tag = format!("{name}-{}-{theme:?}", width as u32);
-                let options = LayoutOptions {
-                    width,
-                    theme,
-                    ..LayoutOptions::default()
-                };
-                let result = render(&source, &options, &mut fonts);
-                match result {
+            for width in [700.0, 900.0, 1100.0] {
+                for theme in [Theme::Light, Theme::Dark] {
+                    let tag = format!("{name}-{}-{theme:?}", width as u32);
+                    let options = LayoutOptions {
+                        width,
+                        theme,
+                        ..LayoutOptions::default()
+                    };
+                    let result = render(&source, &options, &mut fonts);
+                    match result {
                     Ok((scene,previous)) => {
                         let mut stable = scene.clone(); stable.metrics.layout_ms=0.0;
                         let baseline=serde_json::to_value(&stable)?;
@@ -46,17 +49,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(error) => rows.push(json!({"name":name,"width":width,"theme":format!("{theme:?}"),"error":error})),
                 }
+                }
             }
         }
+        fs::write(
+            output.join("matrix.json"),
+            serde_json::to_vec_pretty(&rows)?,
+        )?;
+        fs::write(
+            output.join("stability.json"),
+            serde_json::to_vec_pretty(&stability_rows)?,
+        )?;
+        fs::write(
+            output.join("window-stability.json"),
+            serde_json::to_vec_pretty(&window_rows)?,
+        )?;
     }
-    fs::write(
-        output.join("matrix.json"),
-        serde_json::to_vec_pretty(&rows)?,
-    )?;
-    fs::write(
-        output.join("stability.json"),
-        serde_json::to_vec_pretty(&stability_rows)?,
-    )?;
+    if args.iter().any(|arg| arg == "--matrix-only") {
+        return Ok(());
+    }
     let mut bench = Vec::new();
     for count in [20, 50, 100, 200] {
         for seed in [17u64, 42, 2026] {
@@ -91,6 +102,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_vec_pretty(&bench)?,
     )?;
     Ok(())
+}
+
+fn window_stability(name: &str, graph: &Graph, fonts: &mut dyn FontMetrics) -> Vec<Value> {
+    let mut previous: Option<PreviousGraph> = None;
+    let mut rows = Vec::new();
+    for width in [700.0, 900.0, 1100.0, 900.0, 700.0] {
+        let viewport = previous.as_ref().map(|old| GraphViewport {
+            visible: old
+                .nodes
+                .iter()
+                .filter(|n| n.rect.y < 600.0)
+                .map(|n| ViewportAnchor {
+                    node_id: n.node_id.clone(),
+                    screen_center: Point {
+                        x: n.rect.x + n.rect.width / 2.0,
+                        y: n.rect.y + n.rect.height / 2.0,
+                    },
+                })
+                .collect(),
+        });
+        let after = match layout_graph(
+            graph,
+            &LayoutOptions {
+                width,
+                previous: previous.clone(),
+                viewport,
+                ..Default::default()
+            },
+            fonts,
+        ) {
+            Ok(after) => after,
+            Err(error) => {
+                rows.push(json!({"name": name, "width": width, "error": error.to_string()}));
+                continue;
+            }
+        };
+        if let Some(before) = &previous {
+            let common = before
+                .nodes
+                .iter()
+                .filter_map(|a| {
+                    after
+                        .previous
+                        .nodes
+                        .iter()
+                        .find(|b| a.node_id == b.node_id)
+                        .map(|b| (a, b))
+                })
+                .collect::<Vec<_>>();
+            let deltas = common
+                .iter()
+                .map(|(a, b)| {
+                    (
+                        b.rect.x + b.rect.width / 2.0 - a.rect.x - a.rect.width / 2.0,
+                        b.rect.y + b.rect.height / 2.0 - a.rect.y - a.rect.height / 2.0,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut distances = deltas.iter().map(|(x, y)| x.hypot(*y)).collect::<Vec<_>>();
+            distances.sort_by(f64::total_cmp);
+            let anchor = common
+                .iter()
+                .position(|(a, _)| a.rect.y < 600.0)
+                .map(|i| deltas[i]);
+            let mut anchored = deltas
+                .iter()
+                .map(|(x, y)| anchor.map_or(0.0, |(dx, dy)| (x - dx).hypot(y - dy)))
+                .collect::<Vec<_>>();
+            anchored.sort_by(f64::total_cmp);
+            let groups = common.iter().filter(|(a, b)| a.group != b.group).count();
+            rows.push(json!({"name":name,"from_width":before.width,"width":width,"nodes":common.len(),"median_displacement_px":distances.get(distances.len()/2),"max_displacement_px":distances.last(),"first_visible_anchor_compensated_median_px":anchored.get(anchored.len()/2),"first_visible_anchor_compensated_max_px":anchored.last(),"group_changes":groups,"row_band_changes":groups,"reason":after.metrics.stability_reason,"geometry":geometry(&after.scene)}));
+        }
+        previous = Some(after.previous);
+    }
+    rows
 }
 fn render(
     source: &str,

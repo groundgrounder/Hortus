@@ -52,10 +52,16 @@ struct DiagramLineKey: Hashable {
     }
 }
 
+struct DiagramDrawing {
+    let bounds: CGRect
+    let paths: [CGPath]
+}
+
 /// CoreText 对象不可变，可在后台准备，主线程只提交绘制指令。
 final class PreparedScene: @unchecked Sendable {
     let scene: DiagramScene
     let lines: [(DiagramText, CTLine)]
+    let drawings: [DiagramDrawing?]
     let payloadBytes: Int
     let sourceRanges: [String: NSRange]
     let edgeRanges: [UInt64: NSRange]
@@ -66,13 +72,14 @@ final class PreparedScene: @unchecked Sendable {
         self.payloadBytes = payloadBytes
         self.sourceRanges = sourceRanges; self.edgeRanges = edgeRanges; self.edgeLabels = edgeLabels
         acceptsInteraction = true
+        drawings = scene.primitives.map(SceneRenderer.prepare)
         lines = scene.primitives.compactMap { primitive in
             if case let .text(span) = primitive { return (span, lineProvider(span)) }
             return nil
         }
     }
     private init(previous: PreparedScene) {
-        scene = previous.scene; lines = previous.lines; payloadBytes = previous.payloadBytes
+        scene = previous.scene; lines = previous.lines; drawings = previous.drawings; payloadBytes = previous.payloadBytes
         sourceRanges = [:]; edgeRanges = [:]; edgeLabels = previous.edgeLabels
         acceptsInteraction = false
     }
@@ -182,15 +189,32 @@ enum SceneRenderer {
         }
     }
 
+    /// CGPath 与裁剪包络在后台准备；窗口绘制只提交不可变几何。
+    static func prepare(_ primitive: ScenePrimitive) -> DiagramDrawing? {
+        switch primitive {
+        case let .roundedRect(rect, radius, _):
+            return DiagramDrawing(bounds: rect.cgRect, paths: [CGPath(roundedRect: rect.cgRect, cornerWidth: radius, cornerHeight: radius, transform: nil)])
+        case let .graphShape(rect, _, outline, details, _, _, width):
+            return DiagramDrawing(bounds: rect.cgRect.insetBy(dx: -width, dy: -width),
+                                  paths: [path(outline, closed: true)] + details.map { path($0) })
+        case let .graphPath(_, radius, points, _, _, _, _, _, _, _, _, _):
+            guard let first = points.first else { return nil }
+            var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
+            for point in points { minX = min(minX, point.x); maxX = max(maxX, point.x); minY = min(minY, point.y); maxY = max(maxY, point.y) }
+            return DiagramDrawing(bounds: CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY).insetBy(dx: -12, dy: -12), paths: [roundedPath(points, radius: radius)])
+        default: return nil
+        }
+    }
+
     static func draw(_ prepared: PreparedScene, in context: CGContext) {
         context.saveGState()
         let clip = context.boundingBoxOfClipPath
-        for primitive in prepared.scene.primitives {
+        for (index, primitive) in prepared.scene.primitives.enumerated() {
             switch primitive {
-            case let .roundedRect(rect, radius, color):
-                guard rect.cgRect.intersects(clip) else { continue }
+            case let .roundedRect(_, _, color):
+                guard let drawing = prepared.drawings[index], drawing.bounds.intersects(clip) else { continue }
                 context.setFillColor(color.cgColor)
-                context.addPath(CGPath(roundedRect: rect.cgRect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+                context.addPath(drawing.paths[0])
                 context.fillPath()
             case let .line(from, to, width, color):
                 let bounds = CGRect(x: min(from.x, to.x), y: min(from.y, to.y),
@@ -201,32 +225,28 @@ enum SceneRenderer {
                 context.move(to: from.cgPoint)
                 context.addLine(to: to.cgPoint)
                 context.strokePath()
-            case let .graphShape(rect, _, outline, details, fill, stroke, width):
-                guard rect.cgRect.insetBy(dx: -width, dy: -width).intersects(clip) else { continue }
+            case let .graphShape(_, _, _, _, fill, stroke, width):
+                guard let drawing = prepared.drawings[index], drawing.bounds.intersects(clip) else { continue }
                 context.setFillColor(fill.cgColor)
                 context.setStrokeColor(stroke.cgColor)
                 context.setLineWidth(width)
                 context.setLineDash(phase: 0, lengths: [])
-                context.addPath(path(outline, closed: true))
+                context.addPath(drawing.paths[0])
                 context.drawPath(using: .fillStroke)
-                for points in details { context.addPath(path(points)); context.strokePath() }
+                for detail in drawing.paths.dropFirst() { context.addPath(detail); context.strokePath() }
             case let .labelBackground(_, rect, color):
                 guard rect.cgRect.intersects(clip) else { continue }
                 context.setFillColor(color.cgColor)
                 context.fill(rect.cgRect)
-            case let .graphPath(_, radius, points, _, _, _, _, line, start, end, color, width):
-                guard let first = points.first else { continue }
-                let bounds = points.reduce(CGRect(origin: first.cgPoint, size: .zero)) { bounds, point in
-                    bounds.union(CGRect(origin: point.cgPoint, size: .zero))
-                }.insetBy(dx: -12, dy: -12)
-                guard bounds.intersects(clip) else { continue }
+            case let .graphPath(_, _, points, _, _, _, _, line, start, end, color, width):
+                guard let drawing = prepared.drawings[index], drawing.bounds.intersects(clip) else { continue }
                 context.setStrokeColor(color.cgColor)
                 context.setFillColor(color.cgColor)
                 context.setLineWidth(width)
                 context.setLineJoin(.round)
                 context.setLineCap(.round)
                 context.setLineDash(phase: 0, lengths: line == "Dotted" ? [4, 4] : [])
-                context.addPath(roundedPath(points, radius: radius))
+                context.addPath(drawing.paths[0])
                 context.strokePath()
                 context.setLineDash(phase: 0, lengths: [])
                 marker(start, points: points, atStart: true, in: context)

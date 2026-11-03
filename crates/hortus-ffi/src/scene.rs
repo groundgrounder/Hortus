@@ -110,6 +110,7 @@ pub struct DiagramEdgeAnchor {
 }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct DiagramPrevious {
+    pub direction: u32,
     pub width: f64,
     pub nodes: Vec<DiagramAnchor>,
     pub edges: Vec<DiagramEdgeAnchor>,
@@ -133,6 +134,7 @@ pub struct DiagramGraphMetrics {
 impl From<hortus_diagram::PreviousGraph> for DiagramPrevious {
     fn from(value: hortus_diagram::PreviousGraph) -> Self {
         Self {
+            direction: value.direction as u32,
             width: value.width,
             nodes: value
                 .nodes
@@ -158,6 +160,12 @@ impl From<hortus_diagram::PreviousGraph> for DiagramPrevious {
 impl From<DiagramPrevious> for hortus_diagram::PreviousGraph {
     fn from(value: DiagramPrevious) -> Self {
         Self {
+            direction: match value.direction {
+                1 => hortus_diagram::Direction::BottomToTop,
+                2 => hortus_diagram::Direction::LeftToRight,
+                3 => hortus_diagram::Direction::RightToLeft,
+                _ => hortus_diagram::Direction::TopToBottom,
+            },
             width: value.width,
             nodes: value
                 .nodes
@@ -417,7 +425,7 @@ impl SceneData {
     ) -> Self {
         self.wire_bytes += identity.document.len() as u64;
         if let Some(value) = &previous {
-            self.wire_bytes += 16
+            self.wire_bytes += 20
                 + value
                     .nodes
                     .iter()

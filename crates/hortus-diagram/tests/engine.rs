@@ -828,6 +828,40 @@ fn invalid_widths_and_very_deep_trees() {
     assert!(!scene.metrics.horizontal_overflow);
 }
 
+#[test]
+fn graph_chain_keeps_balanced_rows_after_window_resize() {
+    let source = include_str!("../../../fixtures/mermaid/flowchart/erikson.mmd");
+    let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
+        panic!("LR chain must preserve graph direction");
+    };
+    let mut previous = None;
+    for width in [1100.0, 700.0, 1100.0] {
+        let result = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width,
+                previous,
+                ..LayoutOptions::default()
+            },
+            &mut DeterministicMetrics,
+        )
+        .unwrap();
+        let hits = &result.scene.hit_regions;
+        assert_eq!(hits.len(), 8);
+        for row in hits.chunks(4) {
+            assert!(
+                row.iter().all(|hit| hit.rect.y == row[0].rect.y),
+                "width={width} rows={hits:?}"
+            );
+            assert!(row.windows(2).all(|pair| pair[0].rect.x < pair[1].rect.x));
+        }
+        assert!(hits[0].rect.y < hits[4].rect.y);
+        assert_eq!(result.metrics.node_overlaps, 0);
+        assert!(!result.metrics.horizontal_overflow);
+        previous = Some(result.previous);
+    }
+}
+
 fn sample(prefix: &str) -> Option<String> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/mermaid/tree");
     let path = std::fs::read_dir(dir)
