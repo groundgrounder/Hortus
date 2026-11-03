@@ -11,11 +11,11 @@ struct HortusApp: App {
     private var layout: Layout { application.active?.layout ?? application.initial.layout }
 
     var body: some Scene {
-        WindowGroup("Hortus", id: "main", for: String.self) { $id in
-            if let record = application.record(id) {
-                VaultWindowRoot(application: application, record: record, delegate: delegate)
-            }
+        // 首窗只有一个固定 Scene；附加窗只响应显式 openWindow，不参与系统自动恢复。
+        Window("Hortus", id: "main") {
+            VaultWindowRoot(application: application, record: application.initial, delegate: delegate)
         }
+        .restorationBehavior(.disabled)
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
@@ -76,6 +76,16 @@ struct HortusApp: App {
                 Button("Reset Layout") { layout.reset() }
             }
         }
+
+        WindowGroup("Hortus", id: "vault", for: String.self) { $id in
+            if let record = application.record(id) {
+                VaultWindowRoot(application: application, record: record, delegate: delegate)
+            }
+        }
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
+        .defaultSize(width: 1320, height: 840)
+        .windowToolbarStyle(.unified(showsTitle: false))
     }
 
     private func find(_ action: NSTextFinder.Action) {
@@ -423,7 +433,7 @@ private struct VaultWindowRoot: View {
             } message: { Text(record.workspace.error ?? "") }
             .task {
                 let open = openWindow
-                application.showWindow = { id in open(id: "main", value: id) }
+                application.showWindow = { id in open(id: "vault", value: id) }
                 delegate.application = application
                 let first = record === application.initial
                 if first {

@@ -70,13 +70,13 @@ final class ApplicationWorkspace {
         records.first { $0.id == (id ?? bootstrapID) }
     }
 
-    func start() async {
+    func start(arguments args: [String] = ProcessInfo.processInfo.arguments, core providedCore: WorkspaceCore? = nil) async {
         guard !started else { return }
         started = true
         restoring = true
         defer { restoring = false; ready = true; scheduleSessionSave() }
         do {
-            let service = try await Task.detached { try WorkspaceCore() }.value
+            let service = try await Task.detached { try providedCore ?? WorkspaceCore() }.value
             core = service
             let values = try await Task.detached {
                 (try service.layoutJson(), try service.sessionJson(), try service.fontSize(), try service.defaultView())
@@ -91,7 +91,6 @@ final class ApplicationWorkspace {
             }
             if let saved = session.default_visible, !saved.isEmpty { defaultVisible = saved }
             configure(initial)
-            let args = ProcessInfo.processInfo.arguments
             inspectionLaunch = !Self.shouldPersistSession(arguments: args, cacheOverride: ProcessInfo.processInfo.environment["HORTUS_CACHE_DIR"] != nil)
             if let arg = args.first(where: { $0.hasPrefix("--vault=") }) {
                 await openNow(String(arg.dropFirst("--vault=".count)), source: initial.workspace)

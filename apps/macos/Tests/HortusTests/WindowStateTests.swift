@@ -161,6 +161,47 @@ struct WindowStateTests {
         #expect(ApplicationWorkspace.shouldPersistSession(arguments: [], cacheOverride: false))
     }
 
+    @Test func startupReusesFirstRecordAndOnlyRequestsAdditionalSessionWindows() async throws {
+        _ = NSApplication.shared
+        let fixture = try CloseTests.Fixture()
+        defer { fixture.cleanup() }
+        let secondVault = fixture.directory.appendingPathComponent("second")
+        try FileManager.default.createDirectory(at: secondVault, withIntermediateDirectories: true)
+        let windows = [fixture.vault, secondVault].map { $0.resolvingSymlinksInPath().path }.enumerated().map { index, path in
+            WindowState(id: "saved-\(index)", path: path, tabs: [], selected: nil, views: [:], frame: nil)
+        }
+        func normalized(_ path: String?) -> String? {
+            path.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+        }
+        for mode in ["explicit", "restore", "empty"] {
+            let saved = SessionState(recent: [], windows: windows)
+            try fixture.core.saveWindowSession(json: String(decoding: JSONEncoder().encode(saved), as: UTF8.self))
+            let application = ApplicationWorkspace()
+            let first = application.initial
+            var requested: [String] = []
+            application.showWindow = { requested.append($0) }
+            let args = mode == "explicit" ? ["--vault=" + fixture.vault.path] : mode == "empty" ? ["--empty"] : []
+            await application.start(arguments: args, core: fixture.core)
+            #expect(application.ready)
+            #expect(application.initial === first)
+            #expect(application.record(nil) === first)
+            if mode == "restore" {
+                #expect(application.records.map(\.id) == windows.map(\.id))
+                #expect(requested == ["saved-1"])
+                #expect(application.records.map { normalized($0.workspace.root) } == windows.map { normalized($0.path) })
+            } else {
+                #expect(application.records.count == 1 && requested.isEmpty)
+                #expect(normalized(first.workspace.root) == (mode == "empty" ? nil : normalized(windows[0].path)))
+            }
+            let count = application.records.count
+            await application.start(arguments: args, core: fixture.core)
+            #expect(application.records.count == count)
+            await withCheckedContinuation { continuation in
+                application.beginShutdownCleanup { continuation.resume() }
+            }
+        }
+    }
+
     @Test func groupsAreSharedButSizesAndVisibilityBelongToEachWindow() throws {
         let arrangement = PanelArrangement()
         let a = Layout(arrangement: arrangement), b = Layout(arrangement: arrangement)
