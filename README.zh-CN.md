@@ -15,7 +15,7 @@ Hortus 是原生 Markdown 知识库阅读器，让大幅 Mermaid 树形图保持
 - **阅读为主，agent 写入。** 在终端里让 agent 修改 Markdown 文件，Hortus 原地刷新，便于边读边整理知识库。需要自己编辑时按 ⌘E 切换。
 - **笔记就是普通文件。** 直接打开 Markdown 文件夹，也能打开已有的 Obsidian 库。支持双链、嵌入、任务列表、callout 和 frontmatter；应用状态保存在笔记文件夹之外。LaTeX 公式（行内 $…$ 和块级 $$…$$）在阅读视图里原生排版。
 
-可以先打开原创的 [CC0 演示库](fixtures/demo-vault/README.md)。在 Apple M3 MacBook Air（macOS 27.2）上，Hortus 0.1.3 安装占用 13.7 MiB，启动后约 0.4 秒显示笔记，打开演示大图时只有一个进程、内存约 150 MiB。每项取五次测量的中位数，测法见 `tools/compare-obsidian.py`。
+可以先打开原创的 [CC0 演示库](fixtures/demo-vault/README.md)。在 Apple M3 MacBook Air（macOS 27.2）上，Hortus 0.1.3 安装占用 14.1 MiB，启动后约 0.5 秒显示笔记，打开演示大图时只有一个进程、内存约 160 MiB。每项取五次测量的中位数，测法见 `tools/compare-obsidian.py`。
 
 ## 安装
 
