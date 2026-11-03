@@ -11,6 +11,10 @@ enum MultiWindowInspection {
         do {
             guard let application = workspace.application else { throw CocoaError(.coderValueNotFound) }
             let args = ProcessInfo.processInfo.arguments
+            if args.contains("--multi-window-tab-drag") {
+                try await TabDragInspection.run(application, output: output)
+                return
+            }
             let restoring = args.contains("--multi-window-restore")
             var result: [String: Any] = [:]
             if args.contains("--multi-window-edge") {

@@ -4,6 +4,38 @@ import Testing
 
 @Suite @MainActor
 struct WindowStateTests {
+    @Test func sameVaultOpenRoutesToExistingDocumentAndSnapshotKeepsLastVisibleWrite() async throws {
+        _ = NSApplication.shared
+        let fixture = try CloseTests.Fixture()
+        defer { fixture.cleanup() }
+        let application = ApplicationWorkspace()
+        let first = application.initial
+        let second = WindowRecord(layout: Layout(arrangement: application.arrangement))
+        application.records.append(second)
+        let context = VaultContext(handle: try fixture.core.openVault(path: fixture.vault.path))
+        for record in [first, second] {
+            record.workspace.configure(application: application, core: fixture.core, layout: record.layout)
+            record.workspace.context = context
+        }
+        first.workspace.tabs = [NoteTab(path: "note.md", document: fixture.document, loading: false)]
+        first.workspace.selected = "note.md"
+        second.workspace.openSearchResult(path: "note.md", start: 1, length: 1)
+        #expect(second.workspace.tabs.isEmpty)
+        #expect(application.activeID == first.id)
+        #expect(fixture.document.sourceAnchor == 1)
+        #expect(fixture.document.sourceSelectionLength == 1)
+
+        // 后写者在 records 的前面：遍历快照不能把旧值写回来。
+        second.layout.visible[.left] = true
+        application.layoutChanged(second.workspace)
+        first.layout.visible[.left] = false
+        application.layoutChanged(first.workspace)
+        for _ in 0..<3 {
+            #expect(application.snapshot().recent.first?.visible?["left"] == false)
+        }
+        await context.close()
+    }
+
     @Test func explicitLaunchProtectsRealSessionAndIsolatedLaunchCanRoundTrip() {
         for arguments in [["--empty"], ["--vault=/public", "--note=same.md"]] {
             #expect(!ApplicationWorkspace.shouldPersistSession(arguments: arguments, cacheOverride: false))
