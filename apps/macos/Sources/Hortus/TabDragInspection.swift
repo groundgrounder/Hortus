@@ -3,7 +3,7 @@ import AppKit
 import Darwin
 import ScreenCaptureKit
 
-/// 同库专项通过真实鼠标事件走标签入口；生命周期循环另用同一提交入口。
+/// 以 CGEvent 驱动窗口标签操作并核对释放计数。
 @MainActor
 enum TabDragInspection {
     private static var stage = "start"
