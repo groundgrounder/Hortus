@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P1-03：真实窗口、折叠重启、源码回退、库只读、重排/内存/退出及 CPU。"""
+"""P1-31：一般 flowchart 的真实窗口、源码命中、无障碍和性能验收。"""
 import argparse
 import hashlib
 import json
@@ -16,6 +16,8 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / 'build/Hortus.app/Contents/MacOS/Hortus'
 SAMPLE = ROOT / 'fixtures/vault-sample'
+MEDIA_ROOT = ROOT / 'target/reports/diagram-view/media'
+PRIVATE_ROOT = Path(tempfile.gettempdir()) / 'hortus-diagram-private'
 SPEC = spec_from_file_location('toolbar_check', ROOT / 'tools/check-tabs-in-toolbar.py')
 HELPERS = module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPERS)
@@ -29,13 +31,15 @@ def inventory(root):
 
 def inspect(base, output, name, vault, note, extra=(), screenshot=False):
     output.mkdir(parents=True, exist_ok=True)
+    media = PRIVATE_ROOT if output.is_relative_to(PRIVATE_ROOT) else MEDIA_ROOT
+    media.mkdir(parents=True, exist_ok=True)
     target = output / f'{name}.json'
     target.unlink(missing_ok=True)
     appearance = [] if '--dark' in extra else ['--light']
     arguments = [str(APP), f'--vault={vault}', f'--note={note}', *appearance,
                  f'--diagram-inspection={target}', *extra]
     if screenshot:
-        arguments += [f'--snapshot={output / (name + ".png")}']
+        arguments += [f'--snapshot={media / (name + ".png")}']
     # 图表源码投影的检查直接进入编辑视图，重开标签也保持同一模式。
     config = base / 'config'
     config.mkdir(parents=True, exist_ok=True)
@@ -53,6 +57,7 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
     data = json.loads(target.read_text())
     assert data['source_preserved'] and data['textkit2'], data
     assert data['accessibility_nodes'] == data['visible_nodes'], data
+    assert data['accessibility_edges'] >= 0, data
     assert data['accessibility_expanded_valid'], data
     assert data['custom_fragments'] >= data['diagrams'], data
     assert data['error_fragments'] == len(data['reasons']), data
@@ -74,40 +79,60 @@ def scenarios(base, output):
     assert flow['visible_nodes'] == 3, flow
     dark, _ = inspect(base / 'dark', output, 'dark', SAMPLE, '欢迎.md', ['--dark'], screenshot=True)
     assert dark['dark'], dark
-    folded, _ = inspect(base / 'fold', output, 'collapsed', SAMPLE, '欢迎.md', ['--diagram-click'], True)
-    assert folded['visible_nodes'] == 1 and folded['badge_count'] > 0, folded
-    restored, _ = inspect(base / 'fold', output, 'restored', SAMPLE, '欢迎.md')
-    assert restored['visible_nodes'] == 1 and restored['collapsed_nodes'] == 1, restored
-    expanded, _ = inspect(base / 'fold', output, 'expanded', SAMPLE, '欢迎.md', ['--diagram-click'])
-    assert expanded['visible_nodes'] == 4 and expanded['collapsed_nodes'] == 0, expanded
+    # 折叠仍由既有 mindmap UI 测试覆盖；本脚本聚焦一般 flowchart 的原生窗口验收。
     assert inventory(SAMPLE) == before, '示例库被改写'
     vault = base / 'errors'
     vault.mkdir()
     cases = [('unsupported', 'sequenceDiagram\nA->>B: Hi', '暂不支持'),
-             ('not-tree', 'flowchart TB\nA --> C\nB --> C', '不是树形结构'),
+             ('not-tree', 'flowchart TB\nA --> C\nB --> C', None),
              ('syntax', 'flowchart TB\nA --> B\nB ??? C', '第 3 行语法错误')]
     for name, source, expected in cases:
         (vault / f'{name}.mmd').write_text(source)
         data, _ = inspect(base / name, output, name, vault, f'{name}.mmd', screenshot=True)
-        assert data['diagrams'] == 0 and data['reasons'][0].startswith(expected), data
+        if name == 'not-tree':
+            assert data['diagrams'] == 1 and data['visible_nodes'] == 3 and not data['reasons'], data
+            assert data['accessibility_edges'] == 2, data
+        else:
+            assert data['diagrams'] == 0 and data['reasons'][0].startswith(expected), data
     (vault / 'mixed.md').write_text('前文😀\n\n```mermaid\nmindmap\n  Root\n    First\n```\n中间\n~~~mermaid\nflowchart TB\nA --> B\n~~~\n末尾\n')
     mixed, _ = inspect(base / 'mixed', output, 'mixed', vault, 'mixed.md')
     assert mixed['diagrams'] == 2 and mixed['visible_nodes'] == 4, mixed
+    public_flowcharts = [
+        'chinese-labels.mmd', 'class-styles.mmd', 'connectors-shapes.mmd',
+        'directions-bt.mmd', 'fanout.mmd', 'forest.mmd', 'graph-syntax.mmd',
+        'identity.mmd', 'merge-diamond.mmd', 'research.mmd',
+        'dense-40.mmd', 'dense-dag.mmd', 'erikson.mmd',
+    ]
+    flowchart_output = output / 'flowchart'
+    for name in public_flowcharts:
+        sample = ROOT / 'fixtures/mermaid/flowchart' / name
+        for width in [700, 1100]:
+            for theme in ['light', 'dark']:
+                tag = f'{sample.stem}-{width}-{theme}'
+                data, _ = inspect(base / tag, flowchart_output, tag, sample.parent, sample.name,
+                                  [f'--{theme}', f'--diagram-width={width}'], screenshot=True)
+                if name == 'class-styles.mmd':
+                    # stroke-width/dash 超出基本 hex fill/stroke 范围，须明确报错。
+                    assert data['diagrams'] == 0 and data['reasons'], data
+                else:
+                    assert data['diagrams'] == 1 and data['visible_nodes'] > 0 and not data['reasons'], data
+                    assert all(abs(w - width) < .5 for w in data['scene_widths']), data
+                    assert data['accessibility_nodes'] == data['visible_nodes'], data
     private = ROOT / 'fixtures/mermaid/tree'
     files = sorted(private.glob('04-*.md')) if private.exists() else []
     if files:
         private_before = inventory(private)
         sample = files[0]
-        performance_runs = [inspect(base / f'private-{index}', output / 'private', f'04-default-{index}',
+        performance_runs = [inspect(base / f'private-{index}', PRIVATE_ROOT, f'04-default-{index}-private',
                                     private, sample.name, ['--diagram-resize'], index == 0)[0]
                             for index in range(3)]
         performance = performance_runs[0]
-        memory_data, _ = inspect(base / 'private-memory', output / 'private', 'memory-only', private, sample.name,
+        memory_data, _ = inspect(base / 'private-memory', PRIVATE_ROOT, 'memory-only-private', private, sample.name,
                                 ['--diagram-memory'])
         assert inventory(private) == private_before, '私人样本被改写'
     else:
-        print('私人 04 样本缺失：跳过截图，使用最大公开夹具执行性能/内存验收', flush=True)
-        sample = max((ROOT / 'fixtures/mermaid/mindmap').glob('*.mmd'), key=lambda path: path.stat().st_size)
+        print('私人 04 样本缺失：跳过该样本，使用公开 dense-40 Graph 执行性能/内存验收', flush=True)
+        sample = ROOT / 'fixtures/mermaid/flowchart/dense-40.mmd'
         performance_runs = [inspect(base / f'performance-{index}', output, f'public-performance-{index}',
                                     sample.parent, sample.name, ['--diagram-resize'], index == 0)[0]
                             for index in range(3)]
@@ -143,13 +168,21 @@ def scenarios(base, output):
 
 
 def main():
+    global MEDIA_ROOT, PRIVATE_ROOT
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/diagram-view')
+    parser.add_argument('--media-output', type=Path, default=MEDIA_ROOT)
+    parser.add_argument('--private-output', type=Path, default=PRIVATE_ROOT)
     parser.add_argument('--skip-cpu', action='store_true')
     parser.add_argument('--cpu-only', action='store_true')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    MEDIA_ROOT = args.media_output.resolve()
+    PRIVATE_ROOT = args.private_output.resolve()
+    PRIVATE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    PRIVATE_ROOT.chmod(0o700)
+    MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='hortus-diagrams-') as directory:
         base = Path(directory)
         if not args.cpu_only:
@@ -157,7 +190,8 @@ def main():
         if not args.skip_cpu:
             empty = HELPERS.idle_cpu(base / 'cpu-empty', [])
             print('未打开库的 30 s CPU 采样完成', flush=True)
-            opened = HELPERS.idle_cpu(base / 'cpu-opened', [f'--vault={SAMPLE}', '--note=欢迎.md'])
+            graph_vault = ROOT / 'fixtures/mermaid/flowchart'
+            opened = HELPERS.idle_cpu(base / 'cpu-opened', [f'--vault={graph_vault}', '--note=dense-40.mmd'])
             difference = opened['average_cpu_percent'] - empty['average_cpu_percent']
             result = {'empty': empty, 'opened': opened, 'difference_percentage_points': difference}
             (output / 'idle-cpu.json').write_text(json.dumps(result, indent=2) + '\n')

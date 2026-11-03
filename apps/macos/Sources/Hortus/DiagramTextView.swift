@@ -91,7 +91,7 @@ struct NoteText: NSViewRepresentable {
         guard let view = scroll.documentView as? DiagramTextView else { return }
         view.undoManager?.removeAllActions()
         view.editingCoordinator = nil
-        view.onWidthOrThemeChange = nil; view.onToggle = nil; view.onEditSource = nil
+        view.onWidthOrThemeChange = nil; view.onToggle = nil; view.onEditSource = nil; view.onSourceRange = nil
         view.onCompositionState = nil; view.onCommit = nil
         view.delegate = nil; view.textStorage?.delegate = nil
         for diagram in view.diagramViews.values { diagram.detach() }
@@ -162,6 +162,7 @@ struct NoteText: NSViewRepresentable {
             view.onWidthOrThemeChange = { [weak self] in self?.schedule(); self?.scheduleStyles(force: true) }
             view.onToggle = { [weak self] ordinal, id in self?.toggle(ordinal: ordinal, id: id) }
             view.onEditSource = { [weak self] ordinal in self?.editSource(ordinal) }
+            view.onSourceRange = { [weak self] ordinal, range in self?.locateSource(ordinal, range: range) }
             view.onCompositionState = { [weak self] marked in self?.document?.compositionChanged(marked) }
             view.onCommit = { [weak self] in self?.textDidChange(Notification(name: NSText.didChangeNotification)) }
             input.document?.onReload = { [weak self] text in self?.reload(text, preserve: true) }
@@ -284,6 +285,15 @@ struct NoteText: NSViewRepresentable {
                 self.selectionChanged()
             }
         }
+        private func locateSource(_ ordinal: UInt32, range: NSRange) {
+            guard let view, !view.compositionActive, let block = view.blocks.first(where: { $0.ordinal == ordinal }),
+                  block.revision == document?.revision ?? 0, range.location >= block.range.location,
+                  NSMaxRange(range) <= NSMaxRange(block.range) else { return }
+            view.window?.makeFirstResponder(view)
+            view.setSelectedRange(range)
+            selectionChanged()
+            view.scrollRangeToVisible(range)
+        }
         private func editSource(_ ordinal: UInt32) {
             guard let view, !view.compositionActive, let block = view.blocks.first(where: { $0.ordinal == ordinal }) else { return }
             view.window?.makeFirstResponder(view)
@@ -315,17 +325,22 @@ struct NoteText: NSViewRepresentable {
                         source = snapshot.text
                         let wire = try await document.io.perform { try $0.mediaBlocks(width: width, size: input.fontSize) }
                         media = await LocalImageCache.shared.prepare(wire, vault: input.vault)
-                        loaded = try await input.service.blocks(snapshot: snapshot, vault: input.vault, note: input.path, core: input.core)
+                        loaded = try await input.service.blocks(snapshot: snapshot, vault: input.vault, note: input.path, core: input.core, documentIdentity: document.diagramIdentity)
                     } else {
                         source = input.text
                         loaded = try await input.service.blocks(source: source, mmd: input.path.lowercased().hasSuffix(".mmd"),
                                                                  vault: input.vault, note: input.path, core: input.core)
                     }
                     for index in loaded.indices {
-                        if let old = blocks.first(where: { $0.ordinal == loaded[index].ordinal }) { loaded[index].collapsed = old.collapsed }
+                        if let old = blocks.first(where: { $0.ordinal == loaded[index].ordinal }) { loaded[index].inherit(old) }
+                    }
+                    for index in loaded.indices {
+                        if let diagram = view.diagramViews[loaded[index].ordinal] {
+                            loaded[index].viewport = diagram.viewportAnchors()
+                        }
                     }
                     let rendered = await input.service.render(source: source, mmd: input.path.lowercased().hasSuffix(".mmd"),
-                                                               blocks: loaded, width: width, dark: dark)
+                                                               blocks: loaded, width: width, dark: dark, requestGeneration: UInt64(token), fontGeneration: input.fontSize.bitPattern)
                     guard !Task.isCancelled, generation == token, !view.compositionActive, expected == document?.revision else { return }
                     blocks = rendered
                     suppressSelection = true; view.install(rendered); suppressSelection = false
@@ -612,6 +627,7 @@ final class DiagramTextView: NSTextView {
     weak var editingCoordinator: NoteText.EditorCoordinator?
     var representedPath = ""
     var representedDocument: ObjectIdentifier?
+    private var diagramViewportAnchor: (ordinal: UInt32, nodeID: String, screen: ScenePoint)?
     var sourceTypingAttributes: [NSAttributedString.Key: Any]?
     weak var sourceStyling: SourceStyling?
     override var typingAttributes: [NSAttributedString.Key: Any] {
@@ -691,6 +707,7 @@ final class DiagramTextView: NSTextView {
     var onWidthOrThemeChange: (() -> Void)?
     var onToggle: ((UInt32, String) -> Void)?
     var onEditSource: ((UInt32) -> Void)?
+    var onSourceRange: ((UInt32, NSRange) -> Void)?
     var onCompositionState: ((Bool) -> Void)?
     var onCommit: (() -> Void)?
     var expanded: Set<UInt32> = []
@@ -745,9 +762,12 @@ final class DiagramTextView: NSTextView {
                 if range.location <= block.tailStart { block.tailStart += delta }
                 return block
             }
-            // 受编辑影响的图立即失效；后台重扫前不显示旧图或旧错误。
-            diagramViews.removeValue(forKey: block.ordinal)?.detach()
-            return nil
+            // 后台重扫前保留上次有效图；源码范围在本次编辑后已过期。
+            block.range.length = max(0, block.range.length + delta)
+            if range.location <= block.tailStart { block.tailStart = max(block.range.location, block.tailStart + delta) }
+            block.prepared = block.prepared?.withoutSourceInteraction()
+            if let prepared = block.prepared { diagramViews[block.ordinal]?.update(prepared) }
+            return block.range.length > 0 ? block : nil
         }
         // 组合时仅平移已有投影的范围，不改变展开状态、场景或组合区属性。
         updateProjectionRanges()
@@ -766,6 +786,15 @@ final class DiagramTextView: NSTextView {
         let started = ProcessInfo.processInfo.systemUptime
         defer { installMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1000; recordMainWork(since: started) }
         guard !compositionActive else { return }
+        // 提交时重新取屏幕锚点，避免后台请求期间的主动滚动被旧坐标拉回。
+        diagramViewportAnchor = self.blocks.lazy.compactMap { old in
+            guard let next = blocks.first(where: { $0.ordinal == old.ordinal && $0.documentIdentity == old.documentIdentity }),
+                  next.previous != nil, let view = self.diagramViews[old.ordinal], !view.isHidden,
+                  let anchor = view.viewportAnchors().first(where: { anchor in
+                      next.prepared?.scene.hitRegions.contains(where: { $0.nodeId == anchor.nodeId }) == true
+                  }) else { return nil }
+            return (old.ordinal, anchor.nodeId, anchor.screenCenter)
+        }.first
         let nextProjection: [NSRange] = isReading ? [] : blocks.filter { $0.prepared != nil && !expanded.contains($0.ordinal) }.map(\.range) + projectedMediaParagraphs
         let projectionChanged = diagramStorage?.diagrams != nextProjection
         let geometryChanged = projectionChanged || installedExpanded != expanded || self.blocks.count != blocks.count || zip(self.blocks, blocks).contains { old, new in
@@ -794,6 +823,7 @@ final class DiagramTextView: NSTextView {
                 view.isHidden = true
                 view.onToggle = { [weak self] id in self?.onToggle?(block.ordinal, id) }
                 view.onEditSource = { [weak self] in self?.onEditSource?(block.ordinal) }
+                view.onSourceRange = { [weak self] range in self?.onSourceRange?(block.ordinal, range) }
                 diagramViews[block.ordinal] = view
                 addSubview(view)
             }
@@ -814,6 +844,7 @@ final class DiagramTextView: NSTextView {
             }
             for view in diagramViews.values { view.setFrameSize(CGSize(width: view.prepared.scene.width, height: view.prepared.scene.height)) }
             resizeDocument()
+            restoreDiagramViewport()
             installPhases = ["update_ms": (ProcessInfo.processInfo.systemUptime - started) * 1000]
             needsDisplay = true
             return
@@ -843,6 +874,22 @@ final class DiagramTextView: NSTextView {
                          "enumerate_ms": (enumerated - updated) * 1000,
                          "invalidate_ms": (invalidated - enumerated) * 1000,
                          "layout_ms": (ProcessInfo.processInfo.systemUptime - invalidated) * 1000]
+    }
+    private func restoreDiagramViewport() {
+        guard let anchor = diagramViewportAnchor else { return }
+        diagramViewportAnchor = nil
+        guard let diagram = diagramViews[anchor.ordinal], !diagram.isHidden, let window,
+              let scroll = enclosingScrollView,
+              let hit = diagram.prepared.scene.hitRegions.first(where: { $0.nodeId == anchor.nodeID }) else { return }
+        let current = diagram.convert(CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY), to: self)
+        let target = convert(window.convertPoint(fromScreen: CGPoint(x: anchor.screen.x, y: anchor.screen.y)), from: nil)
+        let clip = scroll.contentView
+        var origin = clip.bounds.origin
+        origin.y += current.y - target.y
+        origin.y = min(max(0, origin.y), max(0, bounds.height - clip.bounds.height))
+        guard abs(origin.y - clip.bounds.origin.y) > 0.25 else { return }
+        clip.scroll(to: origin)
+        scroll.reflectScrolledClipView(clip)
     }
     func configure(_ fragment: NoteLayoutFragment, at offset: Int) {
         fragment.replacement = nil
@@ -1185,6 +1232,7 @@ final class DiagramTextView: NSTextView {
         for math in mathViews where !visibleMath.contains(ObjectIdentifier(math)) { math.isHidden = true }
         oldInlineViews.filter { old in !inlineMathViews.contains { $0 === old } }.forEach { $0.removeFromSuperview() }
         resizeDocument()
+        restoreDiagramViewport()
         recordMediaDisplay()
         layoutPhases = ["native_ms": (native - started) * 1000, "ensure_ms": (ensured - native) * 1000,
                         "enumerate_ms": (enumerated - ensured) * 1000,

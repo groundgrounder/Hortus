@@ -43,6 +43,34 @@ pub enum ScenePrimitive {
         width: f64,
         color: SceneColor,
     },
+    GraphPath {
+        edge_id: u64,
+        corner_radius: f64,
+        points: Vec<ScenePoint>,
+        source_start: u64,
+        source_end: u64,
+        label_start: Option<u64>,
+        label_end: Option<u64>,
+        line: String,
+        start: String,
+        end: String,
+        color: SceneColor,
+        width: f64,
+    },
+    GraphShape {
+        rect: SceneRect,
+        shape: String,
+        outline: Vec<ScenePoint>,
+        details: Vec<Vec<ScenePoint>>,
+        fill: SceneColor,
+        stroke: SceneColor,
+        stroke_width: f64,
+    },
+    LabelBackground {
+        edge_id: u64,
+        rect: SceneRect,
+        color: SceneColor,
+    },
     Text {
         span: SceneText,
     },
@@ -58,8 +86,129 @@ pub struct SceneHit {
     pub source_start: u64,
     pub source_end: u64,
 }
+/// 调用方拥有请求身份与上一场景；解析缓存不保存它们。
+#[derive(Clone, Debug, Default, PartialEq, uniffi::Record)]
+pub struct DiagramIdentity {
+    pub document: String,
+    pub block: u32,
+    pub revision: u64,
+    pub dark: bool,
+    pub font_generation: u64,
+    pub request_generation: u64,
+}
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct DiagramAnchor {
+    pub node_id: String,
+    pub rect: SceneRect,
+    pub rank: u32,
+    pub group: u32,
+}
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct DiagramEdgeAnchor {
+    pub edge_id: u64,
+    pub points: Vec<ScenePoint>,
+}
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct DiagramPrevious {
+    pub width: f64,
+    pub nodes: Vec<DiagramAnchor>,
+    pub edges: Vec<DiagramEdgeAnchor>,
+}
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct DiagramViewportAnchor {
+    pub node_id: String,
+    pub screen_center: ScenePoint,
+}
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct DiagramGraphMetrics {
+    pub ranks: u32,
+    pub roots: u32,
+    pub edges: u32,
+    pub node_overlaps: u32,
+    pub edge_crossings: u32,
+    pub horizontal_overflow: bool,
+    pub retained_nodes: u32,
+    pub stability_reason: String,
+}
+impl From<hortus_diagram::PreviousGraph> for DiagramPrevious {
+    fn from(value: hortus_diagram::PreviousGraph) -> Self {
+        Self {
+            width: value.width,
+            nodes: value
+                .nodes
+                .into_iter()
+                .map(|node| DiagramAnchor {
+                    node_id: node.node_id,
+                    rect: node.rect.into(),
+                    rank: node.rank as u32,
+                    group: node.group as u32,
+                })
+                .collect(),
+            edges: value
+                .edges
+                .into_iter()
+                .map(|edge| DiagramEdgeAnchor {
+                    edge_id: edge.edge_id as u64,
+                    points: edge.points.into_iter().map(Into::into).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+impl From<DiagramPrevious> for hortus_diagram::PreviousGraph {
+    fn from(value: DiagramPrevious) -> Self {
+        Self {
+            width: value.width,
+            nodes: value
+                .nodes
+                .into_iter()
+                .map(|node| hortus_diagram::GraphAnchor {
+                    node_id: node.node_id,
+                    rect: hortus_diagram::Rect {
+                        x: node.rect.x,
+                        y: node.rect.y,
+                        width: node.rect.width,
+                        height: node.rect.height,
+                    },
+                    rank: node.rank as usize,
+                    group: node.group as usize,
+                })
+                .collect(),
+            edges: value
+                .edges
+                .into_iter()
+                .map(|edge| hortus_diagram::EdgeAnchor {
+                    edge_id: edge.edge_id as usize,
+                    points: edge
+                        .points
+                        .into_iter()
+                        .map(|p| Point { x: p.x, y: p.y })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+impl From<hortus_diagram::GraphMetrics> for DiagramGraphMetrics {
+    fn from(value: hortus_diagram::GraphMetrics) -> Self {
+        Self {
+            ranks: value.ranks as u32,
+            roots: value.roots as u32,
+            edges: value.edge_count as u32,
+            node_overlaps: value.node_overlaps as u32,
+            edge_crossings: value.edge_crossings as u32,
+            horizontal_overflow: value.horizontal_overflow,
+            retained_nodes: value.retained_nodes as u32,
+            stability_reason: value.stability_reason,
+        }
+    }
+}
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SceneData {
+    pub schema_version: u32,
+    pub identity: DiagramIdentity,
+    pub previous: Option<DiagramPrevious>,
+    pub graph_metrics: Option<DiagramGraphMetrics>,
     pub width: f64,
     pub height: f64,
     pub primitives: Vec<ScenePrimitive>,
@@ -121,7 +270,7 @@ impl From<HitRegion> for SceneHit {
 }
 impl From<Scene> for SceneData {
     fn from(scene: Scene) -> Self {
-        let mut bytes = 40;
+        let mut bytes = 44 + 33 + 2;
         let primitives = scene
             .primitives
             .into_iter()
@@ -156,6 +305,81 @@ impl From<Scene> for SceneData {
                     bytes += 78 + span.text.len() + span.font_family.len();
                     ScenePrimitive::Text { span: span.into() }
                 }
+                Primitive::GraphPath {
+                    edge_id,
+                    corner_radius,
+                    points,
+                    source_range,
+                    label_range,
+                    line,
+                    start,
+                    end,
+                    color,
+                    width,
+                } => {
+                    let line = format!("{line:?}");
+                    let start = format!("{start:?}");
+                    let end = format!("{end:?}");
+                    bytes += 94
+                        + points.len() * 16
+                        + line.len()
+                        + start.len()
+                        + end.len()
+                        + usize::from(label_range.is_some()) * 16;
+                    ScenePrimitive::GraphPath {
+                        edge_id: edge_id as u64,
+                        corner_radius,
+                        points: points.into_iter().map(Into::into).collect(),
+                        source_start: source_range.start as u64,
+                        source_end: source_range.end as u64,
+                        label_start: label_range.as_ref().map(|range| range.start as u64),
+                        label_end: label_range.as_ref().map(|range| range.end as u64),
+                        line,
+                        start,
+                        end,
+                        color: color.into(),
+                        width,
+                    }
+                }
+                Primitive::GraphShape {
+                    rect,
+                    shape,
+                    outline,
+                    details,
+                    fill,
+                    stroke,
+                    stroke_width,
+                } => {
+                    let shape = format!("{shape:?}");
+                    bytes += 120
+                        + shape.len()
+                        + outline.len() * 16
+                        + details.iter().map(|p| 4 + p.len() * 16).sum::<usize>();
+                    ScenePrimitive::GraphShape {
+                        rect: rect.into(),
+                        shape,
+                        outline: outline.into_iter().map(Into::into).collect(),
+                        details: details
+                            .into_iter()
+                            .map(|p| p.into_iter().map(Into::into).collect())
+                            .collect(),
+                        fill: fill.into(),
+                        stroke: stroke.into(),
+                        stroke_width,
+                    }
+                }
+                Primitive::LabelBackground {
+                    edge_id,
+                    rect,
+                    color,
+                } => {
+                    bytes += 76;
+                    ScenePrimitive::LabelBackground {
+                        edge_id: edge_id as u64,
+                        rect: rect.into(),
+                        color: color.into(),
+                    }
+                }
             })
             .collect();
         let hit_regions = scene
@@ -170,6 +394,10 @@ impl From<Scene> for SceneData {
             })
             .collect();
         Self {
+            schema_version: 2,
+            identity: DiagramIdentity::default(),
+            previous: None,
+            graph_metrics: None,
             width: scene.width,
             height: scene.height,
             primitives,
@@ -177,5 +405,36 @@ impl From<Scene> for SceneData {
             wire_bytes: bytes as u64,
             layout_ms: scene.metrics.layout_ms,
         }
+    }
+}
+
+impl SceneData {
+    pub(crate) fn with_request(
+        mut self,
+        identity: DiagramIdentity,
+        previous: Option<DiagramPrevious>,
+        metrics: Option<DiagramGraphMetrics>,
+    ) -> Self {
+        self.wire_bytes += identity.document.len() as u64;
+        if let Some(value) = &previous {
+            self.wire_bytes += 16
+                + value
+                    .nodes
+                    .iter()
+                    .map(|node| 44 + node.node_id.len() as u64)
+                    .sum::<u64>()
+                + value
+                    .edges
+                    .iter()
+                    .map(|edge| 12 + 16 * edge.points.len() as u64)
+                    .sum::<u64>();
+        }
+        if let Some(value) = &metrics {
+            self.wire_bytes += 29 + value.stability_reason.len() as u64;
+        }
+        self.identity = identity;
+        self.previous = previous;
+        self.graph_metrics = metrics;
+        self
     }
 }

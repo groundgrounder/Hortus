@@ -379,6 +379,29 @@ pub(crate) fn translate(primitives: &mut [Primitive], x: f64, y: f64) {
                 to.x += x;
                 to.y += y;
             }
+            Primitive::GraphPath { points, .. } => {
+                for point in points {
+                    point.x += x;
+                    point.y += y;
+                }
+            }
+            Primitive::GraphShape {
+                rect,
+                outline,
+                details,
+                ..
+            } => {
+                rect.x += x;
+                rect.y += y;
+                for point in outline.iter_mut().chain(details.iter_mut().flatten()) {
+                    point.x += x;
+                    point.y += y;
+                }
+            }
+            Primitive::LabelBackground { rect, .. } => {
+                rect.x += x;
+                rect.y += y;
+            }
             Primitive::Text(span) => {
                 span.baseline.x += x;
                 span.baseline.y += y;
@@ -436,6 +459,12 @@ mod tests {
                         Primitive::RoundedRect { color, .. } => *color = neutral,
                         Primitive::Text(text) => text.color = neutral,
                         Primitive::Line { color, .. } => *color = neutral,
+                        Primitive::GraphPath { color, .. } => *color = neutral,
+                        Primitive::GraphShape { fill, stroke, .. } => {
+                            *fill = neutral;
+                            *stroke = neutral;
+                        }
+                        Primitive::LabelBackground { color, .. } => *color = neutral,
                     }
                     normalized
                 })

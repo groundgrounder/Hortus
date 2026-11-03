@@ -1,6 +1,6 @@
-# 树形 Mermaid 引擎
+# 原生 Mermaid 引擎
 
-`hortus-diagram` 负责解析树形 flowchart / graph 和 mindmap、测量文字、按样稿 v2 分栏，并输出与平台无关的 `Scene`。不依赖 UI，不联网，不写笔记目录。
+`hortus-diagram` 负责解析 flowchart / graph 和 mindmap、测量文字、布局与正交路由，并输出与平台无关的 `Scene`。不依赖 UI，不联网，不写笔记目录。
 
 ## Rust API
 
@@ -31,6 +31,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## CLI
 
+产品入口使用 `parse_diagram` / `parse_diagram_at` 或 `MermaidBlock::parse_diagram`，返回 `Diagram::Tree` 或 `Diagram::Graph`。能够由旧类型完整表达的单根树继续使用原来的 `layout()`；多根、汇合、回路、自环，以及包含方向、形状、边标签或重复边的图使用 `layout_graph()`。上面的 `parse` / `parse_at` / `MermaidBlock::parse` 保持原有 Tree API 和错误行为。
+
+Graph 保留节点、边及标签的 UTF-8 半开范围与稳定身份，支持 TB/TD/BT/LR/RL，矩形、圆角、体育场、子程序、圆柱、圆、双圆、菱形、六边形、不对称及两种平行四边形。支持实线、虚线、粗线、无箭头、单向/双向箭头、圆点/叉端点、链式边、两种边标签和 `A & B --> C`。基本 `classDef` / `class` / `:::` / `style` 接受 hex fill/stroke；subgraph、linkStyle 和其他 CSS 属性返回带范围的明确诊断。
+
+`LayoutOptions.previous` 与 `viewport` 是每次请求的显式输入。它们只用于当前文档的局部保位，不进入解析缓存；调用方负责文档、修订和请求代次校验。Graph 的路由及稳定性指标位于 `GraphScene.metrics`，旧 `Scene` / `Metrics` / `HitRegion` 保持原字段。
+
 在仓库根目录构建：
 
 ```sh
@@ -39,7 +45,7 @@ target/release/hortus mermaid render note.md --out diagram.svg --metrics metrics
 target/release/hortus mermaid render note.md --block 2 --width 1100 --theme dark --collapse A,B --out folded.svg
 ```
 
-默认第 1 个 Mermaid 块、700px、浅色、不折叠。输出文件的父目录须已存在。输入笔记只读；SVG 与 metrics 必须是不同文件，且不能覆盖输入。SVG 使用 Scene 中已计算的坐标及测得的文字宽度，不依赖浏览器换行。
+默认第 1 个 Mermaid 块、700px、浅色、不折叠。CLI 与原生应用共用上述 AST 和布局入口；输入是含 Mermaid 围栏的 Markdown，原生应用另支持裸 `.mmd`。输出文件的父目录须已存在。输入笔记只读；SVG 与 metrics 必须是不同文件，且不能覆盖输入。SVG 使用 Scene 中已计算的坐标及测得的文字宽度，不依赖浏览器换行。
 
 metrics 包含栏数、图高、最小字号、横向溢出、节点重叠数、实际字体、排版耗时和根/分支色相。CLI 的耗时包含本次排版中的整形及按需字体读取，不含解析和系统字体发现。错误退出码为非零。
 

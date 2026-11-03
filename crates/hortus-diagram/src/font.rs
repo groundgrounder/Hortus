@@ -235,10 +235,23 @@ impl SystemFonts {
         let primary_id = candidates.first().copied().expect("系统字体族已验证");
         let mut selected = candidates.iter().copied().find(|id| self.supports(*id, ch));
         if selected.is_none() {
+            // 明确选择彩色 emoji 字体，避免 LastResort 的全字符占位抢先命中。
+            selected = self
+                .db
+                .query(&Query {
+                    families: &[
+                        Family::Name("Apple Color Emoji"),
+                        Family::Name("Noto Color Emoji"),
+                    ],
+                    ..Query::default()
+                })
+                .filter(|id| self.supports(*id, ch));
+        }
+        if selected.is_none() {
             candidates = self
                 .db
                 .faces()
-                .filter(|f| f.weight.0 == 400)
+                .filter(|f| f.weight.0 == 400 && !f.post_script_name.contains("LastResort"))
                 .map(|f| f.id)
                 .collect();
             selected = candidates.into_iter().find(|id| self.supports(*id, ch));

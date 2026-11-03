@@ -89,7 +89,7 @@ fn errors_have_nonzero_exit_codes_and_do_not_write_output() {
     let sandbox = Sandbox::new();
     for (source, diagnostic) in [
         ("sequenceDiagram\nA->>B: message", "Unsupported"),
-        ("flowchart TB\nA --> B --> D\nA --> C --> D", "NotATree"),
+        ("flowchart TB\nsubgraph G\nA --> B\nend", "Syntax"),
         ("flowchart TB\nA[unclosed", "Syntax"),
     ] {
         std::fs::write(

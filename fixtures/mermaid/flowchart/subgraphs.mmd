@@ -1,0 +1,14 @@
+flowchart LR
+  subgraph input[输入阶段]
+    direction TB
+    A[读取] --> B[清洗]
+    subgraph validation[校验]
+      V[类型检查] --> W[数值检查]
+    end
+    B --> V
+  end
+  subgraph output[输出阶段]
+    C[布局] --> D[绘制]
+  end
+  input --> output
+  B -.-> D

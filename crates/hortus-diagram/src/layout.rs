@@ -15,6 +15,8 @@ pub struct LayoutOptions {
     pub width: f64,
     pub theme: Theme,
     pub collapsed: HashSet<String>,
+    pub previous: Option<crate::PreviousGraph>,
+    pub viewport: Option<crate::GraphViewport>,
 }
 
 impl Default for LayoutOptions {
@@ -23,6 +25,8 @@ impl Default for LayoutOptions {
             width: 700.0,
             theme: Theme::Light,
             collapsed: HashSet::new(),
+            previous: None,
+            viewport: None,
         }
     }
 }
@@ -470,6 +474,12 @@ pub fn layout(
         Primitive::RoundedRect { rect, .. } => {
             rect.x < -0.001 || rect.x + rect.width > options.width + 0.001
         }
+        Primitive::GraphShape { rect, .. } | Primitive::LabelBackground { rect, .. } => {
+            rect.x < -0.001 || rect.x + rect.width > options.width + 0.001
+        }
+        Primitive::GraphPath { points, width, .. } => points.iter().any(|point| {
+            point.x - width / 2.0 < -0.001 || point.x + width / 2.0 > options.width + 0.001
+        }),
         Primitive::Line {
             from, to, width, ..
         } => {

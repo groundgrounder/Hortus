@@ -1,3 +1,4 @@
+use crate::graph::{Diagram, EdgeLine, Marker, Shape};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -73,6 +74,7 @@ pub struct MermaidBlock<'a> {
     pub source_range: Range<usize>,
     /// 围栏位于引用块、列表等容器内，`source` 已去掉容器前缀。
     pub container: bool,
+    closed: bool,
     projection: Projection,
 }
 
@@ -99,7 +101,17 @@ impl Projection {
     }
 
     fn map_range(&self, range: Range<usize>) -> Range<usize> {
-        self.map(range.start)..self.map(range.end)
+        let start = self.map(range.start);
+        if range.is_empty() {
+            return start..start;
+        }
+        // 半开范围的末端属于前一段；下一段可能越过容器前缀或被归一化的 CR。
+        let index = self
+            .segments
+            .partition_point(|(at, _, _)| *at < range.end)
+            .saturating_sub(1);
+        let (at, raw, length) = self.segments[index];
+        start..raw + (range.end - at).min(length)
     }
 }
 
@@ -111,6 +123,21 @@ impl MermaidBlock<'_> {
             Ok(mut tree) => {
                 tree.map_ranges(map);
                 Ok(tree)
+            }
+            Err(error) => Err(error.map_ranges(map)),
+        }
+    }
+
+    /// 解析一般 Mermaid 图，返回的节点、边范围指向整篇原文。
+    pub fn parse_diagram(&self) -> Result<Diagram, DiagramError> {
+        if !self.closed {
+            return Err(syntax(self.fence_range.clone(), "fence_unclosed"));
+        }
+        let map = |range| self.projection.map_range(range);
+        match parse_diagram_relative(&self.source) {
+            Ok(mut diagram) => {
+                diagram.map_ranges(map);
+                Ok(diagram)
             }
             Err(error) => Err(error.map_ranges(map)),
         }
@@ -179,6 +206,7 @@ pub fn mermaid_blocks(markdown: &str) -> Vec<MermaidBlock<'_>> {
                         source,
                         source_range,
                         container: builder.container,
+                        closed,
                         projection: Projection {
                             segments: builder.segments,
                             length,
@@ -189,9 +217,25 @@ pub fn mermaid_blocks(markdown: &str) -> Vec<MermaidBlock<'_>> {
             }
             Event::Text(text) if fence.is_some() => {
                 let builder = fence.as_mut().unwrap();
-                builder
-                    .segments
-                    .push((builder.body.len(), range.start, range.len()));
+                let raw = &markdown[range.clone()];
+                if raw != text.as_ref() && raw.replace("\r\n", "\n") == text.as_ref() {
+                    // CommonMark 将 CRLF 变为 LF，不能把归一化后的偏移直接加到原文。
+                    let mut raw_at = range.start;
+                    for (at, ch) in text.char_indices() {
+                        builder
+                            .segments
+                            .push((builder.body.len() + at, raw_at, ch.len_utf8()));
+                        raw_at += if ch == '\n' && markdown[raw_at..].starts_with("\r\n") {
+                            2
+                        } else {
+                            ch.len_utf8()
+                        };
+                    }
+                } else {
+                    builder
+                        .segments
+                        .push((builder.body.len(), range.start, range.len()));
+                }
                 builder.body.push_str(&text);
                 builder.last_text_end = range.end;
             }
@@ -223,6 +267,65 @@ pub fn parse_at(source: &str, offset: usize) -> Result<Tree, DiagramError> {
             Ok(tree)
         }
         Err(error) => Err(error.map_ranges(shift)),
+    }
+}
+
+/// 解析一般 flowchart；普通树继续返回原 Tree 类型和原布局路径。
+pub fn parse_diagram(source: &str) -> Result<Diagram, DiagramError> {
+    parse_diagram_relative(source)
+}
+
+/// 解析相对 `offset` 的图表源码；所有节点、边与错误范围都加上 `offset`。
+pub fn parse_diagram_at(source: &str, offset: usize) -> Result<Diagram, DiagramError> {
+    let shift = |range: Range<usize>| range.start + offset..range.end + offset;
+    match parse_diagram_relative(source) {
+        Ok(mut diagram) => {
+            diagram.map_ranges(shift);
+            Ok(diagram)
+        }
+        Err(error) => Err(error.map_ranges(shift)),
+    }
+}
+
+fn parse_diagram_relative(source: &str) -> Result<Diagram, DiagramError> {
+    let first = statements(source)
+        .first()
+        .map(|(_, statement)| *statement)
+        .unwrap_or("");
+    if first.split_whitespace().next() == Some("mindmap") {
+        return parse_relative(source).map(Diagram::Tree);
+    }
+    let graph = crate::graph_parser::parse(source)?;
+    let ordinary_tree = graph.direction == crate::Direction::TopToBottom
+        && graph
+            .nodes
+            .iter()
+            .all(|node| node.shape == Shape::Rectangle)
+        && graph.edges.iter().all(|edge| {
+            edge.label.is_none()
+                && edge.connector.line == EdgeLine::Solid
+                && edge.connector.start == Marker::None
+                && edge.connector.end == Marker::Arrow
+        })
+        && graph
+            .edges
+            .iter()
+            .map(|edge| (edge.from, edge.to))
+            .collect::<HashSet<_>>()
+            .len()
+            == graph.edges.len();
+    if ordinary_tree && let Ok(tree) = parse_relative(source) {
+        return Ok(Diagram::Tree(tree));
+    }
+    Ok(Diagram::Graph(graph))
+}
+
+impl Diagram {
+    fn map_ranges(&mut self, map: impl Fn(Range<usize>) -> Range<usize> + Copy) {
+        match self {
+            Self::Tree(tree) => tree.map_ranges(map),
+            Self::Graph(graph) => graph.map_ranges(map),
+        }
     }
 }
 
@@ -279,7 +382,7 @@ impl DiagramError {
     }
 }
 
-fn syntax(range: Range<usize>, kind: &str) -> DiagramError {
+pub(crate) fn syntax(range: Range<usize>, kind: &str) -> DiagramError {
     DiagramError::Syntax {
         range,
         kind: kind.into(),
@@ -287,7 +390,7 @@ fn syntax(range: Range<usize>, kind: &str) -> DiagramError {
 }
 
 // 只在形状、引号以外切分语句，保留原始字节位置。注释中的分号不影响解析。
-fn statements(source: &str) -> Vec<(usize, &str)> {
+pub(crate) fn statements(source: &str) -> Vec<(usize, &str)> {
     let mut result = Vec::new();
     let mut start = 0;
     let mut stack = Vec::new();

@@ -58,6 +58,7 @@ final class DocumentIO: Sendable {
 
 @Observable @MainActor
 final class NoteDocument {
+    let diagramIdentity = UUID().uuidString
     let io: DocumentIO
     // 只在打开、外部载入和恢复时改变；日常输入保留在原生存储与 Rust 镜像中。
     var text: String

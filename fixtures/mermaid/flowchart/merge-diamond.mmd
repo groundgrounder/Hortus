@@ -1,0 +1,7 @@
+flowchart TD
+  start([开始]) --> choice{条件满足？}
+  choice -->|是| left[路径 A]
+  choice -->|否| right[路径 B]
+  left --> merge{汇合}
+  right --> merge
+  merge --> done([完成])

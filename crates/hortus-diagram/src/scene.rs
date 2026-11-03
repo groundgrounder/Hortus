@@ -1,4 +1,4 @@
-use crate::{Color, FontInfo};
+use crate::{Color, EdgeLine, FontInfo, Marker, Shape};
 use serde::Serialize;
 use std::ops::Range;
 
@@ -59,6 +59,32 @@ pub enum Primitive {
         from: Point,
         to: Point,
         width: f64,
+        color: Color,
+    },
+    GraphPath {
+        edge_id: usize,
+        corner_radius: f64,
+        points: Vec<Point>,
+        source_range: Range<usize>,
+        label_range: Option<Range<usize>>,
+        line: EdgeLine,
+        start: Marker,
+        end: Marker,
+        color: Color,
+        width: f64,
+    },
+    GraphShape {
+        rect: Rect,
+        shape: Shape,
+        outline: Vec<Point>,
+        details: Vec<Vec<Point>>,
+        fill: Color,
+        stroke: Color,
+        stroke_width: f64,
+    },
+    LabelBackground {
+        edge_id: usize,
+        rect: Rect,
         color: Color,
     },
     Text(TextSpan),

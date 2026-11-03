@@ -352,6 +352,7 @@ dependencies = [
  "pulldown-cmark",
  "rustybuzz",
  "serde",
+ "serde_json",
  "unicode-segmentation",
 ]
 

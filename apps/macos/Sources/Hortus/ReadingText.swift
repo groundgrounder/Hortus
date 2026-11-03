@@ -199,7 +199,7 @@ struct ReadingText: NSViewRepresentable {
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
         coordinator.detach()
         guard let view = scroll.documentView as? DiagramTextView else { return }
-        view.onWidthOrThemeChange = nil; view.onToggle = nil; view.readingCoordinator = nil
+        view.onWidthOrThemeChange = nil; view.onToggle = nil; view.onSourceRange = nil; view.readingCoordinator = nil
         for diagram in view.diagramViews.values { diagram.detach() }
         for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
         view.mediaViews = []; view.mediaBlocks = []
@@ -274,6 +274,13 @@ struct ReadingText: NSViewRepresentable {
                 let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                 if abs(width - max(120, view.bounds.width - 60)) > 0.25 || self.dark != dark
                     || scrollerStyle != view.formulaScrollerStyle { refresh() }
+            }
+            view.onSourceRange = { [weak self] ordinal, range in
+                guard let self, let block = rendered.first(where: { $0.ordinal == ordinal }),
+                      block.revision == input.document.revision else { return }
+                input.document.sourceAnchor = range.location
+                input.document.sourceSelectionLength = range.length
+                input.document.reading = false
             }
             view.onToggle = { [weak self] ordinal, id in
                 guard let self, let index = rendered.firstIndex(where: { $0.ordinal == ordinal }) else { return }
@@ -375,15 +382,18 @@ struct ReadingText: NSViewRepresentable {
                                     var diagrams: [NoteDiagram] = []
                                     if let snapshot = reading.1, !snapshot.blocks.isEmpty {
                                         diagrams = try await input.service.blocks(snapshot: snapshot, vault: input.vault,
-                                                                                  note: input.path, core: input.core)
+                                                                                  note: input.path, core: input.core, documentIdentity: input.document.diagramIdentity)
                                         for i in diagrams.indices {
                                             if let old = oldRendered.first(where: { $0.ordinal == diagrams[i].ordinal }) {
-                                                diagrams[i].collapsed = old.collapsed
+                                                diagrams[i].inherit(old)
+                                            }
+                                            if let diagram = view?.diagramViews[diagrams[i].ordinal] {
+                                                diagrams[i].viewport = diagram.viewportAnchors()
                                             }
                                         }
                                         diagrams = await input.service.render(source: snapshot.text,
                                             mmd: input.path.lowercased().hasSuffix(".mmd"), blocks: diagrams,
-                                            width: width, dark: dark)
+                                            width: width, dark: dark, requestGeneration: UInt64(token), fontGeneration: input.fontSize.bitPattern)
                                     }
                                     let media = await LocalImageCache.shared.prepare(reading.6, vault: input.vault,
                                         size: input.fontSize, mathService: input.mathService, previousMath: oldTableMath)

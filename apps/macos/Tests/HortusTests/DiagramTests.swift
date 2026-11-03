@@ -16,6 +16,8 @@ struct DiagramTests {
             let engine = try DiagramEngine()
             let manager = FileManager.default
             var files = try manager.contentsOfDirectory(at: root.appendingPathComponent("fixtures/mermaid/mindmap"), includingPropertiesForKeys: nil)
+            files += try manager.contentsOfDirectory(at: root.appendingPathComponent("fixtures/mermaid/flowchart"), includingPropertiesForKeys: nil)
+                .filter { !["unsupported.mmd", "subgraphs.mmd", "class-styles.mmd"].contains($0.lastPathComponent) }
             let vault = root.appendingPathComponent("fixtures/vault-sample")
             let enumerator = manager.enumerator(at: vault, includingPropertiesForKeys: nil)!
             while let file = enumerator.nextObject() as? URL { if ["md", "markdown", "mmd"].contains(file.pathExtension) { files.append(file) } }
@@ -27,12 +29,12 @@ struct DiagramTests {
             for file in files {
                 let source = try String(contentsOf: file, encoding: .utf8)
                 let mmd = file.pathExtension == "mmd"
-                for width in [380.0, 700, 1100] {
+                for width in (file.path.contains("/flowchart/") ? [700.0, 1100] : [380.0, 700, 1100]) {
                     for dark in [false, true] {
                         let count = mmd ? 1 : diagramBlocks(note: source).count
                         for block in 0..<count {
                             let scene = try engine.render(source: source, mmd: mmd, block: UInt32(block + 1), width: width, dark: dark, collapsed: [])
-                            let prepared = PreparedScene(scene: DiagramScene(scene))
+                            let prepared = PreparedScene(scene: try DiagramScene(scene))
                             errors += prepared.lines.map { abs(CTLineGetTypographicBounds($0.1, nil, nil, nil) - $0.0.width) }
                         }
                     }
@@ -180,16 +182,59 @@ struct DiagramTests {
         #expect(start?.compare(storage.documentRange.location) == .orderedSame)
     }
 
-    @Test func errorsKeepSourceAndDescribeAllThreeReasons() async throws {
+    @Test func unsupportedAndMalformedDiagramsKeepSource() async throws {
         let service = DiagramService()
         for (source, reason) in [("sequenceDiagram\nA->>B: Hi", L10n.string("Unsupported %@ diagram; showing source", "sequenceDiagram")),
-                                 ("flowchart TB\nA --> C\nB --> C", L10n.string("Not a tree; showing source")),
                                  ("flowchart TB\nA --> B\nB ??? C", L10n.string("Syntax error on line %d; showing source", 3))] {
             let blocks = try await service.blocks(source: source, mmd: true, vault: "test", note: "x.mmd", core: nil)
             let result = await service.render(source: source, mmd: true, blocks: blocks, width: 700, dark: false)
             #expect(result[0].prepared == nil)
             #expect(result[0].reason == reason)
         }
+    }
+
+    @Test func graphSourceRangesAccessibilityAndFailureRetention() async throws {
+        let source = "前言😀\r\n\r\n```mermaid\r\nflowchart LR\r\nA[中文😀 é] -->|是| C{决定}\r\nB(备用) --> C\r\nC -.-> A\r\n```\r\n"
+        let service = DiagramService()
+        let blocks = try await service.blocks(source: source, mmd: false, vault: "test", note: "graph.md", core: nil)
+        let result = await service.render(source: source, mmd: false, blocks: blocks, width: 700, dark: false, requestGeneration: 1)
+        let prepared = try #require(result[0].prepared, "\(result[0].reason ?? "No diagnostic")")
+        #expect(prepared.acceptsInteraction)
+        #expect(result[0].sceneVersion == 2)
+        #expect(prepared.edgeRanges.count == 3)
+        let diagram = DiagramView(prepared: prepared)
+        let children = try #require(diagram.accessibilityChildren() as? [NSAccessibilityElement])
+        let hit = try #require(prepared.scene.hitRegions.first(where: { $0.nodeId == "A" }))
+        let range = try #require(diagram.sourceRange(at: CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY)))
+        #expect((source as NSString).substring(with: range) == "A[中文😀 é]")
+        #expect(diagram.accessibilityNodeCount == 3)
+        #expect(diagram.accessibilityEdgeCount == 3)
+        let dark = await service.render(source: source, mmd: false, blocks: result, width: 900, dark: true, requestGeneration: 2)
+        diagram.update(try #require(dark[0].prepared))
+        let updated = try #require(diagram.accessibilityChildren() as? [NSAccessibilityElement])
+        #expect(children.count == updated.count)
+        #expect(zip(children, updated).allSatisfy { $0 === $1 })
+        let brokenSource = source.replacingOccurrences(of: "C -.-> A", with: "C ??? A")
+        let brokenBlocks = try await service.blocks(source: brokenSource, mmd: false, vault: "test", note: "graph.md", core: nil)
+        let failed = await service.render(source: brokenSource, mmd: false, blocks: brokenBlocks, width: 900, dark: true, requestGeneration: 3)
+        #expect(failed[0].prepared != nil)
+        #expect(failed[0].prepared?.acceptsInteraction == false)
+        #expect(failed[0].reason != nil)
+        let otherBlocks = try await service.blocks(source: brokenSource, mmd: false, vault: "test", note: "other.md", core: nil)
+        let other = await service.render(source: brokenSource, mmd: false, blocks: otherBlocks, width: 900, dark: true)
+        #expect(other[0].prepared == nil)
+    }
+
+    @Test func utfRangesRejectTruncatedScalarsAndSurrogates() {
+        let source = "甲😀\r\né乙"
+        let bytes = source.utf8.count
+        let full = DiagramService.sourceRange(start: 0, end: UInt64(bytes), in: source)
+        #expect(full == NSRange(location: 0, length: (source as NSString).length))
+        #expect(DiagramService.sourceRange(start: 1, end: 3, in: source) == nil)
+        #expect(DiagramService.sourceRange(start: 3, end: 5, in: source) == nil)
+        #expect(DiagramService.sourceRange(start: 7, end: UInt64(bytes + 1), in: source) == nil)
+        #expect(DiagramService.byteRange(NSRange(location: 2, length: 1), in: source) == nil)
+        #expect(DiagramService.byteRange(NSRange(location: 0, length: (source as NSString).length), in: source) == 0..<bytes)
     }
 
     private func wait(_ view: DiagramTextView) async throws {

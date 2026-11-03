@@ -1,0 +1,1103 @@
+//! 基于节点外侧可见网格的确定性正交路由；已占用通道作为代价。
+use crate::{Direction, Graph, LayoutError, Point, Rect, Shape};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
+const CLEARANCE: f64 = 10.0;
+
+#[derive(Clone, Copy)]
+struct ChannelOwner {
+    first: usize,
+    common_from: usize,
+    common_to: usize,
+    labelled: bool,
+}
+impl ChannelOwner {
+    const EMPTY: Self = Self {
+        first: usize::MAX,
+        common_from: usize::MAX,
+        common_to: usize::MAX,
+        labelled: false,
+    };
+    fn occupy(&mut self, index: usize, graph: &Graph) {
+        let edge = &graph.edges[index];
+        if self.first == usize::MAX {
+            *self = Self {
+                first: index,
+                common_from: edge.from,
+                common_to: edge.to,
+                labelled: edge.label.is_some(),
+            };
+        } else {
+            if self.common_from != edge.from {
+                self.common_from = usize::MAX;
+            }
+            if self.common_to != edge.to {
+                self.common_to = usize::MAX;
+            }
+            self.labelled |= edge.label.is_some();
+        }
+    }
+}
+
+pub(crate) struct Routes {
+    pub paths: Vec<Vec<Point>>,
+    pub labels: Vec<Option<Rect>>,
+}
+
+pub(crate) fn route(
+    graph: &Graph,
+    nodes: &[(Rect, Shape)],
+    accepted: &[bool],
+    width: f64,
+    height: f64,
+    label_widths: &[Option<f64>],
+) -> Result<Routes, LayoutError> {
+    if let Some(paths) = branch_routes(graph, nodes, width) {
+        return Ok(Routes {
+            paths,
+            labels: vec![None; graph.edges.len()],
+        });
+    }
+    let mut best = route_grid(graph, nodes, accepted, width, height, label_widths, None)?;
+    if nodes.len() <= 24 && graph.edges.len() <= 48 {
+        let (mut score, conflicts) = route_conflicts(&best.paths);
+        // 贪心通道可能挡住后来的跨层边。只对冲突边局部提升优先级，保留更清晰的结果。
+        for edge in conflicts.into_iter().take(8) {
+            if score == 0 {
+                break;
+            }
+            if let Ok(candidate) = route_grid(
+                graph,
+                nodes,
+                accepted,
+                width,
+                height,
+                label_widths,
+                Some(edge),
+            ) {
+                let next = route_conflicts(&candidate.paths).0;
+                if next < score {
+                    best = candidate;
+                    score = next;
+                }
+            }
+        }
+        if score > 0 {
+            for edge in 0..graph.edges.len() {
+                if let Ok(candidate) = route_grid(
+                    graph,
+                    nodes,
+                    accepted,
+                    width,
+                    height,
+                    label_widths,
+                    Some(edge + graph.edges.len()),
+                ) {
+                    let next = route_conflicts(&candidate.paths).0;
+                    if next < score {
+                        best = candidate;
+                        score = next;
+                    }
+                    if score == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(best)
+}
+
+fn route_conflicts(paths: &[Vec<Point>]) -> (usize, Vec<usize>) {
+    let mut score = 0;
+    let mut conflicts = Vec::new();
+    for (i, a) in paths.iter().enumerate() {
+        for (j, b) in paths.iter().enumerate().skip(i + 1) {
+            for a in a.windows(2) {
+                for b in b.windows(2) {
+                    let ah = (a[0].y - a[1].y).abs() < 0.001;
+                    let bh = (b[0].y - b[1].y).abs() < 0.001;
+                    if ah == bh {
+                        continue;
+                    }
+                    let (h, v) = if ah { (a, b) } else { (b, a) };
+                    if v[0].x > h[0].x.min(h[1].x) + 0.001
+                        && v[0].x < h[0].x.max(h[1].x) - 0.001
+                        && h[0].y > v[0].y.min(v[1].y) + 0.001
+                        && h[0].y < v[0].y.max(v[1].y) - 0.001
+                    {
+                        score += 1;
+                        for edge in [i, j] {
+                            if !conflicts.contains(&edge) {
+                                conflicts.push(edge);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (score, conflicts)
+}
+
+fn route_grid(
+    graph: &Graph,
+    nodes: &[(Rect, Shape)],
+    accepted: &[bool],
+    width: f64,
+    height: f64,
+    label_widths: &[Option<f64>],
+    preferred: Option<usize>,
+) -> Result<Routes, LayoutError> {
+    let vertical = matches!(
+        graph.direction,
+        Direction::TopToBottom | Direction::BottomToTop
+    );
+    let positive = matches!(
+        graph.direction,
+        Direction::TopToBottom | Direction::LeftToRight
+    );
+    let mut ends = Vec::new();
+    let mut long_edge_slot = 0usize;
+    let mut long_node_side: Vec<Option<bool>> = vec![None; nodes.len()];
+    for (index, edge) in graph.edges.iter().enumerate() {
+        let (from, fs) = nodes[edge.from];
+        let (to, ts) = nodes[edge.to];
+        let mut a_vertical = vertical;
+        let mut b_vertical = vertical;
+        let mut a_positive = positive;
+        let mut b_positive = !positive;
+        if edge.from == edge.to {
+            a_vertical = false;
+            a_positive = true;
+            b_vertical = true;
+            b_positive = false;
+        } else if !accepted[index] {
+            a_vertical = false;
+            b_vertical = false;
+            a_positive = true;
+            b_positive = true;
+        } else if !vertical && (from.y - to.y).abs() > from.height.max(to.height) {
+            // LR/RL 折回下一行，仍从下一行的源码起点继续阅读。
+            a_vertical = true;
+            b_vertical = true;
+            a_positive = true;
+            b_positive = false;
+        } else if vertical && (from.y - to.y).abs() < 1.0 {
+            a_vertical = false;
+            b_vertical = false;
+            a_positive = from.x < to.x;
+            b_positive = !a_positive;
+        }
+        if preferred == Some(index) && vertical && accepted[index] {
+            // 冲突边改用外侧端口，解除固定上下端口对平面嵌入的限制。
+            a_vertical = false;
+            b_vertical = false;
+            a_positive = from.x >= width / 2.0;
+            b_positive = a_positive;
+        }
+        let long_edge = nodes.len() <= 48
+            && vertical
+            && accepted[index]
+            && (to.y - from.y).abs() > from.height + to.height + 60.0;
+        if long_edge {
+            // 连续的长边交替走左右外侧。相邻跳边的区间只在节点层边界相接，
+            // 横向引线不会穿过上一条边的竖向通道。
+            let source_side = long_node_side[edge.from].map(|side| !side);
+            let target_side = long_node_side[edge.to].map(|side| !side);
+            let side = source_side
+                .or(target_side)
+                .unwrap_or(long_edge_slot % 2 == 1);
+            a_vertical = false;
+            b_vertical = false;
+            a_positive = side;
+            b_positive = side;
+            long_node_side[edge.from] = Some(side);
+            long_node_side[edge.to] = Some(side);
+            long_edge_slot += 1;
+        }
+        if long_edge {
+            if graph
+                .edges
+                .iter()
+                .filter(|other| other.from == edge.from)
+                .count()
+                >= 3
+            {
+                // 跨带扇出沿左侧，跨带汇合沿右侧，避免来回边共用一条总线。
+                a_vertical = false;
+                a_positive = false;
+            }
+            if graph
+                .edges
+                .iter()
+                .filter(|other| other.to == edge.to)
+                .count()
+                >= 3
+            {
+                b_vertical = false;
+                b_positive = true;
+            }
+        }
+        // 重复边不合并成一条线。不同目标的同源前缀和同目的后缀允许共用端口。
+        let peers = graph
+            .edges
+            .iter()
+            .filter(|other| other.from == edge.from && other.to == edge.to)
+            .count();
+        let slot = graph.edges[..index]
+            .iter()
+            .filter(|other| other.from == edge.from && other.to == edge.to)
+            .count();
+        if peers > 1 && slot > 0 {
+            // 平行边改走独立外侧通道，标签不能挤在相距数像素的共同前后缀上。
+            a_vertical = !vertical;
+            b_vertical = !vertical;
+            a_positive = slot % 2 == 1;
+            b_positive = a_positive;
+        }
+        let delta = (slot as f64 - (peers - 1) as f64 / 2.0) * 9.0;
+        let label_delta = |outgoing: bool| {
+            let mut incident = graph
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(_, other)| {
+                    if outgoing {
+                        other.from == edge.from
+                    } else {
+                        other.to == edge.to
+                    }
+                })
+                .collect::<Vec<_>>();
+            if peers > 1
+                || nodes.len() > 48
+                || (incident.len() > 3 && !incident.iter().any(|(_, edge)| edge.label.is_some()))
+            {
+                return delta;
+            }
+            incident.sort_by(|(a, first), (b, second)| {
+                let first = nodes[if outgoing { first.to } else { first.from }].0;
+                let second = nodes[if outgoing { second.to } else { second.from }].0;
+                let coordinate = |rect: Rect| {
+                    if vertical {
+                        rect.x + rect.width / 2.0
+                    } else {
+                        rect.y + rect.height / 2.0
+                    }
+                };
+                coordinate(first)
+                    .total_cmp(&coordinate(second))
+                    .then(a.cmp(b))
+            });
+            let position = incident.iter().position(|(i, _)| *i == index).unwrap_or(0);
+            (position as f64 - (incident.len() - 1) as f64 / 2.0) * 12.0
+        };
+        let endpoint =
+            |node_index: usize, rect: Rect, shape, is_vertical, is_positive, delta: f64| {
+                let clearance = if peers > 1 && slot > 0 {
+                    28.0 + slot as f64 * 4.0
+                } else {
+                    CLEARANCE
+                };
+                let fixed = if is_vertical {
+                    rect.x + rect.width / 2.0 + delta.clamp(-rect.width * 0.22, rect.width * 0.22)
+                } else {
+                    rect.y
+                        + rect.height / 2.0
+                        + delta.clamp(-rect.height * 0.22, rect.height * 0.22)
+                };
+                let port = crate::shape::port(shape, rect, is_vertical, fixed, is_positive);
+                // 平行边的外侧短段不能跨过邻近节点；其余路径仍由网格分配独立通道。
+                let edge_axis = if is_vertical {
+                    rect.y + if is_positive { rect.height } else { 0.0 }
+                } else {
+                    rect.x + if is_positive { rect.width } else { 0.0 }
+                };
+                let clearance = nodes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (other, _))| {
+                        if index == node_index {
+                            return None;
+                        }
+                        let (lo, hi, near) = if is_vertical {
+                            (
+                                other.x - 6.0,
+                                other.x + other.width + 6.0,
+                                if is_positive {
+                                    other.y - 6.0
+                                } else {
+                                    other.y + other.height + 6.0
+                                },
+                            )
+                        } else {
+                            (
+                                other.y - 6.0,
+                                other.y + other.height + 6.0,
+                                if is_positive {
+                                    other.x - 6.0
+                                } else {
+                                    other.x + other.width + 6.0
+                                },
+                            )
+                        };
+                        let distance = if is_positive {
+                            near - edge_axis
+                        } else {
+                            edge_axis - near
+                        };
+                        (fixed > lo && fixed < hi && distance > 0.0)
+                            .then_some((distance - 1.0).max(1.0))
+                    })
+                    .fold(clearance, f64::min);
+                let stub = if is_vertical {
+                    Point {
+                        x: fixed,
+                        y: if is_positive {
+                            rect.y + rect.height + clearance
+                        } else {
+                            rect.y - clearance
+                        },
+                    }
+                } else {
+                    Point {
+                        x: if is_positive {
+                            rect.x + rect.width + clearance
+                        } else {
+                            rect.x - clearance
+                        },
+                        y: fixed,
+                    }
+                };
+                (port, stub)
+            };
+        ends.push((
+            endpoint(
+                edge.from,
+                from,
+                fs,
+                a_vertical,
+                a_positive,
+                label_delta(true),
+            ),
+            endpoint(edge.to, to, ts, b_vertical, b_positive, label_delta(false)),
+        ));
+    }
+    let mut xs = vec![8.0, 18.0, width - 18.0, width - 8.0];
+    let mut ys = vec![8.0, 18.0, height - 18.0, height - 8.0];
+    for (rect, _) in nodes {
+        xs.extend([
+            rect.x - CLEARANCE,
+            rect.x + rect.width / 2.0,
+            rect.x + rect.width + CLEARANCE,
+        ]);
+        ys.extend([
+            rect.y - CLEARANCE,
+            rect.y + rect.height / 2.0,
+            rect.y + rect.height + CLEARANCE,
+        ]);
+    }
+    for ((source, a), (target, b)) in &ends {
+        xs.extend([source.x, a.x, target.x, b.x]);
+        ys.extend([source.y, a.y, target.y, b.y]);
+    }
+    let sort = |values: &mut Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        values.dedup_by(|a, b| (*a - *b).abs() < 0.001);
+    };
+    sort(&mut xs);
+    sort(&mut ys);
+    if nodes.len() <= 24 {
+        // 走廊中线给相反方向的入边、出边各留一条通道。
+        xs.extend(
+            xs.clone()
+                .windows(2)
+                .filter(|p| p[1] - p[0] >= 8.0)
+                .map(|p| (p[0] + p[1]) / 2.0),
+        );
+        ys.extend(
+            ys.clone()
+                .windows(2)
+                .filter(|p| p[1] - p[0] >= 8.0)
+                .map(|p| (p[0] + p[1]) / 2.0),
+        );
+        sort(&mut xs);
+        sort(&mut ys);
+    }
+    let nx = xs.len();
+    let ny = ys.len();
+    let count = nx * ny;
+    if count > 2_000_000 {
+        return Err(LayoutError(
+            "Graph routing grid exceeds the supported size".into(),
+        ));
+    }
+    let mut horizontal = vec![false; count];
+    let mut vertical_blocked = vec![false; count];
+    for (rect, _) in nodes {
+        let (left, right, top, bottom) = (
+            rect.x - 6.0,
+            rect.x + rect.width + 6.0,
+            rect.y - 6.0,
+            rect.y + rect.height + 6.0,
+        );
+        let x0 = xs.partition_point(|x| *x < left).saturating_sub(1);
+        let x1 = xs.partition_point(|x| *x <= right).min(nx - 1);
+        let y0 = ys.partition_point(|y| *y < top).saturating_sub(1);
+        let y1 = ys.partition_point(|y| *y <= bottom).min(ny - 1);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if x + 1 < nx && ys[y] > top && ys[y] < bottom && xs[x] < right && xs[x + 1] > left
+                {
+                    horizontal[y * nx + x] = true;
+                }
+                if y + 1 < ny && xs[x] > left && xs[x] < right && ys[y] < bottom && ys[y + 1] > top
+                {
+                    vertical_blocked[y * nx + x] = true;
+                }
+            }
+        }
+    }
+    let mut h_use = vec![0u16; count];
+    let mut v_use = vec![0u16; count];
+    let mut h_owner = vec![ChannelOwner::EMPTY; count];
+    let mut v_owner = vec![ChannelOwner::EMPTY; count];
+    let mut h_block_prefix = vec![0usize; count];
+    let mut v_block_prefix = vec![0usize; count];
+    for y in 0..ny {
+        for x in 0..nx {
+            let i = y * nx + x;
+            h_block_prefix[i] =
+                usize::from(horizontal[i]) + if x > 0 { h_block_prefix[i - 1] } else { 0 };
+            v_block_prefix[i] =
+                usize::from(vertical_blocked[i]) + if y > 0 { v_block_prefix[i - nx] } else { 0 };
+        }
+    }
+    let mut distances = vec![u64::MAX; count * 3];
+    let mut generations = vec![0usize; count * 3];
+    let mut previous = vec![usize::MAX; count * 3];
+    let locate = |point: Point| {
+        let x = xs.partition_point(|x| *x < point.x - 0.001).min(nx - 1);
+        let y = ys.partition_point(|y| *y < point.y - 0.001).min(ny - 1);
+        y * nx + x
+    };
+    let point = |index: usize| Point {
+        x: xs[index % nx],
+        y: ys[index / nx],
+    };
+    // 端口到网格的短段也占用通道；提前登记，防止较早的边遮住后续边的端点身份。
+    for (edge_index, ((source, a), (target, b))) in ends.iter().enumerate() {
+        for (p, q) in [(*source, *a), (*target, *b)] {
+            let (from, to) = (locate(p), locate(q));
+            let h = from / nx == to / nx;
+            let mut i = from.min(to);
+            while i < from.max(to) {
+                if h {
+                    h_use[i] = h_use[i].saturating_add(1);
+                    h_owner[i].occupy(edge_index, graph);
+                } else {
+                    v_use[i] = v_use[i].saturating_add(1);
+                    v_owner[i].occupy(edge_index, graph);
+                }
+                i += if h { 1 } else { nx };
+            }
+        }
+    }
+    let mut result = vec![Vec::new(); ends.len()];
+    let mut label_rects = vec![None; ends.len()];
+    let rects = nodes.iter().map(|(rect, _)| *rect).collect::<Vec<_>>();
+    let mut protected = Vec::<Rect>::new();
+    let mut routing_order = (0..ends.len()).collect::<Vec<_>>();
+    routing_order.sort_by(|a, b| {
+        label_widths[*a]
+            .is_none()
+            .cmp(&label_widths[*b].is_none())
+            .then_with(|| {
+                if nodes.len() > 48 {
+                    return a.cmp(b);
+                }
+                let distance = |i: usize| {
+                    let ((_, a), (_, b)) = ends[i];
+                    (a.x - b.x).abs() + (a.y - b.y).abs()
+                };
+                (Some(*a) == preferred)
+                    .cmp(&(Some(*b) == preferred))
+                    .then_with(|| distance(*a).total_cmp(&distance(*b)))
+                    .then(a.cmp(b))
+            })
+    });
+    if let Some(first) = preferred.filter(|i| *i >= graph.edges.len()) {
+        let index = routing_order
+            .iter()
+            .position(|i| *i == first - graph.edges.len())
+            .unwrap_or(0);
+        routing_order.rotate_left(index);
+    }
+    for edge_index in routing_order {
+        let (source, a) = clear_label_port(
+            nodes[graph.edges[edge_index].from],
+            ends[edge_index].0,
+            &protected,
+        );
+        let (target, b) = clear_label_port(
+            nodes[graph.edges[edge_index].to],
+            ends[edge_index].1,
+            &protected,
+        );
+        let generation = edge_index + 1;
+        let start = locate(a);
+        let goal = locate(b);
+        // 优先比较确定的少弯路径。大图无需在每条边上遍历整个二维网格。
+        let current = &graph.edges[edge_index];
+        let compatible = |owner: ChannelOwner, _p: Point, _q: Point| {
+            owner.first == usize::MAX || owner.first == edge_index || {
+                (owner.common_from == current.from || owner.common_to == current.to)
+                    && !(owner.common_from == current.from && owner.common_to == current.to)
+                    && !owner.labelled
+                    && current.label.is_none()
+            }
+        };
+        let score_segment = |a: usize, b: usize| -> Option<f64> {
+            let horizontal_axis = a / nx == b / nx;
+            let (lo, hi, step, blocked, usage, other_use, owners) = if horizontal_axis {
+                (
+                    a.min(b),
+                    a.max(b),
+                    1,
+                    &h_block_prefix,
+                    &h_use,
+                    &v_use,
+                    &h_owner,
+                )
+            } else if a % nx == b % nx {
+                (
+                    a.min(b),
+                    a.max(b),
+                    nx,
+                    &v_block_prefix,
+                    &v_use,
+                    &h_use,
+                    &v_owner,
+                )
+            } else {
+                return None;
+            };
+            if lo == hi {
+                return Some(0.0);
+            }
+            let before = if horizontal_axis {
+                lo % nx > 0
+            } else {
+                lo >= nx
+            };
+            let blocked_count = blocked[hi - step] - if before { blocked[lo - step] } else { 0 };
+            if blocked_count != 0 {
+                return None;
+            }
+            let p = point(a);
+            let q = point(b);
+            if current.label.is_some()
+                && protected.iter().any(|rect| segment_intersects(p, q, *rect))
+            {
+                return None;
+            }
+            let mut cost = (p.x - q.x).abs() + (p.y - q.y).abs();
+            let mut i = lo;
+            while i < hi {
+                if usage[i] > 0 && !compatible(owners[i], point(i), point(i + step)) {
+                    cost += 1_000_000.0;
+                }
+                // 端点的共同前后缀不计作交叉；中间垂直占用必须绕开。
+                if i != lo && other_use[i] > 0 {
+                    // A candidate that crosses an occupied perpendicular channel is
+                    // never preferable to a longer orthogonal detour on small graphs.
+                    cost += 1_000_000.0;
+                }
+                i += step;
+            }
+            Some(cost)
+        };
+        let sx = start % nx;
+        let sy = start / nx;
+        let gx = goal % nx;
+        let gy = goal / nx;
+        let mut candidates = vec![
+            vec![start, sy * nx + gx, goal],
+            vec![start, gy * nx + sx, goal],
+        ];
+        let mut columns = vec![0, nx - 1, sx, gx, (sx + gx) / 2];
+        let mut rows = vec![0, ny - 1, sy, gy, (sy + gy) / 2];
+        for delta in 1..=3 {
+            columns.extend([
+                sx.saturating_sub(delta),
+                (sx + delta).min(nx - 1),
+                gx.saturating_sub(delta),
+                (gx + delta).min(nx - 1),
+            ]);
+            rows.extend([
+                sy.saturating_sub(delta),
+                (sy + delta).min(ny - 1),
+                gy.saturating_sub(delta),
+                (gy + delta).min(ny - 1),
+            ]);
+        }
+        columns.sort_unstable();
+        columns.dedup();
+        rows.sort_unstable();
+        rows.dedup();
+        for x in &columns {
+            candidates.push(vec![start, sy * nx + x, gy * nx + x, goal]);
+        }
+        for y in &rows {
+            candidates.push(vec![start, y * nx + sx, y * nx + gx, goal]);
+        }
+        if nodes.len() <= 48 {
+            // 局部带与独立回边的少弯组合，先于完整网格搜索。
+            for x in &columns {
+                for y in &rows {
+                    candidates.push(vec![start, sy * nx + x, y * nx + x, y * nx + gx, goal]);
+                    candidates.push(vec![start, y * nx + sx, y * nx + x, gy * nx + x, goal]);
+                }
+            }
+        }
+        let mut best: Option<(f64, Vec<usize>)> = None;
+        for candidate in candidates {
+            let mut score = 8.0 * candidate.len() as f64;
+            let mut valid = true;
+            for segment in candidate.windows(2) {
+                if let Some(cost) = score_segment(segment[0], segment[1]) {
+                    score += cost;
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid && let Some(label_width) = label_widths[edge_index] {
+                let mut points = vec![source];
+                points.extend(candidate.iter().copied().map(point));
+                points.push(target);
+                result[edge_index] = simplify(points);
+                valid = crate::graph_layout::place_edge_label(
+                    edge_index,
+                    label_width,
+                    &result,
+                    &rects,
+                    &protected,
+                    width,
+                )
+                .is_some();
+                result[edge_index].clear();
+            }
+            if valid && best.as_ref().is_none_or(|(old, _)| score < *old) {
+                best = Some((score, candidate));
+            }
+        }
+        let indices = if let Some((_, indices)) = best.filter(|(score, _)| {
+            // 小图遇到已有边的独占通道时扩大搜索，不能仅因少弯候选可达就接受交叉。
+            *score < 4_000.0 || nodes.len() > 48 || label_widths[edge_index].is_some()
+        }) {
+            indices
+        } else {
+            // 少数受阻路径才扩大到完整可见网格，禁止退化成穿过节点的直线。
+            let heuristic = |index| {
+                let p = point(index);
+                ((p.x - b.x).abs() + (p.y - b.y).abs()) * 1000.0
+            };
+            let mut heap = BinaryHeap::new();
+            let first = start * 3;
+            distances[first] = 0;
+            generations[first] = generation;
+            previous[first] = usize::MAX;
+            heap.push(Reverse((heuristic(start) as u64, 0u64, first)));
+            let mut last = None;
+            while let Some(Reverse((_, cost, state))) = heap.pop() {
+                if generations[state] != generation || distances[state] != cost {
+                    continue;
+                }
+                let index = state / 3;
+                let axis = state % 3;
+                if index == goal {
+                    last = Some(state);
+                    break;
+                }
+                let x = index % nx;
+                let y = index / nx;
+                for (valid, next, next_axis, segment) in [
+                    (x > 0, index.saturating_sub(1), 1, index.saturating_sub(1)),
+                    (x + 1 < nx, index + 1, 1, index),
+                    (y > 0, index.saturating_sub(nx), 2, index.saturating_sub(nx)),
+                    (y + 1 < ny, index + nx, 2, index),
+                ] {
+                    if !valid
+                        || if next_axis == 1 {
+                            horizontal[segment]
+                        } else {
+                            vertical_blocked[segment]
+                        }
+                    {
+                        continue;
+                    }
+                    let p = point(index);
+                    let q = point(next);
+                    if current.label.is_some()
+                        && protected.iter().any(|rect| segment_intersects(p, q, *rect))
+                    {
+                        continue;
+                    }
+                    let owner = if next_axis == 1 {
+                        h_owner[segment]
+                    } else {
+                        v_owner[segment]
+                    };
+                    let penalty = if compatible(owner, p, q) {
+                        0.0
+                    } else {
+                        1_000_000.0
+                    };
+                    let crosses = if next_axis == 1 {
+                        v_use[index] > 0 || (index >= nx && v_use[index - nx] > 0)
+                    } else {
+                        h_use[index] > 0 || (index % nx > 0 && h_use[index - 1] > 0)
+                    };
+                    let crossing_penalty =
+                        if nodes.len() <= 48 && index != start && index != goal && crosses {
+                            1_000_000.0
+                        } else {
+                            0.0
+                        };
+                    let bend = if axis != 0 && axis != next_axis {
+                        8.0
+                    } else {
+                        0.0
+                    };
+                    let next_cost = cost
+                        + (((p.x - q.x).abs()
+                            + (p.y - q.y).abs()
+                            + bend
+                            + penalty
+                            + crossing_penalty)
+                            * 1000.0) as u64;
+                    let next_state = next * 3 + next_axis;
+                    if generations[next_state] != generation || next_cost < distances[next_state] {
+                        generations[next_state] = generation;
+                        distances[next_state] = next_cost;
+                        previous[next_state] = state;
+                        heap.push(Reverse((
+                            next_cost + heuristic(next) as u64,
+                            next_cost,
+                            next_state,
+                        )));
+                    }
+                }
+            }
+            let Some(mut state) = last else {
+                // 通道占用可能把相邻的短边完全封死，但只要两段折线不穿过
+                // 其它节点，就仍然是可读的有效路径。仅在完整搜索无路时启用。
+                let elbows = [Point { x: a.x, y: b.y }, Point { x: b.x, y: a.y }];
+                let clear = |points: &[Point]| {
+                    points.windows(2).all(|segment| {
+                        !nodes.iter().enumerate().any(|(index, (rect, _))| {
+                            index != current.from
+                                && index != current.to
+                                && segment_intersects(segment[0], segment[1], *rect)
+                        }) && (current.label.is_none()
+                            || !protected
+                                .iter()
+                                .any(|rect| segment_intersects(segment[0], segment[1], *rect)))
+                    })
+                };
+                if let Some(elbow) = elbows.iter().find(|elbow| {
+                    let points = [a, **elbow, b];
+                    clear(&points)
+                }) {
+                    result[edge_index] = simplify(vec![source, a, *elbow, b, target]);
+                    if let Some(label_width) = label_widths[edge_index] {
+                        let rect = crate::graph_layout::place_edge_label(
+                            edge_index,
+                            label_width,
+                            &result,
+                            &rects,
+                            &protected,
+                            width,
+                        )
+                        .ok_or_else(|| {
+                            LayoutError(format!("No label channel for edge {}", current.id))
+                        })?;
+                        label_rects[edge_index] = Some(rect);
+                        protected.push(rect);
+                    }
+                    continue;
+                }
+                return Err(LayoutError(format!(
+                    "No orthogonal route for edge {} ({} -> {}, {:?} -> {:?})",
+                    current.id, graph.nodes[current.from].id, graph.nodes[current.to].id, a, b
+                )));
+            };
+            let mut indices = Vec::new();
+            loop {
+                indices.push(state / 3);
+                if previous[state] == usize::MAX {
+                    break;
+                }
+                state = previous[state];
+            }
+            indices.reverse();
+            indices
+        };
+        for pair in indices.windows(2) {
+            let (mut index, end) = (pair[0].min(pair[1]), pair[0].max(pair[1]));
+            let h = pair[0] / nx == pair[1] / nx;
+            while index < end {
+                if h {
+                    h_use[index] = h_use[index].saturating_add(1);
+                    h_owner[index].occupy(edge_index, graph);
+                } else {
+                    v_use[index] = v_use[index].saturating_add(1);
+                    v_owner[index].occupy(edge_index, graph);
+                }
+                index += if h { 1 } else { nx };
+            }
+        }
+        let mut points = vec![source];
+        points.extend(indices.into_iter().map(point));
+        points.push(target);
+        result[edge_index] = simplify(points);
+        if let Some(label_width) = label_widths[edge_index] {
+            let rect = crate::graph_layout::place_edge_label(
+                edge_index,
+                label_width,
+                &result,
+                &rects,
+                &protected,
+                width,
+            )
+            .ok_or_else(|| LayoutError(format!("No label channel for edge {}", current.id)))?;
+            label_rects[edge_index] = Some(rect);
+            protected.push(Rect {
+                x: rect.x - 3.0,
+                y: rect.y - 3.0,
+                width: rect.width + 6.0,
+                height: rect.height + 6.0,
+            });
+        }
+    }
+    Ok(Routes {
+        paths: result,
+        labels: label_rects,
+    })
+}
+
+fn clear_label_port(
+    (rect, shape): (Rect, Shape),
+    original: (Point, Point),
+    labels: &[Rect],
+) -> (Point, Point) {
+    let clear = |(port, stub): (Point, Point)| {
+        !labels
+            .iter()
+            .any(|r| r.contains(stub) || segment_intersects(port, stub, *r))
+    };
+    if clear(original) {
+        return original;
+    }
+    for (vertical, positive) in [(true, false), (true, true), (false, false), (false, true)] {
+        let fixed = if vertical {
+            rect.x + rect.width / 2.0
+        } else {
+            rect.y + rect.height / 2.0
+        };
+        let port = crate::shape::port(shape, rect, vertical, fixed, positive);
+        let stub = if vertical {
+            Point {
+                x: fixed,
+                y: if positive {
+                    rect.y + rect.height + CLEARANCE
+                } else {
+                    rect.y - CLEARANCE
+                },
+            }
+        } else {
+            Point {
+                x: if positive {
+                    rect.x + rect.width + CLEARANCE
+                } else {
+                    rect.x - CLEARANCE
+                },
+                y: fixed,
+            }
+        };
+        if clear((port, stub)) {
+            return (port, stub);
+        }
+    }
+    original
+}
+
+/// 单分叉、多条完整链、单汇合的平面嵌入。输入和输出分别沿两侧，带内按端口次序留通道。
+fn branch_routes(graph: &Graph, nodes: &[(Rect, Shape)], width: f64) -> Option<Vec<Vec<Point>>> {
+    if graph.direction != Direction::TopToBottom
+        || graph.edges.iter().any(|edge| {
+            edge.label.is_some()
+                || edge.connector.start != crate::Marker::None
+                || edge.connector.line != crate::EdgeLine::Solid
+        })
+    {
+        return None;
+    }
+    let mut incoming = vec![Vec::new(); nodes.len()];
+    let mut outgoing = vec![Vec::new(); nodes.len()];
+    for edge in &graph.edges {
+        incoming[edge.to].push(edge.from);
+        outgoing[edge.from].push(edge.to);
+    }
+    let roots: Vec<_> = (0..nodes.len())
+        .filter(|i| incoming[*i].is_empty())
+        .collect();
+    let sinks: Vec<_> = (0..nodes.len())
+        .filter(|i| outgoing[*i].is_empty())
+        .collect();
+    if roots.len() != 1 || sinks.len() != 1 {
+        return None;
+    }
+    let (root, sink) = (roots[0], sinks[0]);
+    if outgoing[root].len() < 3
+        || incoming[sink].len() != outgoing[root].len()
+        || (0..nodes.len())
+            .any(|i| i != root && i != sink && (incoming[i].len() != 1 || outgoing[i].len() != 1))
+    {
+        return None;
+    }
+    let ordered = |members: &[usize]| {
+        let mut members = members.to_vec();
+        members.sort_by(|i, j| {
+            nodes[*i]
+                .0
+                .y
+                .total_cmp(&nodes[*j].0.y)
+                .then_with(|| nodes[*j].0.x.total_cmp(&nodes[*i].0.x))
+        });
+        members
+    };
+    let heads = ordered(&outgoing[root]);
+    let tails = ordered(&incoming[sink]);
+    let mut result = Vec::new();
+    for edge in &graph.edges {
+        let (a, ashape) = nodes[edge.from];
+        let (b, bshape) = nodes[edge.to];
+        let points = if edge.from == root {
+            let mut peers = outgoing[root]
+                .iter()
+                .copied()
+                .filter(|i| (nodes[*i].0.y - b.y).abs() < 0.01)
+                .collect::<Vec<_>>();
+            peers.sort_by(|i, j| nodes[*i].0.x.total_cmp(&nodes[*j].0.x));
+            let slot = peers.iter().position(|i| *i == edge.to)?;
+            let y = b.y - 12.0 - slot as f64 * 3.0;
+            let order = heads.iter().position(|i| *i == edge.to)?;
+            let lane = 10.0 + (heads.len() - 1 - order) as f64 * 3.0;
+            let source = crate::shape::port(
+                ashape,
+                a,
+                false,
+                a.y + a.height * (0.8 - 0.6 * order as f64 / (heads.len() - 1) as f64),
+                false,
+            );
+            let target = crate::shape::port(bshape, b, true, b.x + b.width / 2.0, false);
+            vec![
+                source,
+                Point {
+                    x: lane,
+                    y: source.y,
+                },
+                Point { x: lane, y },
+                Point { x: target.x, y },
+                target,
+            ]
+        } else if edge.to == sink {
+            let mut peers = incoming[sink]
+                .iter()
+                .copied()
+                .filter(|i| (nodes[*i].0.y + nodes[*i].0.height - a.y - a.height).abs() < 0.01)
+                .collect::<Vec<_>>();
+            peers.sort_by(|i, j| nodes[*i].0.x.total_cmp(&nodes[*j].0.x));
+            let slot = peers.iter().position(|i| *i == edge.from)?;
+            let y = a.y + a.height + 12.0 + (peers.len() - 1 - slot) as f64 * 3.0;
+            let order = tails.iter().position(|i| *i == edge.from)?;
+            let lane = width - 10.0 - order as f64 * 3.0;
+            let source = crate::shape::port(ashape, a, true, a.x + a.width / 2.0, true);
+            let target = crate::shape::port(
+                bshape,
+                b,
+                false,
+                b.y + b.height * (0.8 - 0.6 * order as f64 / (tails.len() - 1) as f64),
+                true,
+            );
+            vec![
+                source,
+                Point { x: source.x, y },
+                Point { x: lane, y },
+                Point {
+                    x: lane,
+                    y: target.y,
+                },
+                target,
+            ]
+        } else {
+            let source = crate::shape::port(ashape, a, true, a.x + a.width / 2.0, true);
+            let target = crate::shape::port(bshape, b, true, b.x + b.width / 2.0, false);
+            if (source.x - target.x).abs() > 0.01 {
+                return None;
+            }
+            vec![source, target]
+        };
+        // 通道不足时交还一般路由，不能穿节点作为回退。
+        if points.windows(2).any(|pair| {
+            nodes.iter().enumerate().any(|(i, (r, _))| {
+                i != edge.from && i != edge.to && segment_intersects(pair[0], pair[1], *r)
+            })
+        }) {
+            return None;
+        }
+        result.push(simplify(points));
+    }
+    Some(result)
+}
+
+fn segment_intersects(a: Point, b: Point, r: Rect) -> bool {
+    if (a.x - b.x).abs() < 0.001 {
+        a.x > r.x && a.x < r.x + r.width && a.y.min(b.y) < r.y + r.height && a.y.max(b.y) > r.y
+    } else {
+        a.y > r.y && a.y < r.y + r.height && a.x.min(b.x) < r.x + r.width && a.x.max(b.x) > r.x
+    }
+}
+
+fn simplify(points: Vec<Point>) -> Vec<Point> {
+    let mut result: Vec<Point> = Vec::new();
+    for point in points {
+        if result
+            .last()
+            .is_some_and(|last| (last.x - point.x).abs() + (last.y - point.y).abs() < 0.001)
+        {
+            continue;
+        }
+        while result.len() >= 2 {
+            let a = result[result.len() - 2];
+            let b = result[result.len() - 1];
+            if ((a.x - b.x).abs() < 0.001
+                && (b.x - point.x).abs() < 0.001
+                && (b.y - a.y) * (point.y - b.y) >= 0.0)
+                || ((a.y - b.y).abs() < 0.001
+                    && (b.y - point.y).abs() < 0.001
+                    && (b.x - a.x) * (point.x - b.x) >= 0.0)
+            {
+                result.pop();
+            } else {
+                break;
+            }
+        }
+        result.push(point);
+    }
+    result
+}

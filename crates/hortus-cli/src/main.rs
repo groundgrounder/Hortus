@@ -1,4 +1,6 @@
-use hortus_diagram::{LayoutOptions, SystemFonts, Theme, layout, mermaid_block};
+use hortus_diagram::{
+    Diagram, LayoutOptions, SystemFonts, Theme, layout, layout_graph, mermaid_block,
+};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -100,9 +102,12 @@ fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     }
     let markdown = std::fs::read_to_string(&input)?;
     let block = mermaid_block(&markdown, args.block)?;
-    let tree = block.parse()?;
+    let diagram = block.parse_diagram()?;
     let mut fonts = SystemFonts::new()?;
-    let scene = layout(&tree, &args.options, &mut fonts)?;
+    let scene = match diagram {
+        Diagram::Tree(tree) => layout(&tree, &args.options, &mut fonts)?,
+        Diagram::Graph(graph) => layout_graph(&graph, &args.options, &mut fonts)?.scene,
+    };
     std::fs::write(out, scene.to_svg())?;
     if let Some(path) = metrics_path {
         std::fs::write(path, serde_json::to_string_pretty(&scene.metrics)? + "\n")?;

@@ -322,7 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             if let arg = args.first(where: { $0.hasPrefix("--snapshot=") }) {
-                if args.contains("--snapshot-end"), let view = DiagramInspection.current() {
+                if args.contains("--snapshot-end"), let view = DiagramInspection.current(document: workspace.current?.document) {
                     view.scrollRangeToVisible(NSRange(location: view.sourceUTF16Length, length: 0))
                     view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
                 }

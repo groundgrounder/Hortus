@@ -12,12 +12,10 @@ enum DiagramInspection {
     static func textViews(in view: NSView) -> [DiagramTextView] {
         (view as? DiagramTextView).map { [$0] } ?? view.subviews.flatMap { textViews(in: $0) }
     }
-    static func current(document: NoteDocument? = nil) -> DiagramTextView? {
+    static func current(document: NoteDocument?) -> DiagramTextView? {
         let views = NSApp.windows.filter(\.isVisible).compactMap(\.contentView).flatMap { textViews(in: $0) }
-        if let document { return views.first { $0.representedDocument == ObjectIdentifier(document) } }
-        if let view = NSApp.keyWindow?.contentView.flatMap({ textViews(in: $0).first }) { return view }
-        // 显式单窗口检查可能在应用尚未取得 key 状态时开始；多个窗口时不猜测目标。
-        return views.count == 1 ? views.first : nil
+        guard let document else { return nil }
+        return views.first { $0.representedDocument == ObjectIdentifier(document) }
     }
     static func finishEvent() {
         // 自动循环没有原生输入事件；结束 AppKit 的事件临时对象池。
@@ -27,7 +25,7 @@ enum DiagramInspection {
             NSApp.postEvent(event, atStart: false)
         }
     }
-    static func settled(source: String? = nil, document: NoteDocument? = nil) async throws -> DiagramTextView {
+    static func settled(source: String? = nil, document: NoteDocument?) async throws -> DiagramTextView {
         for _ in 0..<500 {
             if let view = current(document: document), !view.diagramPending, source == nil || view.string == source {
                 autoreleasepool { view.layoutSubtreeIfNeeded() }
@@ -40,8 +38,17 @@ enum DiagramInspection {
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         if workspace.current?.document?.reading == true { await workspace.toggleCurrentView() }
         let memory = arguments.contains("--diagram-memory") ? try await memorySamples(workspace: workspace) : []
-        var view = try await settled(source: workspace.current?.text)
+        var view = try await settled(source: workspace.current?.text, document: workspace.current?.document)
         let firstMain = view.maximumMainWorkMilliseconds
+        if let argument = arguments.first(where: { $0.hasPrefix("--diagram-width=") }),
+           let width = Double(argument.dropFirst("--diagram-width=".count)), width >= 120,
+           let window = view.window, let sceneWidth = view.blocks.first?.prepared?.scene.width {
+            var frame = window.frame
+            frame.size.width += width - sceneWidth
+            window.setFrame(frame, display: true)
+            try await Task.sleep(for: .milliseconds(50))
+            view = try await settled(document: workspace.current?.document)
+        }
         var beforeClick = 0
         if arguments.contains("--diagram-click") {
             guard let diagram = view.diagramViews.values.first, let window = diagram.window,
@@ -52,7 +59,19 @@ enum DiagramInspection {
                                                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                                 context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { throw CocoaError(.coderValueNotFound) }
             diagram.mouseDown(with: event)
-            view = try await settled()
+            try await Task.sleep(for: .milliseconds(100))
+            // 直接调用同一 UI 回调，覆盖无窗口事件队列的自检环境。
+            if view.blocks.flatMap({ Array($0.collapsed) }).isEmpty {
+                diagram.onToggle?(hit.nodeId)
+                if let ordinal = view.diagramViews.first(where: { $0.value === diagram })?.key {
+                    view.onToggle?(ordinal, hit.nodeId)
+                }
+            }
+            for _ in 0..<100 {
+                if !view.blocks.flatMap({ Array($0.collapsed) }).isEmpty, !view.diagramPending { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            view = try await settled(document: workspace.current?.document)
         }
         var resize: [[String: Any]] = []
         if arguments.contains("--diagram-resize"), let window = view.window {
@@ -62,7 +81,7 @@ enum DiagramInspection {
                 frame.size.width = original.width - 200 + CGFloat(index % 30) * 10
                 window.setFrame(frame, display: true)
                 try await Task.sleep(for: .milliseconds(10))
-                view = try await settled()
+                view = try await settled(document: workspace.current?.document)
                 if let block = view.blocks.first, let prepared = block.prepared, let diagram = view.diagramViews[block.ordinal] {
                     let visible = diagram.visibleRect.intersection(diagram.bounds)
                     let scale = window.backingScaleFactor
@@ -77,16 +96,18 @@ enum DiagramInspection {
             }
             window.setFrame(original, display: true)
             try await Task.sleep(for: .milliseconds(20))
-            view = try await settled()
+            view = try await settled(document: workspace.current?.document)
         }
         var errors: [Double] = []
         let diagrams = view.diagramViews.values.sorted { $0.frame.minY < $1.frame.minY }
         var accessible = 0
+        var accessibleEdges = 0
         var expandedValid = true
         for diagram in diagrams {
             errors += diagram.prepared.lines.map { abs(CTLineGetTypographicBounds($0.1, nil, nil, nil) - $0.0.width) }
-            let nodes = diagram.accessibilityChildren() as? [NSAccessibilityElement] ?? []
-            accessible += nodes.count
+            let nodes = Array((diagram.accessibilityChildren() as? [NSAccessibilityElement] ?? []).prefix(diagram.accessibilityNodeCount))
+            accessible += diagram.accessibilityNodeCount
+            accessibleEdges += diagram.accessibilityEdgeCount
             for (node, hit) in zip(nodes, diagram.prepared.scene.hitRegions) where hit.canCollapse {
                 expandedValid = expandedValid && node.accessibilityRole() == .disclosureTriangle && node.isAccessibilityExpanded() == !hit.collapsed
             }
@@ -107,13 +128,16 @@ enum DiagramInspection {
                 "custom_fragments": customFragments, "error_fragments": errorFragments,
                 "source_preserved": view.string == workspace.current?.text, "textkit2": view.textLayoutManager != nil,
                 "visible_nodes": hits, "accessibility_nodes": accessible, "accessibility_expanded_valid": expandedValid,
+                "accessibility_edges": accessibleEdges,
                 "before_click_nodes": beforeClick,
                 "collapsed_nodes": view.blocks.flatMap { Array($0.collapsed) }.count,
                 "badge_count": diagrams.flatMap { $0.prepared.lines }.filter { $0.0.text.hasPrefix("+") }.count,
                 "reasons": view.blocks.compactMap(\.reason),
+                "diagnostics": view.blocks.compactMap(\.diagnostic),
                 "width_max_px": errors.last ?? 0, "width_p95_px": errors.isEmpty ? 0 : errors[Int(Double(errors.count - 1) * 0.95)],
                 "spans": errors.count, "first_main_work_max_ms": firstMain,
                 "payload_bytes": diagrams.map { $0.prepared.payloadBytes },
+                "scene_widths": diagrams.map { $0.prepared.scene.width },
                 "resize": resize, "memory": memory]
     }
     private static func memorySamples(workspace: Workspace) async throws -> [[String: Any]] {
@@ -122,7 +146,7 @@ enum DiagramInspection {
         var textIdentities: Set<ObjectIdentifier> = []
         for index in 0..<20 {
             autoreleasepool {
-                if let view = current() {
+                if let view = current(document: workspace.current?.document) {
                     textIdentities.insert(ObjectIdentifier(view))
                     oldText.append(WeakView(view))
                     oldDiagrams += view.diagramViews.values.map { WeakView($0) }
@@ -141,11 +165,11 @@ enum DiagramInspection {
                 let closed = try residentBytes()
                 workspace.openNote(path)
                 for _ in 0..<500 {
-                    if workspace.current?.loading == false, current() != nil { break }
+                    if workspace.current?.loading == false, current(document: workspace.current?.document) != nil { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
                 if workspace.current?.document?.reading == true { await workspace.toggleCurrentView() }
-                let view = try await settled(source: workspace.current?.text)
+                let view = try await settled(source: workspace.current?.text, document: workspace.current?.document)
                 autoreleasepool {
                     view.displayIfNeeded()
                     for diagram in view.diagramViews.values { diagram.displayIfNeeded() }
@@ -158,7 +182,7 @@ enum DiagramInspection {
             getrusage(RUSAGE_SELF, &usage)
             memory.append(["cycle": index + 1, "opened_bytes": try residentBytes(), "closed_bytes": closed,
                            "peak_bytes": usage.ru_maxrss, "text_view_instances": textIdentities.count,
-                           "retained_old_text_views": oldText.filter { $0.value != nil && $0.value !== current() }.count,
+                           "retained_old_text_views": oldText.filter { $0.value != nil && $0.value !== current(document: workspace.current?.document) }.count,
                            "retained_old_diagram_views": oldDiagrams.filter { $0.value != nil }.count])
         }
         return memory

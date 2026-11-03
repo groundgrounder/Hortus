@@ -88,6 +88,155 @@ fn rejects_merges_cycles_forests_and_unsupported_types() {
 }
 
 #[test]
+fn general_diagram_parser_preserves_graph_structure_and_source_ranges() {
+    let source =
+        "flowchart LR\nA[\"开始 😀\"] -->|同意| C{决定}\nB(备用) --> C\nC -.-> A\nC --> C\n";
+    let diagram = parse_diagram_at(source, 23).unwrap();
+    let Diagram::Graph(graph) = diagram else {
+        panic!("merge, cycle, and self-loop must use the graph AST");
+    };
+    assert_eq!(graph.direction, Direction::LeftToRight);
+    assert_eq!(graph.nodes.len(), 3);
+    assert_eq!(graph.nodes[0].label, "开始 😀");
+    assert_eq!(graph.nodes[0].shape, Shape::Rectangle);
+    assert_eq!(graph.nodes[1].shape, Shape::Diamond);
+    assert_eq!(graph.nodes[2].shape, Shape::Rounded);
+    assert_eq!(graph.edges.len(), 4);
+    assert_eq!(graph.edges[0].label.as_deref(), Some("同意"));
+    assert_eq!(
+        graph.edges[0].label_range.as_ref().unwrap().start,
+        23 + source.find("同意").unwrap()
+    );
+    assert_eq!(graph.edges[2].connector.line, EdgeLine::Dotted);
+    assert_eq!(graph.edges[3].to, graph.edges[3].from);
+    for node in &graph.nodes {
+        assert!(source.is_char_boundary(node.id_range.start - 23));
+        assert!(source.is_char_boundary(node.id_range.end - 23));
+        assert!(source.is_char_boundary(node.label_range.start - 23));
+        assert!(source.is_char_boundary(node.label_range.end - 23));
+    }
+}
+
+#[test]
+fn graph_markdown_crlf_ranges_and_unclosed_fences() {
+    let body = "flowchart LR\r\nA[中文😀 é] -->|是| C{决定}\r\nB(备用) --> C\r\nC -.-> A\r\n";
+    for prefix in ["", "> ", "  "] {
+        let source = format!(
+            "前言😀\r\n\r\n{prefix}```mermaid\r\n{}{prefix}```\r\n",
+            body.split_inclusive('\n')
+                .map(|line| format!("{prefix}{line}"))
+                .collect::<String>()
+        );
+        let block = mermaid_block(&source, 1).unwrap();
+        let Diagram::Graph(graph) = block.parse_diagram().unwrap() else {
+            panic!("expected graph")
+        };
+        assert_eq!(&source[graph.nodes[0].source_range.clone()], "A[中文😀 é]");
+        assert_eq!(
+            &source[graph.edges[0].source_range.clone()],
+            "A[中文😀 é] -->|是| C{决定}"
+        );
+        for node in &graph.nodes {
+            assert!(source.is_char_boundary(node.source_range.start));
+            assert!(source.is_char_boundary(node.source_range.end));
+        }
+    }
+    let block = mermaid_block("```mermaid\nflowchart TB\nA --> B\n", 1).unwrap();
+    assert!(
+        matches!(block.parse_diagram(), Err(DiagramError::Syntax { kind, .. }) if kind == "fence_unclosed")
+    );
+}
+
+#[test]
+fn general_diagram_parser_keeps_edge_identity_and_forest_relations() {
+    let graph = match parse_diagram("flowchart TB\nA --> C\nB --> C\nA --> C\n") {
+        Ok(Diagram::Graph(graph)) => graph,
+        other => panic!("expected graph with a merge and duplicate edge: {other:?}"),
+    };
+    assert_eq!(graph.edges.len(), 3);
+    assert_ne!(graph.edges[0].id, graph.edges[2].id);
+    let Diagram::Graph(edited) =
+        parse_diagram("flowchart TB\nX --> Y\nA --> C\nB --> C\nA --> C\n").unwrap()
+    else {
+        panic!("expected graph")
+    };
+    assert_eq!(graph.edges[0].id, edited.edges[1].id);
+    assert_eq!(graph.edges[2].id, edited.edges[3].id);
+    assert!(!graph.forest);
+
+    let graph = match parse_diagram("flowchart TB\nA --> B\nC -.-> B\n") {
+        Ok(Diagram::Graph(graph)) => graph,
+        other => panic!("expected a forest with a relation edge: {other:?}"),
+    };
+    assert_eq!(graph.edges.len(), 2);
+    assert!(graph.forest);
+}
+
+#[test]
+fn general_diagram_parser_supports_bidirectional_connectors_and_common_shapes() {
+    let source =
+        "flowchart TB\nA --> B\nB <--> C\nC ---o D\nD --x E\nE ==> F\nF[/slant/]\nG[\\reverse\\]";
+    let graph = match parse_diagram(source) {
+        Ok(Diagram::Graph(graph)) => graph,
+        other => panic!("expected graph: {other:?}"),
+    };
+    assert_eq!(graph.edges.len(), 5);
+    assert_eq!(graph.edges[1].connector.start, Marker::Arrow);
+    assert_eq!(graph.edges[1].connector.end, Marker::Arrow);
+    assert_eq!(graph.edges[2].connector.end, Marker::Circle);
+    assert_eq!(graph.edges[3].connector.end, Marker::Cross);
+    assert_eq!(graph.edges[4].connector.line, EdgeLine::Thick);
+    assert_eq!(graph.nodes[5].shape, Shape::Parallelogram);
+    assert_eq!(graph.nodes[6].shape, Shape::ParallelogramReverse);
+}
+
+#[test]
+fn graph_layout_returns_native_paths_nodes_and_stable_svg() {
+    let graph =
+        match parse_diagram("flowchart TB\nA -->|yes| C{Decision}\nB --> C\nC -.-> A\nC --> C") {
+            Ok(Diagram::Graph(graph)) => graph,
+            other => panic!("expected graph: {other:?}"),
+        };
+    let render =
+        || layout_graph(&graph, &LayoutOptions::default(), &mut DeterministicMetrics).unwrap();
+    let first = render();
+    let second = render();
+    assert_eq!(first.scene.to_svg(), second.scene.to_svg());
+    assert_eq!(first.metrics.edge_count, 4);
+    assert_eq!(first.metrics.ranks, 2);
+    assert_eq!(first.scene.hit_regions.len(), 3);
+    assert!(
+        first
+            .scene
+            .primitives
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::GraphPath { .. }))
+    );
+    assert!(first.scene.primitives.iter().any(|primitive| matches!(
+        primitive,
+        Primitive::GraphShape {
+            shape: Shape::Diamond,
+            ..
+        }
+    )));
+    assert!(
+        first
+            .scene
+            .primitives
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::LabelBackground { .. }))
+    );
+    assert!(
+        first
+            .scene
+            .to_svg()
+            .contains(&format!("data-edge-id=\"{}\"", graph.edges[0].id))
+    );
+    assert!(!first.metrics.horizontal_overflow);
+    assert_eq!(first.metrics.node_overlaps, 0);
+}
+
+#[test]
 fn flowchart_connection_variants_and_ampersand_expansion() {
     assert!(matches!(parse("flowchart TB\nB & C --> D"),
         Err(DiagramError::NotATree { multi_parent, .. }) if multi_parent == vec!["D"]));

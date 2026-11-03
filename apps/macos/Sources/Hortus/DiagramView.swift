@@ -5,6 +5,7 @@ import HortusCore
 final class DiagramView: NSView {
     private(set) var prepared: PreparedScene
     var onToggle: ((String) -> Void)?
+    var onSourceRange: ((NSRange) -> Void)?
     var onEditSource: (() -> Void)?
     private var hover: NSTrackingArea?
     private lazy var editButton: NSButton = {
@@ -16,6 +17,7 @@ final class DiagramView: NSView {
         return button
     }()
     private var nodes: [DiagramAccessibilityNode] = []
+    private var edges: [DiagramAccessibilityEdge] = []
     override var isFlipped: Bool { true }
 
     init(prepared: PreparedScene) {
@@ -23,7 +25,7 @@ final class DiagramView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: prepared.scene.width, height: prepared.scene.height))
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel(L10n.string("Tree diagram"))
+        setAccessibilityLabel(L10n.string("Mermaid diagram"))
         update(prepared)
     }
     func update(_ prepared: PreparedScene) {
@@ -44,14 +46,38 @@ final class DiagramView: NSView {
             }
             if !previous.isEmpty { NSAccessibility.post(element: self, notification: .layoutChanged) }
         }
+        let previousEdges = Dictionary(uniqueKeysWithValues: edges.map { ($0.id, $0) })
+        edges = prepared.scene.primitives.compactMap { primitive in
+            guard case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive,
+                  let first = points.first else { return nil }
+            let bounds = points.dropFirst().reduce(CGRect(origin: first.cgPoint, size: .zero)) {
+                $0.union(CGRect(origin: $1.cgPoint, size: .zero))
+            }.insetBy(dx: -5, dy: -5)
+            let edge = previousEdges[id] ?? DiagramAccessibilityEdge(id: id, owner: self)
+            edge.update(label: prepared.edgeLabels[id] ?? "", bounds: bounds)
+            return edge
+        }
         needsDisplay = true
         window?.invalidateCursorRects(for: self)
     }
-    override func accessibilityChildren() -> [Any]? { nodes }
+    override func accessibilityChildren() -> [Any]? { nodes + edges.map { $0 as NSAccessibilityElement } }
+    var accessibilityNodeCount: Int { nodes.count }
+    var accessibilityEdgeCount: Int { edges.count }
+    func screenPoint(_ point: CGPoint) -> ScenePoint {
+        let value = window?.convertPoint(toScreen: convert(point, to: nil)) ?? point
+        return ScenePoint(x: value.x, y: value.y)
+    }
+    func viewportAnchors() -> [DiagramViewportAnchor] {
+        prepared.scene.hitRegions.filter { $0.rect.cgRect.intersects(visibleRect) }.map {
+            DiagramViewportAnchor(nodeId: $0.nodeId, screenCenter: screenPoint(CGPoint(x: $0.rect.cgRect.midX, y: $0.rect.cgRect.midY)))
+        }
+    }
     func detach() {
         nodes = []
+        edges = []
         onToggle = nil
         onEditSource = nil
+        onSourceRange = nil
         removeFromSuperview()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -79,10 +105,65 @@ final class DiagramView: NSView {
     override func resetCursorRects() {
         for hit in prepared.scene.hitRegions where hit.canCollapse { addCursorRect(hit.rect.cgRect, cursor: .pointingHand) }
     }
+    func sourceRange(at point: CGPoint) -> NSRange? {
+        guard prepared.acceptsInteraction else { return nil }
+        if let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) }) { return prepared.sourceRanges[hit.nodeId] }
+        for primitive in prepared.scene.primitives.reversed() {
+            if case let .labelBackground(id, rect, _) = primitive, rect.cgRect.contains(point) { return prepared.edgeRanges[id] }
+            if case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive {
+                for (a, b) in zip(points, points.dropFirst()) {
+                    let dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy
+                    guard length > 0 else { continue }
+                    let t = min(1, max(0, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length))
+                    if hypot(point.x - a.x - t * dx, point.y - a.y - t * dy) <= 5 { return prepared.edgeRanges[id] }
+                }
+            }
+        }
+        return nil
+    }
     override func mouseDown(with event: NSEvent) {
+        guard prepared.acceptsInteraction else { return }
         let point = convert(event.locationInWindow, from: nil)
         if let hit = prepared.scene.hitRegions.first(where: { $0.canCollapse && $0.rect.cgRect.contains(point) }) {
             onToggle?(hit.nodeId)
+        } else if let range = sourceRange(at: point) { onSourceRange?(range) }
+    }
+}
+
+private final class DiagramAccessibilityEdge: NSAccessibilityElement {
+    let id: UInt64
+    private var bounds = CGRect.zero
+    private let parentProvider: @MainActor @Sendable () -> DiagramView?
+    @MainActor init(id: UInt64, owner: DiagramView) {
+        self.id = id
+        parentProvider = { [weak owner] in owner }
+        super.init()
+        setAccessibilityRole(.button)
+    }
+    func update(label: String, bounds: CGRect) {
+        self.bounds = bounds
+        setAccessibilityLabel(label)
+    }
+    override func accessibilityParent() -> Any? {
+        let provider = parentProvider
+        return MainActor.assumeIsolated { provider() }
+    }
+    override func accessibilityFrame() -> NSRect {
+        let provider = parentProvider
+        let rect = bounds
+        return MainActor.assumeIsolated {
+            guard let owner = provider(), let window = owner.window else { return .zero }
+            return window.convertToScreen(owner.convert(rect, to: nil))
+        }
+    }
+    override func accessibilityPerformPress() -> Bool {
+        let provider = parentProvider
+        let edgeID = id
+        return MainActor.assumeIsolated {
+            guard let owner = provider(), let range = owner.prepared.edgeRanges[edgeID],
+                  owner.prepared.acceptsInteraction, let action = owner.onSourceRange else { return false }
+            action(range)
+            return true
         }
     }
 }
@@ -101,8 +182,11 @@ private final class DiagramAccessibilityNode: NSAccessibilityElement {
             return window.convertToScreen(owner.convert(rect.cgRect, to: nil))
         }
         press = { [weak owner] id in
-            guard let owner else { return false }
-            owner.onToggle?(id)
+            guard let owner, owner.prepared.acceptsInteraction else { return false }
+            if let hit = owner.prepared.scene.hitRegions.first(where: { $0.nodeId == id }), hit.canCollapse {
+                owner.onToggle?(id)
+            } else if let range = owner.prepared.sourceRanges[id], owner.onSourceRange != nil { owner.onSourceRange?(range) }
+            else { return false }
             return true
         }
         super.init()
@@ -127,13 +211,13 @@ private final class DiagramAccessibilityNode: NSAccessibilityElement {
     }
     override func isAccessibilityExpanded() -> Bool { !hit.collapsed }
     override func accessibilityPerformPress() -> Bool {
-        guard hit.canCollapse else { return false }
         let action = press
         let id = hit.nodeId
         return MainActor.assumeIsolated { action(id) }
     }
     override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
-        if selector == #selector(isAccessibilityExpanded) || selector == #selector(accessibilityPerformPress) { return hit.canCollapse }
+        if selector == #selector(isAccessibilityExpanded) { return hit.canCollapse }
+        if selector == #selector(accessibilityPerformPress) { return true }
         return super.isAccessibilitySelectorAllowed(selector)
     }
 }

@@ -1,6 +1,7 @@
 //! 长期存活的字体与单篇笔记解析缓存；调用方须在后台初始化及排版。
 use hortus_diagram::{
-    DiagramError, FontMetrics, LayoutOptions, SystemFonts, Tree, layout, mermaid_blocks, parse_at,
+    Diagram, DiagramError, FontMetrics, LayoutOptions, SystemFonts, layout, layout_graph,
+    mermaid_blocks, parse_diagram_at,
 };
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -63,7 +64,9 @@ struct EngineState {
     fonts: SystemFonts,
     source: String,
     mmd: bool,
-    trees: Vec<Result<Tree, DiagramError>>,
+    diagrams: Vec<Result<Diagram, DiagramError>>,
+    document: String,
+    revision: u64,
 }
 
 #[derive(uniffi::Object)]
@@ -87,7 +90,9 @@ impl DiagramEngine {
                 fonts,
                 source: String::new(),
                 mmd: false,
-                trees: Vec::new(),
+                diagrams: Vec::new(),
+                document: String::new(),
+                revision: 0,
             }),
         }))
     }
@@ -101,22 +106,57 @@ impl DiagramEngine {
         dark: bool,
         collapsed: Vec<String>,
     ) -> Result<crate::SceneData, DiagramFailure> {
-        let mut state = self.state.lock().unwrap();
-        if state.source != source || state.mmd != mmd || state.trees.is_empty() {
-            state.trees = if mmd {
-                vec![parse_at(&source, 0)]
+        self.render_request(
+            source,
+            mmd,
+            width,
+            collapsed,
+            crate::DiagramIdentity {
+                block,
+                dark,
+                ..crate::DiagramIdentity::default()
+            },
+            None,
+            Vec::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_request(
+        &self,
+        source: String,
+        mmd: bool,
+        width: f64,
+        collapsed: Vec<String>,
+        identity: crate::DiagramIdentity,
+        previous: Option<crate::DiagramPrevious>,
+        viewport: Vec<crate::DiagramViewportAnchor>,
+    ) -> Result<crate::SceneData, DiagramFailure> {
+        let mut state = self.state.lock().map_err(|_| DiagramFailure::Engine {
+            kind: "poisoned".into(),
+        })?;
+        if state.source != source
+            || state.mmd != mmd
+            || state.document != identity.document
+            || state.revision != identity.revision
+            || state.diagrams.is_empty()
+        {
+            state.diagrams = if mmd {
+                vec![parse_diagram_at(&source, 0)]
             } else {
                 mermaid_blocks(&source)
                     .into_iter()
-                    .map(|b| b.parse())
+                    .map(|b| b.parse_diagram())
                     .collect()
             };
             state.source = source;
             state.mmd = mmd;
+            state.document = identity.document.clone();
+            state.revision = identity.revision;
         }
-        let tree = state
-            .trees
-            .get(block.wrapping_sub(1) as usize)
+        let diagram = state
+            .diagrams
+            .get(identity.block.wrapping_sub(1) as usize)
             .ok_or_else(|| DiagramFailure::Engine {
                 kind: "missing_block".into(),
             })?
@@ -143,18 +183,40 @@ impl DiagramEngine {
             .clone();
         let options = LayoutOptions {
             width,
-            theme: if dark {
+            theme: if identity.dark {
                 hortus_diagram::Theme::Dark
             } else {
                 hortus_diagram::Theme::Light
             },
             collapsed: collapsed.into_iter().collect(),
+            previous: previous.map(Into::into),
+            viewport: Some(hortus_diagram::GraphViewport {
+                visible: viewport
+                    .into_iter()
+                    .map(|anchor| hortus_diagram::ViewportAnchor {
+                        node_id: anchor.node_id,
+                        screen_center: hortus_diagram::Point {
+                            x: anchor.screen_center.x,
+                            y: anchor.screen_center.y,
+                        },
+                    })
+                    .collect(),
+            }),
         };
-        let scene =
-            layout(&tree, &options, &mut state.fonts).map_err(|_| DiagramFailure::Engine {
-                kind: "layout".into(),
-            })?;
-        Ok(scene.into())
+        match &diagram {
+            Diagram::Tree(tree) => layout(tree, &options, &mut state.fonts)
+                .map(|scene| crate::SceneData::from(scene).with_request(identity, None, None)),
+            Diagram::Graph(graph) => {
+                layout_graph(graph, &options, &mut state.fonts).map(|result| {
+                    crate::SceneData::from(result.scene).with_request(
+                        identity,
+                        Some(result.previous.into()),
+                        Some(result.metrics.into()),
+                    )
+                })
+            }
+        }
+        .map_err(|error| DiagramFailure::Engine { kind: error.0 })
     }
 }
 
@@ -205,10 +267,9 @@ mod tests {
             render("sequenceDiagram", vec![]),
             Err(DiagramFailure::Unsupported { .. })
         ));
-        assert!(matches!(
-            render("flowchart TB\nB & C --> D", vec![]),
-            Err(DiagramFailure::NotATree { .. })
-        ));
+        let graph = render("flowchart TB\nB & C --> D", vec![]).unwrap();
+        assert_eq!(graph.hit_regions.len(), 3);
+        assert_eq!(graph.schema_version, 2);
         assert!(matches!(
             render("flowchart TB\nA --> B\nB ??? C", vec![]),
             Err(DiagramFailure::Syntax { line: 3, .. })
@@ -220,5 +281,91 @@ mod tests {
         assert_eq!(scene.wire_bytes as usize, wire.len());
         let scene = render("flowchart TB\nA --> B", vec!["A".into()]).unwrap();
         assert_eq!(scene.hit_regions.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod graph_wire_tests {
+    use super::*;
+
+    #[test]
+    fn graph_width_changes_keep_a_renderable_previous_scene() {
+        let source = include_str!("../../../fixtures/mermaid/flowchart/graph-syntax.mmd");
+        let engine = DiagramEngine::new().unwrap();
+        let mut previous = None;
+        for width in [1100.0, 700.0, 900.0, 1100.0] {
+            let scene = engine
+                .render_request(
+                    source.into(),
+                    true,
+                    width,
+                    vec![],
+                    crate::DiagramIdentity {
+                        document: "width-regression".into(),
+                        block: 1,
+                        ..Default::default()
+                    },
+                    previous,
+                    vec![],
+                )
+                .unwrap();
+            assert_eq!(scene.width, width);
+            assert_eq!(scene.hit_regions.len(), 8);
+            assert!(!scene.graph_metrics.as_ref().unwrap().horizontal_overflow);
+            previous = scene.previous;
+        }
+    }
+
+    #[test]
+    fn every_graph_primitive_and_request_matches_actual_uniffi_bytes() {
+        let engine = DiagramEngine::new().unwrap();
+        for source in [
+            "flowchart TB\nA[甲😀] -->|是| B{乙}\nC[(库)] --> B\nB --o A\nB --x C",
+            "flowchart RL\nA((甲)) <--> B[[乙]]\nA --> B\nB ==> C[/丙/]",
+        ] {
+            let identity = crate::DiagramIdentity {
+                document: "session-甲😀".into(),
+                block: 1,
+                revision: 12,
+                dark: true,
+                font_generation: 3,
+                request_generation: 7,
+            };
+            let first = engine
+                .render_request(
+                    source.into(),
+                    true,
+                    700.0,
+                    vec![],
+                    identity.clone(),
+                    None,
+                    vec![],
+                )
+                .unwrap();
+            for scene in [
+                first.clone(),
+                engine
+                    .render_request(
+                        source.into(),
+                        true,
+                        900.0,
+                        vec![],
+                        identity.clone(),
+                        first.previous,
+                        vec![],
+                    )
+                    .unwrap(),
+            ] {
+                let mut wire = Vec::new();
+                <crate::SceneData as uniffi::Lower<crate::UniFfiTag>>::write(
+                    scene.clone(),
+                    &mut wire,
+                );
+                assert_eq!(scene.wire_bytes as usize, wire.len());
+                assert_eq!(scene.identity, identity);
+                assert_eq!(scene.schema_version, 2);
+                assert!(scene.graph_metrics.is_some());
+            }
+        }
     }
 }
