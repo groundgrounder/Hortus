@@ -287,6 +287,8 @@ enum TabDragInspection {
               let toolbar = window.toolbar?.items.first(where: { $0.itemIdentifier.rawValue == "editor-tabs" })?.view,
               let source = button(in: toolbar, path: path) else { throw CocoaError(.coderValueNotFound) }
         record.workspace.application?.activate(record)
+        NSApp.activate(ignoringOtherApps: true)
+        try await wait { NSApp.isActive && window.isKeyWindow }
         try await Task.sleep(for: .milliseconds(fast ? 20 : 100))
         let rect = window.convertToScreen(source.convert(source.bounds, to: nil))
         let from = rect.center
@@ -301,9 +303,13 @@ enum TabDragInspection {
               let toolbar = window.toolbar?.items.first(where: { $0.itemIdentifier.rawValue == "editor-tabs" })?.view,
               let source = button(in: toolbar, path: path) else { throw CocoaError(.coderValueNotFound) }
         record.workspace.application?.activate(record)
+        NSApp.activate(ignoringOtherApps: true)
+        record.workspace.application?.tabDragTrace.append("activate active=\(NSApp.isActive) key=\(window.isKeyWindow) post=\(CGPreflightPostEventAccess())")
+        try await wait { NSApp.isActive && window.isKeyWindow }
         try await Task.sleep(for: .milliseconds(120))
         let rect = window.convertToScreen(source.convert(source.bounds, to: nil))
         let point = NSPoint(x: close ? rect.maxX + 12 : rect.midX, y: rect.midY)
+        record.workspace.application?.tabDragTrace.append("click \(path) close=\(close) active=\(NSApp.isActive) key=\(window.isKeyWindow) post=\(CGPreflightPostEventAccess()) rect=\(NSStringFromRect(rect))")
         await withCheckedContinuation { continuation in
             DispatchQueue.global().async {
                 let location = CGPoint(x: point.x, y: CGDisplayBounds(CGMainDisplayID()).height - point.y)
