@@ -39,6 +39,7 @@ struct StartupWindowProbe {
             try task.run(); task.waitUntilExit()
             guard task.terminationStatus == 0 else { throw NSError(domain: "Window screenshot failed", code: 2) }
         }
+        if CommandLine.arguments.contains("--hold-open") { return }
         guard NSRunningApplication(processIdentifier: pid)?.terminate() == true else {
             throw NSError(domain: "Quit request failed", code: 3)
         }

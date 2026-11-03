@@ -53,17 +53,37 @@ def main():
                 text += f'tabs = ["{name}"]\nselected = "{name}"\n[windows.views]\n"{name}" = "reading"\n'
             (cache / 'session.toml').write_text(text)
 
-        cases = [(f'explicit-{index}', [f'--vault={vaults[0]}', '--note=a.md'], ['a.md']) for index in range(1, 4)]
+        # 先验证尚未经 LaunchServices 激活的副本，避免后续直接启动依赖其激活记录。
+        cases = [(f'direct-{index}', [f'--vault={vaults[0]}', '--note=a.md'], ['a.md']) for index in range(1, 4)]
+        cases += [(f'explicit-{index}', [f'--vault={vaults[0]}', '--note=a.md'], ['a.md']) for index in range(1, 4)]
         cases += [('restore-two-1', [], ['a.md', 'b.md']), ('restore-two-2', [], ['a.md', 'b.md']),
                   ('empty', ['--empty'], ['Hortus'])]
-        # 直接启动也必须创建首窗；不能依赖 LaunchServices 的激活事件。
-        cases += [(f'direct-{index}', [f'--vault={vaults[0]}', '--note=a.md'], ['a.md']) for index in range(1, 4)]
         for name, arguments, titles in cases:
             if name in ('restore-two-1', 'empty'):
                 seed_two()
             command = ['open', '-n', '-a', str(app), '--env', f'HORTUS_CONFIG_DIR={state / "config"}',
                        '--env', f'HORTUS_CACHE_DIR={state / "cache"}', '--args', *arguments, '--light']
             process = None
+            if name.startswith('direct-'):
+                # 空库稳定运行后被终止，下一次直接启动也必须重新创建初始 Scene。
+                empty_state = base / (name + '-empty-state')
+                empty_process = subprocess.Popen([str(executable), '--empty', '--light'], env=dict(os.environ,
+                    HORTUS_CONFIG_DIR=str(empty_state / 'config'), HORTUS_CACHE_DIR=str(empty_state / 'cache')))
+                try:
+                    time.sleep(5)
+                    empty_target = output / (name + '-before-termination.json')
+                    subprocess.run([str(helper), str(empty_process.pid), str(empty_target),
+                                    str(media / (name + '-before-termination')), '--hold-open'], check=True, timeout=30)
+                    empty_data = json.loads(empty_target.read_text())
+                    empty_windows = [[w for w in sample['windows'] if w['AXSubrole'] == 'AXStandardWindow']
+                                     for sample in empty_data['samples']]
+                    assert all([w['AXTitle'] for w in windows] == ['Hortus'] for windows in empty_windows), empty_data
+                    assert (empty_state / 'config/config.toml').exists(), 'Empty window did not initialize configuration'
+                    assert (empty_state / 'cache/session.toml').exists(), 'Empty window did not initialize session'
+                finally:
+                    if empty_process.poll() is None:
+                        empty_process.terminate()
+                    empty_process.wait(timeout=15)
             if name.startswith('direct-'):
                 command = [str(executable), *arguments, '--light']
                 process = subprocess.Popen(command, env=dict(os.environ,

@@ -7,15 +7,18 @@ import CoreGraphics
 struct HortusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var application = ApplicationWorkspace()
+    @Environment(\.openWindow) private var openWindow
     private var workspace: Workspace { application.active?.workspace ?? application.initial.workspace }
     private var layout: Layout { application.active?.layout ?? application.initial.layout }
 
     var body: some Scene {
-        // 首窗只有一个固定 Scene；附加窗只响应显式 openWindow，不参与系统自动恢复。
+        let open = openWindow
+        let _ = delegate.presentInitialWindow = { open(id: "main") }
+        // 所有窗口都由应用请求创建；首窗在启动完成时打开，附加窗按记录标识打开。
         Window("Hortus", id: "main") {
             VaultWindowRoot(application: application, record: application.initial, delegate: delegate)
         }
-        .defaultLaunchBehavior(.presented)
+        .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified(showsTitle: false))
@@ -101,6 +104,7 @@ struct HortusApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var application: ApplicationWorkspace?
+    var presentInitialWindow: (() -> Void)?
     var workspace: Workspace? { application?.initial.workspace }
     var layout: Layout? { application?.initial.layout }
     var ready = false
@@ -157,6 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if args.contains("--dark") { NSApp.appearance = NSAppearance(named: .darkAqua) }
         if args.contains("--light") { NSApp.appearance = NSAppearance(named: .aqua) }
         if args.contains("--simulate-high-contrast") { NSApp.appearance = NSAppearance(named: .aqua) }
+        presentInitialWindow?()
         NSApp.activate()
         focusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
             nonisolated(unsafe) let object = note.object
