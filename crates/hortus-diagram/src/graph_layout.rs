@@ -7,7 +7,17 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 const NODE_GAP: f64 = 28.0;
-const RANK_GAP: f64 = 28.0;
+const RANK_GAP_COMPACT: f64 = 28.0;
+const RANK_GAP_DENSE: f64 = 44.0;
+
+/// 稀疏链保持紧凑步距；连边密集或节点多时保留较大层距，避免走线折点膨胀。
+fn rank_gap(graph: &Graph) -> f64 {
+    if graph.nodes.len() > 32 || graph.edges.len() * 5 > graph.nodes.len() * 6 {
+        RANK_GAP_DENSE
+    } else {
+        RANK_GAP_COMPACT
+    }
+}
 const OUTER: f64 = 30.0;
 
 #[derive(Clone, Debug)]
@@ -849,7 +859,7 @@ fn place_nodes(
             groups[*node] = group;
             x += boxes[*node].rect.width + NODE_GAP;
         }
-        y += height + RANK_GAP;
+        y += height + rank_gap(graph);
     }
     // 同高的反馈支路放在主干右侧；主干保持一条竖直阅读轴。
     for edge in &graph.edges {
@@ -898,7 +908,7 @@ fn place_nodes(
             }
         }
     }
-    (y - RANK_GAP + OUTER, groups)
+    (y - rank_gap(graph) + OUTER, groups)
 }
 
 type ColumnLayout = (Vec<(f64, f64)>, f64, Vec<usize>, Vec<Vec<Point>>);
@@ -1282,7 +1292,7 @@ fn place_branches(
                 boxes[node].rect.y = *y;
                 x += boxes[node].rect.width + NODE_GAP;
             }
-            *y += height + RANK_GAP;
+            *y += height + rank_gap(graph);
         }
     };
     common(0..first_rank, &mut y);
@@ -1307,7 +1317,7 @@ fn place_branches(
                 boxes[*node].rect.x = x + (widths[branch] - boxes[*node].rect.width) / 2.0;
                 boxes[*node].rect.y = node_y;
                 groups[*node] = band;
-                node_y += boxes[*node].rect.height + RANK_GAP;
+                node_y += boxes[*node].rect.height + rank_gap(graph);
             }
             bottom = bottom.max(node_y);
             x += widths[branch] + NODE_GAP;
@@ -1335,15 +1345,15 @@ fn place_branches(
             bottom = bottom.max(y + boxes[node].rect.height);
             x += boxes[node].rect.width + NODE_GAP;
         }
-        y = bottom + RANK_GAP;
+        y = bottom + rank_gap(graph);
     }
     if graph.direction == Direction::BottomToTop {
         // 每个物理带只反转自身的层序，分支成员和左右次序不变。
         for boxed in boxes {
-            boxed.rect.y = y - RANK_GAP - boxed.rect.y - boxed.rect.height + OUTER;
+            boxed.rect.y = y - rank_gap(graph) - boxed.rect.y - boxed.rect.height + OUTER;
         }
     }
-    Some((y - RANK_GAP + OUTER, groups))
+    Some((y - rank_gap(graph) + OUTER, groups))
 }
 
 fn retain_positions(
@@ -1603,12 +1613,12 @@ fn retain_positions(
                 }
                 Direction::TopToBottom => Rect {
                     x: r.x + (r.width - initial.width) / 2.0,
-                    y: r.y + r.height + RANK_GAP,
+                    y: r.y + r.height + rank_gap(graph),
                     ..initial
                 },
                 Direction::BottomToTop => Rect {
                     x: r.x + (r.width - initial.width) / 2.0,
-                    y: r.y - initial.height - RANK_GAP,
+                    y: r.y - initial.height - rank_gap(graph),
                     ..initial
                 },
                 Direction::LeftToRight => Rect {
@@ -1686,8 +1696,8 @@ fn retain_positions(
                     rect.x + rect.width + NODE_GAP,
                 ]);
                 ys.extend([
-                    rect.y - initial.height - RANK_GAP,
-                    rect.y + rect.height + RANK_GAP,
+                    rect.y - initial.height - rank_gap(graph),
+                    rect.y + rect.height + rank_gap(graph),
                 ]);
             }
             let mut candidates = Vec::new();
@@ -1715,7 +1725,7 @@ fn retain_positions(
                 x: OUTER,
                 y: placed
                     .iter()
-                    .map(|r| r.y + r.height + RANK_GAP)
+                    .map(|r| r.y + r.height + rank_gap(graph))
                     .fold(OUTER, f64::max),
                 ..initial
             })
