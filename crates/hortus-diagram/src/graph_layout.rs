@@ -43,6 +43,51 @@ pub fn layout_graph(
     options: &LayoutOptions,
     fonts: &mut dyn FontMetrics,
 ) -> Result<GraphScene, LayoutError> {
+    let initial = layout_graph_with_order(graph, options, fonts, None)?;
+    if graph.nodes.len() > 16 || initial.metrics.edge_crossings == 0 {
+        return Ok(initial);
+    }
+    let (ranks, count, _) = assign_ranks(graph);
+    let base = order_ranks(graph, &ranks, count);
+    let mut best = initial;
+    for rank in 0..count {
+        if !(2..=3).contains(&base[rank].len()) {
+            continue;
+        }
+        let mut permutations = Vec::new();
+        let mut values = base[rank].clone();
+        permutations_of(&mut values, 0, &mut permutations);
+        for permutation in permutations {
+            let mut order = base.clone();
+            order[rank] = permutation;
+            if let Ok(candidate) = layout_graph_with_order(graph, options, fonts, Some(&order))
+                && candidate.metrics.edge_crossings < best.metrics.edge_crossings
+            {
+                best = candidate;
+            }
+        }
+    }
+    Ok(best)
+}
+
+fn permutations_of(values: &mut [usize], start: usize, output: &mut Vec<Vec<usize>>) {
+    if start == values.len() {
+        output.push(values.to_vec());
+        return;
+    }
+    for index in start..values.len() {
+        values.swap(start, index);
+        permutations_of(values, start + 1, output);
+        values.swap(start, index);
+    }
+}
+
+fn layout_graph_with_order(
+    graph: &Graph,
+    options: &LayoutOptions,
+    fonts: &mut dyn FontMetrics,
+    order_override: Option<&[Vec<usize>]>,
+) -> Result<GraphScene, LayoutError> {
     let started = Instant::now();
     if !options.width.is_finite() || options.width < 120.0 {
         return Err(LayoutError(
@@ -184,7 +229,9 @@ pub fn layout_graph(
             ranks[edge.from] = ranks[incoming[0]];
         }
     }
-    let order = order_ranks(graph, &ranks, rank_count);
+    let order = order_override
+        .map(<[Vec<usize>]>::to_vec)
+        .unwrap_or_else(|| order_ranks(graph, &ranks, rank_count));
     let (mut height, mut groups) = place_nodes(graph, &order, &ranks, &mut boxes, visible_width);
     let (retained_nodes, stability_reason) =
         retain_positions(graph, options, &mut boxes, &mut groups);
@@ -1564,5 +1611,15 @@ mod tests {
             groups(&initial.previous.nodes)
         );
         assert_eq!(resized.metrics.edge_crossings, 0);
+    }
+
+    #[test]
+    fn dense_dag_layout_has_no_crossing() {
+        let graph = graph(include_str!(
+            "../../../fixtures/mermaid/flowchart/dense-dag.mmd"
+        ));
+        let mut fonts = crate::SystemFonts::new().unwrap();
+        let result = layout_graph(&graph, &LayoutOptions::default(), &mut fonts).unwrap();
+        assert!(result.metrics.edge_crossings <= 1);
     }
 }
