@@ -1,7 +1,7 @@
 //! 基于节点外侧可见网格的确定性正交路由；已占用通道作为代价。
 use crate::{Direction, Graph, LayoutError, Point, Rect, Shape};
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 const CLEARANCE: f64 = 10.0;
 
@@ -353,6 +353,20 @@ fn route_grid(
     );
     let mut ends = Vec::new();
     let mut edge_sides = Vec::with_capacity(graph.edges.len());
+    let mut peer_totals = BTreeMap::<(usize, usize), usize>::new();
+    for edge in &graph.edges {
+        *peer_totals.entry((edge.from, edge.to)).or_default() += 1;
+    }
+    let mut peer_seen = BTreeMap::<(usize, usize), usize>::new();
+    let mut peer_counts = Vec::with_capacity(graph.edges.len());
+    let mut peer_slots = Vec::with_capacity(graph.edges.len());
+    for edge in &graph.edges {
+        let key = (edge.from, edge.to);
+        let slot = peer_seen.entry(key).or_default();
+        peer_counts.push(peer_totals[&key]);
+        peer_slots.push(*slot);
+        *slot += 1;
+    }
     let mut long_edge_slot = 0usize;
     let mut long_node_side: Vec<Option<bool>> = vec![None; nodes.len()];
     for (index, edge) in graph.edges.iter().enumerate() {
@@ -460,15 +474,8 @@ fn route_grid(
             b_positive = from.x + from.width / 2.0 > to.x + to.width / 2.0;
         }
         // 重复边不合并成一条线。不同目标的同源前缀和同目的后缀允许共用端口。
-        let peers = graph
-            .edges
-            .iter()
-            .filter(|other| other.from == edge.from && other.to == edge.to)
-            .count();
-        let slot = graph.edges[..index]
-            .iter()
-            .filter(|other| other.from == edge.from && other.to == edge.to)
-            .count();
+        let peers = peer_counts[index];
+        let slot = peer_slots[index];
         if peers > 1 && slot > 0 {
             // 平行边改走独立外侧通道，标签不能挤在相距数像素的共同前后缀上。
             a_vertical = !vertical;
@@ -478,36 +485,32 @@ fn route_grid(
         }
         edge_sides.push((a_vertical, a_positive, b_vertical, b_positive));
     }
-    let port_delta = |edge_index: usize, outgoing: bool, is_vertical: bool, is_positive: bool| {
-        let node_index = if outgoing {
-            graph.edges[edge_index].from
-        } else {
-            graph.edges[edge_index].to
-        };
-        let mut incident = graph
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(index, edge)| {
-                let side = edge_sides[*index];
-                let (side_vertical, side_positive) = if outgoing {
-                    (side.0, side.1)
-                } else {
-                    (side.2, side.3)
-                };
-                (if outgoing { edge.from } else { edge.to }) == node_index
-                    && side_vertical == is_vertical
-                    && side_positive == is_positive
-            })
-            .collect::<Vec<_>>();
-        if nodes.len() > 48
-            || (incident.len() > 2 && incident.iter().all(|(_, edge)| edge.label.is_none()))
-        {
-            return 0.0;
-        }
-        incident.sort_by(|(a, first), (b, second)| {
-            let first = nodes[if outgoing { first.to } else { first.from }].0;
-            let second = nodes[if outgoing { second.to } else { second.from }].0;
+    let mut port_groups = BTreeMap::<(usize, bool, bool, bool), Vec<usize>>::new();
+    for (index, edge) in graph.edges.iter().enumerate() {
+        let side = edge_sides[index];
+        port_groups
+            .entry((edge.from, true, side.0, side.1))
+            .or_default()
+            .push(index);
+        port_groups
+            .entry((edge.to, false, side.2, side.3))
+            .or_default()
+            .push(index);
+    }
+    for (&(_, outgoing, is_vertical, _), incident) in &mut port_groups {
+        incident.sort_by(|a, b| {
+            let first = &graph.edges[*a];
+            let second = &graph.edges[*b];
+            let first = if outgoing {
+                nodes[first.to].0
+            } else {
+                nodes[first.from].0
+            };
+            let second = if outgoing {
+                nodes[second.to].0
+            } else {
+                nodes[second.from].0
+            };
             let coordinate = |rect: Rect| {
                 if is_vertical {
                     rect.x + rect.width / 2.0
@@ -519,9 +522,25 @@ fn route_grid(
                 .total_cmp(&coordinate(second))
                 .then(a.cmp(b))
         });
+    }
+    let port_delta = |edge_index: usize, outgoing: bool, is_vertical: bool, is_positive: bool| {
+        let node_index = if outgoing {
+            graph.edges[edge_index].from
+        } else {
+            graph.edges[edge_index].to
+        };
+        let incident = &port_groups[&(node_index, outgoing, is_vertical, is_positive)];
+        if nodes.len() > 48
+            || (incident.len() > 2
+                && incident
+                    .iter()
+                    .all(|index| graph.edges[*index].label.is_none()))
+        {
+            return 0.0;
+        }
         let position = incident
             .iter()
-            .position(|(i, _)| *i == edge_index)
+            .position(|index| *index == edge_index)
             .unwrap_or(0);
         (position as f64 - (incident.len() - 1) as f64 / 2.0) * 12.0
     };
@@ -529,15 +548,8 @@ fn route_grid(
         let (from, fs) = nodes[edge.from];
         let (to, ts) = nodes[edge.to];
         let (a_vertical, a_positive, b_vertical, b_positive) = edge_sides[index];
-        let peers = graph
-            .edges
-            .iter()
-            .filter(|other| other.from == edge.from && other.to == edge.to)
-            .count();
-        let slot = graph.edges[..index]
-            .iter()
-            .filter(|other| other.from == edge.from && other.to == edge.to)
-            .count();
+        let peers = peer_counts[index];
+        let slot = peer_slots[index];
         let endpoint =
             |node_index: usize, rect: Rect, shape, is_vertical, is_positive, delta: f64| {
                 let clearance = if peers > 1 && slot > 0 {
