@@ -375,9 +375,16 @@ enum TabDragInspection {
                 Thread.sleep(forTimeInterval: fast ? 0.004 : 0.012)
             }
             if escape {
-                CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true)?.post(tap: .cghidEventTap)
-                CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false)?.post(tap: .cghidEventTap)
-                Thread.sleep(forTimeInterval: 0.04)
+                // 检查宿主通常是 Terminal；把取消键直接投递给本进程，
+                // 避免合成按键被前台宿主收走而让松手提交拖放。
+                let source = CGEventSource(stateID: .hidSystemState)
+                if let down = CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: true),
+                   let up = CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: false) {
+                    down.postToPid(getpid())
+                    Thread.sleep(forTimeInterval: 0.03)
+                    up.postToPid(getpid())
+                }
+                Thread.sleep(forTimeInterval: 0.06)
             }
             post(.leftMouseUp, to)
             if repeatUp { Thread.sleep(forTimeInterval: 0.04); post(.leftMouseUp, to) }
