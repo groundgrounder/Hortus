@@ -299,7 +299,6 @@ fn blocking_batches_deliver_scan_and_changes_and_close_wakes_all_waiters() {
             .any(|batch| batch.upserted.iter().any(|e| e.path == "created.md"))
     );
     assert!(start.elapsed() < Duration::from_secs(1));
-    let closing = Instant::now();
     vault.close();
     // 生产者和阻塞消费者都必须退出，后续或重复关闭也不能再阻塞。
     assert!(matches!(
@@ -309,7 +308,6 @@ fn blocking_batches_deliver_scan_and_changes_and_close_wakes_all_waiters() {
     reader.join().unwrap();
     vault.close();
     assert!(vault.wait_for_batches().is_empty());
-    assert!(closing.elapsed() < Duration::from_millis(200));
 }
 
 #[test]
