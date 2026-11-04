@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 const NODE_GAP: f64 = 28.0;
-const RANK_GAP: f64 = 44.0;
+const RANK_GAP: f64 = 28.0;
 const OUTER: f64 = 30.0;
 
 #[derive(Clone, Debug)]
@@ -115,7 +115,7 @@ fn layout_graph_with_order(
             Direction::LeftToRight | Direction::RightToLeft
         );
         let limit = if horizontal {
-            ((visible_width - 32.0 * 3.0) / 4.0 - 24.0).max(48.0)
+            ((visible_width - 32.0 * 3.0) / 4.0 - 8.0).max(48.0)
         } else {
             196.0_f64.min(visible_width - 24.0)
         };
@@ -787,9 +787,9 @@ fn place_nodes(
                 bottom = bottom.max(node_y - 32.0);
                 x += weights[index];
             }
-            y = bottom + 64.0;
+            y = bottom + 48.0;
         }
-        return (y - 64.0 + OUTER, groups);
+        return (y - 48.0 + OUTER, groups);
     }
     if let Some((height, bands)) = place_branches(graph, ranks, boxes, available) {
         return (height, bands);
