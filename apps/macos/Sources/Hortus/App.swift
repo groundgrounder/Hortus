@@ -45,6 +45,12 @@ private struct HortusCommands: Commands {
         CommandGroup(replacing: .appInfo) {
             Button("About Hortus") { delegate.showAboutPanel() }
         }
+        // 原生文本视图不实现撤销动作，SwiftUI 的标准撤销项在嵌入编辑器上又是禁用的；
+        // 这里把撤销与重做直接交回响应者链，撤销栈仍由 NSTextView 管理。
+        CommandGroup(replacing: .undoRedo) {
+            Button("Undo") { dispatch(#selector(DiagramTextView.undoCommand(_:))) }.keyboardShortcut("z", modifiers: .command)
+            Button("Redo") { dispatch(#selector(DiagramTextView.redoCommand(_:))) }.keyboardShortcut("z", modifiers: [.command, .shift])
+        }
         CommandGroup(replacing: .newItem) {
             Button("Open Folder…") { workspace.chooseFolder() }.keyboardShortcut("o", modifiers: .command)
             Menu("Recent") {
@@ -100,6 +106,8 @@ private struct HortusCommands: Commands {
         }
     }
 
+    /// 撤销与重做交回第一响应者执行，撤销栈仍由原生文本视图自己维护。
+    private func dispatch(_ selector: Selector) { NSApp.sendAction(selector, to: nil, from: nil) }
     private func find(_ action: NSTextFinder.Action) {
         let item = NSMenuItem(); item.tag = action.rawValue
         NSApp.sendAction(#selector(NSTextView.performFindPanelAction(_:)), to: nil, from: item)
