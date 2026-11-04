@@ -1407,8 +1407,8 @@ fn column_stability(
     let mut common = 0;
     let mut exact = 0;
     let mut group_changes = 0;
-    let mut max_dx = 0.0_f64;
-    let mut max_dy = 0.0_f64;
+    let mut uniform = true;
+    let mut first_delta = None;
     for (index, node) in graph.nodes.iter().enumerate() {
         let Some(anchor) = previous
             .nodes
@@ -1427,10 +1427,17 @@ fn column_stability(
         if groups[index] != anchor.group {
             group_changes += 1;
         }
-        max_dx = max_dx.max((rect.x - anchor.rect.x).abs());
-        max_dy = max_dy.max((rect.y - anchor.rect.y).abs());
-        if (rect.x - anchor.rect.x).abs() < 0.01
-            && (rect.y - anchor.rect.y).abs() < 0.01
+        let delta = (rect.x - anchor.rect.x, rect.y - anchor.rect.y);
+        match first_delta {
+            None => first_delta = Some(delta),
+            Some((dx, dy)) => {
+                if (delta.0 - dx).abs() > 0.01 || (delta.1 - dy).abs() > 0.01 {
+                    uniform = false;
+                }
+            }
+        }
+        if delta.0.abs() < 0.01
+            && delta.1.abs() < 0.01
             && (rect.width - anchor.rect.width).abs() < 0.01
             && (rect.height - anchor.rect.height).abs() < 0.01
         {
@@ -1440,13 +1447,16 @@ fn column_stability(
     if common == 0 {
         return (0, "no_common_nodes".into());
     }
-    if group_changes == 0 && max_dy < 0.01 {
-        if max_dx < 0.01 {
-            (exact, format!("retained_columns_exact_{common}"))
+    // 共同成员只发生同一平移时，列结构、行带和相对位置都保留；
+    // 根框高度随扇出改变时整体平移不是等距的，按逐项精确命中计数。
+    if group_changes == 0 && uniform {
+        let (dx, dy) = first_delta.unwrap_or((0.0, 0.0));
+        if exact == common {
+            (common, format!("retained_columns_exact_{common}"))
         } else {
             (
                 common,
-                format!("retained_columns_shift_{max_dx:.1}_{common}"),
+                format!("retained_columns_translated_{dx:.1}x{dy:.1}_{common}"),
             )
         }
     } else {
