@@ -9,6 +9,10 @@ use std::time::Instant;
 const NODE_GAP: f64 = 28.0;
 const RANK_GAP_COMPACT: f64 = 28.0;
 const RANK_GAP_DENSE: f64 = 44.0;
+const EDGE_LABEL_SIZE: f64 = 13.6;
+const EDGE_LABEL_HEIGHT: f64 = 22.0;
+const EDGE_LABEL_PAD_X: f64 = 2.0;
+const EDGE_LABEL_SIDE_CLEARANCE: f64 = 7.0;
 
 /// 稀疏链保持紧凑步距；连边密集或节点多时保留较大层距，避免走线折点膨胀。
 fn rank_gap(graph: &Graph) -> f64 {
@@ -296,7 +300,7 @@ fn layout_graph_with_order(
         .map(|edge| {
             edge.label
                 .as_ref()
-                .map(|label| fonts.measure(label.trim_end(), 13.0, 400).width)
+                .map(|label| fonts.measure(label.trim_end(), EDGE_LABEL_SIZE, 400).width)
         })
         .collect::<Vec<_>>();
     let routed = if let Some(paths) = column_paths {
@@ -340,7 +344,7 @@ fn layout_graph_with_order(
     for (index, edge) in graph.edges.iter().enumerate() {
         if let Some(label) = &edge.label {
             let label = label.trim_end();
-            let measured = fonts.measure(label, 13.0, 400);
+            let measured = fonts.measure(label, EDGE_LABEL_SIZE, 400);
             let rect =
                 routed.labels[index].ok_or_else(|| LayoutError("Missing edge label".into()))?;
             primitives.push(Primitive::LabelBackground {
@@ -348,16 +352,16 @@ fn layout_graph_with_order(
                 rect,
                 color: background,
             });
-            let mut x = rect.x + 5.0;
+            let mut x = rect.x + EDGE_LABEL_PAD_X;
             for run in measured.runs {
                 primitives.push(Primitive::Text(TextSpan {
                     text: run.text,
                     baseline: Point {
                         x,
-                        y: rect.y + 14.0,
+                        y: rect.y + EDGE_LABEL_HEIGHT * 0.7,
                     },
                     width: run.width,
-                    font_size: 13.0,
+                    font_size: EDGE_LABEL_SIZE,
                     font_weight: 400,
                     font_family: run.font_family,
                     color: text_color,
@@ -440,9 +444,10 @@ fn layout_graph_with_order(
                 .nodes
                 .iter()
                 .any(|node| !crate::text::label_parts(&node.label).sub.is_empty())
-                || graph.edges.iter().any(|edge| edge.label.is_some())
             {
                 13.0
+            } else if graph.edges.iter().any(|edge| edge.label.is_some()) {
+                EDGE_LABEL_SIZE
             } else {
                 15.0
             },
@@ -2110,23 +2115,29 @@ pub(crate) fn place_edge_label(
     for (segment, pair) in paths[index].windows(2).enumerate() {
         let length = (pair[1].x - pair[0].x).abs() + (pair[1].y - pair[0].y).abs();
         let horizontal = (pair[0].y - pair[1].y).abs() < 0.001;
-        for fraction in [0.5, 0.3, 0.7, 0.15, 0.85] {
+        for fraction in [0.5, 0.35, 0.3, 0.65, 0.7, 0.15, 0.85] {
             let center = Point {
                 x: pair[0].x + (pair[1].x - pair[0].x) * fraction,
                 y: pair[0].y + (pair[1].y - pair[0].y) * fraction,
             };
             // 长标签在密集 LR 图里放不进边线正中；允许垂直/水平让位到相邻空白。
-            for offset in [0.0, 12.0, -12.0, 22.0, -22.0, 32.0, -32.0] {
+            let offsets = if horizontal {
+                vec![0.0, 12.0, -12.0, 22.0, -22.0, 32.0, -32.0]
+            } else {
+                let side = width / 2.0 + EDGE_LABEL_PAD_X + EDGE_LABEL_SIDE_CLEARANCE;
+                vec![side, -side]
+            };
+            for offset in offsets {
                 let (dx, dy) = if horizontal {
                     (0.0, offset)
                 } else {
                     (offset, 0.0)
                 };
                 let rect = Rect {
-                    x: center.x + dx - width / 2.0 - 5.0,
-                    y: center.y + dy - 10.0,
-                    width: width + 10.0,
-                    height: 20.0,
+                    x: center.x + dx - width / 2.0 - EDGE_LABEL_PAD_X,
+                    y: center.y + dy - EDGE_LABEL_HEIGHT / 2.0,
+                    width: width + EDGE_LABEL_PAD_X * 2.0,
+                    height: EDGE_LABEL_HEIGHT,
                 };
                 if rect.x < 4.0 || rect.x + rect.width > canvas_width - 4.0 || rect.y < 4.0 {
                     continue;
@@ -2137,8 +2148,22 @@ pub(crate) fn place_edge_label(
                     width: rect.width + 4.0,
                     height: rect.height + 4.0,
                 };
-                if nodes.iter().any(|node| margin.intersects(*node))
+                if nodes.iter().any(|node| rect.intersects(*node))
                     || labels.iter().any(|label| margin.intersects(*label))
+                {
+                    continue;
+                }
+                if !horizontal && segment_hits_rect(pair[0], pair[1], margin) {
+                    continue;
+                }
+                if marker_clearance(
+                    paths[index].last(),
+                    paths[index]
+                        .len()
+                        .checked_sub(2)
+                        .and_then(|i| paths[index].get(i)),
+                )
+                .is_some_and(|marker| rect.intersects(marker))
                 {
                     continue;
                 }
@@ -2151,7 +2176,7 @@ pub(crate) fn place_edge_label(
                     continue;
                 }
                 candidates.push((
-                    -(length.min(100.0))
+                    -length
                         + (fraction - 0.5).abs() * 30.0
                         + offset.abs() * 1.5
                         + segment as f64 * 0.01,
@@ -2162,6 +2187,57 @@ pub(crate) fn place_edge_label(
     }
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
     candidates.first().map(|(_, rect)| *rect)
+}
+
+fn marker_clearance(point: Option<&Point>, next: Option<&Point>) -> Option<Rect> {
+    let (point, next) = (point?, next?);
+    let dx = point.x - next.x;
+    let dy = point.y - next.y;
+    let length = dx.hypot(dy);
+    if length < 0.001 {
+        return None;
+    }
+    let back = Point {
+        x: point.x - 9.0 * dx / length,
+        y: point.y - 9.0 * dy / length,
+    };
+    let side = Point {
+        x: -dy / length * 4.0,
+        y: dx / length * 4.0,
+    };
+    let vertices = [
+        *point,
+        Point {
+            x: back.x + side.x,
+            y: back.y + side.y,
+        },
+        Point {
+            x: back.x - side.x,
+            y: back.y - side.y,
+        },
+    ];
+    let min_x = vertices
+        .iter()
+        .map(|point| point.x)
+        .fold(f64::MAX, f64::min);
+    let max_x = vertices
+        .iter()
+        .map(|point| point.x)
+        .fold(f64::MIN, f64::max);
+    let min_y = vertices
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::MAX, f64::min);
+    let max_y = vertices
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::MIN, f64::max);
+    Some(Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    })
 }
 
 fn segment_hits_rect(a: Point, b: Point, r: Rect) -> bool {
@@ -2381,5 +2457,229 @@ mod tests {
         let mut fonts = crate::SystemFonts::new().unwrap();
         let result = layout_graph(&graph, &LayoutOptions::default(), &mut fonts).unwrap();
         assert!(result.metrics.edge_crossings <= 1);
+    }
+
+    #[test]
+    fn research_ports_and_labels_use_centered_generic_rules() {
+        let graph = graph(include_str!(
+            "../../../fixtures/mermaid/flowchart/research.mmd"
+        ));
+        let mut fonts = crate::SystemFonts::new().unwrap();
+        let result = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 700.0,
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        assert_eq!((result.scene.width, result.scene.height), (700.0, 644.0));
+        assert_eq!(result.scene.hit_regions.len(), 10);
+
+        let nodes = result
+            .scene
+            .hit_regions
+            .iter()
+            .map(|hit| (hit.node_id.as_str(), hit.rect))
+            .collect::<BTreeMap<_, _>>();
+        let expected_nodes = [
+            ("A", 252.0, 30.0, 84.0, 40.0),
+            ("B", 252.0, 98.0, 84.0, 40.0),
+            ("C", 252.0, 166.0, 84.0, 40.0),
+            ("D", 252.0, 234.0, 84.0, 40.0),
+            ("E", 252.0, 302.0, 84.0, 40.0),
+            ("F", 252.0, 370.0, 84.0, 40.0),
+            ("G", 219.5, 438.0, 149.0, 40.0),
+            ("H", 252.0, 506.0, 84.0, 40.0),
+            ("J", 252.0, 574.0, 84.0, 40.0),
+            ("I", 396.5, 438.0, 84.0, 40.0),
+        ];
+        for (id, x, y, width, height) in expected_nodes {
+            assert_eq!(
+                nodes[id],
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height
+                },
+                "{id}"
+            );
+        }
+
+        let paths = result
+            .scene
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::GraphPath {
+                    edge_id, points, ..
+                } => Some((*edge_id, points)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), graph.edges.len());
+        let point = |x, y| Point { x, y };
+        assert_eq!(paths[2].1, &[point(294.0, 206.0), point(294.0, 234.0)]);
+        assert_eq!(paths[6].1, &[point(294.0, 478.0), point(294.0, 506.0)]);
+        assert_eq!(paths[8].1, &[point(368.5, 458.0), point(396.5, 458.0)]);
+        assert_eq!(
+            paths[9].1,
+            &[
+                point(438.5, 438.0),
+                point(438.5, 254.0),
+                point(336.0, 254.0)
+            ]
+        );
+
+        let label = |text: &str| {
+            result
+                .scene
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::Text(span) if span.text == text => Some(span),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing label {text}"))
+        };
+        let background = |edge_id| {
+            result
+                .scene
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::LabelBackground {
+                        edge_id: id, rect, ..
+                    } if *id == edge_id => Some(*rect),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing label background {edge_id}"))
+        };
+        for text in ["是", "否", "重新检验"] {
+            let span = label(text);
+            assert_eq!((span.font_size, span.font_weight), (EDGE_LABEL_SIZE, 400));
+        }
+        for (text, edge) in [("是", 6), ("重新检验", 9)] {
+            let span = label(text);
+            let rect = background(paths[edge].0);
+            let line_x = paths[edge]
+                .1
+                .windows(2)
+                .filter(|pair| (pair[0].x - pair[1].x).abs() < 0.001)
+                .max_by(|a, b| (a[0].y - a[1].y).abs().total_cmp(&(b[0].y - b[1].y).abs()))
+                .unwrap()[0]
+                .x;
+            assert!(rect.x > line_x + 4.0, "{text}: {rect:?} crosses x={line_x}");
+            assert!(span.baseline.x > line_x + 4.0);
+            assert!(span.baseline.x + span.width <= rect.x + rect.width);
+        }
+        let horizontal = label("否");
+        let horizontal_rect = background(paths[8].0);
+        assert!(horizontal_rect.y < 458.0 && horizontal_rect.y + horizontal_rect.height > 458.0);
+        assert!((horizontal_rect.x + horizontal_rect.width / 2.0 - 382.5).abs() <= 5.0);
+        assert!(horizontal.baseline.x >= horizontal_rect.x);
+        assert!(
+            horizontal.baseline.x + horizontal.width <= horizontal_rect.x + horizontal_rect.width
+        );
+
+        let backgrounds = paths
+            .iter()
+            .filter_map(|(edge_id, _)| {
+                result
+                    .scene
+                    .primitives
+                    .iter()
+                    .find_map(|primitive| match primitive {
+                        Primitive::LabelBackground {
+                            edge_id: id, rect, ..
+                        } if id == edge_id => Some((*edge_id, *rect)),
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (index, (edge_id, rect)) in backgrounds.iter().enumerate() {
+            assert!(nodes.values().all(|node| !rect.intersects(*node)));
+            assert!(
+                backgrounds[index + 1..]
+                    .iter()
+                    .all(|(_, other)| !rect.intersects(*other))
+            );
+            let path = paths
+                .iter()
+                .find(|(other_id, _)| other_id == edge_id)
+                .unwrap()
+                .1;
+            if let Some(marker) = marker_clearance(
+                path.last(),
+                path.len().checked_sub(2).and_then(|index| path.get(index)),
+            ) {
+                assert!(!rect.intersects(marker));
+            }
+            assert!(paths.iter().all(|(other_id, path)| {
+                other_id == edge_id
+                    || path
+                        .windows(2)
+                        .all(|pair| !segment_hits_rect(pair[0], pair[1], *rect))
+            }));
+        }
+    }
+
+    #[test]
+    fn same_side_and_parallel_edges_keep_distinct_ports() {
+        let same_side = graph("flowchart TB\n  A --> B\n  A --> C\n  B --> C\n");
+        let mut fonts = crate::SystemFonts::new().unwrap();
+        let result = layout_graph(
+            &same_side,
+            &LayoutOptions {
+                width: 700.0,
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        let paths = result
+            .scene
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::GraphPath { points, .. } => Some(points),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let c = result
+            .scene
+            .hit_regions
+            .iter()
+            .find(|hit| hit.node_id == "C")
+            .unwrap()
+            .rect;
+        let incoming = [paths[1].last().unwrap(), paths[2].last().unwrap()];
+        assert!(incoming.iter().all(|point| (point.y - c.y).abs() < 0.001));
+        assert!((incoming[0].x - incoming[1].x).abs() >= 12.0);
+        assert!(((incoming[0].x + incoming[1].x) / 2.0 - (c.x + c.width / 2.0)).abs() < 0.001);
+
+        let parallel = graph("flowchart TB\n  A --> B\n  A --> B\n");
+        let result = layout_graph(
+            &parallel,
+            &LayoutOptions {
+                width: 700.0,
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        let paths = result
+            .scene
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::GraphPath { points, .. } => Some(points),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(paths[0].first(), paths[1].first());
+        assert_ne!(paths[0].last(), paths[1].last());
     }
 }

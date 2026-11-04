@@ -136,7 +136,7 @@ def assert_geometry(name, data):
             assert actual['crossings'] <= limit, actual
 
 
-def assert_research_loop_label(data, source=None):
+def assert_research_geometry(data, source=None):
     if source is None:
         source = (ROOT / 'fixtures/mermaid/flowchart/research.mmd').read_bytes()
     loop = 'I[修正假设] -->|重新检验| D'.encode()
@@ -150,16 +150,76 @@ def assert_research_loop_label(data, source=None):
     scene = json.loads(data['initial_semantic_scenes'][0])
     nodes = {item['node_id']: item['rect'] for item in scene['hit_regions']}
     paths = [item for item in scene['primitives'] if item['kind'] == 'graph_path']
+    texts = [item for item in scene['primitives'] if item['kind'] == 'text']
+    backgrounds = {item['edge_id']: item['rect'] for item in scene['primitives']
+                   if item['kind'] == 'label_background'}
 
     def touches(point, rect, side):
         in_y = rect['y'] <= point['y'] <= rect['y'] + rect['height']
         in_x = rect['x'] <= point['x'] <= rect['x'] + rect['width']
         return ((side == 'right' and abs(point['x'] - (rect['x'] + rect['width'])) < .5 and in_y)
-                or (side == 'bottom' and abs(point['y'] - (rect['y'] + rect['height'])) < .5 and in_x))
+                or (side == 'left' and abs(point['x'] - rect['x']) < .5 and in_y)
+                or (side == 'bottom' and abs(point['y'] - (rect['y'] + rect['height'])) < .5 and in_x)
+                or (side == 'top' and abs(point['y'] - rect['y']) < .5 and in_x))
+
+    center_ports = []
+    for rect in nodes.values():
+        center_ports.extend([
+            {'x': rect['x'] + rect['width'] / 2, 'y': rect['y']},
+            {'x': rect['x'] + rect['width'] / 2, 'y': rect['y'] + rect['height']},
+            {'x': rect['x'], 'y': rect['y'] + rect['height'] / 2},
+            {'x': rect['x'] + rect['width'], 'y': rect['y'] + rect['height'] / 2},
+        ])
+    for path in paths:
+        target = path['points'][-1]
+        assert any(abs(target['x'] - port['x']) < .5 and abs(target['y'] - port['y']) < .5
+                   for port in center_ports), (path['source_range'], target, center_ports)
+
+    def edge(text):
+        matches = [path for path in paths
+                   if source[path['source_range']['start']:path['source_range']['end']] == text.encode()]
+        assert len(matches) == 1, (text, matches)
+        return matches[0]
+
+    def points(text):
+        return [(round(point['x'], 3), round(point['y'], 3)) for point in edge(text)['points']]
+
+    def marker_rect(path):
+        end, previous = path['points'][-1], path['points'][-2]
+        dx, dy = end['x'] - previous['x'], end['y'] - previous['y']
+        length = (dx * dx + dy * dy) ** .5
+        assert length > 0
+        back = {'x': end['x'] - 9 * dx / length, 'y': end['y'] - 9 * dy / length}
+        side = {'x': -dy / length * 4, 'y': dx / length * 4}
+        vertices = [end, {'x': back['x'] + side['x'], 'y': back['y'] + side['y']},
+                    {'x': back['x'] - side['x'], 'y': back['y'] - side['y']}]
+        xs, ys = [point['x'] for point in vertices], [point['y'] for point in vertices]
+        return {'x': min(xs), 'y': min(ys), 'width': max(xs) - min(xs), 'height': max(ys) - min(ys)}
+
+    def intersects(a, b):
+        return (a['x'] < b['x'] + b['width'] - .001 and b['x'] < a['x'] + a['width'] - .001
+                and a['y'] < b['y'] + b['height'] - .001 and b['y'] < a['y'] + a['height'] - .001)
+
+    cx, cy = lambda node: nodes[node]['x'] + nodes[node]['width'] / 2, lambda node: nodes[node]['y'] + nodes[node]['height'] / 2
+    expected_paths = {
+        'C[形成假设] --> D[设计实验]': [
+            (cx('C'), nodes['C']['y'] + nodes['C']['height']),
+            (cx('D'), nodes['D']['y'])],
+        'G -->|是| H[得出结论]': [
+            (cx('G'), nodes['G']['y'] + nodes['G']['height']), (cx('H'), nodes['H']['y'])],
+        'G -->|否| I[修正假设]': [
+            (nodes['G']['x'] + nodes['G']['width'], cy('G')),
+            (nodes['I']['x'], cy('I'))],
+        'I[修正假设] -->|重新检验| D': [
+            (cx('I'), nodes['I']['y']), (cx('I'), cy('D')),
+            (nodes['D']['x'] + nodes['D']['width'], cy('D'))],
+    }
+    for text, expected in expected_paths.items():
+        assert points(text) == expected, (text, points(text), expected, nodes)
 
     loops = [path for path in paths
              if path.get('label_range') is not None
-             and touches(path['points'][0], nodes['I'], 'right')
+             and touches(path['points'][0], nodes['I'], 'top')
              and touches(path['points'][-1], nodes['D'], 'right')]
     assert len(loops) == 1, paths
     loop_path = loops[0]
@@ -167,13 +227,38 @@ def assert_research_loop_label(data, source=None):
     label_range = loop_path['label_range']
     assert source[source_range['start']:source_range['end']] == loop, source_range
     assert source[label_range['start']:label_range['end']] == label_text, label_range
-    backgrounds = [item for item in scene['primitives']
-                   if item['kind'] == 'label_background' and item['edge_id'] == loop_path['edge_id']]
-    assert len(backgrounds) == 1, backgrounds
-    labels = [item for item in scene['primitives']
-              if item['kind'] == 'text' and item['text'] == '重新检验']
-    assert len(labels) == 1, labels
-    label, background = labels[0], backgrounds[0]['rect']
+    labels = {text: [item for item in texts if item['text'] == text]
+              for text in ('是', '否', '重新检验')}
+    assert all(len(items) == 1 for items in labels.values()), labels
+    assert all(item['font_size'] == 13.6 and item['font_weight'] == 400
+               for items in labels.values() for item in items), labels
+
+    for text, path_text in [
+        ('是', 'G -->|是| H[得出结论]'),
+        ('重新检验', 'I[修正假设] -->|重新检验| D'),
+    ]:
+        path = edge(path_text)
+        label = labels[text][0]
+        background = backgrounds[path['edge_id']]
+        assert not intersects(background, marker_rect(path)), (text, background, marker_rect(path))
+        vertical = [(a, b) for a, b in zip(path['points'], path['points'][1:])
+                    if abs(a['x'] - b['x']) < .001]
+        line_x = max(vertical, key=lambda pair: abs(pair[0]['y'] - pair[1]['y']))[0]['x']
+        assert background['x'] > line_x + 4, (text, background, line_x)
+        assert label['baseline']['x'] > line_x + 4, (text, label, line_x)
+
+    no_path = edge('G -->|否| I[修正假设]')
+    no_label, no_background = labels['否'][0], backgrounds[no_path['edge_id']]
+    assert not intersects(no_background, marker_rect(no_path)), (no_background, marker_rect(no_path))
+    line_y = no_path['points'][0]['y']
+    assert no_background['y'] < line_y < no_background['y'] + no_background['height'], no_background
+    gap = (nodes['G']['x'] + nodes['G']['width'] + nodes['I']['x']) / 2
+    assert abs(no_background['x'] + no_background['width'] / 2 - gap) <= 5, (no_background, gap)
+    assert no_background['x'] <= no_label['baseline']['x'], (no_label, no_background)
+    assert no_label['baseline']['x'] + no_label['width'] <= no_background['x'] + no_background['width'], (no_label, no_background)
+
+    background = backgrounds[loop_path['edge_id']]
+    label = labels['重新检验'][0]
     assert background['x'] <= label['baseline']['x'], (label, background)
     assert label['baseline']['x'] + label['width'] <= background['x'] + background['width'], (label, background)
     assert background['y'] <= label['baseline']['y'] - label['font_size'], (label, background)
@@ -187,7 +272,23 @@ def assert_research_loop_label(data, source=None):
         'path': loop_path['points'],
         'label_background': background,
         'label_text': label['text'],
+        'labels': {text: {'edge_id': edge(edge_text)['edge_id'],
+                          'background': backgrounds[edge(edge_text)['edge_id']],
+                          'text': labels[text][0]} for text, edge_text in [
+                              ('是', 'G -->|是| H[得出结论]'),
+                              ('否', 'G -->|否| I[修正假设]'),
+                              ('重新检验', 'I[修正假设] -->|重新检验| D')]},
+        'paths': {
+            'C_to_D': edge('C[形成假设] --> D[设计实验]')['points'],
+            'G_to_H': edge('G -->|是| H[得出结论]')['points'],
+            'G_to_I': edge('G -->|否| I[修正假设]')['points'],
+            'I_to_D': edge('I[修正假设] -->|重新检验| D')['points'],
+        },
     }
+
+
+def assert_research_loop_label(data, source=None):
+    return assert_research_geometry(data, source)
 
 
 def opening_main_thread_pass(samples, limit=33):
@@ -272,7 +373,7 @@ def scenarios(base, output):
                     assert data['diagrams'] == 1 and data['visible_nodes'] > 0 and not data['reasons'], data
                     assert data['scene_widths'] and all(abs(w - width) < .5 for w in data['scene_widths']), data
                     assert data['accessibility_nodes'] == data['visible_nodes'], data
-                    if name == 'research.mmd': assert_research_loop_label(data)
+                    if name == 'research.mmd': assert_research_geometry(data)
                     if name == 'erikson.mmd': assert data['row_counts'] == [[4, 4]], data
                     if name == 'erikson.mmd': assert data['initial_row_counts'] == [[4, 4]], data
     deterministic = ROOT / 'fixtures/mermaid/flowchart/research.mmd'

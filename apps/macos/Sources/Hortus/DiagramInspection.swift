@@ -326,7 +326,12 @@ enum DiagramInspection {
             for (index, pair) in zip(children.dropFirst(nodes.count), paths).enumerated() {
                 let (element, path) = pair
                 guard let first = path.1.first else { throw CocoaError(.coderValueNotFound) }
-                let bounds = path.1.dropFirst().reduce(CGRect(origin: first.cgPoint, size: .zero)) { $0.union(CGRect(origin: $1.cgPoint, size: .zero)) }.insetBy(dx: -5, dy: -5)
+                let pathBounds = path.1.dropFirst().reduce(CGRect(origin: first.cgPoint, size: .zero)) { $0.union(CGRect(origin: $1.cgPoint, size: .zero)) }.insetBy(dx: -5, dy: -5)
+                let labelBounds = diagram.prepared.scene.primitives.compactMap { primitive -> CGRect? in
+                    guard case let .labelBackground(id, rect, _) = primitive, id == path.0 else { return nil }
+                    return rect.cgRect
+                }.first
+                let bounds = labelBounds ?? pathBounds
                 let expected = diagram.window?.convertToScreen(diagram.convert(bounds, to: nil)) ?? .zero
                 let actual = element.accessibilityFrame()
                 let error = max(abs(expected.minX - actual.minX), abs(expected.minY - actual.minY), abs(expected.width - actual.width), abs(expected.height - actual.height))

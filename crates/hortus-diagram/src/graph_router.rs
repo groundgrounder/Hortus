@@ -352,11 +352,12 @@ fn route_grid(
         Direction::TopToBottom | Direction::LeftToRight
     );
     let mut ends = Vec::new();
+    let mut edge_sides = Vec::with_capacity(graph.edges.len());
     let mut long_edge_slot = 0usize;
     let mut long_node_side: Vec<Option<bool>> = vec![None; nodes.len()];
     for (index, edge) in graph.edges.iter().enumerate() {
-        let (from, fs) = nodes[edge.from];
-        let (to, ts) = nodes[edge.to];
+        let (from, _) = nodes[edge.from];
+        let (to, _) = nodes[edge.to];
         let mut a_vertical = vertical;
         let mut b_vertical = vertical;
         let mut a_positive = positive;
@@ -383,7 +384,18 @@ fn route_grid(
             a_positive = from.x < to.x;
             b_positive = !a_positive;
         }
-        let long_edge = nodes.len() <= 48
+        // 回边从靠近目标的竖直边出发，再沿目标朝向源节点的侧面汇入。这样
+        // 不会与同节点的主链端口共用一条竖线，也不会为绕行额外挪动中心端。
+        let backward =
+            vertical && ((positive && to.y < from.y - 1.0) || (!positive && to.y > from.y + 1.0));
+        if backward {
+            a_vertical = true;
+            a_positive = !positive;
+            b_vertical = false;
+            b_positive = from.x + from.width / 2.0 > to.x + to.width / 2.0;
+        }
+        let long_edge = !backward
+            && nodes.len() <= 48
             && vertical
             && accepted[index]
             && (to.y - from.y).abs() > from.height + to.height + 60.0;
@@ -441,6 +453,12 @@ fn route_grid(
                 b_positive = sides & 2 != 0;
             }
         }
+        if backward {
+            a_vertical = true;
+            a_positive = !positive;
+            b_vertical = false;
+            b_positive = from.x + from.width / 2.0 > to.x + to.width / 2.0;
+        }
         // 重复边不合并成一条线。不同目标的同源前缀和同目的后缀允许共用端口。
         let peers = graph
             .edges
@@ -458,43 +476,68 @@ fn route_grid(
             a_positive = slot % 2 == 1;
             b_positive = a_positive;
         }
-        let delta = (slot as f64 - (peers - 1) as f64 / 2.0) * 9.0;
-        let label_delta = |outgoing: bool| {
-            let mut incident = graph
-                .edges
-                .iter()
-                .enumerate()
-                .filter(|(_, other)| {
-                    if outgoing {
-                        other.from == edge.from
-                    } else {
-                        other.to == edge.to
-                    }
-                })
-                .collect::<Vec<_>>();
-            if peers > 1
-                || nodes.len() > 48
-                || (incident.len() > 2 && !incident.iter().any(|(_, edge)| edge.label.is_some()))
-            {
-                return delta;
-            }
-            incident.sort_by(|(a, first), (b, second)| {
-                let first = nodes[if outgoing { first.to } else { first.from }].0;
-                let second = nodes[if outgoing { second.to } else { second.from }].0;
-                let coordinate = |rect: Rect| {
-                    if vertical {
-                        rect.x + rect.width / 2.0
-                    } else {
-                        rect.y + rect.height / 2.0
-                    }
-                };
-                coordinate(first)
-                    .total_cmp(&coordinate(second))
-                    .then(a.cmp(b))
-            });
-            let position = incident.iter().position(|(i, _)| *i == index).unwrap_or(0);
-            (position as f64 - (incident.len() - 1) as f64 / 2.0) * 12.0
+        edge_sides.push((a_vertical, a_positive, b_vertical, b_positive));
+    }
+    let port_delta = |edge_index: usize, outgoing: bool, is_vertical: bool, is_positive: bool| {
+        let node_index = if outgoing {
+            graph.edges[edge_index].from
+        } else {
+            graph.edges[edge_index].to
         };
+        let mut incident = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(index, edge)| {
+                let side = edge_sides[*index];
+                let (side_vertical, side_positive) = if outgoing {
+                    (side.0, side.1)
+                } else {
+                    (side.2, side.3)
+                };
+                (if outgoing { edge.from } else { edge.to }) == node_index
+                    && side_vertical == is_vertical
+                    && side_positive == is_positive
+            })
+            .collect::<Vec<_>>();
+        if nodes.len() > 48
+            || (incident.len() > 2 && incident.iter().all(|(_, edge)| edge.label.is_none()))
+        {
+            return 0.0;
+        }
+        incident.sort_by(|(a, first), (b, second)| {
+            let first = nodes[if outgoing { first.to } else { first.from }].0;
+            let second = nodes[if outgoing { second.to } else { second.from }].0;
+            let coordinate = |rect: Rect| {
+                if is_vertical {
+                    rect.x + rect.width / 2.0
+                } else {
+                    rect.y + rect.height / 2.0
+                }
+            };
+            coordinate(first)
+                .total_cmp(&coordinate(second))
+                .then(a.cmp(b))
+        });
+        let position = incident
+            .iter()
+            .position(|(i, _)| *i == edge_index)
+            .unwrap_or(0);
+        (position as f64 - (incident.len() - 1) as f64 / 2.0) * 12.0
+    };
+    for (index, edge) in graph.edges.iter().enumerate() {
+        let (from, fs) = nodes[edge.from];
+        let (to, ts) = nodes[edge.to];
+        let (a_vertical, a_positive, b_vertical, b_positive) = edge_sides[index];
+        let peers = graph
+            .edges
+            .iter()
+            .filter(|other| other.from == edge.from && other.to == edge.to)
+            .count();
+        let slot = graph.edges[..index]
+            .iter()
+            .filter(|other| other.from == edge.from && other.to == edge.to)
+            .count();
         let endpoint =
             |node_index: usize, rect: Rect, shape, is_vertical, is_positive, delta: f64| {
                 let clearance = if peers > 1 && slot > 0 {
@@ -581,9 +624,16 @@ fn route_grid(
                 fs,
                 a_vertical,
                 a_positive,
-                label_delta(true),
+                port_delta(index, true, a_vertical, a_positive),
             ),
-            endpoint(edge.to, to, ts, b_vertical, b_positive, label_delta(false)),
+            endpoint(
+                edge.to,
+                to,
+                ts,
+                b_vertical,
+                b_positive,
+                port_delta(index, false, b_vertical, b_positive),
+            ),
         ));
     }
     let mut xs = vec![8.0, 18.0, width - 18.0, width - 8.0];
@@ -899,6 +949,32 @@ fn route_grid(
                 } else {
                     valid = false;
                     break;
+                }
+            }
+            if valid && candidate.len() > 1 {
+                // 源端口和目端口的 10px 短段不在候选网格内，也要计入转折次数；
+                // 否则两条等长曼哈顿路径会因候选顺序而紧贴节点折返。
+                let axis = |from: Point, to: Point| {
+                    if (from.y - to.y).abs() < 0.001 {
+                        Some(true)
+                    } else if (from.x - to.x).abs() < 0.001 {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                };
+                let source_axis = axis(source, a);
+                let first_axis = axis(a, point(candidate[1]));
+                let last_axis = axis(
+                    point(candidate[candidate.len() - 2]),
+                    point(candidate[candidate.len() - 1]),
+                );
+                let target_axis = axis(b, target);
+                if source_axis != first_axis {
+                    score += 8.0;
+                }
+                if last_axis != target_axis {
+                    score += 8.0;
                 }
             }
             if valid && let Some(label_width) = label_widths[edge_index] {

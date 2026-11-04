@@ -47,14 +47,18 @@ final class DiagramView: NSView {
             if !previous.isEmpty { NSAccessibility.post(element: self, notification: .layoutChanged) }
         }
         let previousEdges = Dictionary(uniqueKeysWithValues: edges.map { ($0.id, $0) })
-        edges = prepared.scene.primitives.compactMap { primitive in
+        let labelBounds: [UInt64: CGRect] = Dictionary(uniqueKeysWithValues: prepared.scene.primitives.compactMap { primitive -> (UInt64, CGRect)? in
+            guard case let .labelBackground(id, rect, _) = primitive else { return nil }
+            return (id, rect.cgRect)
+        })
+        edges = prepared.scene.primitives.compactMap { primitive -> DiagramAccessibilityEdge? in
             guard case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive,
                   let first = points.first else { return nil }
-            let bounds = points.dropFirst().reduce(CGRect(origin: first.cgPoint, size: .zero)) {
+            let pathBounds = points.dropFirst().reduce(CGRect(origin: first.cgPoint, size: .zero)) {
                 $0.union(CGRect(origin: $1.cgPoint, size: .zero))
             }.insetBy(dx: -5, dy: -5)
             let edge = previousEdges[id] ?? DiagramAccessibilityEdge(id: id, owner: self)
-            edge.update(label: prepared.edgeLabels[id] ?? "", bounds: bounds)
+            edge.update(label: prepared.edgeLabels[id] ?? "", bounds: labelBounds[id] ?? pathBounds)
             return edge
         }
         needsDisplay = true
