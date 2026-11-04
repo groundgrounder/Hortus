@@ -4,11 +4,76 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+TRUSTED_HOST_ENV = 'HORTUS_CHECK_ACCESSIBILITY_HOST'
+RELOCATED_TIMEOUT = 300
+
+
+def event_posting_trusted():
+    """Whether this host may post CGEvents (macOS Accessibility permission)."""
+    if sys.platform != 'darwin':
+        return True
+    try:
+        import ctypes
+        library = ctypes.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+        library.CGPreflightPostEventAccess.restype = ctypes.c_bool
+        return bool(library.CGPreflightPostEventAccess())
+    except OSError:
+        return False
+
+
+def ensure_event_posting_host():
+    """Re-run the identical check under Terminal when this host lacks Accessibility.
+
+    The inspection app drives its own controls with CGEvents at the HID event
+    tap. macOS attributes that permission to the responsible application, so a
+    check started from an untrusted host silently loses every synthetic click
+    and drag. Re-executing the same command under Terminal keeps the real
+    CGEvents and every assertion; only the responsible host changes.
+    """
+    if os.environ.get(TRUSTED_HOST_ENV) == '1' or event_posting_trusted():
+        return
+    if sys.platform != 'darwin':
+        raise SystemExit('Accessibility event posting is unavailable')
+    base = Path(tempfile.mkdtemp(prefix='hortus-trusted-host-'))
+    out, err, status, command = base / 'stdout', base / 'stderr', base / 'status', base / 'run.command'
+    invocation = ' '.join(shlex.quote(part) for part in
+                          [sys.executable, '-B', str(Path(__file__).resolve()), *sys.argv[1:]])
+    command.write_text(f'''#!/bin/zsh
+cd {shlex.quote(str(ROOT))}
+export {TRUSTED_HOST_ENV}=1
+{invocation} > {shlex.quote(str(out))} 2> {shlex.quote(str(err))}
+print -r -- $? > {shlex.quote(str(status))}
+''')
+    command.chmod(0o700)
+    print('Accessibility event posting is not granted to this host; '
+          're-running the same check under Terminal.', file=sys.stderr)
+    try:
+        try:
+            subprocess.run(['open', '-a', 'Terminal', str(command)], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise SystemExit(f'Cannot start Terminal for the Accessibility check: {error}') from error
+        deadline = time.monotonic() + RELOCATED_TIMEOUT
+        while time.monotonic() < deadline and not status.exists():
+            time.sleep(0.5)
+        if not status.exists():
+            raise SystemExit('Timed out waiting for the Terminal-hosted check')
+        sys.stdout.write(out.read_text() if out.exists() else '')
+        sys.stderr.write(err.read_text() if err.exists() else '')
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise SystemExit(int(status.read_text().strip() or '1'))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def main():
@@ -17,6 +82,7 @@ def main():
     parser.add_argument('--app', type=Path, default=ROOT / 'apps/macos/.build/debug/Hortus')
     parser.add_argument('--screenshots', type=Path)
     args = parser.parse_args()
+    ensure_event_posting_host()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='hortus-tab-drag-') as directory:
