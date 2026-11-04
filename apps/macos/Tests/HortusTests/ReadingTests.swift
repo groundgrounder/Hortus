@@ -152,7 +152,8 @@ struct ReadingTests {
 
         count = f.coordinator.submittedRequests
         f.coordinator.refresh()
-        f.view.setFrameSize(NSSize(width: f.view.bounds.width + 20, height: f.view.bounds.height))
+        let scroll = try #require(f.view.enclosingScrollView)
+        scroll.setFrameSize(NSSize(width: scroll.bounds.width + 20, height: scroll.bounds.height))
         f.coordinator.refresh()
         f.coordinator.refresh()
         #expect(f.coordinator.submittedRequests == count + 1)
