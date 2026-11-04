@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -39,6 +40,13 @@ def global_scrollbar_default():
                                capture_output=True, text=True)
     return {'present': completed.returncode == 0,
             'value': completed.stdout.strip() if completed.returncode == 0 else None}
+
+
+def prepare_cpu_root(base):
+    # 两种 CPU 路径使用同一已初始化配置，排除首次启动目录创建对空载基线的偏差。
+    (base / 'config').mkdir(parents=True, exist_ok=True)
+    (base / 'cache').mkdir(parents=True, exist_ok=True)
+    (base / 'config' / 'config.toml').write_text('font_size = 15.0\n')
 
 
 def inspect(base, output, name, vault, note, extra=(), screenshot=False):
@@ -352,6 +360,8 @@ def main():
         'global_default_modified': False,
         'global_before': global_before,
         'global_after': None,
+        'load_before': os.getloadavg(),
+        'load_after': None,
         'restore_action': 'not_required: process-local defaults argument',
     }
     (output / 'scrollbar-setting.json').write_text(json.dumps(setting_evidence, indent=2) + '\n')
@@ -365,6 +375,8 @@ def main():
         if not args.cpu_only:
             scenarios(base, output)
         if not args.skip_cpu:
+            prepare_cpu_root(base / 'cpu-empty')
+            prepare_cpu_root(base / 'cpu-opened')
             empty = HELPERS.idle_cpu(base / 'cpu-empty', SCROLLBAR_ARGUMENTS)
             print('未打开库的 30 s CPU 采样完成', flush=True)
             graph_vault = ROOT / 'fixtures/mermaid/flowchart'
@@ -376,6 +388,7 @@ def main():
             assert abs(difference) <= .1, result
         global_after = global_scrollbar_default()
         setting_evidence['global_after'] = global_after
+        setting_evidence['load_after'] = os.getloadavg()
         (output / 'scrollbar-setting.json').write_text(json.dumps(setting_evidence, indent=2) + '\n')
         assert global_after == global_before, (global_before, global_after)
 
