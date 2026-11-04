@@ -518,7 +518,7 @@ enum DiagramInspection {
                 }
             }
             // 每轮任务结束后再采样，避免自检异步栈持有上轮的原生视图。
-            let closed = try await Task { @MainActor in
+            let cycleValues = try await Task { @MainActor in
                 workspace.closeTab(path)
                 for _ in 0..<500 {
                     if !workspace.tabs.contains(where: { $0.path == path }) { break }
@@ -527,7 +527,11 @@ enum DiagramInspection {
                 guard !workspace.tabs.contains(where: { $0.path == path }) else { throw CocoaError(.coderValueNotFound) }
                 finishEvent()
                 try await Task.sleep(for: .milliseconds(200))
+                let closedRaw = try residentBytes()
+                relieveFreePages()
                 let closed = try residentBytes()
+                let closedFootprint = try footprintBytes()
+                let closedMalloc = mallocState()
                 workspace.openNote(path)
                 for _ in 0..<500 {
                     if workspace.current?.loading == false, current(document: workspace.current?.document) != nil { break }
@@ -539,18 +543,64 @@ enum DiagramInspection {
                     view.displayIfNeeded()
                     for diagram in view.diagramViews.values { diagram.displayIfNeeded() }
                 }
-                return closed
+                let window = view.window
+                let diagram = view.diagramViews.values.first
+                let openedMalloc = mallocState()
+                let openedRaw = try residentBytes()
+                relieveFreePages()
+                let openedFootprint = try footprintBytes()
+                let openedBytes = try residentBytes()
+                return (closed, closedRaw, closedFootprint, closedMalloc.0, closedMalloc.1,
+                        openedFootprint, openedBytes, openedRaw, openedMalloc.0, openedMalloc.1,
+                        window?.frame ?? .zero, window?.isVisible == true,
+                        window?.occlusionState.contains(.visible) == true, NSApp.isActive,
+                        window?.backingScaleFactor ?? 0,
+                        diagram.map { [$0.frame.width, $0.frame.height] } ?? [])
             }.value
+            let (closed, closedRaw, closedFootprint, closedMallocInUse, closedMallocAllocated,
+                 openedFootprint, openedBytes, openedRaw, openedMallocInUse, openedMallocAllocated,
+                 windowFrame, windowVisible, windowOccluded, appActive, backingScale, diagramFrame) = cycleValues
             finishEvent()
             try await Task.sleep(for: .milliseconds(200))
             var usage = rusage()
             getrusage(RUSAGE_SELF, &usage)
-            memory.append(["cycle": index + 1, "opened_bytes": try residentBytes(), "closed_bytes": closed,
+            memory.append(["cycle": index + 1, "opened_bytes": openedBytes, "closed_bytes": closed,
+                           "opened_raw_bytes": openedRaw, "closed_raw_bytes": closedRaw,
+                           "opened_footprint_bytes": openedFootprint, "closed_footprint_bytes": closedFootprint,
+                           "opened_malloc_in_use": openedMallocInUse, "opened_malloc_allocated": openedMallocAllocated,
+                           "closed_malloc_in_use": closedMallocInUse, "closed_malloc_allocated": closedMallocAllocated,
                            "peak_bytes": usage.ru_maxrss, "text_view_instances": textIdentities.count,
+                           "window_frame": NSStringFromRect(windowFrame), "window_visible": windowVisible,
+                           "window_occluded": !windowOccluded, "app_active": appActive,
+                           "backing_scale": backingScale, "diagram_frame": diagramFrame,
                            "retained_old_text_views": oldText.filter { $0.value != nil && $0.value !== current(document: workspace.current?.document) }.count,
                            "retained_old_diagram_views": oldDiagrams.filter { $0.value != nil }.count])
         }
         return memory
+    }
+
+    /// RSS 含分配器保留的空闲页；采样前归还它们，保留仍在使用的对象。
+    private static func relieveFreePages() {
+        malloc_zone_pressure_relief(nil, 0)
+    }
+
+    /// 与 RSS 并列的真实占用与分配器统计，用来区分 retained 对象、空闲页和共享页。
+    private static func footprintBytes() throws -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { throw CocoaError(.fileReadUnknown) }
+        return info.phys_footprint
+    }
+
+    private static func mallocState() -> (inUse: UInt64, allocated: UInt64) {
+        var stats = malloc_statistics_t()
+        malloc_zone_statistics(malloc_default_zone(), &stats)
+        return (UInt64(stats.size_in_use), UInt64(stats.size_allocated))
     }
     private static func drawMilliseconds(_ prepared: PreparedScene, visible: CGRect, scale: CGFloat) throws -> Double {
         guard !visible.isEmpty else { return 0 }
