@@ -58,6 +58,8 @@ enum TabDragInspection {
         first.workspace.openNote("stay.md")
         try await click(first, path: "move.md")
         try check("click_selects_tab", first.workspace.selected == "move.md")
+        try await settled(application)
+        result["diagram_before_drag"] = diagramState(first)
         let outside = CGPoint(x: screen.maxX - 35, y: screen.minY + 35)
         stage = "source drop"
         try await drag(first, path: "move.md", to: window.frame.center)
@@ -261,9 +263,27 @@ enum TabDragInspection {
         ["id": record.id, "root": record.workspace.root ?? "", "tabs": record.workspace.tabs.map(\.path),
          "selected": record.workspace.selected ?? "", "views": record.workspace.sessionViews(),
          "documents": record.workspace.tabs.compactMap { $0.document.map(documentState) },
+         "diagrams": diagramState(record),
          "terminal_pid": record.workspace.terminal.inspectionShellPid, "terminal_root": record.workspace.terminal.root ?? "",
          "visible": Dictionary(uniqueKeysWithValues: record.layout.visible.map { ($0.key.rawValue, $0.value) }),
          "frame": record.window.map { NSStringFromRect($0.frame) } ?? ""]
+    }
+
+    private static func diagramState(_ record: WindowRecord) -> [[String: Any]] {
+        guard let document = record.workspace.current?.document,
+              let view = DiagramInspection.current(document: document) else { return [] }
+        return view.blocks.map { block in
+            let prepared = block.prepared
+            let nodes = prepared?.scene.hitRegions.count ?? 0
+            let edges = prepared?.scene.primitives.filter { primitive in
+                if case .graphPath = primitive { return true }
+                return false
+            }.count ?? 0
+            return ["ordinal": block.ordinal, "revision": block.revision,
+                    "scene_version": block.sceneVersion, "nodes": nodes, "edges": edges,
+                    "reason": block.reason ?? "", "diagnostic": block.diagnostic ?? "",
+                    "signature": prepared.map { DiagramInspection.sceneSignature($0.scene) } ?? ""]
+        }
     }
     private static func settled(_ application: ApplicationWorkspace) async throws {
         try await wait { application.ready && application.records.allSatisfy { $0.window != nil && !$0.workspace.scanning && !$0.workspace.tabs.contains(where: \.loading) } }

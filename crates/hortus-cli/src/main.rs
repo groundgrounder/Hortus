@@ -4,12 +4,13 @@ use hortus_diagram::{
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-const USAGE: &str = "Usage: hortus mermaid render <note.md> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json]";
+const USAGE: &str = "Usage: hortus mermaid render <note.md> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json] [--scene scene.json]";
 
 struct Arguments {
     input: PathBuf,
     out: PathBuf,
     metrics: Option<PathBuf>,
+    scene: Option<PathBuf>,
     block: usize,
     options: LayoutOptions,
 }
@@ -26,6 +27,7 @@ fn arguments() -> Result<Option<Arguments>, String> {
     let input = args.next().filter(|s| !s.starts_with('-')).ok_or(USAGE)?;
     let mut out = None;
     let mut metrics = None;
+    let mut scene = None;
     let mut block = 1;
     let mut options = LayoutOptions::default();
     while let Some(option) = args.next() {
@@ -38,6 +40,7 @@ fn arguments() -> Result<Option<Arguments>, String> {
         match option.as_str() {
             "--out" => out = Some(PathBuf::from(value)),
             "--metrics" => metrics = Some(PathBuf::from(value)),
+            "--scene" => scene = Some(PathBuf::from(value)),
             "--block" => {
                 block = value
                     .parse()
@@ -68,6 +71,7 @@ fn arguments() -> Result<Option<Arguments>, String> {
         input: input.into(),
         out: out.ok_or("--out is required")?,
         metrics,
+        scene,
         block,
         options,
     }))
@@ -93,10 +97,16 @@ fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     let input = args.input.canonicalize()?;
     let out = destination(&args.out)?;
     let metrics_path = args.metrics.as_deref().map(destination).transpose()?;
+    let scene_path = args.scene.as_deref().map(destination).transpose()?;
     if same_file(&input, &out)
         || metrics_path
             .as_ref()
             .is_some_and(|m| same_file(m, &input) || same_file(m, &out))
+        || scene_path.as_ref().is_some_and(|s| {
+            same_file(s, &input)
+                || same_file(s, &out)
+                || metrics_path.as_ref().is_some_and(|m| same_file(s, m))
+        })
     {
         return Err("Input, SVG, and metrics must use different files".into());
     }
@@ -111,6 +121,9 @@ fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(out, scene.to_svg())?;
     if let Some(path) = metrics_path {
         std::fs::write(path, serde_json::to_string_pretty(&scene.metrics)? + "\n")?;
+    }
+    if let Some(path) = scene_path {
+        std::fs::write(path, serde_json::to_string(&scene.semantic_scene())? + "\n")?;
     }
     println!(
         "{} nodes, {} columns, {:.2}px tall, laid out in {:.3}ms",

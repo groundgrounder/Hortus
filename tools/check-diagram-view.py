@@ -15,6 +15,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / 'build/Hortus.app/Contents/MacOS/Hortus'
+CLI = ROOT / 'target/release/hortus'
 SAMPLE = ROOT / 'fixtures/vault-sample'
 MEDIA_ROOT = ROOT / 'target/reports/diagram-view/media'
 PRIVATE_ROOT = Path(tempfile.gettempdir()) / 'hortus-diagram-private'
@@ -64,6 +65,10 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
     assert all(item['label_matches'] and item['frame_error_px'] <= .5 for item in items), items
     assert data['accessibility_edges'] == data['source_hits']['edges'], data
     assert all(not value for block in data['heavy_work_thread_checks'] for value in block.values()), data
+    if data['diagrams']:
+        assert data['heavy_work_thread_evidence'] and all(data['heavy_work_thread_evidence']), data
+        assert all(any(line == 'main_thread=false' for lines in block.values() for line in lines)
+                   for block in data['heavy_work_thread_evidence']), data
     if '--diagram-ax-press' in extra:
         assert data['accessibility_presses'] and all(x['performed'] and x['selection_matches'] for x in data['accessibility_presses']), data
     hits = data['source_hits']
@@ -72,7 +77,42 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
     assert data['custom_fragments'] >= data['diagrams'], data
     assert data['error_fragments'] == len(data['reasons']), data
     assert data['width_max_px'] <= 0.5, data
+    width = next((float(value.split('=', 1)[1]) for value in extra if value.startswith('--diagram-width=')), None)
+    if width is not None:
+        assert abs(data['requested_content_width'] - width) <= .5, data
+    if data['diagrams']:
+        assert data['scene_widths'], data
+        if width is not None:
+            assert all(abs(value - width) <= .5 for value in data['scene_widths']), data
+        if '--diagram-reference' in extra:
+            assert data['initial_scene_widths'] and len(data['initial_scene_widths']) == data['diagrams'], data
+            assert all(abs(value - width) <= .5 for value in data['initial_scene_widths']), data
+            assert data['initial_row_counts'] == data['row_counts'], data
+    else:
+        assert data['scene_widths'] == [], data
+    assert_geometry(name, data)
     return data, exit_delay
+
+
+def assert_geometry(name, data):
+    metrics = data['graph_metrics']
+    geometry = data['graph_geometry']
+    assert len(metrics) == len(geometry), data
+    for summary, actual in zip(metrics, geometry):
+        assert actual['paths'] == actual['expected_edges'] == summary['edges'], actual
+        assert actual['node_overlaps'] == summary['node_overlaps'] == 0, actual
+        assert actual['crossings'] == summary['edge_crossings'], actual
+        assert bool(actual['horizontal_overflow']) == bool(summary['horizontal_overflow']), actual
+        assert actual['edge_node'] == 0, actual
+        assert actual['nonorthogonal'] == 0, actual
+        assert actual['label_node'] == actual['label_edge'] == actual['label_label'] == 0, actual
+        assert actual['foreign_shared_segments'] == 0, actual
+        # 私人原文是 35 条边的密集 LR 图，任务书未给它交叉上限；仍检查
+        # 节点重叠、穿节点、标签归属、非正交和横向溢出。
+        limit = (1 if name.startswith('dense-dag')
+                 else None if name.startswith('dense-40') or name.endswith('-private') else 0)
+        if limit is not None:
+            assert actual['crossings'] <= limit, actual
 
 
 def opening_main_thread_pass(samples, limit=33):
@@ -96,13 +136,29 @@ def scenarios(base, output):
     assert restored['visible_nodes'] == 1 and restored['collapsed_nodes'] == 1 and restored['badge_count'] == 1, restored
     expanded, _ = inspect(fold_base, output, 'expanded', SAMPLE, '欢迎.md', ['--diagram-click'], screenshot=True)
     assert expanded['before_click_nodes'] == 1 and expanded['visible_nodes'] == 4 and expanded['collapsed_nodes'] == 0, expanded
+    continuity, _ = inspect(base / 'continuity', output, 'accessibility-continuity', SAMPLE,
+                            '欢迎.md', ['--diagram-continuity'])
+    chain = continuity['accessibility_continuity']
+    assert continuity['visible_nodes'] == 4 and continuity['collapsed_nodes'] == 0, continuity
+    assert chain['collapsed_press'] and chain['expanded_press'], chain
+    assert chain['collapsed_state'] and chain['expanded_state'], chain
+    assert chain['collapsed_identity_preserved'] and chain['expanded_identity_preserved'], chain
     assert inventory(SAMPLE) == before, '示例库被改写'
     vault = base / 'errors'
     vault.mkdir()
-    cases = [('unsupported', 'sequenceDiagram\nA->>B: Hi', '暂不支持'),
-             ('not-tree', 'flowchart TB\nA --> C\nB --> C', None),
-             ('syntax', 'flowchart TB\nA --> B\nB ??? C', '第 3 行语法错误')]
-    for name, source, expected in cases:
+    cases = [
+        ('unsupported', 'sequenceDiagram\nA->>B: Hi', '暂不支持', 'Unsupported'),
+        ('not-tree', 'flowchart TB\nA --> C\nB --> C', None, None),
+        ('syntax', 'flowchart TB\nA --> B\nB ??? C', '第 3 行语法错误', 'Syntax'),
+        ('unsupported-subgraph', 'flowchart TB\nA --> B\nsubgraph S[C]\nC --> D\nend\n',
+         '第 3 行的 subgraph 暂不支持', 'UnsupportedConstruct'),
+        ('unsupported-linkstyle',
+         'flowchart TB\nA --> B\nB --> C\nA --> C\nlinkStyle 0 stroke:#f00\n',
+         '第 5 行的 linkStyle 暂不支持', 'UnsupportedConstruct'),
+        ('unsupported-style', 'flowchart TB\nA --> B\nB --> C\nA --> C\nstyle A color:#f00\n',
+         '第 5 行的 style_property 暂不支持', 'UnsupportedConstruct'),
+    ]
+    for name, source, expected, diagnostic_type in cases:
         (vault / f'{name}.mmd').write_text(source)
         data, _ = inspect(base / name, output, name, vault, f'{name}.mmd', screenshot=True)
         if name == 'not-tree':
@@ -110,6 +166,14 @@ def scenarios(base, output):
             assert data['accessibility_edges'] == 2, data
         else:
             assert data['diagrams'] == 0 and data['reasons'][0].startswith(expected), data
+            assert diagnostic_type in data['diagnostics'][0], data
+    utf8_error = vault / 'utf8-unsupported.md'
+    utf8_error.write_text('前言😀\n\n```mermaid\nflowchart TB\nA --> B\nB --> C\nA --> C\nlinkStyle 0 stroke:#f00\n```\n')
+    utf8_data, _ = inspect(base / 'utf8-unsupported', output, 'utf8-unsupported', vault,
+                           utf8_error.name, ['--diagram-width=700'], screenshot=True)
+    assert utf8_data['diagrams'] == 0 and utf8_data['scene_widths'] == [], utf8_data
+    assert utf8_data['reasons'][0].startswith('第 8 行的 linkStyle 暂不支持'), utf8_data
+    assert 'UnsupportedConstruct' in utf8_data['diagnostics'][0], utf8_data
     (vault / 'mixed.md').write_text('前文😀\n\n```mermaid\nmindmap\n  Root\n    First\n```\n中间\n~~~mermaid\nflowchart TB\nA --> B\n~~~\n末尾\n')
     mixed, _ = inspect(base / 'mixed', output, 'mixed', vault, 'mixed.md')
     assert mixed['diagrams'] == 2 and mixed['visible_nodes'] == 4, mixed
@@ -126,7 +190,7 @@ def scenarios(base, output):
             for theme in ['light', 'dark']:
                 for mode in ['editing', 'reading']:
                     tag = f'{sample.stem}-{width}-{theme}-{mode}'
-                    extra = [f'--{theme}', f'--diagram-width={width}']
+                    extra = [f'--{theme}', f'--diagram-width={width}', '--diagram-reference']
                     if mode == 'reading': extra.append('--diagram-reading')
                     data, _ = inspect(base / tag, flowchart_output, tag, sample.parent, sample.name,
                                       extra, screenshot=True)
@@ -134,6 +198,53 @@ def scenarios(base, output):
                     assert data['scene_widths'] and all(abs(w - width) < .5 for w in data['scene_widths']), data
                     assert data['accessibility_nodes'] == data['visible_nodes'], data
                     if name == 'erikson.mmd': assert data['row_counts'] == [[4, 4]], data
+                    if name == 'erikson.mmd': assert data['initial_row_counts'] == [[4, 4]], data
+    deterministic = ROOT / 'fixtures/mermaid/flowchart/research.mmd'
+    deterministic_hashes = []
+    for index in range(10):
+        data, _ = inspect(base / f'determinism-{index}', output, f'determinism-{index}',
+                          deterministic.parent, deterministic.name,
+                          ['--light', '--diagram-width=700'], index == 0)
+        assert data['scene_signatures'], data
+        deterministic_hashes.append(data['scene_signatures'][0])
+    (output / 'determinism.json').write_text(json.dumps({
+        'samples': 10, 'scene_hashes': deterministic_hashes,
+        'unique_scene_hashes': len(set(deterministic_hashes)),
+    }, indent=2) + '\n')
+    assert len(set(deterministic_hashes)) == 1, deterministic_hashes
+    scene_vault = base / 'scene-equality'
+    scene_vault.mkdir()
+    scene_note = scene_vault / 'same-scene.md'
+    scene_note.write_text('# Scene equality\n\n```mermaid\nflowchart TB\n  A[开始] --> B[处理]\n  B --> C[结束]\n  A --> C\n```\n')
+    scene_data, _ = inspect(base / 'scene-macos', output, 'scene-macos', scene_vault,
+                            scene_note.name, ['--light', '--diagram-width=700', '--diagram-reference'])
+    assert len(scene_data['initial_semantic_scenes']) == 1, scene_data
+    cli_scene = output / 'scene-cli.json'
+    cli_svg = output / 'scene-cli.svg'
+    completed = subprocess.run([str(CLI), 'mermaid', 'render', str(scene_note), '--block', '1',
+                                '--width', '700', '--theme', 'light', '--out', str(cli_svg),
+                                '--scene', str(cli_scene)], capture_output=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr.decode(errors='replace')
+    macos_scene = json.loads(scene_data['initial_semantic_scenes'][0])
+    command_scene = json.loads(cli_scene.read_text())
+    same_scene = macos_scene == command_scene
+    canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    equality = {'strict_equal': same_scene,
+                'macos_sha256': hashlib.sha256(canonical(macos_scene).encode()).hexdigest(),
+                'cli_sha256': hashlib.sha256(canonical(command_scene).encode()).hexdigest(),
+                'blocks': 1, 'width': 700, 'theme': 'light'}
+    (output / 'scene-equality.json').write_text(json.dumps(equality, indent=2) + '\n')
+    assert same_scene, equality
+    anchor_sample = ROOT / 'fixtures/mermaid/flowchart/research.mmd'
+    anchor_data, _ = inspect(base / 'anchor-resize', output, 'anchor-resize', anchor_sample.parent,
+                             anchor_sample.name, ['--light', '--diagram-width=700',
+                                                  '--diagram-reveal', '--diagram-anchor'])
+    assert len(anchor_data['anchor_resize']) == 2, anchor_data['anchor_resize']
+    for step in anchor_data['anchor_resize']:
+        assert step['common_anchors'] > 0, step
+        assert step['median_displacement_px'] <= 8, step
+        assert step['max_displacement_px'] <= 48, step
+    (output / 'anchor-resize.json').write_text(json.dumps(anchor_data['anchor_resize'], indent=2) + '\n')
     ax_sample = ROOT / 'fixtures/mermaid/flowchart/research.mmd'
     inspect(base / 'ax-press', output, 'ax-press', ax_sample.parent, ax_sample.name, ['--diagram-ax-press'])
     if PRIVATE_NOTE is not None:
@@ -167,11 +278,11 @@ def scenarios(base, output):
     else:
         print('私人 04 样本缺失：跳过该样本，使用公开 dense-40 Graph 执行性能/内存验收', flush=True)
         sample = ROOT / 'fixtures/mermaid/flowchart/dense-40.mmd'
-        performance_runs = [inspect(base / f'performance-{index}', output, f'public-performance-{index}',
+        performance_runs = [inspect(base / f'performance-{index}', output, f'dense-40-performance-{index}',
                                     sample.parent, sample.name, ['--diagram-resize'], index == 0)[0]
                             for index in range(3)]
         performance = performance_runs[0]
-        memory_data, _ = inspect(base / 'memory', output, 'public-memory', sample.parent,
+        memory_data, _ = inspect(base / 'memory', output, 'dense-40-memory', sample.parent,
                                 sample.name, ['--diagram-memory'])
     opening_values = [sample['first_main_work_max_ms'] for sample in performance_runs]
     opening_summary = {'samples_ms': opening_values, 'median_ms': median(opening_values), 'limit_ms': 33}

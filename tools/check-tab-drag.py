@@ -24,7 +24,10 @@ def main():
         vault = base / 'vault'
         vault.mkdir()
         for name in ['move.md', 'stay.md', 'cycle.md', 'copy.md']:
-            (vault / name).write_text(f'# {name}\n\nPublic tab drag fixture.\n')
+            diagram = ''
+            if name == 'move.md':
+                diagram = '\n```mermaid\nflowchart TB\n  A[Moved] --> B[Diagram]\n```\n'
+            (vault / name).write_text(f'# {name}\n\nPublic tab drag fixture.\n{diagram}')
         env = dict(os.environ, HORTUS_CONFIG_DIR=str(base / 'config'), HORTUS_CACHE_DIR=str(base / 'cache'))
         media = (args.screenshots or output / 'screenshots').resolve()
         media.mkdir(parents=True, exist_ok=True)
@@ -37,6 +40,16 @@ def main():
         result = json.loads(target.read_text())
         assert result['real_cgevent_drag'] and result['stage'] == 'complete', result
         assert result['checks'] and all(result['checks'].values()), result
+        before_diagram = result['diagram_before_drag']
+        assert len(before_diagram) == 1, before_diagram
+        before_diagram = before_diagram[0]
+        assert before_diagram['nodes'] == 2, before_diagram
+        assert before_diagram['reason'] == '' and before_diagram['signature'], before_diagram
+        moved = next(window for window in result['windows'] if 'move.md' in window['tabs'])
+        assert len(moved['diagrams']) == 1, moved
+        moved_diagram = moved['diagrams'][0]
+        assert moved_diagram['nodes'] == 2 and moved_diagram['reason'] == '', moved_diagram
+        assert moved_diagram['signature'], moved_diagram
         assert len(result['cycles']) == 20, result
         for key in ['document', 'io', 'session', 'revision', 'reading']:
             assert result['before'][key] == result['after'][key], (key, result)
@@ -65,6 +78,11 @@ def main():
 
         restored = restore('restored', close=True, note='move.md')
         assert restored['active_id'] == restored['windows'][1]['id'], restored
+        restored_move = next(window for window in restored['windows'] if 'move.md' in window['tabs'])
+        assert len(restored_move['diagrams']) == 1, restored_move
+        restored_diagram = restored_move['diagrams'][0]
+        assert restored_diagram['nodes'] == 2 and restored_diagram['reason'] == '', restored_diagram
+        assert restored_diagram['signature'], restored_diagram
         for key in ['id', 'tabs', 'selected', 'views', 'visible', 'frame']:
             assert [w.get(key) for w in result['session']['windows']] == [w.get(key) for w in restored['session']['windows']], (key, restored)
         assert restored['contexts'] == [{'windows': 2, 'listeners': 1}], restored

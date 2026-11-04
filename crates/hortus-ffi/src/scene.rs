@@ -223,6 +223,7 @@ pub struct SceneData {
     pub hit_regions: Vec<SceneHit>,
     pub wire_bytes: u64,
     pub layout_ms: f64,
+    pub semantic_json: Option<String>,
 }
 impl From<Point> for ScenePoint {
     fn from(p: Point) -> Self {
@@ -278,7 +279,8 @@ impl From<HitRegion> for SceneHit {
 }
 impl From<Scene> for SceneData {
     fn from(scene: Scene) -> Self {
-        let mut bytes = 44 + 33 + 2;
+        // 末尾 semantic_json 选项标签也计入 wire 长度。
+        let mut bytes = 44 + 33 + 2 + 1;
         let primitives = scene
             .primitives
             .into_iter()
@@ -358,15 +360,31 @@ impl From<Scene> for SceneData {
                     stroke,
                     stroke_width,
                 } => {
+                    // 矩形/圆角/胶囊的轮廓可由平台按同一半径重建；跨 FFI 只传形状名，
+                    // 避免 40 节点图每次改宽都搬运数千个重复轮廓点。
+                    let standard_outline = matches!(
+                        shape,
+                        hortus_diagram::Shape::Rectangle
+                            | hortus_diagram::Shape::Rounded
+                            | hortus_diagram::Shape::Stadium
+                    );
                     let shape = format!("{shape:?}");
                     bytes += 120
                         + shape.len()
-                        + outline.len() * 16
+                        + if standard_outline {
+                            0
+                        } else {
+                            outline.len() * 16
+                        }
                         + details.iter().map(|p| 4 + p.len() * 16).sum::<usize>();
                     ScenePrimitive::GraphShape {
                         rect: rect.into(),
                         shape,
-                        outline: outline.into_iter().map(Into::into).collect(),
+                        outline: if standard_outline {
+                            Vec::new()
+                        } else {
+                            outline.into_iter().map(Into::into).collect()
+                        },
                         details: details
                             .into_iter()
                             .map(|p| p.into_iter().map(Into::into).collect())
@@ -412,6 +430,7 @@ impl From<Scene> for SceneData {
             hit_regions,
             wire_bytes: bytes as u64,
             layout_ms: scene.metrics.layout_ms,
+            semantic_json: None,
         }
     }
 }
@@ -443,6 +462,14 @@ impl SceneData {
         self.identity = identity;
         self.previous = previous;
         self.graph_metrics = metrics;
+        self
+    }
+
+    pub(crate) fn with_semantic_json(mut self, semantic_json: Option<String>) -> Self {
+        if let Some(value) = &semantic_json {
+            self.wire_bytes += 4 + value.len() as u64;
+        }
+        self.semantic_json = semantic_json;
         self
     }
 }

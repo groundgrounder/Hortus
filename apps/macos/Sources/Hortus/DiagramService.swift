@@ -48,12 +48,15 @@ struct NoteDiagram: Sendable {
     var reason: String?
     var diagnostic: String?
     var heavyWorkThreadChecks: [String: Bool] = [:]
+    var heavyWorkThreadEvidence: [String: [String]] = [:]
     var renderMilliseconds = 0.0
     var transferMilliseconds = 0.0
     var layoutMilliseconds = 0.0
 }
 /// 应用存活期间复用单个引擎。Task 创建即在后台预热，不占用主线程。
 actor DiagramService {
+    /// 调用栈只在首次渲染时取一次；每次重排都符号化会把验收计时拖慢。
+    private lazy var renderThreadEvidence: [String] = Self.threadEvidence()
     private var lineCache: [DiagramLineKey: CTLine] = [:]
     private var cachedSource: String?
     private var sourceOffsets: DiagramSourceOffsets?
@@ -135,6 +138,11 @@ actor DiagramService {
         previousBlocks = moved
     }
 
+    /// 仅验收使用：丢弃旧图锚点，下一次 render 从初排开始。
+    func discardPrevious() {
+        previousBlocks = [:]
+    }
+
     func render(source: String, mmd: Bool, blocks: [NoteDiagram], width: Double, dark: Bool, requestGeneration: UInt64 = 0, fontGeneration: UInt64 = 0) async -> [NoteDiagram] {
         // 空正文无需排版；保留最后一篇图文档的有界行缓存，重新打开时复用 CoreText 对象。
         guard !blocks.isEmpty else { return blocks }
@@ -168,6 +176,7 @@ actor DiagramService {
                         let identity = DiagramIdentity(document: result[index].documentIdentity, block: result[index].ordinal,
                             revision: result[index].revision, dark: dark, fontGeneration: fontGeneration, requestGeneration: requestGeneration)
                         result[index].heavyWorkThreadChecks["rust_layout_and_ffi"] = Thread.isMainThread
+                        result[index].heavyWorkThreadEvidence["rust_layout_and_ffi"] = renderThreadEvidence
                         let scene = try engine.renderRequest(source: source, mmd: mmd, width: width,
                             collapsed: Array(result[index].collapsed), identity: identity, previous: result[index].previous,
                             viewport: result[index].viewport)
@@ -189,6 +198,7 @@ actor DiagramService {
                         }
                         let transferred = ProcessInfo.processInfo.systemUptime
                         result[index].heavyWorkThreadChecks["scene_decode_and_coretext_prepare"] = Thread.isMainThread
+                        result[index].heavyWorkThreadEvidence["scene_decode_and_coretext_prepare"] = renderThreadEvidence
                         result[index].prepared = PreparedScene(scene: try DiagramScene(scene), payloadBytes: Int(scene.wireBytes), sourceRanges: ranges, edgeRanges: edgeRanges, edgeLabels: edgeLabels) { span in
                             let key = DiagramLineKey(span)
                             if let line = lineCache[key] { return line }
@@ -234,6 +244,12 @@ actor DiagramService {
         guard let value = Range(range, in: source),
               let a = value.lowerBound.samePosition(in: source.utf8), let b = value.upperBound.samePosition(in: source.utf8) else { return nil }
         return source.utf8.distance(from: source.utf8.startIndex, to: a)..<source.utf8.distance(from: source.utf8.startIndex, to: b)
+    }
+
+    private static func threadEvidence() -> [String] {
+        ["main_thread=\(Thread.isMainThread)", "name=\(Thread.current.name ?? "")",
+         "qos=\(Thread.current.qualityOfService.rawValue)"]
+            + Thread.callStackSymbols.prefix(8)
     }
 
     static func reason(_ error: Error) -> String {

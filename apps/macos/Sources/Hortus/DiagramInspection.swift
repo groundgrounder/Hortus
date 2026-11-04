@@ -18,6 +18,19 @@ enum DiagramInspection {
         guard let document else { return nil }
         return views.first { $0.representedDocument == ObjectIdentifier(document) }
     }
+    static func sceneSignature(_ scene: DiagramScene) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        func mix(_ value: String) {
+            for byte in value.utf8 {
+                hash ^= UInt64(byte)
+                hash &*= 0x0000_0100_0000_01b3
+            }
+        }
+        mix(String(scene.width)); mix(String(scene.height))
+        for primitive in scene.primitives { mix(String(reflecting: primitive)) }
+        for hit in scene.hitRegions { mix(String(reflecting: hit)) }
+        return String(format: "%016llx", hash)
+    }
     static func finishEvent() {
         // 自动循环没有原生输入事件；结束 AppKit 的事件临时对象池。
         if let event = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [],
@@ -57,10 +70,87 @@ enum DiagramInspection {
             window.setFrame(frame, display: true)
             try await Task.sleep(for: .milliseconds(50))
             view = try await settled(document: workspace.current?.document)
+            // 启动窗口尺寸可能来自上一次会话；按目标宽度重做初排，
+            // 使同一文档、同一宽度的验收场景不受上次窗口宽度影响。
+            await view.onFreshRender?()
+            view = try await settled(document: workspace.current?.document)
         }
         if arguments.contains("--diagram-reveal"), let diagram = view.diagramViews.values.min(by: { $0.frame.minY < $1.frame.minY }) {
             view.scrollToVisible(CGRect(x: diagram.frame.minX, y: diagram.frame.minY, width: diagram.frame.width, height: min(500, diagram.frame.height)))
             view.displayIfNeeded()
+        }
+        let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let requestedWidth = arguments.first(where: { $0.hasPrefix("--diagram-width=") })
+            .flatMap { Double($0.dropFirst("--diagram-width=".count)) }
+            ?? max(120, view.bounds.width - view.textContainerInset.width * 2)
+        var initialRows: [[Int]] = []
+        var initialWidths: [Double] = []
+        var initialSignatures: [String] = []
+        var initialScenes: [String] = []
+        if arguments.contains("--diagram-reference"), let source = originalSource, !view.blocks.isEmpty {
+            let blocks = view.blocks
+            let document = blocks.first?.documentIdentity ?? "diagram-inspection"
+            let mmd = workspace.selected?.lowercased().hasSuffix(".mmd") == true
+            let references = try await Task.detached {
+                let engine = try DiagramEngine()
+                return try blocks.map { block in
+                    try engine.renderRequestInspection(source: source, mmd: mmd, width: requestedWidth,
+                                                       collapsed: Array(block.collapsed),
+                                                       identity: DiagramIdentity(document: document, block: block.ordinal,
+                                                                                 revision: block.revision, dark: dark,
+                                                                                 fontGeneration: 0, requestGeneration: 0),
+                                                       previous: nil, viewport: [])
+                }
+            }.value
+            initialRows = references.map { rowCounts($0.hitRegions) }
+            initialWidths = references.map(\.width)
+            initialSignatures = references.map { reference in
+                (try? DiagramScene(reference)).map(DiagramInspection.sceneSignature) ?? ""
+            }
+            initialScenes = references.compactMap(\.semanticJson)
+        }
+        var anchorResize: [[String: Any]] = []
+        if arguments.contains("--diagram-anchor"), let window = view.window {
+            let original = window.frame
+            for delta in [-60.0, 120.0] {
+                let before = anchorSnapshot(view)
+                var frame = original
+                frame.size.width += delta
+                window.setFrame(frame, display: true)
+                try await Task.sleep(for: .milliseconds(30))
+                view = try await settled(document: workspace.current?.document)
+                let after = anchorSnapshot(view)
+                let oldAnchors = Dictionary(uniqueKeysWithValues: (before["anchors"] as? [[String: Any]] ?? []).compactMap { item -> (String, CGPoint)? in
+                    guard let id = item["node_id"] as? String, let x = item["x"] as? Double, let y = item["y"] as? Double else { return nil }
+                    return (id, CGPoint(x: x, y: y))
+                })
+                let newAnchors = Dictionary(uniqueKeysWithValues: (after["anchors"] as? [[String: Any]] ?? []).compactMap { item -> (String, CGPoint)? in
+                    guard let id = item["node_id"] as? String, let x = item["x"] as? Double, let y = item["y"] as? Double else { return nil }
+                    return (id, CGPoint(x: x, y: y))
+                })
+                let distances = oldAnchors.keys.filter { newAnchors[$0] != nil }.map { id in
+                    hypot(newAnchors[id]!.x - oldAnchors[id]!.x, newAnchors[id]!.y - oldAnchors[id]!.y)
+                }.sorted()
+                let medianValue: Double?
+                if distances.isEmpty {
+                    medianValue = nil
+                } else if distances.count.isMultiple(of: 2) {
+                    medianValue = (distances[distances.count / 2 - 1] + distances[distances.count / 2]) / 2
+                } else {
+                    medianValue = distances[distances.count / 2]
+                }
+                let median: Any = medianValue ?? NSNull()
+                let oldGroups = before["groups"] as? [String: Int] ?? [:]
+                let newGroups = after["groups"] as? [String: Int] ?? [:]
+                let groupChanges = oldGroups.keys.filter { newGroups[$0] != nil && oldGroups[$0] != newGroups[$0] }.count
+                anchorResize.append(["window_delta": delta, "before": before, "after": after,
+                                     "common_anchors": distances.count,
+                                     "median_displacement_px": median,
+                                     "max_displacement_px": distances.last ?? NSNull(), "group_changes": groupChanges])
+            }
+            window.setFrame(original, display: true)
+            try await Task.sleep(for: .milliseconds(30))
+            view = try await settled(document: workspace.current?.document)
         }
         var beforeClick = 0
         if arguments.contains("--diagram-click") {
@@ -160,6 +250,9 @@ enum DiagramInspection {
             ["roots": Int($0.roots), "edges": Int($0.edges), "node_overlaps": Int($0.nodeOverlaps),
              "edge_crossings": Int($0.edgeCrossings), "horizontal_overflow": $0.horizontalOverflow ? 1 : 0]
         }
+        let graphGeometry = diagrams.compactMap { diagram in
+            diagram.prepared.scene.graphMetrics == nil ? nil : graphGeometry(diagram)
+        }
         let fillCount = Set(diagrams.flatMap { diagram in
             diagram.prepared.scene.primitives.compactMap { primitive -> SceneColor? in
                 if case let .graphShape(_, _, _, _, fill, _, _) = primitive { return fill }
@@ -183,21 +276,55 @@ enum DiagramInspection {
                 }
             }
         }
+        var accessibilityContinuity: [String: Any] = [:]
+        if arguments.contains("--diagram-continuity"),
+           let diagram = diagrams.first,
+           let index = diagram.prepared.scene.hitRegions.firstIndex(where: \.canCollapse),
+           let child = (diagram.accessibilityChildren() as? [NSAccessibilityElement])?[index] {
+            let nodeId = diagram.prepared.scene.hitRegions[index].nodeId
+            let identity = ObjectIdentifier(child)
+            NSAccessibility.post(element: child, notification: .focusedUIElementChanged)
+            let collapsedPress = child.accessibilityPerformPress()
+            try await Task.sleep(for: .milliseconds(30))
+            view = try await settled(document: workspace.current?.document)
+            let collapsedChildren = diagram.accessibilityChildren() as? [NSAccessibilityElement] ?? []
+            let collapsedElement = zip(collapsedChildren, diagram.prepared.scene.hitRegions)
+                .first { $0.1.nodeId == nodeId }?.0
+            let collapsedState = collapsedElement?.isAccessibilityExpanded() == false
+            let collapsedIdentity = collapsedElement.map(ObjectIdentifier.init) == identity
+            if let collapsedElement { NSAccessibility.post(element: collapsedElement, notification: .focusedUIElementChanged) }
+            let expandedPress = collapsedElement?.accessibilityPerformPress() ?? false
+            try await Task.sleep(for: .milliseconds(30))
+            view = try await settled(document: workspace.current?.document)
+            let expandedChildren = diagram.accessibilityChildren() as? [NSAccessibilityElement] ?? []
+            let expandedElement = zip(expandedChildren, diagram.prepared.scene.hitRegions)
+                .first { $0.1.nodeId == nodeId }?.0
+            let expandedState = expandedElement?.isAccessibilityExpanded() == true
+            let expandedIdentity = expandedElement.map(ObjectIdentifier.init) == identity
+            if let expandedElement { NSAccessibility.post(element: expandedElement, notification: .focusedUIElementChanged) }
+            accessibilityContinuity = ["node_id": nodeId, "collapsed_press": collapsedPress,
+                                       "expanded_press": expandedPress, "collapsed_state": collapsedState,
+                                       "expanded_state": expandedState, "collapsed_identity_preserved": collapsedIdentity,
+                                       "expanded_identity_preserved": expandedIdentity]
+        }
         return ["diagrams": diagrams.count, "blocks": view.blocks.count, "reading": view.isReading,
-                "graph_metrics": graphMetrics, "graph_fill_count": fillCount,
+                "graph_metrics": graphMetrics, "graph_geometry": graphGeometry, "graph_fill_count": fillCount,
                 "scene_heights": diagrams.map { $0.prepared.scene.height },
                 "row_counts": diagrams.map { diagram in
-                    var rows: [Double: Int] = [:]
-                    for hit in diagram.prepared.scene.hitRegions { rows[hit.rect.y, default: 0] += 1 }
-                    return rows.sorted { $0.key < $1.key }.map(\.value)
+                    rowCounts(diagram.prepared.scene.hitRegions)
                 },
-                "dark": view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
+                "initial_row_counts": initialRows, "initial_scene_widths": initialWidths,
+                "initial_scene_signatures": initialSignatures,
+                "initial_semantic_scenes": initialScenes,
+                "dark": dark,
                 "custom_fragments": customFragments, "error_fragments": errorFragments,
                 "source_preserved": sourcePreserved, "textkit2": view.textLayoutManager != nil,
                 "visible_nodes": hits, "accessibility_nodes": accessible, "accessibility_expanded_valid": expandedValid,
                 "accessibility_edges": accessibleEdges,
                 "accessibility_items": accessibilityItems, "accessibility_presses": presses,
+                "accessibility_continuity": accessibilityContinuity,
                 "heavy_work_thread_checks": view.blocks.map(\.heavyWorkThreadChecks),
+                "heavy_work_thread_evidence": view.blocks.map(\.heavyWorkThreadEvidence),
                 "source_hits": sourceHits(diagrams, source: workspace.current?.text ?? ""),
                 "before_click_nodes": beforeClick,
                 "collapsed_nodes": view.blocks.flatMap { Array($0.collapsed) }.count,
@@ -208,9 +335,146 @@ enum DiagramInspection {
                 "spans": errors.count, "first_main_work_max_ms": firstMain,
                 "payload_bytes": diagrams.map { $0.prepared.payloadBytes },
                 "scene_widths": diagrams.map { $0.prepared.scene.width },
+                "scene_signatures": diagrams.map { sceneSignature($0.prepared.scene) },
                 "requested_content_width": max(120, view.bounds.width - view.textContainerInset.width * 2),
                 "window_width": view.window?.frame.width ?? 0,
-                "resize": resize, "memory": memory]
+                "anchor_resize": anchorResize, "resize": resize, "memory": memory]
+    }
+    private static func anchorSnapshot(_ view: DiagramTextView) -> [String: Any] {
+        guard let diagram = view.diagramViews.values.first else { return [:] }
+        let anchors = diagram.viewportAnchors().map {
+            ["node_id": $0.nodeId, "x": $0.screenCenter.x, "y": $0.screenCenter.y]
+        }
+        var rows: [Double: Int] = [:]
+        for hit in diagram.prepared.scene.hitRegions { rows[hit.rect.y, default: 0] += 1 }
+        let block = view.blocks.first
+        let groups = Dictionary(uniqueKeysWithValues: (block?.previous?.nodes ?? []).map { ($0.nodeId, Int($0.group)) })
+        return ["anchors": anchors, "scene_width": diagram.prepared.scene.width,
+                "row_counts": rows.sorted { $0.key < $1.key }.map(\.value), "groups": groups]
+    }
+    private static func rowCounts(_ hits: [SceneHit]) -> [Int] {
+        var rows: [Double: Int] = [:]
+        for hit in hits { rows[hit.rect.y, default: 0] += 1 }
+        return rows.sorted { $0.key < $1.key }.map(\.value)
+    }
+
+    /// 从最终 Scene 图元独立重算几何，避免只信任核心返回的汇总指标。
+    private static func graphGeometry(_ diagram: DiagramView) -> [String: Any] {
+        let scene = diagram.prepared.scene
+        let hits = scene.hitRegions.map(\.rect.cgRect)
+        let paths = scene.primitives.compactMap { primitive -> (UInt64, [ScenePoint])? in
+            guard case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive else { return nil }
+            return (id, points)
+        }
+        let labels = scene.primitives.compactMap { primitive -> (UInt64, CGRect)? in
+            guard case let .labelBackground(id, rect, _) = primitive else { return nil }
+            return (id, rect.cgRect)
+        }
+        var nodeOverlaps = 0
+        for index in hits.indices {
+            for other in hits.index(after: index)..<hits.endIndex {
+                let a = hits[index], b = hits[other]
+                if a.minX < b.maxX - 0.01 && a.maxX > b.minX + 0.01
+                    && a.minY < b.maxY - 0.01 && a.maxY > b.minY + 0.01 {
+                    nodeOverlaps += 1
+                }
+            }
+        }
+        var edgeNode = 0, nonorthogonal = 0, horizontalOverflow = false
+        for (_, points) in paths {
+            for (index, pair) in zip(points, points.dropFirst()).enumerated() {
+                let a = pair.0.cgPoint, b = pair.1.cgPoint
+                if abs(a.x - b.x) > 0.001 && abs(a.y - b.y) > 0.001 { nonorthogonal += 1 }
+                for rect in hits {
+                    let endpoint = (index == 0 && rect.contains(a)) || (index == points.count - 2 && rect.contains(b))
+                    if !endpoint && segmentIntersects(a, b, rect) { edgeNode += 1 }
+                }
+            }
+            for point in points where point.x < -0.01 || point.x > scene.width + 0.01 { horizontalOverflow = true }
+        }
+        for primitive in scene.primitives {
+            switch primitive {
+            case let .graphShape(rect, _, _, _, _, _, _), let .labelBackground(_, rect, _):
+                if rect.cgRect.minX < -0.01 || rect.cgRect.maxX > scene.width + 0.01 { horizontalOverflow = true }
+            case let .text(span):
+                if span.baseline.x < -0.01 || span.baseline.x + span.width > scene.width + 0.01 { horizontalOverflow = true }
+            default: break
+            }
+        }
+        var crossings = 0, labelNode = 0, labelEdge = 0, labelLabel = 0, shared = 0, foreignShared = 0
+        var crossingDetails: [[String: Any]] = []
+        for first in paths.indices {
+            for second in paths.indices where second > first {
+                for a in zip(paths[first].1, paths[first].1.dropFirst()) {
+                    for b in zip(paths[second].1, paths[second].1.dropFirst()) {
+                        let ah = abs(a.0.y - a.1.y) < 0.001, bh = abs(b.0.y - b.1.y) < 0.001
+                        if ah != bh {
+                            let (horizontal, vertical) = ah ? (a, b) : (b, a)
+                            let x = vertical.0.x, y = horizontal.0.y
+                            if x > min(horizontal.0.x, horizontal.1.x) + 0.001
+                                && x < max(horizontal.0.x, horizontal.1.x) - 0.001
+                                && y > min(vertical.0.y, vertical.1.y) + 0.001
+                                && y < max(vertical.0.y, vertical.1.y) - 0.001 {
+                                crossings += 1
+                                crossingDetails.append(["edge_a": paths[first].0, "edge_b": paths[second].0,
+                                                        "point": [x, y], "path_a": pointsArray(paths[first].1),
+                                                        "path_b": pointsArray(paths[second].1)])
+                            }
+                        } else if ah && abs(a.0.y - b.0.y) < 0.001
+                            && min(a.0.x, a.1.x) < max(b.0.x, b.1.x) - 0.001
+                            && min(b.0.x, b.1.x) < max(a.0.x, a.1.x) - 0.001 {
+                            shared += 1
+                            let endpoint = { (points: [ScenePoint], first: Bool) -> Int? in
+                                let point = first ? points.first : points.last
+                                guard let point else { return nil }
+                                return hits.firstIndex { $0.contains(point.cgPoint) }
+                            }
+                            let sameSource = endpoint(paths[first].1, true) == endpoint(paths[second].1, true)
+                            let sameTarget = endpoint(paths[first].1, false) == endpoint(paths[second].1, false)
+                            if !sameSource && !sameTarget { foreignShared += 1 }
+                        }
+                    }
+                }
+            }
+        }
+        for (labelId, label) in labels {
+            labelNode += hits.filter { intersects(label, $0) }.count
+            for path in paths where path.0 != labelId {
+                if zip(path.1, path.1.dropFirst()).contains(where: { segmentIntersects($0.0.cgPoint, $0.1.cgPoint, label) }) {
+                    labelEdge += 1
+                }
+            }
+        }
+        for index in labels.indices {
+            for other in labels.index(after: index)..<labels.endIndex where intersects(labels[index].1, labels[other].1) {
+                labelLabel += 1
+            }
+        }
+        return ["node_overlaps": nodeOverlaps, "edge_node": edgeNode, "nonorthogonal": nonorthogonal,
+                "crossings": crossings, "crossing_details": crossingDetails,
+                "shared_segments": shared, "foreign_shared_segments": foreignShared,
+                "label_node": labelNode, "label_edge": labelEdge,
+                "label_label": labelLabel, "horizontal_overflow": horizontalOverflow,
+                "paths": paths.count, "expected_edges": Int(scene.graphMetrics?.edges ?? 0)]
+    }
+
+    private static func intersects(_ a: CGRect, _ b: CGRect) -> Bool {
+        a.minX < b.maxX - 0.01 && a.maxX > b.minX + 0.01
+            && a.minY < b.maxY - 0.01 && a.maxY > b.minY + 0.01
+    }
+
+    private static func segmentIntersects(_ a: CGPoint, _ b: CGPoint, _ rect: CGRect) -> Bool {
+        if abs(a.x - b.x) < 0.001 {
+            a.x > rect.minX + 0.001 && a.x < rect.maxX - 0.001
+                && min(a.y, b.y) < rect.maxY - 0.001 && max(a.y, b.y) > rect.minY + 0.001
+        } else {
+            a.y > rect.minY + 0.001 && a.y < rect.maxY - 0.001
+                && min(a.x, b.x) < rect.maxX - 0.001 && max(a.x, b.x) > rect.minX + 0.001
+        }
+    }
+
+    private static func pointsArray(_ points: [ScenePoint]) -> [[Double]] {
+        points.map { [$0.x, $0.y] }
     }
     /// 检查真实窗口中每个节点和边都有可回查的源码命中；公开结果只输出计数。
     private static func sourceHits(_ diagrams: [DiagramView], source: String) -> [String: Any] {

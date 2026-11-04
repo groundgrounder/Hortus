@@ -127,4 +127,13 @@ impl Scene {
     pub fn hit_test(&self, point: Point) -> Option<&HitRegion> {
         self.hit_regions.iter().find(|hit| hit.rect.contains(point))
     }
+
+    /// 去除仅用于性能统计的耗时后，返回可跨 CLI/FFI 严格比较的完整 Scene。
+    pub fn semantic_scene(&self) -> Self {
+        let mut scene = self.clone();
+        scene.metrics.layout_ms = 0.0;
+        // 字体缓存命中记录取决于进程预热历史；实际字体族和字形仍在每个文本图元中。
+        scene.metrics.fonts.clear();
+        scene
+    }
 }

@@ -149,6 +149,40 @@ impl DiagramEngine {
         previous: Option<crate::DiagramPrevious>,
         viewport: Vec<crate::DiagramViewportAnchor>,
     ) -> Result<crate::SceneData, DiagramFailure> {
+        self.render_request_impl(
+            source, mmd, width, collapsed, identity, previous, viewport, false,
+        )
+    }
+
+    /// 仅验收使用：与 render_request 同一布局路径，额外返回完整 Scene JSON。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_request_inspection(
+        &self,
+        source: String,
+        mmd: bool,
+        width: f64,
+        collapsed: Vec<String>,
+        identity: crate::DiagramIdentity,
+        previous: Option<crate::DiagramPrevious>,
+        viewport: Vec<crate::DiagramViewportAnchor>,
+    ) -> Result<crate::SceneData, DiagramFailure> {
+        self.render_request_impl(
+            source, mmd, width, collapsed, identity, previous, viewport, true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_request_impl(
+        &self,
+        source: String,
+        mmd: bool,
+        width: f64,
+        collapsed: Vec<String>,
+        identity: crate::DiagramIdentity,
+        previous: Option<crate::DiagramPrevious>,
+        viewport: Vec<crate::DiagramViewportAnchor>,
+        include_semantic_json: bool,
+    ) -> Result<crate::SceneData, DiagramFailure> {
         let mut state = self.state.lock().map_err(|_| DiagramFailure::Engine {
             kind: "poisoned".into(),
         })?;
@@ -232,20 +266,35 @@ impl DiagramEngine {
                     .collect(),
             }),
         };
-        match &diagram {
-            Diagram::Tree(tree) => layout(tree, &options, &mut state.fonts)
-                .map(|scene| crate::SceneData::from(scene).with_request(identity, None, None)),
+        let (scene, previous, metrics) = match &diagram {
+            Diagram::Tree(tree) => {
+                layout(tree, &options, &mut state.fonts).map(|scene| (scene, None, None))
+            }
             Diagram::Graph(graph) => {
                 layout_graph(graph, &options, &mut state.fonts).map(|result| {
-                    crate::SceneData::from(result.scene).with_request(
-                        identity,
+                    (
+                        result.scene,
                         Some(result.previous.into()),
                         Some(result.metrics.into()),
                     )
                 })
             }
         }
-        .map_err(|error| DiagramFailure::Engine { kind: error.0 })
+        .map_err(|error| DiagramFailure::Engine { kind: error.0 })?;
+        let semantic_json = if include_semantic_json {
+            Some(
+                serde_json::to_string(&scene.semantic_scene()).map_err(|error| {
+                    DiagramFailure::Engine {
+                        kind: format!("semantic_json:{error}"),
+                    }
+                })?,
+            )
+        } else {
+            None
+        };
+        Ok(crate::SceneData::from(scene)
+            .with_request(identity, previous, metrics)
+            .with_semantic_json(semantic_json))
     }
 }
 
