@@ -589,7 +589,11 @@ final class DiagramTextView: NSTextView {
     override func resignFirstResponder() -> Bool {
         // 组合中输入法把标记文本留在存储里；交还第一响应者时先结束组合，
         // 否则 hasMarkedText() 不再变化，文档会停在 marked 并拒绝保存。
-        if hasMarkedText() { unmarkText() }
+        if hasMarkedText() {
+            unmarkText()
+            // 先保留已显示的组合正文，再结束输入法会话，避免重新聚焦时重放旧 preedit。
+            inputContext?.discardMarkedText()
+        }
         let accepted = super.resignFirstResponder(); redrawInlineMath()
         UndoMenuState.scheduleRefresh()
         return accepted

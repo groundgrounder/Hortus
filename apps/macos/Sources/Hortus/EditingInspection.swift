@@ -269,13 +269,24 @@ enum EditingInspection {
 
         // 第二次组合在失焦后立即用真实 ⌘S 保存，避免把已经干净的磁盘误当成命令生效。
         await click(textPoint(of: view, in: window), window: window)
-        let refocused = await waitUntil(5) { window.firstResponder === view }
+        let refocused = await waitUntil(5) {
+            window.firstResponder === view
+                && view.inputContext === NSTextInputContext.current
+                && view.selectedRange() == NSRange(location: 0, length: 0)
+                && !view.hasMarkedText() && !document.marked
+        }
         result["second_editor_focus"] = refocused
+        result["second_editor_context_converged"] = view.inputContext === NSTextInputContext.current
+        try await bridge.emit("second_editor_focused", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
         if refocused {
             await typeText("hao")
-            _ = await waitUntil(4) { view.hasMarkedText() && document.marked }
+            let secondComposition = await waitUntil(4) { view.hasMarkedText() && document.marked }
+            result["second_composition_started"] = secondComposition
+            try await bridge.emit("second_composition_active", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
             await click(center(of: terminal!, in: window), window: window)
-            _ = await waitUntil(4) { window.firstResponder !== view }
+            let secondFocusLeft = await waitUntil(4) { window.firstResponder !== view }
+            result["second_focus_left_editor"] = secondFocusLeft
+            try await bridge.emit("second_focus_left", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
             lastEvent = await press(1, flags: .maskCommand)
             let saveSettled = await waitUntil(5) { !view.hasMarkedText() && !document.marked && !document.dirty }
             result["command_s_after_focus_loss"] = saveSettled
@@ -518,6 +529,10 @@ enum EditingInspection {
             state["issue"] = String(describing: document.issue)
         }
         if let view {
+            let selection = view.selectedRange()
+            let markedRange = view.markedRange()
+            let inputContext = view.inputContext
+            let currentInputContext = NSTextInputContext.current
             state["diagram_view"] = true
             state["reading_view"] = view.isReading
             state["view_editable"] = view.isEditable
@@ -525,6 +540,16 @@ enum EditingInspection {
             state["composition"] = view.compositionActive
             state["view_text"] = view.string
             state["view_length"] = view.textStorage?.length ?? -1
+            state["selection"] = ["location": selection.location, "length": selection.length]
+            state["marked_range"] = markedRange.location == NSNotFound
+                ? NSNull()
+                : ["location": markedRange.location, "length": markedRange.length]
+            state["input_context_id"] = inputContext.map { String(describing: ObjectIdentifier($0)) } ?? ""
+            state["current_input_context_id"] = currentInputContext.map { String(describing: ObjectIdentifier($0)) } ?? ""
+            state["input_context_current"] = inputContext != nil && inputContext === currentInputContext
+            state["input_context_client"] = inputContext.map { String(describing: type(of: $0.client)) } ?? ""
+            state["input_context_selected_source"] = inputContext?.selectedKeyboardInputSource ?? ""
+            state["text_revision"] = document?.textRevision ?? 0
             state["note_undo_manager_id"] = noteUndo.map { String(describing: ObjectIdentifier($0)) } ?? ""
             state["note_can_undo"] = noteUndo?.canUndo ?? false
             state["note_can_redo"] = noteUndo?.canRedo ?? false

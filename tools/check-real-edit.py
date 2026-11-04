@@ -23,6 +23,11 @@ APP = ROOT / "build/Hortus.app/Contents/MacOS/Hortus"
 NOTE_NAME = "note.md"
 NOTE_TEXT = "# 示例笔记\n\n公开的真实编辑回归夹具。\n"
 SCIM_ID = "com.apple.inputmethod.SCIM.ITABC"
+COMMITTED_INITIAL = "中" + NOTE_TEXT
+FIRST_PREEDIT = "ni hao"
+FIRST_COMMITTED = "中" + FIRST_PREEDIT + NOTE_TEXT
+SECOND_PREEDIT = "hao"
+SECOND_COMMITTED = SECOND_PREEDIT + FIRST_COMMITTED
 SESSION = '''last_vault = "{vault}"
 
 [[recent]]
@@ -62,6 +67,33 @@ def sha256(data):
 
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def composition_expectation(phase):
+    values = {
+        "before_composition": (COMMITTED_INITIAL, COMMITTED_INITIAL, 1),
+        "composition_active": (FIRST_COMMITTED, COMMITTED_INITIAL, 7),
+        "command_s_while_composing": (FIRST_COMMITTED, COMMITTED_INITIAL, 7),
+        "command_e_while_composing": (FIRST_COMMITTED, COMMITTED_INITIAL, 7),
+        "focus_left": (FIRST_COMMITTED, COMMITTED_INITIAL, 7),
+        "autosave_after_focus_loss": (FIRST_COMMITTED, FIRST_COMMITTED, 7),
+        "second_editor_focused": (FIRST_COMMITTED, FIRST_COMMITTED, 0),
+        "second_composition_active": (SECOND_COMMITTED, FIRST_COMMITTED, 3),
+        "second_focus_left": (SECOND_COMMITTED, FIRST_COMMITTED, 3),
+        "command_s_after_focus_loss": (SECOND_COMMITTED, SECOND_COMMITTED, 3),
+        "command_e_after_focus_loss": (SECOND_COMMITTED, SECOND_COMMITTED, 3),
+    }
+    value = values.get(phase)
+    if value is None:
+        return None
+    view_text, disk_text, selection = value
+    return {
+        "view_text": view_text,
+        "view_bytes": len(view_text.encode("utf-8")),
+        "disk_text": disk_text,
+        "disk_bytes": len(disk_text.encode("utf-8")),
+        "selection_location": selection,
+    }
 
 
 def initialise_run(base):
@@ -128,6 +160,7 @@ def acknowledge_phase(run_dir, ack_dir, phase, observation):
         "phase": phase["phase"],
         "state": phase.get("state", {}),
         "disk": observation,
+        "expectation": composition_expectation(phase["phase"]),
         "ack_wall_time": time.time(),
     }
     with (run_dir / "observations.jsonl").open("a", encoding="utf-8") as handle:
@@ -275,6 +308,33 @@ def menu_matches(state, errors, label):
             f"{label}: Redo enabled={state.get('menu_redo_enabled')} expected={expected_redo}", errors)
 
 
+def composition_text_matches(record, errors, label):
+    expectation = record.get("expectation")
+    if expectation is None:
+        errors.append(f"{label}: missing expected text model")
+        return
+    state = record["state"]
+    view_text = state.get("view_text")
+    disk_text = record["disk"]["text"]
+    require(view_text == expectation["view_text"],
+            f"{label}: visible body mismatch; expected {expectation['view_bytes']} B "
+            f"{expectation['view_text']!r}, got {len(view_text.encode('utf-8')) if isinstance(view_text, str) else -1} B "
+            f"{view_text!r}", errors)
+    require(disk_text == expectation["disk_text"],
+            f"{label}: disk body mismatch; expected {expectation['disk_bytes']} B "
+            f"{expectation['disk_text']!r}, got {record['disk']['bytes']} B {disk_text!r}", errors)
+    selection = state.get("selection") or {}
+    require(selection.get("location") == expectation["selection_location"],
+            f"{label}: selection={selection.get('location')} expected={expectation['selection_location']}", errors)
+
+
+def revision_change(first, second, expected, label, errors):
+    before = first["state"].get("revision")
+    after = second["state"].get("revision")
+    require(isinstance(before, int) and isinstance(after, int) and after - before == expected,
+            f"{label}: revision delta expected {expected}, got {before}->{after}", errors)
+
+
 def evaluate_composition(run):
     errors = []
     require_prerequisites(run, errors)
@@ -282,6 +342,7 @@ def evaluate_composition(run):
     phases = observation_map(run)
     names = ["before_composition", "composition_active", "command_s_while_composing",
              "command_e_while_composing", "focus_left", "autosave_after_focus_loss",
+             "second_editor_focused", "second_composition_active", "second_focus_left",
              "command_s_after_focus_loss", "command_e_after_focus_loss"]
     require(sorted(phases) == sorted(names), f"phase set mismatch: {sorted(phases)}", errors)
     if not set(names).issubset(phases):
@@ -292,19 +353,30 @@ def evaluate_composition(run):
     command_e = phases["command_e_while_composing"]
     focus_left = phases["focus_left"]
     autosave = phases["autosave_after_focus_loss"]
+    second_focus = phases["second_editor_focused"]
+    second_active = phases["second_composition_active"]
+    second_focus_left = phases["second_focus_left"]
     saved_s = phases["command_s_after_focus_loss"]
     saved_e = phases["command_e_after_focus_loss"]
+    for record in (before, active, command_s, command_e, focus_left, autosave,
+                   second_focus, second_active, second_focus_left, saved_s, saved_e):
+        composition_text_matches(record, errors, record["phase"])
     require(before["state"].get("marked_text") is False and before["state"].get("dirty") is False,
             "real IME commit did not settle", errors)
     require(before["disk"]["sha256"] != run["initial"]["sha256"], "real IME commit was not saved externally", errors)
     require(active["disk"]["sha256"] == before["disk"]["sha256"], "active preedit reached disk", errors)
     require(active["state"].get("marked_text") is True and active["state"].get("marked") is True,
             "SCIM did not produce a marked composition", errors)
+    require(active["state"].get("marked_range") == {"location": 1, "length": len(FIRST_PREEDIT)},
+            f"first marked range={active['state'].get('marked_range')} expected=1..<7", errors)
+    revision_change(before, active, len("nihao"), "first preedit", errors)
     for label, record, keycode in (("composition ⌘S", command_s, 1), ("composition ⌘E", command_e, 14)):
         require(record["disk"]["sha256"] == before["disk"]["sha256"], f"{label} changed disk", errors)
         require(record["state"].get("marked_text") is True, f"{label} committed the preedit", errors)
         require(record["state"].get("reading") is False, f"{label} switched views", errors)
         require(event_is(record["state"], keycode, ["command"]), f"{label} event is not the real command keycode", errors)
+        require(record["state"].get("revision") == active["state"].get("revision"),
+                f"{label} changed the document revision", errors)
     menu_matches(command_s["state"], errors, "composition ⌘S")
     menu_matches(command_e["state"], errors, "composition ⌘E")
     require(focus_left["state"].get("first_responder") != "DiagramTextView",
@@ -313,16 +385,44 @@ def evaluate_composition(run):
     require(autosave["state"].get("marked_text") is False and autosave["state"].get("marked") is False,
             "focus-loss autosave left a marked composition", errors)
     require(autosave["state"].get("dirty") is False, "focus-loss autosave did not settle", errors)
-    require(autosave["disk"]["text"] == autosave["state"].get("view_text"),
-            "focus-loss disk body differs from visible editor body", errors)
+    require(autosave["state"].get("input_context_id") != autosave["state"].get("current_input_context_id"),
+            "focus-loss evidence did not leave the editor input context", errors)
+    revision_change(active, focus_left, 2, "first preedit commit", errors)
+    require(autosave["state"].get("revision") == focus_left["state"].get("revision"),
+            "first autosave changed the document revision", errors)
+    require(second_focus["state"].get("first_responder") == "DiagramTextView",
+            "second composition did not refocus the editor", errors)
+    require(second_focus["state"].get("input_context_current") is True,
+            "second composition started without the editor input context", errors)
+    require(second_focus["state"].get("marked_text") is False and second_focus["state"].get("marked") is False,
+            "second composition started with stale marked text", errors)
+    require(second_focus["state"].get("revision") == autosave["state"].get("revision"),
+            "refocusing the editor inserted stale preedit text", errors)
+    require(second_active["state"].get("first_responder") == "DiagramTextView",
+            "second composition lost editor focus", errors)
+    require(second_active["state"].get("input_context_current") is True,
+            "second composition lost its input context", errors)
+    require(second_active["state"].get("marked_text") is True and second_active["state"].get("marked") is True,
+            "second SCIM composition did not start", errors)
+    require(second_active["state"].get("marked_range") == {"location": 0, "length": len(SECOND_PREEDIT)},
+            f"second marked range={second_active['state'].get('marked_range')} expected=0..<3", errors)
+    revision_change(second_focus, second_active, len("hao"), "second preedit", errors)
+    require(second_focus_left["state"].get("first_responder") != "DiagramTextView",
+            "second composition did not leave the editor", errors)
+    require(second_focus_left["state"].get("marked_text") is False
+            and second_focus_left["state"].get("marked") is False,
+            "second focus loss left a marked composition", errors)
+    revision_change(second_active, second_focus_left, 2, "second preedit commit", errors)
     require(saved_s["disk"]["sha256"] != autosave["disk"]["sha256"], "post-focus real ⌘S did not save an edit", errors)
-    require(saved_s["disk"]["text"] == saved_s["state"].get("view_text"),
-            "post-focus ⌘S disk body differs from editor", errors)
     require(saved_s["state"].get("dirty") is False, "post-focus ⌘S did not settle", errors)
+    require(saved_s["state"].get("revision") == second_focus_left["state"].get("revision"),
+            "post-focus ⌘S changed the document revision", errors)
     require(event_is(saved_s["state"], 1, ["command"]), "post-focus save event is not real ⌘S", errors)
     require(saved_e["state"].get("reading") is True, "post-focus real ⌘E did not switch to reading", errors)
     require(saved_e["disk"]["sha256"] == saved_s["disk"]["sha256"], "post-focus ⌘E changed disk", errors)
     require(event_is(saved_e["state"], 14, ["command"]), "post-focus toggle event is not real ⌘E", errors)
+    require(saved_e["state"].get("revision") == saved_s["state"].get("revision"),
+            "post-focus ⌘E changed the document revision", errors)
     return {"passed": not errors, "errors": errors}
 
 
