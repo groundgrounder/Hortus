@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import HortusCore
 
 /// 真实窗口验收；仅在显式命令行参数下触发，不给日常运行增加轮询。
@@ -7,10 +8,10 @@ enum EditingInspection {
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         guard let document = workspace.current?.document, let path = workspace.selected else { throw CocoaError(.coderValueNotFound) }
         let mode = arguments.first(where: { $0.hasPrefix("--edit-mode=") }).map { String($0.dropFirst("--edit-mode=".count)) } ?? "lifecycle"
-        // 观察模式不发送任何编辑、焦点或保存动作；状态只由外部的真实键盘和鼠标驱动。
-        if mode == "observe" { return try await observe(workspace: workspace, arguments: arguments) }
-        // 组合在焦点离开编辑器后的保存与快捷键回归：点击和 ⌘E 是真实 CGEvent。
-        if mode == "composition-focus-loss" { return try await compositionFocusLoss(workspace: workspace) }
+        // 真实编辑检查只走 SCIM ITABC 的纯 keycode 事件；每个阶段等待外部读盘 ack。
+        if mode == "composition-focus-loss" { return try await compositionFocusLoss(workspace: workspace, arguments: arguments) }
+        if mode == "undo-redo" { return try await undoRedo(workspace: workspace, arguments: arguments) }
+        if mode == "undo-matrix" { return try await undoMatrix(workspace: workspace, arguments: arguments) }
         if document.reading { await workspace.toggleCurrentView() }
         for _ in 0..<500 {
             if DiagramInspection.current(document: workspace.current?.document)?.isReading == false { break }
@@ -179,116 +180,512 @@ enum EditingInspection {
                 "selection_preserved": caret == selected, "undo_cleared": undoCleared,
                 "dirty_before_exit": workspace.current?.document?.dirty == true]
     }
-    /// 只读取主线程状态并按变化追加 JSONL；不发起任何编辑、焦点、菜单刷新或保存动作。
-    /// 真实按键由外部探针通过 CGEvent 发送，本模式只提供同一时钟下的内部状态对照。
-    private static func observe(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
-        guard let argument = arguments.first(where: { $0.hasPrefix("--observe-log=") }) else { throw CocoaError(.coderInvalidValue) }
-        let path = String(argument.dropFirst("--observe-log=".count))
-        let seconds = arguments.first(where: { $0.hasPrefix("--observe-seconds=") })
-            .flatMap { Double($0.dropFirst("--observe-seconds=".count)) } ?? 20
-        let salt = arguments.first(where: { $0.hasPrefix("--observe-salt=") })
-            .map { String($0.dropFirst("--observe-salt=".count)) } ?? ""
-        FileManager.default.createFile(atPath: path, contents: nil)
-        guard let file = FileHandle(forWritingAtPath: path) else { throw CocoaError(.fileWriteUnknown) }
-        defer { try? file.close() }
-        var written = 0
-        var last: [String: Any] = [:]
-        let started = ProcessInfo.processInfo.systemUptime
-        var ticks = 0
-        // 先写一行起点，外部探针据此判断检查器已经接管。
-        try append(["kind": "start", "t": started, "seconds": seconds], to: file)
-        written += 1
-        while ProcessInfo.processInfo.systemUptime - started < seconds {
-            ticks += 1
-            if var sample = sample(workspace: workspace, salt: salt) {
-                sample.removeValue(forKey: "t")
-                if sample as NSDictionary != last as NSDictionary {
-                    var line = sample
-                    line["kind"] = "state"
-                    line["t"] = ProcessInfo.processInfo.systemUptime
-                    try append(line, to: file)
-                    written += 1
-                    last = sample
-                }
-            }
-            try await Task.sleep(for: .milliseconds(50))
+    /// 真实点击编辑器建立焦点，由 SCIM ITABC 建立组合，再真实点击底部终端让焦点离开。
+    /// 每个阶段都由外部驱动读盘并 ack；本函数不读取磁盘，也不替外部结论作判定。
+    private static func compositionFocusLoss(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
+        let bridge = try PhaseBridge(arguments: arguments)
+        defer { bridge.close() }
+        let originalInputSource = selectedInputSourceID()
+        var result: [String: Any] = ["mode": "composition-focus-loss", "event_tap": "cghidEventTap"]
+        defer { _ = restoreInputSource(originalInputSource) }
+        guard let document = workspace.current?.document,
+              let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) else {
+            result["status"] = "environment_failed"
+            result["prerequisites"] = ["window": false, "document": false]
+            return result
         }
-        let ended = ProcessInfo.processInfo.systemUptime
-        try append(["kind": "end", "t": ended, "ticks": ticks], to: file)
-        written += 1
-        return ["observe_log": path, "samples": written, "ticks": ticks, "seconds": ended - started,
-                "document_reading": workspace.current?.document?.reading == true,
-                "document_dirty": workspace.current?.document?.dirty == true,
-                "document_marked": workspace.current?.document?.marked == true]
-    }
-    private static func sample(workspace: Workspace, salt: String) -> [String: Any]? {
-        guard let document = workspace.current?.document else { return nil }
-        let view = DiagramInspection.current(document: document)
-        let window = NSApp.keyWindow ?? NSApp.windows.first(where: \.isVisible)
-        var sample: [String: Any] = [
-            "tabs": workspace.tabs.count,
-            "selected_index": workspace.tabs.firstIndex(where: { $0.path == workspace.selected }) ?? -1,
-            "reading": document.reading,
-            "dirty": document.dirty,
-            "marked": document.marked,
-            "issue": String(describing: document.issue),
-            "message": document.message,
-            "persistence": String(describing: document.persistence),
-            "revision": document.revision,
-            "text_revision": document.textRevision,
-            "read_only": document.readOnlyReason ?? "",
-            "key_window": window?.isKeyWindow == true,
-            "main_active": NSApp.isActive,
-            "first_responder": window.flatMap { $0.firstResponder.map { String(describing: type(of: $0)) } } ?? "",
-            "save_enabled": saveItem(NSApp.mainMenu)?.isEnabled ?? false,
-            "save_action": saveItem(NSApp.mainMenu)?.action.map(NSStringFromSelector) ?? "",
+        let access = CGPreflightPostEventAccess()
+        result["post_event_access"] = access
+        result["input_source_requested"] = SCIMInputSourceID
+        result["input_source_before"] = originalInputSource ?? ""
+        result["focus_event_tap"] = "cghidEventTap"
+        guard access else {
+            result["status"] = "environment_failed"
+            result["prerequisites"] = ["event_access": access]
+            return result
+        }
+        let activation = await activate(window)
+        let input = selectSCIM()
+        result["input_source_status"] = input.status
+        result["input_source_available"] = input.available
+        result["input_source_selected"] = input.selected
+        result["input_source_after_select"] = selectedInputSourceID() ?? ""
+        var terminal: NSView?
+        if let content = window.contentView {
+            terminal = await waitUntil(5) {
+                firstView(named: "HortusTerminalView", in: content).flatMap { !$0.isHiddenOrHasHiddenAncestor ? $0 : nil } != nil
+            } ? firstView(named: "HortusTerminalView", in: content) : nil
+        }
+        let terminalVisible = terminal.map { !$0.isHiddenOrHasHiddenAncestor } ?? false
+        var prerequisites: [String: Any] = [
+            "event_access": access, "application_active": NSApp.isActive,
+            "activation_converged": activation, "key_window": window.isKeyWindow,
+            "terminal_found": terminal != nil, "terminal_visible": terminalVisible,
+            "input_source_available": input.available, "input_source_selected": input.selected,
+            "input_source_before": originalInputSource ?? "",
         ]
-        // 只解析当前响应者链上的命令目标，不触发菜单校验或刷新。
-        sample["responder_chain"] = chain(window?.firstResponder)
-        for (name, selector) in [("undo", "undo:"), ("copy", "copy:"), ("select_all", "selectAll:"),
-                                 ("paste", "paste:"), ("insert_newline", "insertNewline:"),
-                                 ("toggle_sidebar", "toggleSidebar:")] {
-            sample["target_\(name)"] = NSApp.target(forAction: Selector(selector), to: nil, from: nil)
-                .map { String(describing: type(of: $0)) } ?? ""
+        guard activation, terminal != nil else {
+            result["status"] = "environment_failed"
+            result["prerequisites"] = prerequisites
+            return result
+        }
+        let view = try await DiagramInspection.settled(document: document)
+        await click(textPoint(of: view, in: window), window: window)
+        let focused = await waitUntil(5) { window.firstResponder === view }
+        prerequisites["editor_focused"] = focused
+        prerequisites["focus_event_tap"] = "cghidEventTap"
+        result["prerequisites"] = prerequisites
+        guard focused else {
+            result["status"] = "environment_failed"
+            return result
+        }
+        var lastEvent: [String: Any] = [:]
+        await typeText("zhong")
+        lastEvent = await press(49, flags: [])
+        let committed = await waitUntil(10) { !view.hasMarkedText() && !document.marked && !document.dirty }
+        result["initial_commit"] = committed
+        try await bridge.emit("before_composition", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        await typeText("nihao")
+        let composition = await waitUntil(5) { view.hasMarkedText() && document.marked }
+        result["composition_started"] = composition
+        try await bridge.emit("composition_active", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        lastEvent = await press(1, flags: .maskCommand)
+        try? await Task.sleep(for: .milliseconds(700))
+        try await bridge.emit("command_s_while_composing", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        lastEvent = await press(14, flags: .maskCommand)
+        try? await Task.sleep(for: .milliseconds(700))
+        try await bridge.emit("command_e_while_composing", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        await click(center(of: terminal!, in: window), window: window)
+        let focusLeft = await waitUntil(5) { window.firstResponder !== view }
+        result["focus_left_editor"] = focusLeft
+        try await bridge.emit("focus_left", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+        let autoSaved = await waitUntil(5) { !view.hasMarkedText() && !document.marked && !document.dirty }
+        result["autosave_after_focus_loss"] = autoSaved
+        try await bridge.emit("autosave_after_focus_loss", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        // 第二次组合在失焦后立即用真实 ⌘S 保存，避免把已经干净的磁盘误当成命令生效。
+        await click(textPoint(of: view, in: window), window: window)
+        let refocused = await waitUntil(5) { window.firstResponder === view }
+        result["second_editor_focus"] = refocused
+        if refocused {
+            await typeText("hao")
+            _ = await waitUntil(4) { view.hasMarkedText() && document.marked }
+            await click(center(of: terminal!, in: window), window: window)
+            _ = await waitUntil(4) { window.firstResponder !== view }
+            lastEvent = await press(1, flags: .maskCommand)
+            let saveSettled = await waitUntil(5) { !view.hasMarkedText() && !document.marked && !document.dirty }
+            result["command_s_after_focus_loss"] = saveSettled
+            try await bridge.emit("command_s_after_focus_loss", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+        }
+
+        lastEvent = await press(14, flags: .maskCommand)
+        let toggled = await waitUntil(5) { document.reading }
+        result["command_e_after_focus_loss"] = toggled
+        try await bridge.emit("command_e_after_focus_loss", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+        result["status"] = prerequisites.values.allSatisfy { ($0 as? Bool) != false } ? "completed" : "environment_failed"
+        result["phase_count"] = bridge.phaseCount
+        result["ack_count"] = bridge.ackCount
+        result["input_source_restored"] = restoreInputSource(originalInputSource)
+        result["input_source_after_run"] = selectedInputSourceID() ?? ""
+        return result
+    }
+
+    /// 独立撤销场景：先真实提交，再由真实 ⌘Z/⇧⌘Z 回退和恢复；最后验证组合中 ⌘Z 不改状态。
+    private static func undoRedo(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
+        let bridge = try PhaseBridge(arguments: arguments)
+        defer { bridge.close() }
+        let originalInputSource = selectedInputSourceID()
+        var result: [String: Any] = ["mode": "undo-redo", "event_tap": "cghidEventTap"]
+        defer { _ = restoreInputSource(originalInputSource) }
+        guard let document = workspace.current?.document,
+              let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) else {
+            result["status"] = "environment_failed"
+            return result
+        }
+        let access = CGPreflightPostEventAccess()
+        let activation = await activate(window)
+        let input = selectSCIM()
+        let view = try await DiagramInspection.settled(document: document)
+        await click(textPoint(of: view, in: window), window: window)
+        let focused = await waitUntil(5) { window.firstResponder === view }
+        let prerequisites: [String: Any] = ["event_access": access, "application_active": NSApp.isActive,
+                                             "activation_converged": activation, "key_window": window.isKeyWindow,
+                                             "editor_focused": focused, "input_source_available": input.available,
+                                             "input_source_selected": input.selected,
+                                             "input_source_before": originalInputSource ?? ""]
+        result["prerequisites"] = prerequisites
+        result["input_source_status"] = input.status
+        result["input_source_after_select"] = selectedInputSourceID() ?? ""
+        result["focus_event_tap"] = "cghidEventTap"
+        guard access, input.available, input.selected, activation, focused else {
+            result["status"] = "environment_failed"
+            result["failure_state"] = snapshot(workspace: workspace, window: window, lastEvent: [:])
+            return result
+        }
+        var lastEvent: [String: Any] = [:]
+        await typeText("zhong")
+        lastEvent = await press(49, flags: [])
+        _ = await waitUntil(10) { !view.hasMarkedText() && !document.marked && !document.dirty }
+        try await bridge.emit("commit_ready", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        let commitRevision = document.revision
+        lastEvent = await press(6, flags: .maskCommand)
+        let undone = await waitUntil(5) { document.revision != commitRevision && !document.dirty }
+        try? await Task.sleep(for: .milliseconds(300))
+        result["undo_changed_document"] = undone
+        try await bridge.emit("after_undo", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        let undoRevision = document.revision
+        lastEvent = await press(6, flags: [.maskCommand, .maskShift])
+        let redone = await waitUntil(5) { document.revision != undoRevision && !document.dirty }
+        try? await Task.sleep(for: .milliseconds(300))
+        result["redo_changed_document"] = redone
+        try await bridge.emit("after_redo", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        await typeText("nihao")
+        let composing = await waitUntil(5) { view.hasMarkedText() && document.marked }
+        let beforeCompositeUndo = snapshot(workspace: workspace, window: window, lastEvent: lastEvent)
+        result["composition_undo_prerequisite"] = composing && (view.undoManager?.canUndo == true)
+        try await bridge.emit("composition_undo_ready", state: beforeCompositeUndo)
+        lastEvent = await press(6, flags: .maskCommand)
+        try? await Task.sleep(for: .milliseconds(800))
+        let afterCompositeUndo = snapshot(workspace: workspace, window: window, lastEvent: lastEvent)
+        result["composition_undo_unchanged"] = beforeCompositeUndo["view_text"] as? String == afterCompositeUndo["view_text"] as? String
+            && beforeCompositeUndo["revision"] as? UInt64 == afterCompositeUndo["revision"] as? UInt64
+            && afterCompositeUndo["marked_text"] as? Bool == true
+        try await bridge.emit("after_composition_undo", state: afterCompositeUndo)
+
+        // 清理组合，避免退出时留下恢复稿；清理动作不作为通过证据。
+        if view.hasMarkedText() {
+            _ = await press(53, flags: [])
+            _ = await waitUntil(2) { !view.hasMarkedText() }
+        }
+        await click(textPoint(of: noteView(in: window) ?? view, in: window), window: window)
+        result["status"] = prerequisites.values.allSatisfy { ($0 as? Bool) != false } ? "completed" : "environment_failed"
+        result["phase_count"] = bridge.phaseCount
+        result["ack_count"] = bridge.ackCount
+        result["input_source_restored"] = restoreInputSource(originalInputSource)
+        result["input_source_after_run"] = selectedInputSourceID() ?? ""
+        return result
+    }
+
+    /// 同一撤销矩阵覆盖编辑、阅读、终端和搜索框；阅读与终端只验证不误触笔记撤销。
+    private static func undoMatrix(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
+        let bridge = try PhaseBridge(arguments: arguments)
+        defer { bridge.close() }
+        let originalInputSource = selectedInputSourceID()
+        var result: [String: Any] = ["mode": "undo-matrix", "event_tap": "cghidEventTap"]
+        defer { _ = restoreInputSource(originalInputSource) }
+        guard let document = workspace.current?.document,
+              let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) else {
+            result["status"] = "environment_failed"
+            return result
+        }
+        let access = CGPreflightPostEventAccess()
+        let activation = await activate(window)
+        let input = selectSCIM()
+        let view = try await DiagramInspection.settled(document: document)
+        await click(textPoint(of: view, in: window), window: window)
+        let focused = await waitUntil(5) { window.firstResponder === view }
+        let prerequisites: [String: Any] = ["event_access": access, "application_active": NSApp.isActive,
+                                             "activation_converged": activation, "key_window": window.isKeyWindow,
+                                             "editor_focused": focused, "input_source_available": input.available,
+                                             "input_source_selected": input.selected,
+                                             "input_source_before": originalInputSource ?? ""]
+        result["prerequisites"] = prerequisites
+        result["input_source_status"] = input.status
+        result["input_source_after_select"] = selectedInputSourceID() ?? ""
+        result["focus_event_tap"] = "cghidEventTap"
+        guard access, input.available, input.selected, activation, focused else {
+            result["status"] = "environment_failed"
+            result["failure_state"] = snapshot(workspace: workspace, window: window, lastEvent: [:])
+            return result
+        }
+        var lastEvent: [String: Any] = [:]
+        await typeText("zhong")
+        lastEvent = await press(49, flags: [])
+        _ = await waitUntil(10) { !view.hasMarkedText() && !document.marked && !document.dirty }
+        try await bridge.emit("editor", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        lastEvent = await press(14, flags: .maskCommand)
+        _ = await waitUntil(5) { document.reading }
+        let readingView = try await DiagramInspection.settled(document: document)
+        await click(textPoint(of: readingView, in: window), window: window)
+        _ = await waitUntil(5) { window.firstResponder === readingView }
+        try await bridge.emit("reading", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+        lastEvent = await press(6, flags: .maskCommand)
+        try? await Task.sleep(for: .milliseconds(800))
+        try await bridge.emit("after_reading_undo", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        lastEvent = await press(14, flags: .maskCommand)
+        _ = await waitUntil(5) { !document.reading }
+        guard let content = window.contentView,
+              let terminal = firstView(named: "HortusTerminalView", in: content) else {
+            result["status"] = "environment_failed"
+            return result
+        }
+        await click(center(of: terminal, in: window), window: window)
+        _ = await waitUntil(5) { window.firstResponder === terminal }
+        try await bridge.emit("terminal", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+        lastEvent = await press(6, flags: .maskCommand)
+        try? await Task.sleep(for: .milliseconds(800))
+        try await bridge.emit("after_terminal_undo", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+
+        lastEvent = await press(3, flags: [.maskCommand, .maskShift])
+        guard let content = window.contentView,
+              await waitUntil(5, { firstView(of: NativeSearchField.self, in: content)?.isHiddenOrHasHiddenAncestor == false }) else {
+            result["status"] = "environment_failed"
+            return result
+        }
+        guard let field = firstView(of: NativeSearchField.self, in: content) else {
+            result["status"] = "environment_failed"
+            return result
+        }
+        let latin = selectInputSource(ABCInputSourceID)
+        result["search_input_source_selected"] = latin.selected
+        guard latin.available, latin.selected else {
+            result["status"] = "environment_failed"
+            return result
+        }
+        await click(center(of: field, in: window), window: window)
+        _ = await waitUntil(5) { field.currentEditor() != nil }
+        await typeText("note")
+        _ = await waitUntil(5) { workspace.searchQuery == "note" }
+        let searchText = workspace.searchQuery
+        try await bridge.emit("search_typed", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+        lastEvent = await press(6, flags: .maskCommand)
+        _ = await waitUntil(3) { workspace.searchQuery != searchText }
+        try await bridge.emit("after_search_undo", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+        lastEvent = await press(6, flags: [.maskCommand, .maskShift])
+        _ = await waitUntil(3) { workspace.searchQuery == searchText }
+        try await bridge.emit("after_search_redo", state: snapshot(workspace: workspace, window: window, lastEvent: lastEvent))
+        result["status"] = "completed"
+        result["phase_count"] = bridge.phaseCount
+        result["ack_count"] = bridge.ackCount
+        result["input_source_restored"] = restoreInputSource(originalInputSource)
+        result["input_source_after_run"] = selectedInputSourceID() ?? ""
+        return result
+    }
+
+    private static func snapshot(workspace: Workspace, window: NSWindow, lastEvent: [String: Any]) -> [String: Any] {
+        let document = workspace.current?.document
+        let view = document.flatMap(DiagramInspection.current(document:))
+        let responder = window.firstResponder
+        let responderText = responder as? NSTextView
+        let currentUndo = responder?.undoManager
+        let noteUndo = view?.undoManager
+        NSApp.mainMenu?.update()
+        let items = undoMenuItems(NSApp.mainMenu)
+        let editable = responderText?.isEditable ?? false
+        let marked = responderText?.hasMarkedText() ?? false
+        let canUndo = currentUndo?.canUndo ?? false
+        let canRedo = currentUndo?.canRedo ?? false
+        var state: [String: Any] = [
+            "last_event": lastEvent,
+            "first_responder": responder.map { String(describing: type(of: $0)) } ?? "",
+            "responder_chain": responderChain(responder),
+            "key_window": window.isKeyWindow,
+            "main_active": NSApp.isActive,
+            "current_editable": editable,
+            "current_marked_text": marked,
+            "current_text_length": responderText?.string.utf16.count ?? 0,
+            "current_text": responderText?.string ?? "",
+            "undo_manager_class": currentUndo.map { String(describing: type(of: $0)) } ?? "",
+            "undo_manager_id": currentUndo.map { String(describing: ObjectIdentifier($0)) } ?? "",
+            "can_undo": canUndo,
+            "can_redo": canRedo,
+            "menu_undo_enabled": items.undo?.isEnabled ?? false,
+            "menu_redo_enabled": items.redo?.isEnabled ?? false,
+            "menu_undo_title": items.undo?.title ?? "",
+            "menu_redo_title": items.redo?.title ?? "",
+            "menu_undo_action": items.undo?.action.map(NSStringFromSelector) ?? "",
+            "menu_redo_action": items.redo?.action.map(NSStringFromSelector) ?? "",
+            "menu_undo_target": items.undo?.target.map { String(describing: type(of: $0)) } ?? "",
+            "menu_redo_target": items.redo?.target.map { String(describing: type(of: $0)) } ?? "",
+            "expected_menu_undo": editable && !marked && canUndo,
+            "expected_menu_redo": editable && !marked && canRedo,
+            "input_source": selectedInputSourceID() ?? "",
+        ]
+        if let document {
+            state["reading"] = document.reading
+            state["dirty"] = document.dirty
+            state["marked"] = document.marked
+            state["revision"] = document.revision
+            state["issue"] = String(describing: document.issue)
         }
         if let view {
-            sample["editable"] = view.isEditable
-            sample["marked_text"] = view.hasMarkedText()
-            sample["composition"] = view.compositionActive
-            sample["view_length"] = view.textStorage?.length ?? -1
-            sample["view_hash"] = digest(view.string, salt: salt)
-            sample["blocks"] = view.blocks.count
-            sample["pending"] = view.diagramPending
-            sample["is_reading"] = view.isReading
-            sample["selection_length"] = view.selectedRange().length
-            sample["can_undo"] = view.undoManager?.canUndo ?? false
-            sample["can_redo"] = view.undoManager?.canRedo ?? false
-            sample["undo_groups"] = view.undoManager?.undoCount ?? 0
+            state["diagram_view"] = true
+            state["reading_view"] = view.isReading
+            state["view_editable"] = view.isEditable
+            state["marked_text"] = view.hasMarkedText()
+            state["composition"] = view.compositionActive
+            state["view_text"] = view.string
+            state["view_length"] = view.textStorage?.length ?? -1
+            state["note_undo_manager_id"] = noteUndo.map { String(describing: ObjectIdentifier($0)) } ?? ""
+            state["note_can_undo"] = noteUndo?.canUndo ?? false
+            state["note_can_redo"] = noteUndo?.canRedo ?? false
+            state["undo_manager_is_note_view"] = currentUndo.flatMap { current in
+                noteUndo.map { current === $0 }
+            } ?? false
         }
-        for key in ["z", "a", "c", "v", "x"] {
-            let item = menuItem(key, NSApp.mainMenu)
-            sample["menu_\(key)_title"] = item?.title ?? ""
-            sample["menu_\(key)_enabled"] = item?.isEnabled ?? false
-            sample["menu_\(key)_action"] = item?.action.map(NSStringFromSelector) ?? ""
+        state["search_query"] = workspace.searchQuery
+        if let field = window.contentView.flatMap({ firstView(of: NativeSearchField.self, in: $0) }) {
+            state["search_field"] = true
+            state["search_editor_active"] = field.currentEditor() != nil
+            state["search_field_text"] = field.stringValue
         }
-        if let item = toggleItem(NSApp.mainMenu) {
-            sample["switch_enabled"] = item.isEnabled
-            sample["switch_title"] = item.title
-            sample["switch_action"] = item.action.map(NSStringFromSelector) ?? ""
-        }
-        let url = document.io.url
-        if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) {
-            sample["disk_bytes"] = (attributes[.size] as? NSNumber)?.intValue ?? -1
-            sample["disk_mtime"] = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        } else {
-            sample["disk_bytes"] = -1
-        }
-        sample["disk_hash"] = (try? String(contentsOf: url, encoding: .utf8)).map { digest($0, salt: salt) } ?? "missing"
-        return sample
+        return state
     }
-    private static func chain(_ responder: NSResponder?) -> String {
+
+    private static func noteView(in window: NSWindow) -> DiagramTextView? {
+        guard let content = window.contentView else { return nil }
+        return firstView(of: DiagramTextView.self, in: content)
+    }
+
+    private static func activate(_ window: NSWindow) async -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        return await waitUntil(8) { NSApp.isActive && window.isKeyWindow }
+    }
+
+    private static func waitUntil(_ seconds: Double, _ predicate: () -> Bool) async -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + seconds
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if predicate() { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return predicate()
+    }
+
+    private static func typeText(_ word: String) async {
+        let keys: [Character: CGKeyCode] = ["a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5,
+            "z": 6, "x": 7, "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14,
+            "r": 15, "y": 16, "t": 17, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37,
+            "j": 38, "k": 40, "n": 45, "m": 46]
+        for character in word {
+            guard let key = keys[character] else { continue }
+            _ = await press(key, flags: [])
+        }
+    }
+
+    @discardableResult
+    private static func press(_ key: CGKeyCode, flags: CGEventFlags) async -> [String: Any] {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for down in [true, false] {
+            let event = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: down)
+            event?.flags = flags
+            event?.post(tap: .cghidEventTap)
+            try? await Task.sleep(for: .milliseconds(down ? 18 : 55))
+        }
+        return ["kind": "keyboard", "keycode": Int(key), "flags": flagNames(flags), "tap": "cghidEventTap"]
+    }
+
+    private static func click(_ point: CGPoint, window: NSWindow) async {
+        let screen = window.convertPoint(toScreen: point)
+        let height = NSScreen.screens.max { $0.frame.maxY < $1.frame.maxY }?.frame.maxY ?? NSScreen.main?.frame.height ?? 0
+        let location = CGPoint(x: screen.x, y: height - screen.y)
+        let source = CGEventSource(stateID: .hidSystemState)
+        for type in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
+            let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                mouseCursorPosition: location, mouseButton: .left)
+            event?.flags = []
+            event?.post(tap: .cghidEventTap)
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+    }
+
+    private static func center(of view: NSView, in window: NSWindow) -> CGPoint {
+        let bounds = view.convert(view.bounds, to: nil)
+        return CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    private static func textPoint(of view: NSTextView, in window: NSWindow) -> CGPoint {
+        let range = NSRange(location: 0, length: min(1, view.string.utf16.count))
+        if range.length == 1 {
+            var actual = NSRange()
+            let screen = view.firstRect(forCharacterRange: range, actualRange: &actual)
+            let point = window.convertPoint(fromScreen: screen.origin)
+            return CGPoint(x: point.x + min(8, screen.width * 0.25), y: point.y + min(8, screen.height * 0.5))
+        }
+        return CGPoint(x: view.textContainerInset.width + 8, y: view.textContainerInset.height + 8)
+    }
+
+    private static func firstView(named name: String, in view: NSView) -> NSView? {
+        if String(describing: type(of: view)) == name { return view }
+        for subview in view.subviews {
+            if let found = firstView(named: name, in: subview) { return found }
+        }
+        return nil
+    }
+
+    private static func firstView<T: NSView>(of type: T.Type, in view: NSView) -> T? {
+        if let match = view as? T { return match }
+        for subview in view.subviews {
+            if let found = firstView(of: type, in: subview) { return found }
+        }
+        return nil
+    }
+
+    private static let SCIMInputSourceID = "com.apple.inputmethod.SCIM.ITABC"
+    private static let ABCInputSourceID = "com.apple.keylayout.ABC"
+
+    private static func inputSources() -> [TISInputSource] {
+        (TISCreateInputSourceList(nil, false)?.takeRetainedValue() as? [TISInputSource]) ?? []
+    }
+
+    private static func inputSourceID(_ source: TISInputSource) -> String? {
+        guard let pointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
+        return Unmanaged<CFString>.fromOpaque(pointer).takeUnretainedValue() as String
+    }
+
+    private static func inputSourceBool(_ source: TISInputSource, _ key: CFString) -> Bool {
+        guard let pointer = TISGetInputSourceProperty(source, key) else { return false }
+        return (Unmanaged<CFBoolean>.fromOpaque(pointer).takeUnretainedValue() as NSNumber).boolValue
+    }
+
+    private static func selectedInputSourceID() -> String? {
+        inputSources().first { inputSourceBool($0, kTISPropertyInputSourceIsSelected) }.flatMap(inputSourceID)
+    }
+
+    private static func selectSCIM() -> (available: Bool, selected: Bool, status: Int32) {
+        selectInputSource(SCIMInputSourceID)
+    }
+
+    private static func selectInputSource(_ identifier: String) -> (available: Bool, selected: Bool, status: Int32) {
+        guard let source = inputSources().first(where: { inputSourceID($0) == identifier }) else {
+            return (false, false, -1)
+        }
+        let available = inputSourceBool(source, kTISPropertyInputSourceIsEnabled)
+            && inputSourceBool(source, kTISPropertyInputSourceIsSelectCapable)
+        let status = TISSelectInputSource(source)
+        usleep(250_000)
+        return (available, selectedInputSourceID() == identifier, status)
+    }
+
+    private static func restoreInputSource(_ identifier: String?) -> Bool {
+        guard let identifier,
+              let source = inputSources().first(where: { inputSourceID($0) == identifier }) else { return false }
+        let status = TISSelectInputSource(source)
+        usleep(250_000)
+        return status == 0 && selectedInputSourceID() == identifier
+    }
+
+    private static func flagNames(_ flags: CGEventFlags) -> [String] {
         var names: [String] = []
-        var current: NSResponder? = responder
+        if flags.contains(.maskCommand) { names.append("command") }
+        if flags.contains(.maskShift) { names.append("shift") }
+        if flags.contains(.maskControl) { names.append("control") }
+        if flags.contains(.maskAlternate) { names.append("option") }
+        return names
+    }
+
+    private static func responderChain(_ responder: NSResponder?) -> String {
+        var names: [String] = []
+        var current = responder
         for _ in 0..<12 {
             guard let next = current else { break }
             names.append(String(describing: type(of: next)))
@@ -296,125 +693,73 @@ enum EditingInspection {
         }
         return names.joined(separator: ">")
     }
-    private static func append(_ line: [String: Any], to file: FileHandle) throws {
-        let data = try JSONSerialization.data(withJSONObject: line, options: [.sortedKeys])
-        try file.write(contentsOf: data + Data([0x0a]))
-        try file.synchronize()
+
+    private static func undoMenuItems(_ menu: NSMenu?) -> (undo: NSMenuItem?, redo: NSMenuItem?) {
+        var undo: NSMenuItem?
+        var redo: NSMenuItem?
+        func visit(_ menu: NSMenu) {
+            for item in menu.items {
+                if item.keyEquivalent.lowercased() == "z" {
+                    if item.keyEquivalentModifierMask == .command { undo = undo ?? item }
+                    if item.keyEquivalentModifierMask == [.command, .shift] { redo = redo ?? item }
+                }
+                if let submenu = item.submenu { visit(submenu) }
+            }
+        }
+        if let menu { visit(menu) }
+        return (undo, redo)
     }
-    /// 只用于比较两段正文是否相同；私人根内的日志才保存结果。
-    private static func digest(_ text: String, salt: String) -> String {
-        var hash: UInt64 = 0xcbf29ce484222325
-        for byte in (salt + "\u{0}" + text).utf8 {
-            hash = (hash ^ UInt64(byte)) &* 0x100000001b3
+
+    @MainActor
+    private final class PhaseBridge {
+        private let runID: String
+        private let file: FileHandle
+        private let ackDirectory: URL
+        private(set) var phaseCount = 0
+        private(set) var ackCount = 0
+
+        init(arguments: [String]) throws {
+            func argument(_ prefix: String) -> String? {
+                arguments.first(where: { $0.hasPrefix(prefix) }).map { String($0.dropFirst(prefix.count)) }
+            }
+            guard let runID = argument("--edit-run-id="),
+                  let logPath = argument("--edit-phase-log="),
+                  let ackPath = argument("--edit-ack-dir=") else { throw CocoaError(.coderInvalidValue) }
+            let logURL = URL(fileURLWithPath: logPath)
+            ackDirectory = URL(fileURLWithPath: ackPath, isDirectory: true)
+            self.runID = runID
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            guard let file = FileHandle(forWritingAtPath: logURL.path) else { throw CocoaError(.fileWriteUnknown) }
+            self.file = file
+            try FileManager.default.createDirectory(at: ackDirectory, withIntermediateDirectories: true)
         }
-        return String(format: "%016llx", hash)
-    }
-    private static func menuItem(_ key: String, _ menu: NSMenu?) -> NSMenuItem? {
-        for item in menu?.items ?? [] {
-            if item.keyEquivalent == key, item.keyEquivalentModifierMask == .command { return item }
-            if let nested = menuItem(key, item.submenu) { return nested }
+
+        func emit(_ phase: String, state: [String: Any]) async throws {
+            phaseCount += 1
+            let sequence = phaseCount
+            let line: [String: Any] = ["kind": "phase", "run_id": runID, "sequence": sequence,
+                                       "phase": phase, "t": ProcessInfo.processInfo.systemUptime, "state": state]
+            let data = try JSONSerialization.data(withJSONObject: line, options: [.sortedKeys])
+            try file.write(contentsOf: data + Data([0x0a]))
+            try file.synchronize()
+            let ack = ackDirectory.appendingPathComponent(String(format: "%03d.json", sequence))
+            let deadline = ProcessInfo.processInfo.systemUptime + 30
+            while !FileManager.default.fileExists(atPath: ack.path) {
+                guard ProcessInfo.processInfo.systemUptime < deadline else {
+                    throw NSError(domain: "EditingInspection", code: 2,
+                                  userInfo: [NSLocalizedDescriptionKey: "等待外部 ack 超时：\(phase)"])
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let ackData = try Data(contentsOf: ack)
+            guard let value = try JSONSerialization.jsonObject(with: ackData) as? [String: Any],
+                  value["run_id"] as? String == runID,
+                  value["sequence"] as? Int == sequence,
+                  value["phase"] as? String == phase else { throw CocoaError(.coderInvalidValue) }
+            ackCount += 1
         }
-        return nil
-    }
-    private static func toggleItem(_ menu: NSMenu?) -> NSMenuItem? {
-        for item in menu?.items ?? [] {
-            if item.keyEquivalent == "e", item.keyEquivalentModifierMask == .command { return item }
-            if let nested = toggleItem(item.submenu) { return nested }
-        }
-        return nil
-    }
-    /// 真实点击编辑器建立焦点，由输入法入口建立组合，再真实点击底部终端让焦点离开。
-    /// 断言只落在用户可观察结果：是否结束组合、是否完成保存、磁盘是否更新、⌘E 是否生效。
-    private static func compositionFocusLoss(workspace: Workspace) async throws -> [String: Any] {
-        var result: [String: Any] = ["post_event_access": CGPreflightPostEventAccess(),
-                                     "windows": NSApp.windows.map { "\($0.className)|visible=\($0.isVisible)|key=\($0.isKeyWindow)" }]
-        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.isKeyWindow })
-                ?? NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) else {
-            result["window"] = "missing"
-            return result
-        }
-        var terminal: NSView?
-        for _ in 0..<60 {
-            if let content = window.contentView { terminal = firstView(named: "HortusTerminalView", in: content) }
-            if terminal != nil { break }
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-        result["terminal_found"] = terminal != nil
-        guard let terminal, let document = workspace.current?.document else {
-            result["document"] = workspace.current?.document != nil
-            return result
-        }
-        let view = try await DiagramInspection.settled(document: document)
-        result["terminal_visible"] = !terminal.isHiddenOrHasHiddenAncestor
-        // 背景窗口第一次点击只用于激活，之后重复一次确保落到目标视图。
-        for _ in 0..<3 {
-            click(center(of: view, in: window), window: window)
-            try? await Task.sleep(for: .milliseconds(250))
-            if window.firstResponder === view { break }
-        }
-        result["focused"] = window.firstResponder === view
-        guard window.firstResponder === view else { return result }
-        let before = try String(contentsOf: document.io.url, encoding: .utf8)
-        // 输入法入口：与真实输入法相同，组合只写进原生存储并由文本通知进入文档状态。
-        let selection = view.selectedRange()
-        view.setMarkedText("nihao", selectedRange: NSRange(location: 5, length: 0), replacementRange: selection)
-        try? await Task.sleep(for: .milliseconds(200))
-        result["composing"] = view.hasMarkedText()
-        result["marked_during_composition"] = document.marked
-        result["dirty_during_composition"] = document.dirty
-        guard view.hasMarkedText() else { return result }
-        // 组合进行中保存与切换必须仍被阻止，修复不能靠放开这道保护通过。
-        attemptShortcut(14, flags: .maskCommand)
-        try? await Task.sleep(for: .milliseconds(400))
-        result["save_blocked_while_composing"] = document.dirty && document.marked
-        result["toggle_blocked_while_composing"] = !document.reading
-        // 真实点击底部终端：焦点离开编辑器。
-        click(center(of: terminal, in: window), window: window)
-        try? await Task.sleep(for: .milliseconds(300))
-        result["focus_left_editor"] = window.firstResponder !== view
-        // 自动保存窗口：1 秒防抖 + 余量。
-        try? await Task.sleep(for: .seconds(2))
-        result["marked_cleared"] = !document.marked && !view.hasMarkedText()
-        result["save_completed"] = !document.dirty && document.issue == .none
-        let after = try String(contentsOf: document.io.url, encoding: .utf8)
-        result["disk_updated"] = after != before && after.contains("nihao")
-        result["disk_matches_editor"] = after == view.string
-        // 真实 ⌘E：保存成功后才允许切换视图。
-        attemptShortcut(14, flags: .maskCommand)
-        try? await Task.sleep(for: .milliseconds(800))
-        result["toggle_worked"] = document.reading
-        result["issue"] = String(describing: document.issue)
-        return result
-    }
-    private static func attemptShortcut(_ key: CGKeyCode, flags: CGEventFlags) {
-        for down in [true, false] {
-            let event = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: key, keyDown: down)
-            event?.flags = flags
-            event?.post(tap: .cghidEventTap)
-            usleep(20_000)
-        }
-    }
-    private static func click(_ point: CGPoint, window: NSWindow) {
-        let screen = window.convertPoint(toScreen: point)
-        // CGEvent 的坐标原点在主显示器左上角；窗口坐标的 y 轴向上。
-        let height = NSScreen.screens.max { $0.frame.maxY < $1.frame.maxY }?.frame.maxY ?? NSScreen.main?.frame.height ?? 0
-        let location = CGPoint(x: screen.x, y: height - screen.y)
-        for type in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
-            CGEvent(mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: type,
-                    mouseCursorPosition: location, mouseButton: .left)?.post(tap: .cghidEventTap)
-            usleep(25_000)
-        }
-    }
-    private static func center(of view: NSView, in window: NSWindow) -> CGPoint {
-        let bounds = view.convert(view.bounds, to: nil)
-        return CGPoint(x: bounds.midX, y: bounds.midY)
-    }
-    private static func firstView(named name: String, in view: NSView) -> NSView? {
-        if String(describing: type(of: view)) == name { return view }
-        for subview in view.subviews {
-            if let found = firstView(named: name, in: subview) { return found }
-        }
-        return nil
+
+        func close() { try? file.close() }
     }
     private static func diskMatches(_ document: NoteDocument, _ view: DiagramTextView) throws -> Bool {
         try String(contentsOf: document.io.url, encoding: .utf8) == view.string

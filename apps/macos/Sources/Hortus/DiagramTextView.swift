@@ -582,13 +582,17 @@ final class DiagramTextView: NSTextView {
         redrawInlineMath()
     }
     override func becomeFirstResponder() -> Bool {
-        let accepted = super.becomeFirstResponder(); redrawInlineMath(); return accepted
+        let accepted = super.becomeFirstResponder(); redrawInlineMath()
+        UndoMenuState.scheduleRefresh()
+        return accepted
     }
     override func resignFirstResponder() -> Bool {
         // 组合中输入法把标记文本留在存储里；交还第一响应者时先结束组合，
         // 否则 hasMarkedText() 不再变化，文档会停在 marked 并拒绝保存。
         if hasMarkedText() { unmarkText() }
-        let accepted = super.resignFirstResponder(); redrawInlineMath(); return accepted
+        let accepted = super.resignFirstResponder(); redrawInlineMath()
+        UndoMenuState.scheduleRefresh()
+        return accepted
     }
     @objc private func redrawInlineMath() {
         for formula in inlineMathViews {
@@ -714,19 +718,18 @@ final class DiagramTextView: NSTextView {
         onCompositionState?(true)
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
         settingMarked = false
+        UndoMenuState.scheduleRefresh()
     }
     override func insertText(_ string: Any, replacementRange: NSRange) {
         super.insertText((string as? NSAttributedString)?.string ?? string, replacementRange: replacementRange)
         if !hasMarkedText() { onCompositionState?(false); onCommit?() }
+        UndoMenuState.scheduleRefresh()
     }
     override func unmarkText() {
         super.unmarkText()
         if !settingMarked { onCompositionState?(false); onCommit?() }
+        UndoMenuState.scheduleRefresh()
     }
-    // 原生文本视图不实现撤销动作，菜单与 ⌘Z 只能沿响应者链找到窗口；
-    // 由编辑器自己承接，撤销栈仍完全归 NSTextView 管理。
-    @objc func undoCommand(_ sender: Any?) { if allowsUndo { undoManager?.undo() } }
-    @objc func redoCommand(_ sender: Any?) { if allowsUndo { undoManager?.redo() } }
     func shiftBlocks(for range: NSRange, delta: Int) {
         var keptMedia: [NoteMedia] = []
         var keptViews: [MediaView] = []

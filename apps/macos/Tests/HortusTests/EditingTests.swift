@@ -124,6 +124,82 @@ struct EditingTests {
         await fixture.close()
     }
 
+    @Test func undoCommandDoesNotUndoCommittedEditDuringComposition() async throws {
+        let fixture = try Fixture(Self.source)
+        try await fixture.ready()
+        fixture.view.insertText("新增", replacementRange: NSRange(location: 0, length: 0))
+        fixture.view.breakUndoCoalescing()
+        try await eventually { !fixture.document.dirty }
+        try #require(fixture.view.undoManager?.canUndo == true)
+
+        fixture.view.setMarkedText("nihao", selectedRange: NSRange(location: 5, length: 0),
+                                   replacementRange: fixture.view.selectedRange())
+        try #require(fixture.view.hasMarkedText())
+        let markedText = fixture.view.string
+        let markedRevision = fixture.document.revision
+        UndoCommandRouter.undo(in: fixture.window)
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(fixture.view.string == markedText)
+        #expect(fixture.view.hasMarkedText())
+        #expect(fixture.document.revision == markedRevision)
+        fixture.view.unmarkText()
+        await fixture.close()
+    }
+
+    @Test func undoRouterUsesNativeFieldEditorOwnUndoManager() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 80),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 28))
+        window.contentView = field
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(field)
+        let editor = try #require(field.currentEditor() as? NSTextView)
+        editor.insertText("note", replacementRange: editor.selectedRange())
+        editor.breakUndoCoalescing()
+        let manager = try #require(editor.undoManager)
+        #expect(manager.canUndo)
+        #expect(UndoCommandRouter.canUndo(in: window))
+        UndoCommandRouter.undo(in: window)
+
+        #expect(editor.string.isEmpty)
+        #expect(editor.undoManager === manager)
+        #expect(manager.canRedo)
+        window.close()
+    }
+
+    @Test func undoRouterRejectsReadingAndTerminalResponders() async throws {
+        final class TerminalProbe: NSView {
+            override var acceptsFirstResponder: Bool { true }
+        }
+        let fixture = try Fixture(Self.source)
+        try await fixture.ready()
+        fixture.view.insertText("新增", replacementRange: NSRange(location: 0, length: 0))
+        fixture.view.breakUndoCoalescing()
+        try await eventually { !fixture.document.dirty }
+        try #require(fixture.view.undoManager?.canUndo == true)
+        let committed = fixture.view.string
+
+        fixture.view.isReading = true
+        fixture.view.isEditable = false
+        fixture.window.makeFirstResponder(fixture.view)
+        #expect(!UndoCommandRouter.canUndo(in: fixture.window))
+        UndoCommandRouter.undo(in: fixture.window)
+        #expect(fixture.view.string == committed)
+
+        let terminal = TerminalProbe(frame: fixture.window.contentView?.bounds ?? .zero)
+        fixture.window.contentView = terminal
+        fixture.window.makeFirstResponder(terminal)
+        #expect(!UndoCommandRouter.canUndo(in: fixture.window))
+        UndoCommandRouter.undo(in: fixture.window)
+        #expect(fixture.view.string == committed)
+
+        fixture.view.isReading = false
+        fixture.view.isEditable = true
+        await fixture.close()
+    }
+
     @Test func selectionPreviewBrokenFencesAndNativeUndoRedo() async throws {
         let fixture = try Fixture(Self.source)
         try await fixture.ready()

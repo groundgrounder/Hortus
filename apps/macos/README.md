@@ -56,6 +56,14 @@ python3 -B tools/check-edit-and-save.py
 
 它覆盖真实保存菜单、窗口失焦、标签和库切换、退出恢复、1 MiB 文档的 300 次连续按键与可见布局，以及编辑后两组各 30 秒的 CPU 时间增量。`--edit-inspection=路径` 和 `--edit-mode=` 只用于验收；`--skip-cpu` / `--cpu-only` 可拆开运行。
 
+真实编辑回归需要简体拼音输入法 `com.apple.inputmethod.SCIM.ITABC`，并允许运行终端控制电脑（系统设置 → 隐私与安全性 → 辅助功能）。检查通过纯 keycode 的 HID 事件输入，在每个阶段等待外部驱动读取公开 vault 后继续：
+
+```sh
+python3 -B tools/check-real-edit.py --output target/reports/real-edit
+```
+
+默认独立启动三次组合焦点场景和撤销场景，再运行一次编辑、阅读、终端与搜索框的撤销矩阵。`summary.json` 给出总判定；各场景的 `phases.jsonl`、`observations.jsonl`、应用日志和 `verdict.json` 分别记录阶段状态、外部磁盘观察与失败原因。
+
 P1-05 的样式和性能验收：
 
 ```sh

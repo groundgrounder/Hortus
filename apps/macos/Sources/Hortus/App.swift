@@ -3,6 +3,65 @@ import Darwin
 import ScreenCaptureKit
 import CoreGraphics
 
+@MainActor
+enum UndoCommandRouter {
+    private static func target(in window: NSWindow?) -> NSTextView? {
+        guard let text = window?.firstResponder as? NSTextView,
+              text.isEditable, !text.hasMarkedText() else { return nil }
+        return text
+    }
+
+    static func canUndo(in window: NSWindow? = NSApp.keyWindow) -> Bool {
+        target(in: window)?.undoManager?.canUndo == true
+    }
+
+    static func canRedo(in window: NSWindow? = NSApp.keyWindow) -> Bool {
+        target(in: window)?.undoManager?.canRedo == true
+    }
+
+    static func undo(in window: NSWindow? = NSApp.keyWindow) {
+        guard let manager = target(in: window)?.undoManager, manager.canUndo else { return }
+        manager.undo()
+    }
+
+    static func redo(in window: NSWindow? = NSApp.keyWindow) {
+        guard let manager = target(in: window)?.undoManager, manager.canRedo else { return }
+        manager.redo()
+    }
+}
+
+/// SwiftUI 命令保留 action，只同步 AppKit 菜单项的启用状态；直接替换 SwiftUI
+/// 菜单项的 target/action 会在 SwiftUI 更新图时崩溃。
+@MainActor
+enum UndoMenuState {
+    private static var refreshScheduled = false
+
+    static func scheduleRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            refreshScheduled = false
+            refresh()
+        }
+    }
+
+    static func refresh() {
+        let undo = UndoCommandRouter.canUndo()
+        let redo = UndoCommandRouter.canRedo()
+        func visit(_ menu: NSMenu) {
+            for item in menu.items {
+                if item.keyEquivalent.lowercased() == "z", item.keyEquivalentModifierMask.contains(.command) {
+                    let shifted = item.keyEquivalentModifierMask.contains(.shift)
+                    let enabled = shifted ? redo : undo
+                    if item.isEnabled != enabled { item.isEnabled = enabled }
+                }
+                if let submenu = item.submenu { visit(submenu) }
+            }
+        }
+        if let main = NSApp.mainMenu { visit(main) }
+    }
+}
+
 @main
 struct HortusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
@@ -45,11 +104,17 @@ private struct HortusCommands: Commands {
         CommandGroup(replacing: .appInfo) {
             Button("About Hortus") { delegate.showAboutPanel() }
         }
-        // 原生文本视图不实现撤销动作，SwiftUI 的标准撤销项在嵌入编辑器上又是禁用的；
-        // 这里把撤销与重做直接交回响应者链，撤销栈仍由 NSTextView 管理。
         CommandGroup(replacing: .undoRedo) {
-            Button("Undo") { dispatch(#selector(DiagramTextView.undoCommand(_:))) }.keyboardShortcut("z", modifiers: .command)
-            Button("Redo") { dispatch(#selector(DiagramTextView.redoCommand(_:))) }.keyboardShortcut("z", modifiers: [.command, .shift])
+            Button("Undo") {
+                UndoCommandRouter.undo()
+                UndoMenuState.scheduleRefresh()
+            }
+            .keyboardShortcut("z", modifiers: .command)
+            Button("Redo") {
+                UndoCommandRouter.redo()
+                UndoMenuState.scheduleRefresh()
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
         }
         CommandGroup(replacing: .newItem) {
             Button("Open Folder…") { workspace.chooseFolder() }.keyboardShortcut("o", modifiers: .command)
@@ -106,8 +171,6 @@ private struct HortusCommands: Commands {
         }
     }
 
-    /// 撤销与重做交回第一响应者执行，撤销栈仍由原生文本视图自己维护。
-    private func dispatch(_ selector: Selector) { NSApp.sendAction(selector, to: nil, from: nil) }
     private func find(_ action: NSTextFinder.Action) {
         let item = NSMenuItem(); item.tag = action.rawValue
         NSApp.sendAction(#selector(NSTextView.performFindPanelAction(_:)), to: nil, from: item)
@@ -132,6 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var launchTime = ContinuousClock.now
     private var focusObserver: NSObjectProtocol?
     private var toolbarFocusObserver: NSObjectProtocol?
+    private var commandAvailabilityObservers: [NSObjectProtocol] = []
 
     func showAboutPanel() {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -179,6 +243,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if args.contains("--simulate-high-contrast") { NSApp.appearance = NSAppearance(named: .aqua) }
         presentInitialWindow?()
         NSApp.activate()
+        UndoMenuState.scheduleRefresh()
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+                     NSWindow.didUpdateNotification, NSText.didChangeNotification,
+                     NSMenu.didChangeItemNotification] {
+            commandAvailabilityObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { UndoMenuState.scheduleRefresh() }
+            })
+        }
         focusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
             nonisolated(unsafe) let object = note.object
             Task { @MainActor in
@@ -479,12 +553,10 @@ private struct VaultWindowRoot: View {
                     if args.contains("--inspect-hide-left") { layout.visible[.left] = false }
                     if let arg = args.first(where: { $0.hasPrefix("--inspect-left-width=") }), let width = Double(arg.dropFirst("--inspect-left-width=".count)) { layout.size[.left] = width }
                     delegate.ready = true
-                    #if DEBUG
                     if let arg = args.first(where: { $0.hasPrefix("--multi-window-inspection=") }) {
                         await MultiWindowInspection.baseline(workspace: workspace, output: String(arg.dropFirst("--multi-window-inspection=".count)))
                         return
                     }
-                    #endif
                     if let arg = args.first(where: { $0.hasPrefix("--check-vault-lifecycle=") }) {
                         await WorkspaceInspection.checkLifecycle(workspace, output: String(arg.dropFirst("--check-vault-lifecycle=".count)))
                     }
