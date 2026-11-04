@@ -294,6 +294,11 @@ enum MultiWindowInspection {
     }
 
     private static func dragPanel(_ application: ApplicationWorkspace, first: WindowRecord, second: WindowRecord) async throws -> Bool {
+        guard CGPreflightPostEventAccess() else {
+            let message = "Hortus panel drag inspection cannot post CGEvents: Accessibility permission is not granted to this host."
+            fputs(message + "\n", stderr)
+            throw NSError(domain: "HortusInspection", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
         application.activate(first)
         try await Task.sleep(for: .milliseconds(200))
         let window = try require(first.window)

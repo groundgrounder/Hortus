@@ -44,6 +44,8 @@ enum TabDragInspection {
             NSApp.terminate(nil)
             return
         }
+        stage = "permission"
+        try requireEventPosting()
         let first = application.initial
         guard let window = first.window, let screen = NSScreen.main?.visibleFrame,
               let root = first.workspace.root, let context = first.workspace.context,
@@ -56,6 +58,7 @@ enum TabDragInspection {
         application.activate(first)
         try await wait { first.workspace.textView?.isEditable == true }
         first.workspace.openNote("stay.md")
+        stage = "click"
         try await click(first, path: "move.md")
         try check("click_selects_tab", first.workspace.selected == "move.md")
         try await settled(application)
@@ -283,6 +286,13 @@ enum TabDragInspection {
                     "scene_version": block.sceneVersion, "nodes": nodes, "edges": edges,
                     "reason": block.reason ?? "", "diagnostic": block.diagnostic ?? "",
                     "signature": prepared.map { DiagramInspection.sceneSignature($0.scene) } ?? ""]
+        }
+    }
+    private static func requireEventPosting() throws {
+        guard CGPreflightPostEventAccess() else {
+            let message = "Hortus tab drag inspection cannot post CGEvents: Accessibility permission is not granted to this host."
+            fputs(message + "\n", stderr)
+            throw NSError(domain: "HortusInspection", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
     private static func settled(_ application: ApplicationWorkspace) async throws {
