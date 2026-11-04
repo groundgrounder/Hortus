@@ -239,8 +239,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.inspectWhenReady() }
         }
         let diagramViews = NSApp.windows.compactMap(\.contentView).flatMap { DiagramInspection.textViews(in: $0) }
-        guard !diagramViews.contains(where: \.diagramPending) else { return }
-        guard settled, launchTime.duration(to: .now) >= .seconds(1) else { return }
+        // 图的异步排版不在观测范围内；待定时显式重试，避免最后一次状态变化早于排版完成。
+        guard !diagramViews.contains(where: \.diagramPending) else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.inspectWhenReady() }
+            return
+        }
+        guard settled, launchTime.duration(to: .now) >= .seconds(1) else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.inspectWhenReady() }
+            return
+        }
         inspectionStarted = true
         inspectionDeadline?.cancel()
         Task { await finishInspection() }
