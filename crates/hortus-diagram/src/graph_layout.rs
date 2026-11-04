@@ -239,6 +239,19 @@ fn layout_graph_with_order(
         .map(<[Vec<usize>]>::to_vec)
         .unwrap_or_else(|| order_ranks(graph, &ranks, rank_count));
     let (mut height, mut groups) = place_nodes(graph, &order, &ranks, &mut boxes, visible_width);
+    let mut column_paths = None;
+    if options.previous.is_none()
+        && let Some((positions, column_height, column_groups, paths)) =
+            column_tree_layout(graph, &boxes, &ranks, visible_width)
+    {
+        for (node, (x, y)) in boxes.iter_mut().zip(positions) {
+            node.rect.x = x;
+            node.rect.y = y;
+        }
+        height = column_height;
+        groups = column_groups;
+        column_paths = Some(paths);
+    }
     let (retained_nodes, stability_reason) =
         retain_positions(graph, options, &mut boxes, &mut groups);
     height = height.max(
@@ -266,18 +279,25 @@ fn layout_graph_with_order(
                 .map(|label| fonts.measure(label.trim_end(), 13.0, 400).width)
         })
         .collect::<Vec<_>>();
-    let routed = crate::graph_router::route(
-        graph,
-        &boxes
-            .iter()
-            .map(|node| (node.rect, node.shape))
-            .collect::<Vec<_>>(),
-        &accepted,
-        options.width,
-        height,
-        &label_widths,
-        options.previous.as_ref().filter(|_| retained_nodes > 0),
-    )?;
+    let routed = if let Some(paths) = column_paths {
+        crate::graph_router::Routes {
+            paths,
+            labels: vec![None; graph.edges.len()],
+        }
+    } else {
+        crate::graph_router::route(
+            graph,
+            &boxes
+                .iter()
+                .map(|node| (node.rect, node.shape))
+                .collect::<Vec<_>>(),
+            &accepted,
+            options.width,
+            height,
+            &label_widths,
+            options.previous.as_ref().filter(|_| retained_nodes > 0),
+        )?
+    };
     let edge_paths = routed.paths;
     for (edge, points) in graph.edges.iter().zip(&edge_paths) {
         primitives.push(Primitive::GraphPath {
@@ -879,6 +899,307 @@ fn place_nodes(
         }
     }
     (y - RANK_GAP + OUTER, groups)
+}
+
+type ColumnLayout = (Vec<(f64, f64)>, f64, Vec<usize>, Vec<Vec<Point>>);
+
+/// 近树图（单根、仅少量附加边）在分层换行无法平面走线时，
+/// 改为按根分支分列、子树纵向排列，并用独立侧通道走线。
+fn column_tree_layout(
+    graph: &Graph,
+    boxes: &[BoxedNode],
+    ranks: &[usize],
+    available: f64,
+) -> Option<ColumnLayout> {
+    if graph.direction != Direction::TopToBottom
+        || graph.edges.iter().any(|edge| edge.label.is_some())
+        || !(12..=24).contains(&graph.nodes.len())
+        || graph.edges.len() < graph.nodes.len()
+        || graph.edges.len() - (graph.nodes.len() - 1) > graph.nodes.len() / 4
+    {
+        return None;
+    }
+    if graph.nodes.iter().any(|node| {
+        !matches!(
+            node.shape,
+            Shape::Rectangle | Shape::Rounded | Shape::Stadium
+        )
+    }) {
+        return None;
+    }
+    let count = graph.nodes.len();
+    let min_rank = ranks.iter().copied().min().unwrap_or(0);
+    let roots = (0..count)
+        .filter(|node| ranks[*node] == min_rank)
+        .take(1)
+        .collect::<Vec<_>>();
+    if roots.len() != 1 {
+        return None;
+    }
+    let root = roots[0];
+    // 从根按有向边做 BFS，得到一棵覆盖全图的树；附加边不参与分列。
+    let mut parent = vec![None; count];
+    let mut children = vec![Vec::new(); count];
+    let mut seen = vec![false; count];
+    let mut queue = std::collections::VecDeque::from([root]);
+    seen[root] = true;
+    while let Some(node) = queue.pop_front() {
+        for edge in &graph.edges {
+            if edge.from == node && edge.to != node && !seen[edge.to] {
+                seen[edge.to] = true;
+                parent[edge.to] = Some(node);
+                children[node].push(edge.to);
+                queue.push_back(edge.to);
+            }
+        }
+    }
+    if seen.iter().any(|seen| !*seen) {
+        return None;
+    }
+    let mut subtree = vec![Vec::new(); count];
+    let branches = children[root].clone();
+    for branch in &branches {
+        let mut queue = std::collections::VecDeque::from([*branch]);
+        while let Some(node) = queue.pop_front() {
+            subtree[*branch].push(node);
+            for child in &children[node] {
+                queue.push_back(*child);
+            }
+        }
+    }
+    if branches.is_empty() {
+        return None;
+    }
+    let mut column_width = 0.0_f64;
+    for branch in &branches {
+        for node in &subtree[*branch] {
+            column_width = column_width.max(boxes[*node].rect.width);
+        }
+    }
+    column_width += 40.0;
+    let total = column_width * branches.len() as f64 + 16.0 * (branches.len() - 1) as f64;
+    if total > available {
+        return None;
+    }
+    let root_rect = boxes[root].rect;
+    let root_x = OUTER + (available - root_rect.width) / 2.0;
+    let mut positions = vec![(0.0, 0.0); count];
+    positions[root] = (root_x, OUTER);
+    let top = OUTER + root_rect.height + 30.0;
+    let mut groups = vec![0usize; count];
+    let mut lanes = vec![0.0_f64; count];
+    let mut right_lanes = vec![0.0_f64; count];
+    let mut cursor = OUTER + (available - total) / 2.0;
+    let mut height = top;
+    for (column, branch) in branches.iter().enumerate() {
+        let mut y = top;
+        for node in &subtree[*branch] {
+            let rect = boxes[*node].rect;
+            positions[*node] = (cursor + 22.0 + (column_width - 40.0 - rect.width) / 2.0, y);
+            lanes[*node] = cursor + 8.0;
+            right_lanes[*node] = cursor + column_width + 8.0;
+            groups[*node] = column + 1;
+            y += rect.height + 14.0;
+        }
+        height = height.max(y);
+        cursor += column_width + 16.0;
+    }
+    let corridor_y = height + 12.0;
+    let height = corridor_y + OUTER;
+    let top_lane_y = OUTER * 0.4;
+    let port = |rect: Rect, side: usize| -> Point {
+        match side {
+            0 => Point {
+                x: rect.x,
+                y: rect.y + rect.height / 2.0,
+            },
+            1 => Point {
+                x: rect.x + rect.width,
+                y: rect.y + rect.height / 2.0,
+            },
+            2 => Point {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y,
+            },
+            _ => Point {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height,
+            },
+        }
+    };
+    let placed = |node: usize| Rect {
+        x: positions[node].0,
+        y: positions[node].1,
+        width: boxes[node].rect.width,
+        height: boxes[node].rect.height,
+    };
+    let mut paths = Vec::with_capacity(graph.edges.len());
+    for edge in &graph.edges {
+        let source = placed(edge.from);
+        let target = placed(edge.to);
+        let mut points = Vec::new();
+        if edge.from == edge.to {
+            let start = port(source, 2);
+            let right = source.x + source.width;
+            points.extend([
+                start,
+                Point {
+                    x: start.x,
+                    y: source.y - 14.0,
+                },
+                Point {
+                    x: right + 16.0,
+                    y: source.y - 14.0,
+                },
+                Point {
+                    x: right + 16.0,
+                    y: source.y + source.height / 2.0,
+                },
+                port(source, 1),
+            ]);
+        } else if edge.from == root {
+            let start = port(source, 3);
+            let corridor = source.y + source.height + 12.0;
+            points.extend([
+                start,
+                Point {
+                    x: start.x,
+                    y: corridor,
+                },
+                Point {
+                    x: target.x + target.width / 2.0,
+                    y: corridor,
+                },
+                port(target, 2),
+            ]);
+        } else if parent[edge.to] == Some(edge.from) {
+            let lane = lanes[edge.from];
+            if lane <= 0.0 {
+                return None;
+            }
+            points.extend([
+                port(source, 0),
+                Point {
+                    x: lane,
+                    y: source.y + source.height / 2.0,
+                },
+                Point {
+                    x: lane,
+                    y: target.y + target.height / 2.0,
+                },
+                port(target, 0),
+            ]);
+        } else if edge.from == root || edge.to == root {
+            let node = if edge.from == root {
+                edge.to
+            } else {
+                edge.from
+            };
+            let lane = lanes[node];
+            if lane <= 0.0 {
+                return None;
+            }
+            let root_top = port(source, 2);
+            let root_top = if edge.from == root {
+                root_top
+            } else {
+                port(target, 2)
+            };
+            let root_center = root_top.x;
+            points.extend([
+                root_top,
+                Point {
+                    x: root_center,
+                    y: top_lane_y,
+                },
+                Point {
+                    x: lane,
+                    y: top_lane_y,
+                },
+                Point {
+                    x: lane,
+                    y: if edge.from == root {
+                        target.y + target.height / 2.0
+                    } else {
+                        source.y + source.height / 2.0
+                    },
+                },
+                if edge.from == root {
+                    port(target, 0)
+                } else {
+                    port(source, 0)
+                },
+            ]);
+        } else {
+            let from_lane = right_lanes[edge.from];
+            let to_lane = right_lanes[edge.to];
+            if from_lane <= 0.0 || to_lane <= 0.0 {
+                return None;
+            }
+            let source_y = source.y + source.height / 2.0;
+            let target_y = target.y + target.height / 2.0;
+            if (from_lane - to_lane).abs() < 0.001 {
+                points.extend([
+                    port(source, 1),
+                    Point {
+                        x: from_lane,
+                        y: source_y,
+                    },
+                    Point {
+                        x: to_lane,
+                        y: target_y,
+                    },
+                    port(target, 1),
+                ]);
+            } else {
+                points.extend([
+                    port(source, 1),
+                    Point {
+                        x: from_lane,
+                        y: source_y,
+                    },
+                    Point {
+                        x: from_lane,
+                        y: corridor_y,
+                    },
+                    Point {
+                        x: to_lane,
+                        y: corridor_y,
+                    },
+                    Point {
+                        x: to_lane,
+                        y: target_y,
+                    },
+                    port(target, 1),
+                ]);
+            }
+        }
+        points.dedup_by(|a, b| (a.x - b.x).abs() < 0.001 && (a.y - b.y).abs() < 0.001);
+        let mut simplified = vec![points[0]];
+        for point in points.into_iter().skip(1) {
+            while simplified.len() >= 2 {
+                let a = simplified[simplified.len() - 2];
+                let b = simplified[simplified.len() - 1];
+                let collinear = ((a.x - b.x).abs() < 0.001
+                    && (b.x - point.x).abs() < 0.001
+                    && (b.y - a.y) * (point.y - b.y) >= 0.0)
+                    || ((a.y - b.y).abs() < 0.001
+                        && (b.y - point.y).abs() < 0.001
+                        && (b.x - a.x) * (point.x - b.x) >= 0.0);
+                if collinear {
+                    simplified.pop();
+                } else {
+                    break;
+                }
+            }
+            simplified.push(point);
+        }
+        paths.push(simplified);
+    }
+    if count_edge_crossings(&paths) != 0 {
+        return None;
+    }
+    Some((positions, height, groups, paths))
 }
 
 fn place_branches(
