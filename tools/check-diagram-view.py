@@ -20,6 +20,8 @@ SAMPLE = ROOT / 'fixtures/vault-sample'
 MEDIA_ROOT = ROOT / 'target/reports/diagram-view/media'
 PRIVATE_ROOT = Path(tempfile.gettempdir()) / 'hortus-diagram-private'
 PRIVATE_NOTE = None
+SCROLLBAR_ARGUMENTS = []
+SCROLLBAR_SETTING = None
 SPEC = spec_from_file_location('toolbar_check', ROOT / 'tools/check-tabs-in-toolbar.py')
 HELPERS = module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPERS)
@@ -38,7 +40,7 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
     target = output / f'{name}.json'
     target.unlink(missing_ok=True)
     appearance = [] if '--dark' in extra else ['--light']
-    arguments = [str(APP), f'--vault={vault}', f'--note={note}', *appearance,
+    arguments = [str(APP), *SCROLLBAR_ARGUMENTS, f'--vault={vault}', f'--note={note}', *appearance,
                  f'--diagram-inspection={target}', *extra]
     if screenshot:
         arguments += [f'--snapshot={media / (name + ".png")}']
@@ -59,6 +61,8 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
     data = json.loads(target.read_text())
     assert data['source_preserved'] and data['textkit2'], data
     assert data['reading'] == ('--diagram-reading' in extra), data
+    if SCROLLBAR_SETTING is not None:
+        assert data['scrollbar_setting'] == SCROLLBAR_SETTING, data
     assert data['accessibility_nodes'] == data['visible_nodes'], data
     items = data['accessibility_items']
     assert len(items) == data['accessibility_nodes'] + data['accessibility_edges'], data
@@ -313,7 +317,7 @@ def scenarios(base, output):
 
 
 def main():
-    global MEDIA_ROOT, PRIVATE_ROOT, PRIVATE_NOTE
+    global MEDIA_ROOT, PRIVATE_ROOT, PRIVATE_NOTE, SCROLLBAR_ARGUMENTS, SCROLLBAR_SETTING
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/diagram-view')
     parser.add_argument('--media-output', type=Path, default=MEDIA_ROOT)
@@ -321,7 +325,11 @@ def main():
     parser.add_argument('--private-note', type=Path)
     parser.add_argument('--skip-cpu', action='store_true')
     parser.add_argument('--cpu-only', action='store_true')
+    parser.add_argument('--scrollbar-style', choices=['always', 'when-scrolling'])
     args = parser.parse_args()
+    if args.scrollbar_style:
+        SCROLLBAR_SETTING = 'Always' if args.scrollbar_style == 'always' else 'WhenScrolling'
+        SCROLLBAR_ARGUMENTS = ['-AppleShowScrollBars', SCROLLBAR_SETTING]
     PRIVATE_NOTE = args.private_note.resolve() if args.private_note else None
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -335,10 +343,10 @@ def main():
         if not args.cpu_only:
             scenarios(base, output)
         if not args.skip_cpu:
-            empty = HELPERS.idle_cpu(base / 'cpu-empty', [])
+            empty = HELPERS.idle_cpu(base / 'cpu-empty', SCROLLBAR_ARGUMENTS)
             print('未打开库的 30 s CPU 采样完成', flush=True)
             graph_vault = ROOT / 'fixtures/mermaid/flowchart'
-            opened = HELPERS.idle_cpu(base / 'cpu-opened', [f'--vault={graph_vault}', '--note=dense-40.mmd'])
+            opened = HELPERS.idle_cpu(base / 'cpu-opened', [*SCROLLBAR_ARGUMENTS, f'--vault={graph_vault}', '--note=dense-40.mmd'])
             difference = opened['average_cpu_percent'] - empty['average_cpu_percent']
             result = {'empty': empty, 'opened': opened, 'difference_percentage_points': difference}
             (output / 'idle-cpu.json').write_text(json.dumps(result, indent=2) + '\n')
