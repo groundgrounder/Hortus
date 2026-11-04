@@ -1030,6 +1030,38 @@ fn retain_positions(
     if previous.direction != graph.direction {
         return (0, "direction_changed".into());
     }
+    let width_changed = (previous.width - options.width).abs() > 0.25;
+    let width_initial = width_changed.then(|| (boxes.to_vec(), groups.to_vec()));
+    if width_changed {
+        let old_rects = previous
+            .nodes
+            .iter()
+            .map(|anchor| anchor.rect)
+            .collect::<Vec<_>>();
+        let new_rects = boxes.iter().map(|node| node.rect).collect::<Vec<_>>();
+        let old_bands = vertical_bands(&old_rects);
+        let new_bands = vertical_bands(&new_rects);
+        let common = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                previous
+                    .nodes
+                    .iter()
+                    .position(|anchor| anchor.node_id == node.id)
+                    .map(|old| (index, old))
+            })
+            .collect::<Vec<_>>();
+        let row_membership_matches = common.iter().all(|(a, old_a)| {
+            common.iter().all(|(b, old_b)| {
+                (old_bands[*old_a] == old_bands[*old_b]) == (new_bands[*a] == new_bands[*b])
+            })
+        });
+        if !row_membership_matches {
+            return (0, "width_row_bands_invalidated".into());
+        }
+    }
     // 改宽后旧行带可能已不再能容纳新框宽；若共同成员的带归属与目标宽度
     // 初排不同，保留旧分组会同时破坏行带和旧通道的一致性。
     if (previous.width - options.width).abs() > 0.25 {
@@ -1108,6 +1140,21 @@ fn retain_positions(
                     groups[i] = group;
                     x += boxes[i].rect.width + 32.0;
                     bottom = bottom.max(y + boxes[i].rect.height);
+                }
+            }
+            if let Some((initial_boxes, initial_groups)) = &width_initial {
+                let initial_bands = vertical_bands(
+                    &initial_boxes
+                        .iter()
+                        .map(|node| node.rect)
+                        .collect::<Vec<_>>(),
+                );
+                let retained_bands =
+                    vertical_bands(&boxes.iter().map(|node| node.rect).collect::<Vec<_>>());
+                if !same_band_partition(&initial_bands, &retained_bands) {
+                    boxes.clone_from_slice(initial_boxes);
+                    groups.copy_from_slice(initial_groups);
+                    return (0, "width_row_bands_invalidated".into());
                 }
             }
             return (boxes.len(), "retained_horizontal_bands".into());
@@ -1377,6 +1424,21 @@ fn retain_positions(
             }
         }
     }
+    if let Some((initial_boxes, initial_groups)) = width_initial {
+        let initial_bands = vertical_bands(
+            &initial_boxes
+                .iter()
+                .map(|node| node.rect)
+                .collect::<Vec<_>>(),
+        );
+        let retained_bands =
+            vertical_bands(&boxes.iter().map(|node| node.rect).collect::<Vec<_>>());
+        if !same_band_partition(&initial_bands, &retained_bands) {
+            boxes.clone_from_slice(&initial_boxes);
+            groups.copy_from_slice(&initial_groups);
+            return (0, "width_row_bands_invalidated".into());
+        }
+    }
     (
         retained,
         format!(
@@ -1384,6 +1446,40 @@ fn retain_positions(
             (0..boxes.len()).filter(|i| visible(*i)).count()
         ),
     )
+}
+
+fn same_band_partition(a: &[usize], b: &[usize]) -> bool {
+    a.len() == b.len()
+        && (0..a.len())
+            .all(|left| (0..a.len()).all(|right| (a[left] == a[right]) == (b[left] == b[right])))
+}
+
+fn vertical_bands(rects: &[Rect]) -> Vec<usize> {
+    let mut bands = vec![usize::MAX; rects.len()];
+    let mut next = 0;
+    for start in 0..rects.len() {
+        if bands[start] != usize::MAX {
+            continue;
+        }
+        bands[start] = next;
+        let mut pending = vec![start];
+        while let Some(index) = pending.pop() {
+            for other in start + 1..rects.len() {
+                if bands[other] != usize::MAX {
+                    continue;
+                }
+                let a = rects[index];
+                let b = rects[other];
+                let overlap = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+                if overlap >= a.height.min(b.height) * 0.5 {
+                    bands[other] = next;
+                    pending.push(other);
+                }
+            }
+        }
+        next += 1;
+    }
+    bands
 }
 
 fn wrap_label(
@@ -1569,7 +1665,7 @@ mod tests {
             &mut fonts,
         )
         .unwrap();
-        assert_eq!(resized.metrics.stability_reason, "width_group_invalidated");
+        assert!(resized.metrics.stability_reason.starts_with("width_"));
         assert_eq!(
             groups(&resized.previous.nodes),
             groups(&initial.previous.nodes)
@@ -1609,6 +1705,65 @@ mod tests {
         assert_eq!(
             groups(&resized.previous.nodes),
             groups(&initial.previous.nodes)
+        );
+        assert_eq!(resized.metrics.edge_crossings, 0);
+    }
+
+    #[test]
+    fn width_change_discards_stale_physical_rows() {
+        let graph = graph(include_str!(
+            "../../../fixtures/mermaid/flowchart/graph-syntax.mmd"
+        ));
+        let mut fonts = crate::SystemFonts::new().unwrap();
+        let initial = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 700.0,
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        let narrow = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 500.0,
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        let resized = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 700.0,
+                previous: Some(narrow.previous),
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        assert_eq!(
+            resized.metrics.stability_reason,
+            "width_row_bands_invalidated"
+        );
+        assert_eq!(
+            vertical_bands(
+                &resized
+                    .previous
+                    .nodes
+                    .iter()
+                    .map(|node| node.rect)
+                    .collect::<Vec<_>>()
+            ),
+            vertical_bands(
+                &initial
+                    .previous
+                    .nodes
+                    .iter()
+                    .map(|node| node.rect)
+                    .collect::<Vec<_>>()
+            )
         );
         assert_eq!(resized.metrics.edge_crossings, 0);
     }
