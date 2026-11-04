@@ -22,6 +22,7 @@ PRIVATE_ROOT = Path(tempfile.gettempdir()) / 'hortus-diagram-private'
 PRIVATE_NOTE = None
 SCROLLBAR_ARGUMENTS = []
 SCROLLBAR_SETTING = None
+SCROLLBAR_STYLE = None
 SPEC = spec_from_file_location('toolbar_check', ROOT / 'tools/check-tabs-in-toolbar.py')
 HELPERS = module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPERS)
@@ -31,6 +32,13 @@ def inventory(root):
     return {str(path.relative_to(root)): (path.stat().st_mtime_ns, path.stat().st_size,
             hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else '')
             for path in [root, *root.rglob('*')]}
+
+
+def global_scrollbar_default():
+    completed = subprocess.run(['defaults', 'read', '-g', 'AppleShowScrollBars'],
+                               capture_output=True, text=True)
+    return {'present': completed.returncode == 0,
+            'value': completed.stdout.strip() if completed.returncode == 0 else None}
 
 
 def inspect(base, output, name, vault, note, extra=(), screenshot=False):
@@ -63,6 +71,7 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
     assert data['reading'] == ('--diagram-reading' in extra), data
     if SCROLLBAR_SETTING is not None:
         assert data['scrollbar_setting'] == SCROLLBAR_SETTING, data
+        assert data['scroller_style'] == SCROLLBAR_STYLE, data
     assert data['accessibility_nodes'] == data['visible_nodes'], data
     items = data['accessibility_items']
     assert len(items) == data['accessibility_nodes'] + data['accessibility_edges'], data
@@ -317,7 +326,7 @@ def scenarios(base, output):
 
 
 def main():
-    global MEDIA_ROOT, PRIVATE_ROOT, PRIVATE_NOTE, SCROLLBAR_ARGUMENTS, SCROLLBAR_SETTING
+    global MEDIA_ROOT, PRIVATE_ROOT, PRIVATE_NOTE, SCROLLBAR_ARGUMENTS, SCROLLBAR_SETTING, SCROLLBAR_STYLE
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/diagram-view')
     parser.add_argument('--media-output', type=Path, default=MEDIA_ROOT)
@@ -329,10 +338,23 @@ def main():
     args = parser.parse_args()
     if args.scrollbar_style:
         SCROLLBAR_SETTING = 'Always' if args.scrollbar_style == 'always' else 'WhenScrolling'
+        SCROLLBAR_STYLE = 'legacy' if args.scrollbar_style == 'always' else 'overlay'
         SCROLLBAR_ARGUMENTS = ['-AppleShowScrollBars', SCROLLBAR_SETTING]
     PRIVATE_NOTE = args.private_note.resolve() if args.private_note else None
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    global_before = global_scrollbar_default()
+    setting_evidence = {
+        'requested_setting': SCROLLBAR_SETTING,
+        'expected_scroller_style': SCROLLBAR_STYLE,
+        'mechanism': 'process_argument_domain',
+        'arguments': SCROLLBAR_ARGUMENTS,
+        'global_default_modified': False,
+        'global_before': global_before,
+        'global_after': None,
+        'restore_action': 'not_required: process-local defaults argument',
+    }
+    (output / 'scrollbar-setting.json').write_text(json.dumps(setting_evidence, indent=2) + '\n')
     MEDIA_ROOT = args.media_output.resolve()
     PRIVATE_ROOT = args.private_output.resolve()
     PRIVATE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -352,6 +374,10 @@ def main():
             (output / 'idle-cpu.json').write_text(json.dumps(result, indent=2) + '\n')
             print(json.dumps(result, indent=2), flush=True)
             assert abs(difference) <= .1, result
+        global_after = global_scrollbar_default()
+        setting_evidence['global_after'] = global_after
+        (output / 'scrollbar-setting.json').write_text(json.dumps(setting_evidence, indent=2) + '\n')
+        assert global_after == global_before, (global_before, global_after)
 
 
 if __name__ == '__main__':

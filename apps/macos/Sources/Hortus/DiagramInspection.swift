@@ -100,7 +100,7 @@ enum DiagramInspection {
                 "content_size": NSStringFromSize(scroll.contentSize),
                 "scroll_origin": [scroll.contentView.bounds.origin.x, scroll.contentView.bounds.origin.y],
                 "vertical_scroller_visible": verticalScroller?.isHidden == false,
-                "content_width": max(120, view.bounds.width - view.textContainerInset.width * 2),
+                "content_width": view.layoutContentWidth,
                 "scene_widths": view.blocks.compactMap { $0.prepared?.scene.width },
                 "scene_heights": view.blocks.compactMap { $0.prepared?.scene.height },
                 "pending": view.diagramPending,
@@ -136,6 +136,11 @@ enum DiagramInspection {
         // 命令行默认域是按进程设置的测试输入；只在窗口内落实同一值，不写回系统设置。
         let preferredStyle = NSScroller.preferredScrollerStyle
         scroll.scrollerStyle = preferredStyle
+        let settleDeadline = ProcessInfo.processInfo.systemUptime + 5
+        while view.diagramPending, ProcessInfo.processInfo.systemUptime < settleDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        recordScrollStability(event: "observation_started", view: view)
         let started = ProcessInfo.processInfo.systemUptime
         var index = 0
         repeat {
@@ -162,7 +167,7 @@ enum DiagramInspection {
         if let argument = arguments.first(where: { $0.hasPrefix("--diagram-width=") }),
            let width = Double(argument.dropFirst("--diagram-width=".count)), width >= 120,
            let window = view.window {
-            let sceneWidth = view.blocks.first?.prepared?.scene.width ?? max(120, view.bounds.width - view.textContainerInset.width * 2)
+            let sceneWidth = view.blocks.first?.prepared?.scene.width ?? view.layoutContentWidth
             var frame = window.frame
             frame.size.width += width - sceneWidth
             window.setFrame(frame, display: true)
@@ -180,7 +185,7 @@ enum DiagramInspection {
         let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let requestedWidth = arguments.first(where: { $0.hasPrefix("--diagram-width=") })
             .flatMap { Double($0.dropFirst("--diagram-width=".count)) }
-            ?? max(120, view.bounds.width - view.textContainerInset.width * 2)
+            ?? view.layoutContentWidth
         var initialRows: [[Int]] = []
         var initialWidths: [Double] = []
         var initialSignatures: [String] = []
@@ -434,7 +439,7 @@ enum DiagramInspection {
                 "payload_bytes": diagrams.map { $0.prepared.payloadBytes },
                 "scene_widths": diagrams.map { $0.prepared.scene.width },
                 "scene_signatures": diagrams.map { sceneSignature($0.prepared.scene) },
-                "requested_content_width": max(120, view.bounds.width - view.textContainerInset.width * 2),
+                "requested_content_width": view.layoutContentWidth,
                 "scrollbar_setting": UserDefaults.standard.string(forKey: "AppleShowScrollBars") ?? "system",
                 "preferred_scroller_style": scrollerStyleName(NSScroller.preferredScrollerStyle),
                 "scroller_style": scrollerStyleName(view.enclosingScrollView?.scrollerStyle ?? NSScroller.preferredScrollerStyle),

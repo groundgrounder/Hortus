@@ -24,7 +24,9 @@ struct EditingTests {
                                                    cache: directory.appendingPathComponent("cache").path)
             let session = try core.openDocument(vault: vault.path, path: "note.md")
             document = NoteDocument(io: DocumentIO(session: session, url: url), initial: try session.initial(), prepareSourceStyles: true)
-            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 540))
+            let scroll = DiagramScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 540))
+            scroll.hasVerticalScroller = true
+            scroll.autohidesScrollers = true
             view = DiagramTextView(diagramLayout: true)
             view.frame = scroll.bounds; view.allowsUndo = true; view.isRichText = false
             view.isVerticallyResizable = true; view.textContainer?.widthTracksTextView = true
