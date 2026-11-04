@@ -309,11 +309,18 @@ enum MultiWindowInspection {
         var diagnostics: [String: Any] = [:]
         diagnostics["preflight_post_event"] = CGPreflightPostEventAccess()
         var parentBuffer = [CChar](repeating: 0, count: 4096)
-        let parentBytes = parentBuffer.map { UInt8(bitPattern: $0) }
-        let parentPath = proc_pidpath(getppid(), &parentBuffer, UInt32(parentBuffer.count)) > 0
-            ? String(decoding: parentBytes.prefix { $0 != 0 }, as: UTF8.self) : ""
+        let parentOK = proc_pidpath(getppid(), &parentBuffer, UInt32(parentBuffer.count)) > 0
+        let parentPath = parentOK
+            ? String(decoding: parentBuffer.map { UInt8(bitPattern: $0) }.prefix { $0 != 0 }, as: UTF8.self)
+            : ""
+        var parentName = [CChar](repeating: 0, count: 256)
+        let parentNameOK = proc_name(getppid(), &parentName, UInt32(parentName.count)) > 0
+        let parentNameText = parentNameOK
+            ? String(decoding: parentName.map { UInt8(bitPattern: $0) }.prefix { $0 != 0 }, as: UTF8.self)
+            : ""
         diagnostics["process"] = ["pid": getpid(), "parent_pid": getppid(),
-                                  "parent_path": parentPath,
+                                  "parent_path": parentPath, "parent_name": parentNameText,
+                                  "executable": Bundle.main.executablePath ?? CommandLine.arguments.first ?? "",
                                   "bundle": Bundle.main.bundleIdentifier ?? ""]
         guard CGPreflightPostEventAccess() else {
             let message = "Hortus panel drag inspection cannot post CGEvents: Accessibility permission is not granted to this host."
