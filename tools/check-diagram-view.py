@@ -397,7 +397,7 @@ def scenarios(base, output):
                             scene_note.name, ['--light', '--diagram-width=700', '--diagram-reference'])
     assert len(scene_data['initial_semantic_scenes']) == 1, scene_data
     cli_scene = output / 'scene-cli.json'
-    cli_svg = output / 'scene-cli.svg'
+    cli_svg = MEDIA_ROOT / 'scene-cli.svg'
     completed = subprocess.run([str(CLI), 'mermaid', 'render', str(scene_note), '--block', '1',
                                 '--width', '700', '--theme', 'light', '--out', str(cli_svg),
                                 '--scene', str(cli_scene)], capture_output=True, timeout=30)
