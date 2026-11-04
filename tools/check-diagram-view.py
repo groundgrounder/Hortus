@@ -136,6 +136,60 @@ def assert_geometry(name, data):
             assert actual['crossings'] <= limit, actual
 
 
+def assert_research_loop_label(data, source=None):
+    if source is None:
+        source = (ROOT / 'fixtures/mermaid/flowchart/research.mmd').read_bytes()
+    loop = 'I[修正假设] -->|重新检验| D'.encode()
+    label_text = '重新检验'.encode()
+    assert source.count(loop) == 1 and source.count(label_text) == 1, source
+    assert data['visible_nodes'] == 10, data
+    assert data['accessibility_edges'] == 10, data
+    assert data['graph_metrics'][0]['edges'] == 10, data['graph_metrics']
+    assert data['graph_geometry'][0]['paths'] == 10, data['graph_geometry']
+
+    scene = json.loads(data['initial_semantic_scenes'][0])
+    nodes = {item['node_id']: item['rect'] for item in scene['hit_regions']}
+    paths = [item for item in scene['primitives'] if item['kind'] == 'graph_path']
+
+    def touches(point, rect, side):
+        in_y = rect['y'] <= point['y'] <= rect['y'] + rect['height']
+        in_x = rect['x'] <= point['x'] <= rect['x'] + rect['width']
+        return ((side == 'right' and abs(point['x'] - (rect['x'] + rect['width'])) < .5 and in_y)
+                or (side == 'bottom' and abs(point['y'] - (rect['y'] + rect['height'])) < .5 and in_x))
+
+    loops = [path for path in paths
+             if path.get('label_range') is not None
+             and touches(path['points'][0], nodes['I'], 'right')
+             and touches(path['points'][-1], nodes['D'], 'right')]
+    assert len(loops) == 1, paths
+    loop_path = loops[0]
+    source_range = loop_path['source_range']
+    label_range = loop_path['label_range']
+    assert source[source_range['start']:source_range['end']] == loop, source_range
+    assert source[label_range['start']:label_range['end']] == label_text, label_range
+    backgrounds = [item for item in scene['primitives']
+                   if item['kind'] == 'label_background' and item['edge_id'] == loop_path['edge_id']]
+    assert len(backgrounds) == 1, backgrounds
+    labels = [item for item in scene['primitives']
+              if item['kind'] == 'text' and item['text'] == '重新检验']
+    assert len(labels) == 1, labels
+    label, background = labels[0], backgrounds[0]['rect']
+    assert background['x'] <= label['baseline']['x'], (label, background)
+    assert label['baseline']['x'] + label['width'] <= background['x'] + background['width'], (label, background)
+    assert background['y'] <= label['baseline']['y'] - label['font_size'], (label, background)
+    assert label['baseline']['y'] <= background['y'] + background['height'], (label, background)
+    return {
+        'nodes': data['visible_nodes'],
+        'edges': data['accessibility_edges'],
+        'edge_id': loop_path['edge_id'],
+        'source_range': loop_path['source_range'],
+        'label_range': loop_path['label_range'],
+        'path': loop_path['points'],
+        'label_background': background,
+        'label_text': label['text'],
+    }
+
+
 def opening_main_thread_pass(samples, limit=33):
     values = list(samples)
     assert len(values) == 3, values
@@ -218,6 +272,7 @@ def scenarios(base, output):
                     assert data['diagrams'] == 1 and data['visible_nodes'] > 0 and not data['reasons'], data
                     assert data['scene_widths'] and all(abs(w - width) < .5 for w in data['scene_widths']), data
                     assert data['accessibility_nodes'] == data['visible_nodes'], data
+                    if name == 'research.mmd': assert_research_loop_label(data)
                     if name == 'erikson.mmd': assert data['row_counts'] == [[4, 4]], data
                     if name == 'erikson.mmd': assert data['initial_row_counts'] == [[4, 4]], data
     deterministic = ROOT / 'fixtures/mermaid/flowchart/research.mmd'
