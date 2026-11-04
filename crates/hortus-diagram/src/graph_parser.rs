@@ -1,9 +1,17 @@
 use crate::graph::{Connector, Direction, Edge, EdgeLine, Graph, GraphNode, Marker, Shape, Style};
-use crate::parser::{DiagramError, syntax};
+use crate::parser::{DiagramError, syntax, unsupported};
 use std::collections::HashMap;
 use std::ops::Range;
 
 pub(crate) fn parse(source: &str) -> Result<Graph, DiagramError> {
+    parse_mode(source, false)
+}
+
+pub(crate) fn tree_probe(source: &str) -> Result<Graph, DiagramError> {
+    parse_mode(source, true)
+}
+
+fn parse_mode(source: &str, tree_probe: bool) -> Result<Graph, DiagramError> {
     let statements = graph_statements(source);
     let Some((header_at, header)) = statements.first().copied() else {
         return Err(syntax(0..0, "missing_type"));
@@ -29,6 +37,7 @@ pub(crate) fn parse(source: &str) -> Result<Graph, DiagramError> {
 
     let mut builder = Builder {
         direction,
+        tree_probe,
         ..Builder::default()
     };
     for (at, statement) in statements.into_iter().skip(1) {
@@ -40,6 +49,8 @@ pub(crate) fn parse(source: &str) -> Result<Graph, DiagramError> {
 #[derive(Default)]
 struct Builder {
     direction: Direction,
+    tree_probe: bool,
+    warnings: Vec<(Range<usize>, String)>,
     nodes: Vec<GraphNode>,
     ids: HashMap<String, usize>,
     defined: Vec<bool>,
@@ -163,6 +174,7 @@ impl Builder {
         }
         Graph {
             direction: self.direction,
+            warnings: self.warnings,
             nodes: self.nodes,
             edges: self.edges,
             class_defs: self.class_defs,
@@ -176,10 +188,17 @@ impl Builder {
 
 fn parse_statement(text: &str, at: usize, builder: &mut Builder) -> Result<(), DiagramError> {
     if starts_word(text, "subgraph") || text == "end" {
-        return Err(syntax(at..at + text.len(), "unsupported_subgraph"));
+        return Err(unsupported(at..at + text.len(), "subgraph"));
+    }
+    if builder.tree_probe
+        && ["classDef", "style", "linkStyle"]
+            .iter()
+            .any(|word| starts_word(text, word))
+    {
+        return Ok(());
     }
     if starts_word(text, "linkStyle") {
-        return Err(syntax(at..at + text.len(), "unsupported_linkStyle"));
+        return Err(unsupported(at..at + text.len(), "linkStyle"));
     }
     if starts_word(text, "click") || starts_word(text, "accTitle") || starts_word(text, "accDescr")
     {
@@ -189,7 +208,11 @@ fn parse_statement(text: &str, at: usize, builder: &mut Builder) -> Result<(), D
         let Some((names, properties)) = rest.split_once(char::is_whitespace) else {
             return Err(syntax(at..at + text.len(), "classdef_missing_properties"));
         };
-        let style = parse_style(properties, at + text.len() - properties.len())?;
+        let style = parse_style(
+            properties,
+            at + text.len() - properties.len(),
+            Some(&mut builder.warnings),
+        )?;
         for name in names.split(',') {
             if name.is_empty() {
                 return Err(syntax(at..at + text.len(), "classdef_empty_name"));
@@ -202,7 +225,7 @@ fn parse_statement(text: &str, at: usize, builder: &mut Builder) -> Result<(), D
         let Some((id, properties)) = rest.split_once(char::is_whitespace) else {
             return Err(syntax(at..at + text.len(), "style_missing_properties"));
         };
-        let style = parse_style(properties, at + text.len() - properties.len())?;
+        let style = parse_style(properties, at + text.len() - properties.len(), None)?;
         let id_at = at + text.len() - rest.len();
         builder.node(
             id,
@@ -605,15 +628,40 @@ fn parse_inline_class(text: &str, cursor: &mut usize) -> Option<String> {
     (start < *cursor).then(|| text[start..*cursor].into())
 }
 
-fn parse_style(text: &str, at: usize) -> Result<Style, DiagramError> {
+fn parse_style(
+    text: &str,
+    at: usize,
+    mut warnings: Option<&mut Vec<(Range<usize>, String)>>,
+) -> Result<Style, DiagramError> {
     let mut style = Style::default();
-    for item in text.split(',') {
+    // CSS 函数的逗号属于同一属性；即使不支持该颜色也保留完整诊断范围。
+    let mut depth = 0usize;
+    let items = text.split(|ch| match ch {
+        '(' => {
+            depth += 1;
+            false
+        }
+        ')' => {
+            depth = depth.saturating_sub(1);
+            false
+        }
+        ',' => depth == 0,
+        _ => false,
+    });
+    for item in items {
         let Some((key, value)) = item.split_once(':') else {
             return Err(syntax(at..at + text.len(), "style_invalid_property"));
         };
         let value = value.trim();
         if !matches!(key.trim(), "fill" | "stroke") || !valid_hex(value) {
-            return Err(syntax(at..at + text.len(), "style_unsupported_property"));
+            let offset = item.as_ptr() as usize - text.as_ptr() as usize;
+            let range = at + offset..at + offset + item.len();
+            if let Some(warnings) = warnings.as_deref_mut() {
+                // classDef 的范围外属性只作可诊断降级，保留基本颜色和原结构。
+                warnings.push((range, format!("ignored_class_property:{}", key.trim())));
+                continue;
+            }
+            return Err(unsupported(range, "style_property"));
         }
         match key.trim() {
             "fill" => style.fill = Some(value.into()),

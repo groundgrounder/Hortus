@@ -89,6 +89,7 @@ pub struct Edge {
 #[derive(Clone, Debug, Default)]
 pub struct Graph {
     pub direction: Direction,
+    pub warnings: Vec<(Range<usize>, String)>,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<Edge>,
     pub class_defs: HashMap<String, Style>,
@@ -104,6 +105,9 @@ pub enum Diagram {
 
 impl Graph {
     pub(crate) fn map_ranges(&mut self, map: impl Fn(Range<usize>) -> Range<usize> + Copy) {
+        for (range, _) in &mut self.warnings {
+            *range = map(range.clone());
+        }
         for node in &mut self.nodes {
             node.id_range = map(node.id_range.clone());
             node.label_range = map(node.label_range.clone());

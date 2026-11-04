@@ -18,6 +18,7 @@ APP = ROOT / 'build/Hortus.app/Contents/MacOS/Hortus'
 SAMPLE = ROOT / 'fixtures/vault-sample'
 MEDIA_ROOT = ROOT / 'target/reports/diagram-view/media'
 PRIVATE_ROOT = Path(tempfile.gettempdir()) / 'hortus-diagram-private'
+PRIVATE_NOTE = None
 SPEC = spec_from_file_location('toolbar_check', ROOT / 'tools/check-tabs-in-toolbar.py')
 HELPERS = module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPERS)
@@ -58,7 +59,13 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
     assert data['source_preserved'] and data['textkit2'], data
     assert data['reading'] == ('--diagram-reading' in extra), data
     assert data['accessibility_nodes'] == data['visible_nodes'], data
-    assert data['accessibility_edges'] >= 0, data
+    items = data['accessibility_items']
+    assert len(items) == data['accessibility_nodes'] + data['accessibility_edges'], data
+    assert all(item['label_matches'] and item['frame_error_px'] <= .5 for item in items), items
+    assert data['accessibility_edges'] == data['source_hits']['edges'], data
+    assert all(not value for block in data['heavy_work_thread_checks'] for value in block.values()), data
+    if '--diagram-ax-press' in extra:
+        assert data['accessibility_presses'] and all(x['performed'] and x['selection_matches'] for x in data['accessibility_presses']), data
     hits = data['source_hits']
     assert hits['node_matches'] == hits['nodes'] and hits['edge_matches'] == hits['edges'], hits
     assert data['accessibility_expanded_valid'], data
@@ -82,7 +89,13 @@ def scenarios(base, output):
     assert flow['visible_nodes'] == 3, flow
     dark, _ = inspect(base / 'dark', output, 'dark', SAMPLE, '欢迎.md', ['--dark'], screenshot=True)
     assert dark['dark'], dark
-    # 折叠仍由既有 mindmap UI 测试覆盖；本脚本聚焦一般 flowchart 的原生窗口验收。
+    fold_base = base / 'fold-session'
+    folded, _ = inspect(fold_base, output, 'folded', SAMPLE, '欢迎.md', ['--diagram-click'], screenshot=True)
+    assert folded['before_click_nodes'] == 4 and folded['visible_nodes'] == 1 and folded['badge_count'] == 1, folded
+    restored, _ = inspect(fold_base, output, 'restored', SAMPLE, '欢迎.md', screenshot=True)
+    assert restored['visible_nodes'] == 1 and restored['collapsed_nodes'] == 1 and restored['badge_count'] == 1, restored
+    expanded, _ = inspect(fold_base, output, 'expanded', SAMPLE, '欢迎.md', ['--diagram-click'], screenshot=True)
+    assert expanded['before_click_nodes'] == 1 and expanded['visible_nodes'] == 4 and expanded['collapsed_nodes'] == 0, expanded
     assert inventory(SAMPLE) == before, '示例库被改写'
     vault = base / 'errors'
     vault.mkdir()
@@ -117,14 +130,28 @@ def scenarios(base, output):
                     if mode == 'reading': extra.append('--diagram-reading')
                     data, _ = inspect(base / tag, flowchart_output, tag, sample.parent, sample.name,
                                       extra, screenshot=True)
-                    if name == 'class-styles.mmd':
-                        # stroke-width/dash 超出基本 hex fill/stroke 范围，须明确报错。
-                        assert data['diagrams'] == 0 and data['reasons'], data
-                    else:
-                        assert data['diagrams'] == 1 and data['visible_nodes'] > 0 and not data['reasons'], data
-                        assert all(abs(w - width) < .5 for w in data['scene_widths']), data
-                        assert data['accessibility_nodes'] == data['visible_nodes'], data
-                        if name == 'erikson.mmd': assert data['row_counts'] == [[4, 4]], data
+                    assert data['diagrams'] == 1 and data['visible_nodes'] > 0 and not data['reasons'], data
+                    assert data['scene_widths'] and all(abs(w - width) < .5 for w in data['scene_widths']), data
+                    assert data['accessibility_nodes'] == data['visible_nodes'], data
+                    if name == 'erikson.mmd': assert data['row_counts'] == [[4, 4]], data
+    ax_sample = ROOT / 'fixtures/mermaid/flowchart/research.mmd'
+    inspect(base / 'ax-press', output, 'ax-press', ax_sample.parent, ax_sample.name, ['--diagram-ax-press'])
+    if PRIVATE_NOTE is not None:
+        original_hash = hashlib.sha256(PRIVATE_NOTE.read_bytes()).hexdigest()
+        states = []
+        for width in [700, 1100]:
+            for theme in ['light', 'dark']:
+                tag = f'original-{width}-{theme}-private'
+                data, _ = inspect(base / tag, PRIVATE_ROOT, tag, PRIVATE_NOTE.parent, PRIVATE_NOTE.name,
+                                  [f'--diagram-width={width}', f'--{theme}', '--diagram-reveal'], True)
+                assert data['diagrams'] > 0 and data['scene_widths'] and all(abs(w-width)<.5 for w in data['scene_widths']), data
+                states.append({'width': width, 'theme': theme, 'diagrams': data['diagrams'], 'nodes': data['visible_nodes'],
+                               'source_hits': data['source_hits'], 'fills': data['graph_fill_count'], 'scene_widths': data['scene_widths'],
+                               'window_width': data['window_width'], 'width_max_px': data['width_max_px']})
+        assert hashlib.sha256(PRIVATE_NOTE.read_bytes()).hexdigest() == original_hash
+        (output / 'private-original-summary.json').write_text(json.dumps({'sha256_unchanged': True, 'states': states}, indent=2)+'\n')
+    else:
+        print('未指定私人原文：跳过原文四态覆盖', flush=True)
     private = ROOT / 'fixtures/mermaid/tree'
     files = sorted(private.glob('04-*.md')) if private.exists() else []
     if files:
@@ -175,14 +202,16 @@ def scenarios(base, output):
 
 
 def main():
-    global MEDIA_ROOT, PRIVATE_ROOT
+    global MEDIA_ROOT, PRIVATE_ROOT, PRIVATE_NOTE
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/diagram-view')
     parser.add_argument('--media-output', type=Path, default=MEDIA_ROOT)
     parser.add_argument('--private-output', type=Path, default=PRIVATE_ROOT)
+    parser.add_argument('--private-note', type=Path)
     parser.add_argument('--skip-cpu', action='store_true')
     parser.add_argument('--cpu-only', action='store_true')
     args = parser.parse_args()
+    PRIVATE_NOTE = args.private_note.resolve() if args.private_note else None
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     MEDIA_ROOT = args.media_output.resolve()

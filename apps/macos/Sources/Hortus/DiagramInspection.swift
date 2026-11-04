@@ -50,7 +50,8 @@ enum DiagramInspection {
         let firstMain = view.maximumMainWorkMilliseconds
         if let argument = arguments.first(where: { $0.hasPrefix("--diagram-width=") }),
            let width = Double(argument.dropFirst("--diagram-width=".count)), width >= 120,
-           let window = view.window, let sceneWidth = view.blocks.first?.prepared?.scene.width {
+           let window = view.window {
+            let sceneWidth = view.blocks.first?.prepared?.scene.width ?? max(120, view.bounds.width - view.textContainerInset.width * 2)
             var frame = window.frame
             frame.size.width += width - sceneWidth
             window.setFrame(frame, display: true)
@@ -72,15 +73,9 @@ enum DiagramInspection {
                                                 context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { throw CocoaError(.coderValueNotFound) }
             diagram.mouseDown(with: event)
             try await Task.sleep(for: .milliseconds(100))
-            // 直接调用同一 UI 回调，覆盖无窗口事件队列的自检环境。
-            if view.blocks.flatMap({ Array($0.collapsed) }).isEmpty {
-                diagram.onToggle?(hit.nodeId)
-                if let ordinal = view.diagramViews.first(where: { $0.value === diagram })?.key {
-                    view.onToggle?(ordinal, hit.nodeId)
-                }
-            }
             for _ in 0..<100 {
-                if !view.blocks.flatMap({ Array($0.collapsed) }).isEmpty, !view.diagramPending { break }
+                if let current = view.blocks.first(where: { $0.prepared?.scene.hitRegions.contains(where: { $0.nodeId == hit.nodeId && $0.collapsed != hit.collapsed }) == true }),
+                   current.collapsed.contains(hit.nodeId) != hit.collapsed, !view.diagramPending { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
             view = try await settled(document: workspace.current?.document)
@@ -112,6 +107,7 @@ enum DiagramInspection {
         }
         var errors: [Double] = []
         let diagrams = view.diagramViews.values.sorted { $0.frame.minY < $1.frame.minY }
+        var accessibilityItems: [[String: Any]] = []
         var accessible = 0
         var accessibleEdges = 0
         var expandedValid = true
@@ -120,8 +116,28 @@ enum DiagramInspection {
             let nodes = Array((diagram.accessibilityChildren() as? [NSAccessibilityElement] ?? []).prefix(diagram.accessibilityNodeCount))
             accessible += diagram.accessibilityNodeCount
             accessibleEdges += diagram.accessibilityEdgeCount
-            for (node, hit) in zip(nodes, diagram.prepared.scene.hitRegions) where hit.canCollapse {
-                expandedValid = expandedValid && node.accessibilityRole() == .disclosureTriangle && node.isAccessibilityExpanded() == !hit.collapsed
+            for (index, pair) in zip(nodes, diagram.prepared.scene.hitRegions).enumerated() {
+                let (node, hit) = pair
+                let expected = diagram.window?.convertToScreen(diagram.convert(hit.rect.cgRect, to: nil)) ?? .zero
+                let actual = node.accessibilityFrame()
+                let frameError = max(abs(expected.minX - actual.minX), abs(expected.minY - actual.minY), abs(expected.width - actual.width), abs(expected.height - actual.height))
+                let labelMatches = node.accessibilityLabel() == hit.accessibilityLabel
+                accessibilityItems.append(["kind": "node", "index": index, "label_matches": labelMatches, "frame_error_px": frameError])
+                if hit.canCollapse { expandedValid = expandedValid && node.accessibilityRole() == .disclosureTriangle && node.isAccessibilityExpanded() == !hit.collapsed }
+            }
+            let children = diagram.accessibilityChildren() as? [NSAccessibilityElement] ?? []
+            let paths = diagram.prepared.scene.primitives.compactMap { primitive -> (UInt64, [ScenePoint])? in
+                guard case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive else { return nil }
+                return (id, points)
+            }
+            for (index, pair) in zip(children.dropFirst(nodes.count), paths).enumerated() {
+                let (element, path) = pair
+                guard let first = path.1.first else { throw CocoaError(.coderValueNotFound) }
+                let bounds = path.1.dropFirst().reduce(CGRect(origin: first.cgPoint, size: .zero)) { $0.union(CGRect(origin: $1.cgPoint, size: .zero)) }.insetBy(dx: -5, dy: -5)
+                let expected = diagram.window?.convertToScreen(diagram.convert(bounds, to: nil)) ?? .zero
+                let actual = element.accessibilityFrame()
+                let error = max(abs(expected.minX - actual.minX), abs(expected.minY - actual.minY), abs(expected.width - actual.width), abs(expected.height - actual.height))
+                accessibilityItems.append(["kind": "edge", "index": index, "label_matches": element.accessibilityLabel() == diagram.prepared.edgeLabels[path.0], "frame_error_px": error])
             }
         }
         var customFragments = 0
@@ -150,6 +166,23 @@ enum DiagramInspection {
                 return nil
             }
         }).count
+        var presses: [[String: Any]] = []
+        if arguments.contains("--diagram-ax-press"), !reading {
+            for diagram in diagrams {
+                let children = diagram.accessibilityChildren() as? [NSAccessibilityElement] ?? []
+                let ranges = diagram.prepared.scene.hitRegions.map { $0.canCollapse ? nil : diagram.prepared.sourceRanges[$0.nodeId] }
+                    + diagram.prepared.scene.primitives.compactMap { primitive -> NSRange? in
+                        guard case let .graphPath(id, _, _, _, _, _, _, _, _, _, _, _) = primitive else { return nil }
+                        return diagram.prepared.edgeRanges[id]
+                    }.map { Optional($0) }
+                for (element, expected) in zip(children, ranges) {
+                    guard let expected else { continue }
+                    let performed = element.accessibilityPerformPress()
+                    try await Task.sleep(for: .milliseconds(10))
+                    presses.append(["performed": performed, "selection_matches": view.selectedRange() == expected])
+                }
+            }
+        }
         return ["diagrams": diagrams.count, "blocks": view.blocks.count, "reading": view.isReading,
                 "graph_metrics": graphMetrics, "graph_fill_count": fillCount,
                 "scene_heights": diagrams.map { $0.prepared.scene.height },
@@ -163,6 +196,8 @@ enum DiagramInspection {
                 "source_preserved": sourcePreserved, "textkit2": view.textLayoutManager != nil,
                 "visible_nodes": hits, "accessibility_nodes": accessible, "accessibility_expanded_valid": expandedValid,
                 "accessibility_edges": accessibleEdges,
+                "accessibility_items": accessibilityItems, "accessibility_presses": presses,
+                "heavy_work_thread_checks": view.blocks.map(\.heavyWorkThreadChecks),
                 "source_hits": sourceHits(diagrams, source: workspace.current?.text ?? ""),
                 "before_click_nodes": beforeClick,
                 "collapsed_nodes": view.blocks.flatMap { Array($0.collapsed) }.count,
@@ -173,6 +208,8 @@ enum DiagramInspection {
                 "spans": errors.count, "first_main_work_max_ms": firstMain,
                 "payload_bytes": diagrams.map { $0.prepared.payloadBytes },
                 "scene_widths": diagrams.map { $0.prepared.scene.width },
+                "requested_content_width": max(120, view.bounds.width - view.textContainerInset.width * 2),
+                "window_width": view.window?.frame.width ?? 0,
                 "resize": resize, "memory": memory]
     }
     /// 检查真实窗口中每个节点和边都有可回查的源码命中；公开结果只输出计数。

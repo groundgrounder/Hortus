@@ -10,6 +10,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(output)?;
     fs::create_dir_all(media)?;
     let mut fonts = SystemFonts::new()?;
+    if args.iter().any(|arg| arg == "--probe-only") {
+        for seed in [17, 42, 2026] {
+            let source = synthetic(20, seed);
+            let start = Instant::now();
+            match render(&source, &LayoutOptions::default(), &mut fonts) {
+                Ok((scene, _)) => {
+                    fs::write(
+                        output.join(format!("probe-{seed}.json")),
+                        serde_json::to_vec_pretty(&scene)?,
+                    )?;
+                    println!(
+                        "seed={seed} ms={} geometry={}",
+                        start.elapsed().as_secs_f64() * 1000.0,
+                        geometry(&scene)
+                    );
+                }
+                Err(error) => println!("seed={seed} error={error}"),
+            }
+        }
+        return Ok(());
+    }
     let mut rows = Vec::new();
     let mut stability_rows = Vec::new();
     let mut window_rows = Vec::new();
@@ -104,6 +125,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn row_band_changes(common: &[(&GraphAnchor, &GraphAnchor)]) -> usize {
+    let same_row = |a: &GraphAnchor, b: &GraphAnchor| {
+        (a.rect.y + a.rect.height / 2.0 - b.rect.y - b.rect.height / 2.0).abs() < 1.0
+    };
+    common
+        .iter()
+        .enumerate()
+        .filter(|(i, (a, b))| {
+            common
+                .iter()
+                .enumerate()
+                .any(|(j, (c, d))| i != &j && same_row(a, c) != same_row(b, d))
+        })
+        .count()
+}
+
 fn window_stability(name: &str, graph: &Graph, fonts: &mut dyn FontMetrics) -> Vec<Value> {
     let mut previous: Option<PreviousGraph> = None;
     let mut rows = Vec::new();
@@ -172,7 +209,7 @@ fn window_stability(name: &str, graph: &Graph, fonts: &mut dyn FontMetrics) -> V
                 .collect::<Vec<_>>();
             anchored.sort_by(f64::total_cmp);
             let groups = common.iter().filter(|(a, b)| a.group != b.group).count();
-            rows.push(json!({"name":name,"from_width":before.width,"width":width,"nodes":common.len(),"median_displacement_px":distances.get(distances.len()/2),"max_displacement_px":distances.last(),"first_visible_anchor_compensated_median_px":anchored.get(anchored.len()/2),"first_visible_anchor_compensated_max_px":anchored.last(),"group_changes":groups,"row_band_changes":groups,"reason":after.metrics.stability_reason,"geometry":geometry(&after.scene)}));
+            rows.push(json!({"name":name,"from_width":before.width,"width":width,"nodes":common.len(),"median_displacement_px":distances.get(distances.len()/2),"max_displacement_px":distances.last(),"analytical_translation_residual_median_px":anchored.get(anchored.len()/2),"analytical_translation_residual_max_px":anchored.last(),"group_changes":groups,"row_band_changes":row_band_changes(&common),"reason":after.metrics.stability_reason,"geometry":geometry(&after.scene)}));
         }
         previous = Some(after.previous);
     }
@@ -237,6 +274,7 @@ fn geometry(scene: &Scene) -> Value {
     let mut piercing = 0;
     let mut nonorthogonal = 0;
     let mut crossings = 0;
+    let mut crossing_details = Vec::new();
     let mut shared = 0;
     let mut foreign_shared = 0;
     for (_, path) in &paths {
@@ -270,6 +308,8 @@ fn geometry(scene: &Scene) -> Value {
                             && h[0].y < v[0].y.max(v[1].y) - 0.001
                         {
                             crossings += 1;
+                            crossing_details.push(json!({"edge_a": paths[i].0, "edge_b": paths[j].0,
+                                "point": {"x": v[0].x, "y": h[0].y}, "path_a": paths[i].1, "path_b": paths[j].1}));
                         }
                     } else if (ah
                         && (a[0].y - b[0].y).abs() < 0.001
@@ -310,7 +350,7 @@ fn geometry(scene: &Scene) -> Value {
             }
         }
     }
-    json!({"node_overlaps":scene.metrics.node_overlaps,"edge_node":piercing,"nonorthogonal":nonorthogonal,"crossings":crossings,"shared_segments":shared,"foreign_or_labelled_shared_segments":foreign_shared,"label_node":labels.iter().map(|(_,r)|scene.hit_regions.iter().filter(|h|h.rect.intersects(*r)).count()).sum::<usize>(),"label_edge":labels.iter().map(|(id,r)|paths.iter().filter(|(other,p)|other!=id && p.windows(2).any(|s|intersects(s,*r))).count()).sum::<usize>(),"label_label":labels.iter().enumerate().map(|(i,(_,a))|labels[i+1..].iter().filter(|(_,b)|a.intersects(*b)).count()).sum::<usize>(),"horizontal_overflow":scene.metrics.horizontal_overflow})
+    json!({"node_overlaps":scene.metrics.node_overlaps,"edge_node":piercing,"nonorthogonal":nonorthogonal,"crossings":crossings,"crossing_details":crossing_details,"shared_segments":shared,"foreign_or_labelled_shared_segments":foreign_shared,"label_node":labels.iter().map(|(_,r)|scene.hit_regions.iter().filter(|h|h.rect.intersects(*r)).count()).sum::<usize>(),"label_edge":labels.iter().map(|(id,r)|paths.iter().filter(|(other,p)|other!=id && p.windows(2).any(|s|intersects(s,*r))).count()).sum::<usize>(),"label_label":labels.iter().enumerate().map(|(i,(_,a))|labels[i+1..].iter().filter(|(_,b)|a.intersects(*b)).count()).sum::<usize>(),"horizontal_overflow":scene.metrics.horizontal_overflow})
 }
 fn intersects(p: &[Point], r: Rect) -> bool {
     if (p[0].x - p[1].x).abs() < 0.001 {
@@ -360,7 +400,8 @@ fn stability(name: &str, graph: &Graph, width: f64, fonts: &mut dyn FontMetrics)
     'outer: for (index, old) in before.previous.nodes.iter().enumerate() {
         for count in 2..24 {
             let mut edited = graph.clone();
-            edited.nodes[index].label = "宽".repeat(count);
+            edited.nodes[index].label =
+                format!("{}{}", graph.nodes[index].label, "W".repeat(count));
             if let Ok(measured) = layout_graph(
                 &edited,
                 &LayoutOptions {
@@ -488,7 +529,7 @@ fn stability(name: &str, graph: &Graph, width: f64, fonts: &mut dyn FontMetrics)
                 );
             }
         }
-        rows.push(json!({"name":name,"width":width,"edit":kind,"actual_width_ratio":ratio,"unchanged_nodes":common.len(),"median_displacement_px":distances.get(distances.len()/2),"max_displacement_px":distances.last(),"group_changes":group_changes,"within_rank_inversions":inversions,"row_band_changes":group_changes,"anchor_residual_max_px":residual.into_iter().max_by(f64::total_cmp),"reason":after.metrics.stability_reason,"geometry":geometry(&after.scene)}));
+        rows.push(json!({"name":name,"width":width,"edit":kind,"actual_width_ratio":ratio,"unchanged_nodes":common.len(),"median_displacement_px":distances.get(distances.len()/2),"max_displacement_px":distances.last(),"group_changes":group_changes,"within_rank_inversions":inversions,"row_band_changes":row_band_changes(&common),"anchor_residual_max_px":residual.into_iter().max_by(f64::total_cmp),"reason":after.metrics.stability_reason,"geometry":geometry(&after.scene)}));
     }
     rows
 }

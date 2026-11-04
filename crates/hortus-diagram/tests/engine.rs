@@ -1011,3 +1011,53 @@ fn long_dotted_edges_and_multiple_sources() {
         Err(DiagramError::NotATree { .. })
     ));
 }
+
+#[test]
+fn tree_dispatch_preserves_legacy_styles_before_graph_validation() {
+    for style in [
+        "linkStyle 0 stroke:#f00",
+        "style A fill:rgba(255,0,0,0.5),stroke:hsl(120,50%,50%)",
+        "classDef vivid fill:#f008,stroke:#1234,stroke-width:2px\nclass A vivid",
+    ] {
+        let source = format!("flowchart TB\nA[Root] --> B[Leaf]\n{style}\n");
+        let legacy = parse(&source).unwrap();
+        let Diagram::Tree(tree) = parse_diagram(&source).unwrap() else {
+            panic!("ordinary tree")
+        };
+        assert_eq!(tree.nodes, legacy.nodes);
+        assert_eq!(tree.class_defs, legacy.class_defs);
+        assert_eq!(tree.inline_styles, legacy.inline_styles);
+        let mut fonts = DeterministicMetrics;
+        let mut actual = layout(&tree, &LayoutOptions::default(), &mut fonts).unwrap();
+        let mut expected = layout(&legacy, &LayoutOptions::default(), &mut fonts).unwrap();
+        actual.metrics.layout_ms = 0.0;
+        expected.metrics.layout_ms = 0.0;
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    }
+}
+
+#[test]
+fn unsupported_graph_constructs_keep_utf8_ranges_and_class_fallback_is_diagnostic() {
+    for (statement, expected) in [
+        ("subgraph 分支😀", "subgraph 分支😀"),
+        ("linkStyle 0 stroke:#f00", "linkStyle 0 stroke:#f00"),
+        ("style A fill:rgba(0,0,0,1)", "fill:rgba(0,0,0,1)"),
+    ] {
+        let source = format!("flowchart TB\nA[甲] --> C\nB --> C\n{statement}\n");
+        let DiagramError::UnsupportedConstruct { range, .. } =
+            parse_diagram_at(&source, 17).unwrap_err()
+        else {
+            panic!("unsupported, not syntax")
+        };
+        assert_eq!(&source[range.start - 17..range.end - 17], expected);
+    }
+    let source = "flowchart TB\nA[甲]:::state --> C\nB --> C\nclassDef state fill:#ff0000,stroke-width:2px,stroke:#112233";
+    let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
+        panic!("graph")
+    };
+    assert_eq!(graph.edges.len(), 2);
+    assert_eq!(graph.class_defs["state"].fill.as_deref(), Some("#ff0000"));
+    assert_eq!(graph.class_defs["state"].stroke.as_deref(), Some("#112233"));
+    assert_eq!(graph.warnings.len(), 1);
+    assert_eq!(&source[graph.warnings[0].0.clone()], "stroke-width:2px");
+}

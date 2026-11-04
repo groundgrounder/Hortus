@@ -54,18 +54,32 @@ pub(crate) fn route(
     label_widths: &[Option<f64>],
     previous: Option<&crate::PreviousGraph>,
 ) -> Result<Routes, LayoutError> {
+    // 同源前缀和同目的后缀共用总线；先重建该平面嵌入，避免局部旧通道形成交叉。
+    if let Some(paths) = branch_routes(graph, nodes, width) {
+        let seeds = paths
+            .into_iter()
+            .map(|p| (!p.is_empty()).then_some(p))
+            .collect::<Vec<_>>();
+        if seeds.iter().all(Option::is_some) {
+            return Ok(Routes {
+                paths: seeds.into_iter().map(Option::unwrap).collect(),
+                labels: vec![None; graph.edges.len()],
+            });
+        }
+        return route_grid(
+            graph,
+            nodes,
+            accepted,
+            (width, height),
+            label_widths,
+            &seeds,
+            None,
+        );
+    }
     let seeds = retained_paths(graph, nodes, width, height, previous);
     if seeds.iter().all(Option::is_some) {
         return Ok(Routes {
             paths: seeds.into_iter().map(Option::unwrap).collect(),
-            labels: vec![None; graph.edges.len()],
-        });
-    }
-    if seeds.iter().all(Option::is_none)
-        && let Some(paths) = branch_routes(graph, nodes, width)
-    {
-        return Ok(Routes {
-            paths,
             labels: vec![None; graph.edges.len()],
         });
     }
@@ -78,7 +92,7 @@ pub(crate) fn route(
         &seeds,
         None,
     )?;
-    if nodes.len() <= 24 && graph.edges.len() <= 48 {
+    if nodes.len() <= 16 && graph.edges.len() <= 32 {
         let mut score = route_conflicts(graph, &best.paths).0;
         for _ in 0..3 {
             let initial_score = score;
@@ -118,6 +132,49 @@ pub(crate) fn route(
                 }
             }
             if score == initial_score {
+                break;
+            }
+        }
+    }
+    if nodes.len() <= 16 && graph.edges.len() <= 32 && route_conflicts(graph, &best.paths).0 > 0 {
+        let conflicts = route_conflicts(graph, &best.paths).1;
+        let mut score = route_conflicts(graph, &best.paths).0;
+        for (i, edge) in conflicts.iter().take(6).enumerate() {
+            for other in conflicts.iter().skip(i + 1).take(6) {
+                for side in 0..16 {
+                    let fixed = best
+                        .paths
+                        .iter()
+                        .enumerate()
+                        .map(|(n, p)| {
+                            (n != *edge && n != *other && label_widths[n].is_none())
+                                .then(|| p.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    if let Ok(candidate) = route_grid(
+                        graph,
+                        nodes,
+                        accepted,
+                        (width, height),
+                        label_widths,
+                        &fixed,
+                        Some((*edge, side)),
+                    ) {
+                        let next = route_conflicts(graph, &candidate.paths).0;
+                        if next < score {
+                            best = candidate;
+                            score = next;
+                        }
+                    }
+                    if score == 0 {
+                        break;
+                    }
+                }
+                if score == 0 {
+                    break;
+                }
+            }
+            if score == 0 {
                 break;
             }
         }
@@ -417,7 +474,7 @@ fn route_grid(
                 .collect::<Vec<_>>();
             if peers > 1
                 || nodes.len() > 48
-                || (incident.len() > 3 && !incident.iter().any(|(_, edge)| edge.label.is_some()))
+                || (incident.len() > 2 && !incident.iter().any(|(_, edge)| edge.label.is_some()))
             {
                 return delta;
             }
@@ -1122,55 +1179,32 @@ fn branch_routes(graph: &Graph, nodes: &[(Rect, Shape)], width: f64) -> Option<V
     let roots: Vec<_> = (0..nodes.len())
         .filter(|i| incoming[*i].is_empty())
         .collect();
-    let sinks: Vec<_> = (0..nodes.len())
-        .filter(|i| outgoing[*i].is_empty())
-        .collect();
-    if roots.len() != 1 || sinks.len() != 1 {
+    if roots.len() != 1 {
         return None;
     }
-    let (root, sink) = (roots[0], sinks[0]);
-    if outgoing[root].len() < 3
-        || incoming[sink].len() != outgoing[root].len()
-        || (0..nodes.len())
-            .any(|i| i != root && i != sink && (incoming[i].len() != 1 || outgoing[i].len() != 1))
+    let root = roots[0];
+    let branches = outgoing[root].len();
+    let merges: Vec<_> = (0..nodes.len())
+        .filter(|i| incoming[*i].len() >= 3)
+        .collect();
+    if branches < 3 || merges.len() != 1 {
+        return None;
+    }
+    let sink = merges[0];
+    if (0..nodes.len())
+        .any(|i| i != root && i != sink && (incoming[i].len() != 1 || outgoing[i].len() > 2))
+        || outgoing[sink].len() > 1
     {
         return None;
     }
-    let ordered = |members: &[usize]| {
-        let mut members = members.to_vec();
-        members.sort_by(|i, j| {
-            nodes[*i]
-                .0
-                .y
-                .total_cmp(&nodes[*j].0.y)
-                .then_with(|| nodes[*j].0.x.total_cmp(&nodes[*i].0.x))
-        });
-        members
-    };
-    let heads = ordered(&outgoing[root]);
-    let tails = ordered(&incoming[sink]);
     let mut result = Vec::new();
     for edge in &graph.edges {
         let (a, ashape) = nodes[edge.from];
         let (b, bshape) = nodes[edge.to];
         let points = if edge.from == root {
-            let mut peers = outgoing[root]
-                .iter()
-                .copied()
-                .filter(|i| (nodes[*i].0.y - b.y).abs() < 0.01)
-                .collect::<Vec<_>>();
-            peers.sort_by(|i, j| nodes[*i].0.x.total_cmp(&nodes[*j].0.x));
-            let slot = peers.iter().position(|i| *i == edge.to)?;
-            let y = b.y - 12.0 - slot as f64 * 3.0;
-            let order = heads.iter().position(|i| *i == edge.to)?;
-            let lane = 10.0 + (heads.len() - 1 - order) as f64 * 3.0;
-            let source = crate::shape::port(
-                ashape,
-                a,
-                false,
-                a.y + a.height * (0.8 - 0.6 * order as f64 / (heads.len() - 1) as f64),
-                false,
-            );
+            let y = b.y - 16.0;
+            let lane = 14.0;
+            let source = crate::shape::port(ashape, a, false, a.y + a.height / 2.0, false);
             let target = crate::shape::port(bshape, b, true, b.x + b.width / 2.0, false);
             vec![
                 source,
@@ -1183,24 +1217,10 @@ fn branch_routes(graph: &Graph, nodes: &[(Rect, Shape)], width: f64) -> Option<V
                 target,
             ]
         } else if edge.to == sink {
-            let mut peers = incoming[sink]
-                .iter()
-                .copied()
-                .filter(|i| (nodes[*i].0.y + nodes[*i].0.height - a.y - a.height).abs() < 0.01)
-                .collect::<Vec<_>>();
-            peers.sort_by(|i, j| nodes[*i].0.x.total_cmp(&nodes[*j].0.x));
-            let slot = peers.iter().position(|i| *i == edge.from)?;
-            let y = a.y + a.height + 12.0 + (peers.len() - 1 - slot) as f64 * 3.0;
-            let order = tails.iter().position(|i| *i == edge.from)?;
-            let lane = width - 10.0 - order as f64 * 3.0;
+            let y = a.y + a.height + 16.0;
+            let lane = width - 14.0;
             let source = crate::shape::port(ashape, a, true, a.x + a.width / 2.0, true);
-            let target = crate::shape::port(
-                bshape,
-                b,
-                false,
-                b.y + b.height * (0.8 - 0.6 * order as f64 / (tails.len() - 1) as f64),
-                true,
-            );
+            let target = crate::shape::port(bshape, b, false, b.y + b.height / 2.0, true);
             vec![
                 source,
                 Point { x: source.x, y },
@@ -1215,7 +1235,8 @@ fn branch_routes(graph: &Graph, nodes: &[(Rect, Shape)], width: f64) -> Option<V
             let source = crate::shape::port(ashape, a, true, a.x + a.width / 2.0, true);
             let target = crate::shape::port(bshape, b, true, b.x + b.width / 2.0, false);
             if (source.x - target.x).abs() > 0.01 {
-                return None;
+                result.push(Vec::new());
+                continue;
             }
             vec![source, target]
         };
@@ -1345,7 +1366,7 @@ mod tests {
                     .map(|edge| edge.points.clone())
                     .collect::<Vec<_>>();
                 let (score, _) = route_conflicts(&graph, &paths);
-                assert_eq!(score, 0);
+                assert_eq!(score, 0, "width={width} source={edited} paths={paths:?}");
             }
         }
     }

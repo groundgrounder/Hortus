@@ -70,17 +70,26 @@ pub fn layout_graph(
             Direction::LeftToRight | Direction::RightToLeft
         );
         let limit = if horizontal {
-            ((visible_width - 48.0 * 3.0) / 4.0 - 24.0).max(48.0)
+            ((visible_width - 32.0 * 3.0) / 4.0 - 24.0).max(48.0)
         } else {
             196.0_f64.min(visible_width - 24.0)
         };
         let mut label_lines = Vec::new();
         for (body, size) in [(&main, 15.0), (&label.sub, 13.0)] {
+            let weight = if size < 15.0 { 400 } else { 500 };
             if body.is_empty() {
                 continue;
             }
-            for line in wrap_label(body, limit, size, fonts) {
-                let measured = fonts.measure(&line, size, 500);
+            // 短拉丁单词保留完整宽度；长链仍按实际框宽决定每带节点数。
+            let word_width = if horizontal {
+                body.split(|c: char| !c.is_ascii_alphanumeric())
+                    .map(|word| fonts.measure(word, size, weight).width.min(196.0))
+                    .fold(limit, f64::max)
+            } else {
+                limit
+            };
+            for line in wrap_label(body, word_width, size, weight, fonts) {
+                let measured = fonts.measure(&line, size, weight);
                 label_lines.push((line, measured.width, measured.ascent, size));
             }
         }
@@ -282,7 +291,8 @@ pub fn layout_graph(
             .sum::<f64>();
         let mut baseline = boxed.rect.y + (boxed.rect.height - line_height) / 2.0 + 13.0;
         for (line, line_width, _, size) in &boxed.label_lines {
-            let measured = fonts.measure(line, *size, 500);
+            let weight = if *size < 15.0 { 400 } else { 500 };
+            let measured = fonts.measure(line, *size, weight);
             let mut x = boxed.rect.x + (boxed.rect.width - line_width) / 2.0;
             for run in measured.runs {
                 primitives.push(Primitive::Text(TextSpan {
@@ -290,7 +300,7 @@ pub fn layout_graph(
                     baseline: Point { x, y: baseline },
                     width: run.width,
                     font_size: *size,
-                    font_weight: 500,
+                    font_weight: weight,
                     font_family: run.font_family,
                     color: text_color,
                 }));
@@ -394,7 +404,14 @@ pub fn layout_graph(
             edge_crossings,
             horizontal_overflow,
             retained_nodes,
-            stability_reason,
+            stability_reason: graph.warnings.iter().fold(
+                stability_reason,
+                |mut reason, (range, kind)| {
+                    use std::fmt::Write;
+                    let _ = write!(reason, "; {kind}@{}..{}", range.start, range.end);
+                    reason
+                },
+            ),
         },
     })
 }
@@ -581,6 +598,83 @@ fn order_ranks(graph: &Graph, ranks: &[usize], count: usize) -> Vec<Vec<usize>> 
             }
         }
     }
+    // 小图对少数多节点层作有限枚举，摆脱逐层下降停在两处交叉的局部最优。
+    if graph.nodes.len() <= 16 {
+        let mut variants = Vec::<(usize, Vec<Vec<usize>>)>::new();
+        let mut combinations = 1usize;
+        for (rank, row) in order.iter().enumerate() {
+            if !(2..=3).contains(&row.len()) {
+                continue;
+            }
+            let mut candidate = row.clone();
+            candidate.sort_unstable();
+            let mut permutations = Vec::new();
+            loop {
+                permutations.push(candidate.clone());
+                let Some(i) = (0..candidate.len() - 1)
+                    .rev()
+                    .find(|i| candidate[*i] < candidate[*i + 1])
+                else {
+                    break;
+                };
+                let j = (i + 1..candidate.len())
+                    .rev()
+                    .find(|j| candidate[*j] > candidate[i])
+                    .unwrap();
+                candidate.swap(i, j);
+                candidate[i + 1..].reverse();
+            }
+            combinations *= permutations.len();
+            if combinations > 4096 {
+                break;
+            }
+            variants.push((rank, permutations));
+        }
+        let score = |rows: &[Vec<usize>]| {
+            let mut positions = vec![0; ranks.len()];
+            for row in rows {
+                for (i, node) in row.iter().enumerate() {
+                    positions[*node] = i;
+                }
+            }
+            graph
+                .edges
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    graph.edges[i + 1..]
+                        .iter()
+                        .filter(|b| {
+                            ranks[a.from] == ranks[b.from]
+                                && ranks[a.to] == ranks[b.to]
+                                && ranks[a.from] < ranks[a.to]
+                                && a.from != b.from
+                                && a.to != b.to
+                                && (positions[a.from] < positions[b.from])
+                                    != (positions[a.to] < positions[b.to])
+                        })
+                        .count()
+                })
+                .sum::<usize>()
+        };
+        let mut best = order.clone();
+        let mut best_score = score(&best);
+        for mut choice in 0..combinations.min(4096) {
+            for (rank, permutations) in &variants {
+                order[*rank] = permutations[choice % permutations.len()].clone();
+                choice /= permutations.len();
+            }
+            let next = score(&order);
+            if next < best_score {
+                best_score = next;
+                best = order.clone();
+            }
+            if best_score == 0 {
+                break;
+            }
+        }
+        order = best;
+    }
     order
 }
 
@@ -602,7 +696,7 @@ fn place_nodes(
                 rank.iter()
                     .map(|node| boxes[*node].rect.width)
                     .fold(0.0, f64::max)
-                    + 48.0
+                    + 32.0
             })
             .collect();
         let mut k = order.len().div_ceil(4).max(1);
@@ -610,7 +704,7 @@ fn place_nodes(
             let ranges = crate::partition(&weights, k);
             if ranges
                 .iter()
-                .all(|range| weights[range.clone()].iter().sum::<f64>() - 48.0 <= available + 0.01)
+                .all(|range| weights[range.clone()].iter().sum::<f64>() - 32.0 <= available + 0.01)
                 || k == order.len()
             {
                 break ranges;
@@ -619,7 +713,7 @@ fn place_nodes(
         };
         let mut y = OUTER;
         for (group, range) in ranges.into_iter().enumerate() {
-            let total = weights[range.clone()].iter().sum::<f64>() - 48.0;
+            let total = weights[range.clone()].iter().sum::<f64>() - 32.0;
             let mut x = OUTER + (available - total).max(0.0) / 2.0;
             let indices: Vec<_> = if graph.direction == Direction::RightToLeft {
                 range.rev().collect()
@@ -631,12 +725,12 @@ fn place_nodes(
                 let mut node_y = y;
                 for node in &order[index] {
                     boxes[*node].rect.x =
-                        x + (weights[index] - 48.0 - boxes[*node].rect.width) / 2.0;
+                        x + (weights[index] - 32.0 - boxes[*node].rect.width) / 2.0;
                     boxes[*node].rect.y = node_y;
                     groups[*node] = group;
-                    node_y += boxes[*node].rect.height + 48.0;
+                    node_y += boxes[*node].rect.height + 32.0;
                 }
-                bottom = bottom.max(node_y - 48.0);
+                bottom = bottom.max(node_y - 32.0);
                 x += weights[index];
             }
             y = bottom + 64.0;
@@ -692,12 +786,40 @@ fn place_nodes(
         let to = boxes[edge.to].rect;
         let dx = from.x + from.width / 2.0 - (OUTER + available / 2.0);
         if dx < 0.0 && to.x + to.width - dx < OUTER + available {
-            for boxed in boxes.iter_mut() {
-                if boxed.rect.width < from.width * 1.2
-                    && (boxed.rect.x + boxed.rect.width / 2.0 - (OUTER + available / 2.0)).abs()
-                        < 1.0
-                {
-                    boxed.rect.x += dx;
+            let moved = boxes
+                .iter()
+                .map(|boxed| {
+                    boxed.rect.width < from.width * 1.2
+                        && (boxed.rect.x + boxed.rect.width / 2.0 - (OUTER + available / 2.0)).abs()
+                            < 1.0
+                })
+                .collect::<Vec<_>>();
+            let clear = boxes.iter().enumerate().all(|(i, boxed)| {
+                if !moved[i] {
+                    return true;
+                }
+                let candidate = Rect {
+                    x: boxed.rect.x + dx,
+                    ..boxed.rect
+                };
+                candidate.x >= OUTER
+                    && boxes.iter().enumerate().all(|(j, other)| {
+                        i == j
+                            || moved[j]
+                            || !candidate.intersects(Rect {
+                                x: other.rect.x - 8.0,
+                                y: other.rect.y - 8.0,
+                                width: other.rect.width + 16.0,
+                                height: other.rect.height + 16.0,
+                            })
+                    })
+            });
+            // 反馈支路不能把其它层的主干推入同层相邻节点。
+            if clear {
+                for (boxed, moved) in boxes.iter_mut().zip(moved) {
+                    if moved {
+                        boxed.rect.x += dx;
+                    }
                 }
             }
         }
@@ -861,28 +983,122 @@ fn retain_positions(
     if previous.direction != graph.direction {
         return (0, "direction_changed".into());
     }
-    // 横向图改宽会改变换行和节点高度；以完整物理行重新排版，避免逐节点锚定成阶梯。
-    if (previous.width - options.width).abs() > 0.01
+    // 横向改宽按旧行带整体装箱，不能把单个溢出节点依次丢到行尾下方。
+    if (previous.width - options.width).abs() > 0.25
         && matches!(
             graph.direction,
             Direction::LeftToRight | Direction::RightToLeft
         )
+        && previous.nodes.len() == graph.nodes.len()
     {
-        return (0, "width_changed_horizontal_rows".into());
+        let mut rows = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+        for (i, node) in graph.nodes.iter().enumerate() {
+            if let Some(old) = previous.nodes.iter().find(|old| old.node_id == node.id) {
+                rows.entry(old.group).or_default().push(i);
+            }
+        }
+        let fits = rows.values().all(|row| {
+            row.iter().map(|i| boxes[*i].rect.width).sum::<f64>()
+                + 32.0 * row.len().saturating_sub(1) as f64
+                <= options.width - 2.0 * OUTER
+        });
+        if fits {
+            let mut bottom = OUTER - 64.0;
+            for (group, mut row) in rows {
+                let anchor = |i: usize| {
+                    previous
+                        .nodes
+                        .iter()
+                        .find(|n| n.node_id == graph.nodes[i].id)
+                        .unwrap()
+                };
+                row.sort_by(|a, b| anchor(*a).rect.x.total_cmp(&anchor(*b).rect.x));
+                let total = row.iter().map(|i| boxes[*i].rect.width).sum::<f64>()
+                    + 32.0 * row.len().saturating_sub(1) as f64;
+                let left = row
+                    .iter()
+                    .map(|i| anchor(*i).rect.x)
+                    .fold(f64::INFINITY, f64::min);
+                let right = row
+                    .iter()
+                    .map(|i| anchor(*i).rect.x + anchor(*i).rect.width)
+                    .fold(0.0, f64::max);
+                let mut x =
+                    ((left + right - total) / 2.0).clamp(OUTER, options.width - OUTER - total);
+                let y = row
+                    .iter()
+                    .map(|i| anchor(*i).rect.y)
+                    .fold(f64::INFINITY, f64::min)
+                    .max(bottom + 64.0);
+                for i in row {
+                    boxes[i].rect.x = x;
+                    boxes[i].rect.y = y;
+                    groups[i] = group;
+                    x += boxes[i].rect.width + 32.0;
+                    bottom = bottom.max(y + boxes[i].rect.height);
+                }
+            }
+            return (boxes.len(), "retained_horizontal_bands".into());
+        }
+        return (0, "horizontal_band_capacity_changed".into());
     }
-    // 窗口收窄后旧行不能只保留一部分。
-    if (previous.width - options.width).abs() > 0.01
-        && previous.nodes.iter().any(|node| {
-            node.rect.x < OUTER - 0.01
-                || node.rect.x + node.rect.width > options.width - OUTER + 0.01
-        })
-    {
-        return (0, "width_invalidated_previous_rows".into());
+    let mut adjusted = previous.clone();
+    // 同层支路在右边界新增叶时，只压缩末端的空白；旧节点最多移动 48px。
+    for (i, node) in graph.nodes.iter().enumerate() {
+        if graph.direction != Direction::TopToBottom
+            || previous.nodes.iter().any(|old| old.node_id == node.id)
+            || graph.edges.iter().any(|e| e.from == i)
+        {
+            continue;
+        }
+        let Some(parent) = graph.edges.iter().find(|e| e.to == i).map(|e| e.from) else {
+            continue;
+        };
+        if graph.edges.iter().filter(|e| e.from == parent).count() < 2 {
+            continue;
+        }
+        let Some(anchor) = previous
+            .nodes
+            .iter()
+            .find(|old| old.node_id == graph.nodes[parent].id)
+        else {
+            continue;
+        };
+        if anchor.rect.x + anchor.rect.width + NODE_GAP + boxes[i].rect.width
+            <= options.width - OUTER
+        {
+            continue;
+        }
+        let mut band = previous
+            .nodes
+            .iter()
+            .filter(|old| (old.rect.y - anchor.rect.y).abs() < 1.0)
+            .collect::<Vec<_>>();
+        band.sort_by(|a, b| b.rect.x.total_cmp(&a.rect.x));
+        let mut right = options.width - OUTER - boxes[i].rect.width - 8.0;
+        let mut moves = Vec::new();
+        for old in band {
+            let x = old.rect.x.min(right - old.rect.width);
+            moves.push((old.rect.x + old.rect.width / 2.0, x - old.rect.x));
+            right = x - 8.0;
+        }
+        if moves.iter().any(|(_, dx)| dx.abs() > 48.0) || right < OUTER - 8.0 {
+            continue;
+        }
+        for old in &mut adjusted.nodes {
+            if let Some((_, dx)) = moves
+                .iter()
+                .find(|(center, _)| (old.rect.x + old.rect.width / 2.0 - center).abs() < 1.0)
+            {
+                old.rect.x += dx;
+            }
+        }
     }
+    // 改宽仍优先保留旧中心和分组；只有实际放不下的节点重新找位。
     let old: Vec<_> = graph
         .nodes
         .iter()
-        .map(|node| previous.nodes.iter().find(|old| old.node_id == node.id))
+        .map(|node| adjusted.nodes.iter().find(|old| old.node_id == node.id))
         .collect();
     let visible = |index: usize| {
         options.viewport.as_ref().is_some_and(|viewport| {
@@ -924,6 +1140,20 @@ fn retain_positions(
         let preferred = parent.map_or(initial, |parent| {
             let r = parent.rect;
             match graph.direction {
+                Direction::TopToBottom
+                    if graph
+                        .edges
+                        .iter()
+                        .filter(|e| graph.nodes[e.from].id == parent.node_id)
+                        .count()
+                        > 1 =>
+                {
+                    Rect {
+                        x: (r.x + r.width + NODE_GAP).min(options.width - OUTER - initial.width),
+                        y: r.y + (r.height - initial.height) / 2.0,
+                        ..initial
+                    }
+                }
                 Direction::TopToBottom => Rect {
                     x: r.x + (r.width - initial.width) / 2.0,
                     y: r.y + r.height + RANK_GAP,
@@ -965,6 +1195,10 @@ fn retain_positions(
                             .is_some_and(|edge| {
                                 edge.from != index
                                     && edge.to != index
+                                    && !parent.is_some_and(|parent| {
+                                        graph.nodes[edge.from].id == parent.node_id
+                                            || graph.nodes[edge.to].id == parent.node_id
+                                    })
                                     && old_edge.points.windows(2).any(|pair| {
                                         segment_hits_rect(
                                             pair[0],
@@ -1080,13 +1314,19 @@ fn retain_positions(
     )
 }
 
-fn wrap_label(text: &str, limit: f64, size: f64, fonts: &mut dyn FontMetrics) -> Vec<String> {
+fn wrap_label(
+    text: &str,
+    limit: f64,
+    size: f64,
+    weight: u16,
+    fonts: &mut dyn FontMetrics,
+) -> Vec<String> {
     use unicode_segmentation::UnicodeSegmentation;
     let mut lines = Vec::new();
     let mut current = String::new();
     for grapheme in text.graphemes(true) {
         let candidate = format!("{current}{grapheme}");
-        if !current.is_empty() && fonts.measure(&candidate, size, 500).width > limit {
+        if !current.is_empty() && fonts.measure(&candidate, size, weight).width > limit {
             lines.push(std::mem::take(&mut current));
         }
         current.push_str(grapheme);

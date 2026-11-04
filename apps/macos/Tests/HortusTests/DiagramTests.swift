@@ -225,6 +225,34 @@ struct DiagramTests {
         #expect(other[0].prepared == nil)
     }
 
+    @Test func insertingAndDeletingFailedBlockNeverBorrowsAnotherDiagram() async throws {
+        let valid = "```mermaid\nflowchart LR\nA[Existing] --> C\nB --> C\n```\n"
+        let bad = "```mermaid\nflowchart TB\nX ??? Y\n```\n"
+        let service = DiagramService()
+        func render(_ source: String) async throws -> [NoteDiagram] {
+            let blocks = try await service.blocks(source: source, mmd: false, vault: "test", note: "insert.md", core: nil)
+            return await service.render(source: source, mmd: false, blocks: blocks, width: 700, dark: false)
+        }
+        let first = try await render(valid)
+        #expect(first[0].prepared != nil)
+        let inserted = try await render(bad + valid)
+        #expect(inserted.count == 2)
+        #expect(inserted[0].prepared == nil)
+        #expect(inserted[0].previous == nil)
+        #expect(inserted[0].reason != nil)
+        #expect(inserted[1].prepared?.scene.hitRegions.contains(where: { $0.label == "Existing" }) == true)
+        #expect(inserted[0].sourceStart != inserted[1].sourceStart)
+        let restored = try await render(valid)
+        #expect(restored.count == 1)
+        #expect(restored[0].reason == nil)
+        #expect(restored[0].prepared?.scene.hitRegions.count == 3)
+        var moved = restored[0]
+        moved.sourceStart += 1
+        moved.prepared = nil; moved.previous = nil
+        moved.inherit(restored[0])
+        #expect(moved.prepared == nil && moved.previous == nil)
+    }
+
     @Test func graphWindowServicesAndRapidGenerationsStayIsolated() async throws {
         let source = "flowchart LR\nA[甲😀] --> C((汇合))\nB[乙] --> C\n"
         func surface(width: Double) -> (NSWindow, DiagramTextView, NoteText.EditorCoordinator) {

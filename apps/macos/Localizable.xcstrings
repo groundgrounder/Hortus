@@ -1,6 +1,8 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Diagram is stale; source error" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Diagram is stale; source error"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "此图已失效；源码错误"}}}},
+    "Unsupported %@ on line %d; showing source" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Unsupported %@ on line %d; showing source"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "第 %2$d 行的 %1$@ 暂不支持；显示源码"}}}},
     "Formula: %@" : {"localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Formula: %@"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "公式：%@"}}}},
     "Formula error: %@; showing source" : {"localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Formula error: %@; showing source"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "公式有误：%@，显示源码"}}}},
     "Formula resource limit exceeded: %@; showing source" : {"localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Formula resource limit exceeded: %@; showing source"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "公式资源超出上限：%@，显示源码"}}}},

@@ -405,7 +405,9 @@ final class NoteLayoutFragment: NSTextLayoutFragment {
         return CGRect(origin: super.layoutFragmentFrame.origin, size: replacement)
     }
     override var renderingSurfaceBounds: CGRect {
-        if let replacement { return CGRect(origin: .zero, size: replacement) }
+        if let replacement {
+            return CGRect(x: 0, y: reason == nil ? 0 : -24, width: replacement.width, height: replacement.height + (reason == nil ? 0 : 24))
+        }
         var rect = super.renderingSurfaceBounds
         if reason != nil { rect.size.width = max(rect.width, noticeWidth) }
         if sourceMask & (32 | 64 | 4096) != 0 {
@@ -416,7 +418,10 @@ final class NoteLayoutFragment: NSTextLayoutFragment {
     }
     override var topMargin: CGFloat { super.topMargin + (reason == nil ? 0 : 24) }
     override func draw(at point: CGPoint, in context: CGContext) {
-        guard replacement == nil else { return }
+        if replacement != nil {
+            drawReason(at: point, in: context)
+            return
+        }
         if sourceMask & (32 | 64 | 4096) != 0 {
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
@@ -437,10 +442,13 @@ final class NoteLayoutFragment: NSTextLayoutFragment {
             context.restoreGState()
         }
         super.draw(at: point, in: context)
+        drawReason(at: point, in: context)
+    }
+    private func drawReason(at point: CGPoint, in context: CGContext) {
         if let reason {
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
-            (reason as NSString).draw(at: point, withAttributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor])
+            (reason as NSString).draw(at: CGPoint(x: point.x, y: point.y - 24), withAttributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor])
             NSGraphicsContext.restoreGraphicsState()
         }
     }
@@ -788,7 +796,7 @@ final class DiagramTextView: NSTextView {
         guard !compositionActive else { return }
         // 提交时重新取屏幕锚点，避免后台请求期间的主动滚动被旧坐标拉回。
         diagramViewportAnchor = self.blocks.lazy.compactMap { old in
-            guard let next = blocks.first(where: { $0.ordinal == old.ordinal && $0.documentIdentity == old.documentIdentity }),
+            guard let next = blocks.first(where: { $0.ordinal == old.ordinal && $0.documentIdentity == old.documentIdentity && $0.sourceStart == old.sourceStart }),
                   next.previous != nil, let view = self.diagramViews[old.ordinal], !view.isHidden,
                   let anchor = view.viewportAnchors().first(where: { anchor in
                       next.prepared?.scene.hitRegions.contains(where: { $0.nodeId == anchor.nodeId }) == true
@@ -942,7 +950,8 @@ final class DiagramTextView: NSTextView {
             if expanded.contains(block.ordinal) {
                 if offset == block.tailStart { fragment.previewHeight = prepared.scene.height + 12 }
             } else { fragment.replacement = head ? CGSize(width: prepared.scene.width, height: prepared.scene.height) : .zero }
-        } else if head { fragment.reason = block.reason }
+        }
+        if head { fragment.reason = block.reason }
     }
     private func resizeDocument() {
         let contentHeight: CGFloat

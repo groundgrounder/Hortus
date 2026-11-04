@@ -8,6 +8,7 @@ use std::ops::Range;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiagramError {
     Unsupported { diagram_type: String },
+    UnsupportedConstruct { range: Range<usize>, kind: String },
     NotATree { multi_parent: Vec<String> },
     Syntax { range: Range<usize>, kind: String },
     MissingBlock { requested: usize },
@@ -17,6 +18,9 @@ impl fmt::Display for DiagramError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported { diagram_type } => write!(f, "Unsupported: {diagram_type}"),
+            Self::UnsupportedConstruct { range, kind } => {
+                write!(f, "Unsupported ({}..{}): {kind}", range.start, range.end)
+            }
             Self::NotATree { multi_parent } => write!(f, "NotATree: multi_parent={multi_parent:?}"),
             Self::Syntax { range, kind } => {
                 write!(f, "Syntax ({}..{}): {kind}", range.start, range.end)
@@ -295,29 +299,34 @@ fn parse_diagram_relative(source: &str) -> Result<Diagram, DiagramError> {
     if first.split_whitespace().next() == Some("mindmap") {
         return parse_relative(source).map(Diagram::Tree);
     }
-    let graph = crate::graph_parser::parse(source)?;
-    let ordinary_tree = graph.direction == crate::Direction::TopToBottom
-        && graph
-            .nodes
-            .iter()
-            .all(|node| node.shape == Shape::Rectangle)
-        && graph.edges.iter().all(|edge| {
-            edge.label.is_none()
-                && edge.connector.line == EdgeLine::Solid
-                && edge.connector.start == Marker::None
-                && edge.connector.end == Marker::Arrow
-        })
-        && graph
-            .edges
-            .iter()
-            .map(|edge| (edge.from, edge.to))
-            .collect::<HashSet<_>>()
-            .len()
-            == graph.edges.len();
-    if ordinary_tree && let Ok(tree) = parse_relative(source) {
-        return Ok(Diagram::Tree(tree));
+    // 先保留旧树入口的样式与忽略语义；能力探测不执行 Graph 样式校验。
+    if let Ok(tree) = parse_relative(source) {
+        let Ok(graph) = crate::graph_parser::tree_probe(source) else {
+            return Ok(Diagram::Tree(tree));
+        };
+        let ordinary_tree = graph.direction == crate::Direction::TopToBottom
+            && graph
+                .nodes
+                .iter()
+                .all(|node| node.shape == Shape::Rectangle)
+            && graph.edges.iter().all(|edge| {
+                edge.label.is_none()
+                    && edge.connector.line == EdgeLine::Solid
+                    && edge.connector.start == Marker::None
+                    && edge.connector.end == Marker::Arrow
+            })
+            && graph
+                .edges
+                .iter()
+                .map(|edge| (edge.from, edge.to))
+                .collect::<HashSet<_>>()
+                .len()
+                == graph.edges.len();
+        if ordinary_tree {
+            return Ok(Diagram::Tree(tree));
+        }
     }
-    Ok(Diagram::Graph(graph))
+    crate::graph_parser::parse(source).map(Diagram::Graph)
 }
 
 impl Diagram {
@@ -377,8 +386,19 @@ impl DiagramError {
                 range: map(range),
                 kind,
             },
+            Self::UnsupportedConstruct { range, kind } => Self::UnsupportedConstruct {
+                range: map(range),
+                kind,
+            },
             other => other,
         }
+    }
+}
+
+pub(crate) fn unsupported(range: Range<usize>, kind: &str) -> DiagramError {
+    DiagramError::UnsupportedConstruct {
+        range,
+        kind: kind.into(),
     }
 }
 

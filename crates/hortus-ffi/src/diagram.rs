@@ -18,16 +18,33 @@ pub struct DiagramBlock {
 
 #[derive(Debug, uniffi::Error)]
 pub enum DiagramFailure {
-    NotATree { multi_parent: Vec<String> },
-    Unsupported { diagram_type: String },
-    Syntax { line: u32, kind: String },
-    Engine { kind: String },
+    NotATree {
+        multi_parent: Vec<String>,
+    },
+    Unsupported {
+        diagram_type: String,
+    },
+    UnsupportedConstruct {
+        line: u32,
+        start: u64,
+        end: u64,
+        kind: String,
+    },
+    Syntax {
+        line: u32,
+        kind: String,
+    },
+    Engine {
+        kind: String,
+    },
 }
 impl fmt::Display for DiagramFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotATree { .. } => f.write_str("diagram.not_a_tree"),
-            Self::Unsupported { .. } => f.write_str("diagram.unsupported"),
+            Self::Unsupported { .. } | Self::UnsupportedConstruct { .. } => {
+                f.write_str("diagram.unsupported")
+            }
             Self::Syntax { .. } => f.write_str("diagram.syntax"),
             Self::Engine { .. } => f.write_str("diagram.engine"),
         }
@@ -168,6 +185,18 @@ impl DiagramEngine {
                 DiagramError::Unsupported { diagram_type } => DiagramFailure::Unsupported {
                     diagram_type: diagram_type.clone(),
                 },
+                DiagramError::UnsupportedConstruct { range, kind } => {
+                    DiagramFailure::UnsupportedConstruct {
+                        line: state.source[..range.start]
+                            .bytes()
+                            .filter(|b| *b == b'\n')
+                            .count() as u32
+                            + 1,
+                        start: range.start as u64,
+                        end: range.end as u64,
+                        kind: kind.clone(),
+                    }
+                }
                 DiagramError::Syntax { range, kind } => DiagramFailure::Syntax {
                     line: state.source[..range.start]
                         .bytes()
