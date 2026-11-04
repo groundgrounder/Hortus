@@ -64,7 +64,9 @@ enum MultiWindowInspection {
                 result["canonical_deduplicated"] = application.records.count == count && application.contexts.count == count && application.active === first
                 result["before_layout"] = application.records.map(describe)
                 stage = "real panel drag"
-                result["real_drag_shared"] = try await dragPanel(application, first: first, second: second)
+                let (shared, dragDiagnostics) = try await dragPanel(application, first: first, second: second)
+                result["real_drag_shared"] = shared
+                result["real_drag_diagnostics"] = dragDiagnostics
                 let oldBSize = second.layout.size[.left]
                 first.layout.moveToRegion(.outline, .left)
                 first.layout.visible[.left] = false
@@ -293,34 +295,98 @@ enum MultiWindowInspection {
         return view.subviews.lazy.compactMap { findView($0, named: name) }.first
     }
 
-    private static func dragPanel(_ application: ApplicationWorkspace, first: WindowRecord, second: WindowRecord) async throws -> Bool {
+    private static func describe(_ view: NSView?) -> [String: Any] {
+        guard let view else { return ["class": "nil"] }
+        return ["class": String(describing: type(of: view)),
+                "identifier": view.identifier?.rawValue ?? "",
+                "frame": NSStringFromRect(view.frame),
+                "hidden": view.isHidden]
+    }
+
+    /// 真实面板拖拽。先确认本进程已激活且窗口是关键窗口，否则 HID 事件会被
+    /// 前台宿主吞掉；同时记录权限、命中、拖动会话和真实窗口状态。
+    private static func dragPanel(_ application: ApplicationWorkspace, first: WindowRecord, second: WindowRecord) async throws -> (Bool, [String: Any]) {
+        var diagnostics: [String: Any] = [:]
+        diagnostics["preflight_post_event"] = CGPreflightPostEventAccess()
+        var parentBuffer = [CChar](repeating: 0, count: 4096)
+        let parentBytes = parentBuffer.map { UInt8(bitPattern: $0) }
+        let parentPath = proc_pidpath(getppid(), &parentBuffer, UInt32(parentBuffer.count)) > 0
+            ? String(decoding: parentBytes.prefix { $0 != 0 }, as: UTF8.self) : ""
+        diagnostics["process"] = ["pid": getpid(), "parent_pid": getppid(),
+                                  "parent_path": parentPath,
+                                  "bundle": Bundle.main.bundleIdentifier ?? ""]
         guard CGPreflightPostEventAccess() else {
             let message = "Hortus panel drag inspection cannot post CGEvents: Accessibility permission is not granted to this host."
             fputs(message + "\n", stderr)
+            diagnostics["error"] = message
             throw NSError(domain: "HortusInspection", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
         }
         application.activate(first)
-        try await Task.sleep(for: .milliseconds(200))
+        NSApp.activate(ignoringOtherApps: true)
+        try await wait { NSApp.isActive && first.window?.isKeyWindow == true }
+        try await Task.sleep(for: .milliseconds(150))
         let window = try require(first.window)
         let content = try require(window.contentView)
         let source = try require(findView(content, named: "panel-tab-outline"))
         let target = try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "bottom-panel" }?.view)
-        func point(_ view: NSView) -> CGPoint {
-            let rect = window.convertToScreen(view.convert(view.bounds, to: nil))
-            return CGPoint(x: rect.midX, y: (NSScreen.screens.first?.frame.maxY ?? 0) - rect.midY)
+        func screenRect(_ view: NSView) -> NSRect {
+            window.convertToScreen(view.convert(view.bounds, to: nil))
         }
-        let from = point(source), to = point(target)
+        let sourceRect = screenRect(source)
+        let targetRect = screenRect(target)
+        let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
+        let from = CGPoint(x: sourceRect.midX, y: displayHeight - sourceRect.midY)
+        let to = CGPoint(x: targetRect.midX, y: displayHeight - targetRect.midY)
+        let windowPoint = window.convertPoint(fromScreen: NSPoint(x: sourceRect.midX, y: sourceRect.midY))
+        let hit = content.hitTest(windowPoint)
+        diagnostics["active"] = NSApp.isActive
+        diagnostics["window"] = ["key": window.isKeyWindow, "main": window.isMainWindow,
+                                 "visible": window.isVisible, "frame": NSStringFromRect(window.frame),
+                                 "screen": NSStringFromRect(NSScreen.screens.first?.frame ?? .zero)]
+        diagnostics["windows"] = application.records.map { record in
+            record.window.map { NSStringFromRect($0.frame) } ?? ""
+        }
+        diagnostics["screens"] = NSScreen.screens.map { NSStringFromRect($0.frame) }
+        diagnostics["source"] = describe(source)
+        diagnostics["source_hit"] = describe(hit)
+        diagnostics["target"] = describe(target)
+        diagnostics["source_rect"] = NSStringFromRect(sourceRect)
+        diagnostics["target_rect"] = NSStringFromRect(targetRect)
+        diagnostics["from"] = ["x": from.x, "y": from.y]
+        diagnostics["to"] = ["x": to.x, "y": to.y]
+        diagnostics["region_before"] = first.layout.region(containing: .outline).map(String.init(describing:)) ?? "nil"
+        let tracker = Task { @MainActor in
+            for _ in 0..<200 {
+                if first.layout.dragging != nil { return true }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return false
+        }
         await withCheckedContinuation { continuation in
             sendDrag(from: from, to: to) { continuation.resume() }
         }
-        try await wait { first.layout.region(containing: .outline) == .bottom }
-        return second.layout.region(containing: .outline) == .bottom && first.layout.groups(in: .bottom).map(\.tabs) == second.layout.groups(in: .bottom).map(\.tabs)
+        diagnostics["drag_session_seen"] = await tracker.value
+        diagnostics["mouse_after"] = ["x": NSEvent.mouseLocation.x, "y": NSEvent.mouseLocation.y]
+        diagnostics["region_after_drag"] = first.layout.region(containing: .outline).map(String.init(describing:)) ?? "nil"
+        var changed = false
+        for _ in 0..<300 {
+            if first.layout.region(containing: .outline) == .bottom { changed = true; break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        diagnostics["region_after"] = first.layout.region(containing: .outline).map(String.init(describing:)) ?? "nil"
+        diagnostics["region_changed"] = changed
+        let shared = second.layout.region(containing: .outline) == .bottom
+            && first.layout.groups(in: .bottom).map(\.tabs) == second.layout.groups(in: .bottom).map(\.tabs)
+        diagnostics["groups_shared"] = shared
+        diagnostics["second_region"] = second.layout.region(containing: .outline).map(String.init(describing:)) ?? "nil"
+        return (changed && shared, diagnostics)
     }
 
     nonisolated private static func sendDrag(from: CGPoint, to: CGPoint, completion: @escaping @Sendable () -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             func post(_ type: CGEventType, _ point: CGPoint) {
-                CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+                event.post(tap: .cghidEventTap)
             }
             post(.mouseMoved, from)
             Thread.sleep(forTimeInterval: 0.1)
