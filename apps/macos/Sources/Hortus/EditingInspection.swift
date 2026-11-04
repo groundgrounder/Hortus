@@ -6,6 +6,11 @@ import HortusCore
 enum EditingInspection {
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         guard let document = workspace.current?.document, let path = workspace.selected else { throw CocoaError(.coderValueNotFound) }
+        let mode = arguments.first(where: { $0.hasPrefix("--edit-mode=") }).map { String($0.dropFirst("--edit-mode=".count)) } ?? "lifecycle"
+        // 观察模式不发送任何编辑、焦点或保存动作；状态只由外部的真实键盘和鼠标驱动。
+        if mode == "observe" { return try await observe(workspace: workspace, arguments: arguments) }
+        // 组合在焦点离开编辑器后的保存与快捷键回归：点击和 ⌘E 是真实 CGEvent。
+        if mode == "composition-focus-loss" { return try await compositionFocusLoss(workspace: workspace) }
         if document.reading { await workspace.toggleCurrentView() }
         for _ in 0..<500 {
             if DiagramInspection.current(document: workspace.current?.document)?.isReading == false { break }
@@ -13,7 +18,6 @@ enum EditingInspection {
         }
         var view = try await DiagramInspection.settled(document: workspace.current?.document)
         view.window?.makeFirstResponder(view)
-        let mode = arguments.first(where: { $0.hasPrefix("--edit-mode=") }).map { String($0.dropFirst("--edit-mode=".count)) } ?? "lifecycle"
         if mode == "recovery" {
             guard document.issue == .recovery else { throw CocoaError(.coderValueNotFound) }
             await document.recover(true)
@@ -174,6 +178,243 @@ enum EditingInspection {
                 "switch_save": switchSave, "library_save": librarySave, "close_save": closeSaved, "external_delay_seconds": externalDelay,
                 "selection_preserved": caret == selected, "undo_cleared": undoCleared,
                 "dirty_before_exit": workspace.current?.document?.dirty == true]
+    }
+    /// 只读取主线程状态并按变化追加 JSONL；不发起任何编辑、焦点、菜单刷新或保存动作。
+    /// 真实按键由外部探针通过 CGEvent 发送，本模式只提供同一时钟下的内部状态对照。
+    private static func observe(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
+        guard let argument = arguments.first(where: { $0.hasPrefix("--observe-log=") }) else { throw CocoaError(.coderInvalidValue) }
+        let path = String(argument.dropFirst("--observe-log=".count))
+        let seconds = arguments.first(where: { $0.hasPrefix("--observe-seconds=") })
+            .flatMap { Double($0.dropFirst("--observe-seconds=".count)) } ?? 20
+        let salt = arguments.first(where: { $0.hasPrefix("--observe-salt=") })
+            .map { String($0.dropFirst("--observe-salt=".count)) } ?? ""
+        FileManager.default.createFile(atPath: path, contents: nil)
+        guard let file = FileHandle(forWritingAtPath: path) else { throw CocoaError(.fileWriteUnknown) }
+        defer { try? file.close() }
+        var written = 0
+        var last: [String: Any] = [:]
+        let started = ProcessInfo.processInfo.systemUptime
+        var ticks = 0
+        // 先写一行起点，外部探针据此判断检查器已经接管。
+        try append(["kind": "start", "t": started, "seconds": seconds], to: file)
+        written += 1
+        while ProcessInfo.processInfo.systemUptime - started < seconds {
+            ticks += 1
+            if var sample = sample(workspace: workspace, salt: salt) {
+                sample.removeValue(forKey: "t")
+                if sample as NSDictionary != last as NSDictionary {
+                    var line = sample
+                    line["kind"] = "state"
+                    line["t"] = ProcessInfo.processInfo.systemUptime
+                    try append(line, to: file)
+                    written += 1
+                    last = sample
+                }
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let ended = ProcessInfo.processInfo.systemUptime
+        try append(["kind": "end", "t": ended, "ticks": ticks], to: file)
+        written += 1
+        return ["observe_log": path, "samples": written, "ticks": ticks, "seconds": ended - started,
+                "document_reading": workspace.current?.document?.reading == true,
+                "document_dirty": workspace.current?.document?.dirty == true,
+                "document_marked": workspace.current?.document?.marked == true]
+    }
+    private static func sample(workspace: Workspace, salt: String) -> [String: Any]? {
+        guard let document = workspace.current?.document else { return nil }
+        let view = DiagramInspection.current(document: document)
+        let window = NSApp.keyWindow ?? NSApp.windows.first(where: \.isVisible)
+        var sample: [String: Any] = [
+            "tabs": workspace.tabs.count,
+            "selected_index": workspace.tabs.firstIndex(where: { $0.path == workspace.selected }) ?? -1,
+            "reading": document.reading,
+            "dirty": document.dirty,
+            "marked": document.marked,
+            "issue": String(describing: document.issue),
+            "message": document.message,
+            "persistence": String(describing: document.persistence),
+            "revision": document.revision,
+            "text_revision": document.textRevision,
+            "read_only": document.readOnlyReason ?? "",
+            "key_window": window?.isKeyWindow == true,
+            "main_active": NSApp.isActive,
+            "first_responder": window.flatMap { $0.firstResponder.map { String(describing: type(of: $0)) } } ?? "",
+            "save_enabled": saveItem(NSApp.mainMenu)?.isEnabled ?? false,
+            "save_action": saveItem(NSApp.mainMenu)?.action.map(NSStringFromSelector) ?? "",
+        ]
+        // 只解析当前响应者链上的命令目标，不触发菜单校验或刷新。
+        sample["responder_chain"] = chain(window?.firstResponder)
+        for (name, selector) in [("undo", "undo:"), ("copy", "copy:"), ("select_all", "selectAll:"),
+                                 ("paste", "paste:"), ("insert_newline", "insertNewline:"),
+                                 ("toggle_sidebar", "toggleSidebar:")] {
+            sample["target_\(name)"] = NSApp.target(forAction: Selector(selector), to: nil, from: nil)
+                .map { String(describing: type(of: $0)) } ?? ""
+        }
+        if let view {
+            sample["editable"] = view.isEditable
+            sample["marked_text"] = view.hasMarkedText()
+            sample["composition"] = view.compositionActive
+            sample["view_length"] = view.textStorage?.length ?? -1
+            sample["view_hash"] = digest(view.string, salt: salt)
+            sample["blocks"] = view.blocks.count
+            sample["pending"] = view.diagramPending
+            sample["is_reading"] = view.isReading
+            sample["selection_length"] = view.selectedRange().length
+            sample["can_undo"] = view.undoManager?.canUndo ?? false
+            sample["can_redo"] = view.undoManager?.canRedo ?? false
+            sample["undo_groups"] = view.undoManager?.undoCount ?? 0
+        }
+        for key in ["z", "a", "c", "v", "x"] {
+            let item = menuItem(key, NSApp.mainMenu)
+            sample["menu_\(key)_title"] = item?.title ?? ""
+            sample["menu_\(key)_enabled"] = item?.isEnabled ?? false
+            sample["menu_\(key)_action"] = item?.action.map(NSStringFromSelector) ?? ""
+        }
+        if let item = toggleItem(NSApp.mainMenu) {
+            sample["switch_enabled"] = item.isEnabled
+            sample["switch_title"] = item.title
+            sample["switch_action"] = item.action.map(NSStringFromSelector) ?? ""
+        }
+        let url = document.io.url
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) {
+            sample["disk_bytes"] = (attributes[.size] as? NSNumber)?.intValue ?? -1
+            sample["disk_mtime"] = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        } else {
+            sample["disk_bytes"] = -1
+        }
+        sample["disk_hash"] = (try? String(contentsOf: url, encoding: .utf8)).map { digest($0, salt: salt) } ?? "missing"
+        return sample
+    }
+    private static func chain(_ responder: NSResponder?) -> String {
+        var names: [String] = []
+        var current: NSResponder? = responder
+        for _ in 0..<12 {
+            guard let next = current else { break }
+            names.append(String(describing: type(of: next)))
+            current = next.nextResponder
+        }
+        return names.joined(separator: ">")
+    }
+    private static func append(_ line: [String: Any], to file: FileHandle) throws {
+        let data = try JSONSerialization.data(withJSONObject: line, options: [.sortedKeys])
+        try file.write(contentsOf: data + Data([0x0a]))
+        try file.synchronize()
+    }
+    /// 只用于比较两段正文是否相同；私人根内的日志才保存结果。
+    private static func digest(_ text: String, salt: String) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in (salt + "\u{0}" + text).utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x100000001b3
+        }
+        return String(format: "%016llx", hash)
+    }
+    private static func menuItem(_ key: String, _ menu: NSMenu?) -> NSMenuItem? {
+        for item in menu?.items ?? [] {
+            if item.keyEquivalent == key, item.keyEquivalentModifierMask == .command { return item }
+            if let nested = menuItem(key, item.submenu) { return nested }
+        }
+        return nil
+    }
+    private static func toggleItem(_ menu: NSMenu?) -> NSMenuItem? {
+        for item in menu?.items ?? [] {
+            if item.keyEquivalent == "e", item.keyEquivalentModifierMask == .command { return item }
+            if let nested = toggleItem(item.submenu) { return nested }
+        }
+        return nil
+    }
+    /// 真实点击编辑器建立焦点，由输入法入口建立组合，再真实点击底部终端让焦点离开。
+    /// 断言只落在用户可观察结果：是否结束组合、是否完成保存、磁盘是否更新、⌘E 是否生效。
+    private static func compositionFocusLoss(workspace: Workspace) async throws -> [String: Any] {
+        var result: [String: Any] = ["post_event_access": CGPreflightPostEventAccess(),
+                                     "windows": NSApp.windows.map { "\($0.className)|visible=\($0.isVisible)|key=\($0.isKeyWindow)" }]
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.isKeyWindow })
+                ?? NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) else {
+            result["window"] = "missing"
+            return result
+        }
+        var terminal: NSView?
+        for _ in 0..<60 {
+            if let content = window.contentView { terminal = firstView(named: "HortusTerminalView", in: content) }
+            if terminal != nil { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        result["terminal_found"] = terminal != nil
+        guard let terminal, let document = workspace.current?.document else {
+            result["document"] = workspace.current?.document != nil
+            return result
+        }
+        let view = try await DiagramInspection.settled(document: document)
+        result["terminal_visible"] = !terminal.isHiddenOrHasHiddenAncestor
+        // 背景窗口第一次点击只用于激活，之后重复一次确保落到目标视图。
+        for _ in 0..<3 {
+            click(center(of: view, in: window), window: window)
+            try? await Task.sleep(for: .milliseconds(250))
+            if window.firstResponder === view { break }
+        }
+        result["focused"] = window.firstResponder === view
+        guard window.firstResponder === view else { return result }
+        let before = try String(contentsOf: document.io.url, encoding: .utf8)
+        // 输入法入口：与真实输入法相同，组合只写进原生存储并由文本通知进入文档状态。
+        let selection = view.selectedRange()
+        view.setMarkedText("nihao", selectedRange: NSRange(location: 5, length: 0), replacementRange: selection)
+        try? await Task.sleep(for: .milliseconds(200))
+        result["composing"] = view.hasMarkedText()
+        result["marked_during_composition"] = document.marked
+        result["dirty_during_composition"] = document.dirty
+        guard view.hasMarkedText() else { return result }
+        // 组合进行中保存与切换必须仍被阻止，修复不能靠放开这道保护通过。
+        attemptShortcut(14, flags: .maskCommand)
+        try? await Task.sleep(for: .milliseconds(400))
+        result["save_blocked_while_composing"] = document.dirty && document.marked
+        result["toggle_blocked_while_composing"] = !document.reading
+        // 真实点击底部终端：焦点离开编辑器。
+        click(center(of: terminal, in: window), window: window)
+        try? await Task.sleep(for: .milliseconds(300))
+        result["focus_left_editor"] = window.firstResponder !== view
+        // 自动保存窗口：1 秒防抖 + 余量。
+        try? await Task.sleep(for: .seconds(2))
+        result["marked_cleared"] = !document.marked && !view.hasMarkedText()
+        result["save_completed"] = !document.dirty && document.issue == .none
+        let after = try String(contentsOf: document.io.url, encoding: .utf8)
+        result["disk_updated"] = after != before && after.contains("nihao")
+        result["disk_matches_editor"] = after == view.string
+        // 真实 ⌘E：保存成功后才允许切换视图。
+        attemptShortcut(14, flags: .maskCommand)
+        try? await Task.sleep(for: .milliseconds(800))
+        result["toggle_worked"] = document.reading
+        result["issue"] = String(describing: document.issue)
+        return result
+    }
+    private static func attemptShortcut(_ key: CGKeyCode, flags: CGEventFlags) {
+        for down in [true, false] {
+            let event = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: key, keyDown: down)
+            event?.flags = flags
+            event?.post(tap: .cghidEventTap)
+            usleep(20_000)
+        }
+    }
+    private static func click(_ point: CGPoint, window: NSWindow) {
+        let screen = window.convertPoint(toScreen: point)
+        // CGEvent 的坐标原点在主显示器左上角；窗口坐标的 y 轴向上。
+        let height = NSScreen.screens.max { $0.frame.maxY < $1.frame.maxY }?.frame.maxY ?? NSScreen.main?.frame.height ?? 0
+        let location = CGPoint(x: screen.x, y: height - screen.y)
+        for type in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
+            CGEvent(mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: type,
+                    mouseCursorPosition: location, mouseButton: .left)?.post(tap: .cghidEventTap)
+            usleep(25_000)
+        }
+    }
+    private static func center(of view: NSView, in window: NSWindow) -> CGPoint {
+        let bounds = view.convert(view.bounds, to: nil)
+        return CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+    private static func firstView(named name: String, in view: NSView) -> NSView? {
+        if String(describing: type(of: view)) == name { return view }
+        for subview in view.subviews {
+            if let found = firstView(named: name, in: subview) { return found }
+        }
+        return nil
     }
     private static func diskMatches(_ document: NoteDocument, _ view: DiagramTextView) throws -> Bool {
         try String(contentsOf: document.io.url, encoding: .utf8) == view.string
