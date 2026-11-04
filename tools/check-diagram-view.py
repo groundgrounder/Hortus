@@ -181,7 +181,7 @@ def scenarios(base, output):
     resize = performance['resize']
     assert len(resize) == 60 and all(row['draw_height'] > 0 and row['draw_scale'] >= 1 for row in resize), '缩放用例未绘制可见图'
     totals = sorted(row['total_ms'] for row in resize)
-    p95 = totals[int((len(totals) - 1) * .95)]
+    p95 = totals[(len(totals) * 95 + 99) // 100 - 1]
     memory = memory_data['memory']
     middle = sorted(row['opened_bytes'] for row in memory[5:10])[2]
     end = sorted(row['opened_bytes'] for row in memory[-5:])[2]

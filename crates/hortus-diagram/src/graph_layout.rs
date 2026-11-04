@@ -983,6 +983,31 @@ fn retain_positions(
     if previous.direction != graph.direction {
         return (0, "direction_changed".into());
     }
+    // 改宽后旧行带可能已不再能容纳新框宽；若共同成员的带归属与目标宽度
+    // 初排不同，保留旧分组会同时破坏行带和旧通道的一致性。
+    if (previous.width - options.width).abs() > 0.25 {
+        let same_group = |a: &crate::GraphAnchor, b: &crate::GraphAnchor| a.group == b.group;
+        let common = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                previous
+                    .nodes
+                    .iter()
+                    .find(|anchor| anchor.node_id == node.id)
+                    .map(|anchor| (index, anchor))
+            })
+            .collect::<Vec<_>>();
+        let matches = common.iter().all(|(a, anchor_a)| {
+            common
+                .iter()
+                .all(|(b, anchor_b)| same_group(anchor_a, anchor_b) == (groups[*a] == groups[*b]))
+        });
+        if !matches {
+            return (0, "width_group_invalidated".into());
+        }
+    }
     // 横向改宽按旧行带整体装箱，不能把单个溢出节点依次丢到行尾下方。
     if (previous.width - options.width).abs() > 0.25
         && matches!(
@@ -1437,4 +1462,107 @@ fn count_edge_crossings(paths: &[Vec<Point>]) -> usize {
         }
     }
     crossings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse_diagram;
+    use std::collections::BTreeSet;
+
+    fn graph(source: &str) -> Graph {
+        let crate::Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
+            panic!("expected graph")
+        };
+        graph
+    }
+
+    fn groups(nodes: &[crate::GraphAnchor]) -> BTreeSet<BTreeSet<String>> {
+        let mut result = std::collections::BTreeMap::<usize, BTreeSet<String>>::new();
+        for node in nodes {
+            result
+                .entry(node.group)
+                .or_default()
+                .insert(node.node_id.clone());
+        }
+        result.into_values().collect()
+    }
+
+    #[test]
+    fn width_change_discards_stale_fanout_bands() {
+        let graph = graph(include_str!(
+            "../../../fixtures/mermaid/flowchart/fanout.mmd"
+        ));
+        let mut fonts = crate::SystemFonts::new().unwrap();
+        let initial = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 700.0,
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        let narrow = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 600.0,
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        let resized = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 700.0,
+                previous: Some(narrow.previous),
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        assert_eq!(resized.metrics.stability_reason, "width_group_invalidated");
+        assert_eq!(
+            groups(&resized.previous.nodes),
+            groups(&initial.previous.nodes)
+        );
+        assert_eq!(resized.metrics.edge_crossings, 0);
+    }
+
+    #[test]
+    fn horizontal_width_change_keeps_compatible_rows() {
+        let graph = graph(include_str!(
+            "../../../fixtures/mermaid/flowchart/erikson.mmd"
+        ));
+        let mut fonts = crate::SystemFonts::new().unwrap();
+        let initial = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 700.0,
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        let resized = layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 900.0,
+                previous: Some(initial.previous.clone()),
+                ..Default::default()
+            },
+            &mut fonts,
+        )
+        .unwrap();
+        assert_eq!(
+            resized.metrics.stability_reason,
+            "retained_horizontal_bands"
+        );
+        assert_eq!(
+            groups(&resized.previous.nodes),
+            groups(&initial.previous.nodes)
+        );
+        assert_eq!(resized.metrics.edge_crossings, 0);
+    }
 }

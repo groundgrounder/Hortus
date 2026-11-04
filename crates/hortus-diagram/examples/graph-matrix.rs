@@ -3,6 +3,11 @@ use hortus_diagram::*;
 use serde_json::{Value, json};
 use std::{env, fs, path::Path, time::Instant};
 
+fn nearest_rank_p95(sorted: &[f64]) -> f64 {
+    assert!(!sorted.is_empty());
+    sorted[(sorted.len() * 95).div_ceil(100) - 1]
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args().collect();
     let output = Path::new(args.get(1).ok_or("missing output directory")?);
@@ -108,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let mut sorted = rounds.iter().flatten().copied().collect::<Vec<_>>();
             sorted.sort_by(f64::total_cmp);
-            let row = json!({"nodes":count,"seed":seed,"rounds_ms":rounds,"median_ms":sorted[sorted.len()/2],"p95_ms":sorted[(sorted.len()-1)*95/100],"max_ms":sorted.last(),"errors":failures});
+            let row = json!({"nodes":count,"seed":seed,"rounds_ms":rounds,"median_ms":sorted[sorted.len()/2],"p95_ms":nearest_rank_p95(&sorted),"max_ms":sorted.last(),"errors":failures});
             println!(
                 "nodes={count} seed={seed} median={:.3} p95={:.3}",
                 row["median_ms"].as_f64().unwrap(),
@@ -125,20 +130,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn row_band_changes(common: &[(&GraphAnchor, &GraphAnchor)]) -> usize {
-    let same_row = |a: &GraphAnchor, b: &GraphAnchor| {
-        (a.rect.y + a.rect.height / 2.0 - b.rect.y - b.rect.height / 2.0).abs() < 1.0
+fn row_band_changes(common: &[(&GraphAnchor, &GraphAnchor)]) -> Option<usize> {
+    if common.len() <= 1 {
+        return None;
+    }
+    // 行带按垂直区间重叠聚类，不依赖节点中心；不同高度的同顶/同中心节点
+    // 仍属于同一实际行带。分支带则由 GraphAnchor.group 单独报告。
+    let band_members = |nodes: &[&GraphAnchor]| {
+        let mut bands = vec![usize::MAX; nodes.len()];
+        let mut next = 0;
+        for start in 0..nodes.len() {
+            if bands[start] != usize::MAX {
+                continue;
+            }
+            bands[start] = next;
+            let mut cursor = start;
+            while cursor < nodes.len() {
+                if bands[cursor] == next {
+                    for other in start + 1..nodes.len() {
+                        if bands[other] != usize::MAX {
+                            continue;
+                        }
+                        let a = nodes[cursor].rect;
+                        let b = nodes[other].rect;
+                        let overlap = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+                        if overlap >= a.height.min(b.height) * 0.5 {
+                            bands[other] = next;
+                        }
+                    }
+                }
+                cursor += 1;
+            }
+            next += 1;
+        }
+        bands
     };
-    common
-        .iter()
-        .enumerate()
-        .filter(|(i, (a, b))| {
-            common
-                .iter()
-                .enumerate()
-                .any(|(j, (c, d))| i != &j && same_row(a, c) != same_row(b, d))
-        })
-        .count()
+    let old = common.iter().map(|(anchor, _)| *anchor).collect::<Vec<_>>();
+    let new = common.iter().map(|(_, anchor)| *anchor).collect::<Vec<_>>();
+    let old_bands = band_members(&old);
+    let new_bands = band_members(&new);
+    Some(
+        (0..common.len())
+            .filter(|index| {
+                (0..common.len()).any(|other| {
+                    index != &other
+                        && (old_bands[*index] == old_bands[other])
+                            != (new_bands[*index] == new_bands[other])
+                })
+            })
+            .count(),
+    )
 }
 
 fn window_stability(name: &str, graph: &Graph, fonts: &mut dyn FontMetrics) -> Vec<Value> {
@@ -532,4 +573,17 @@ fn stability(name: &str, graph: &Graph, width: f64, fonts: &mut dyn FontMetrics)
         rows.push(json!({"name":name,"width":width,"edit":kind,"actual_width_ratio":ratio,"unchanged_nodes":common.len(),"median_displacement_px":distances.get(distances.len()/2),"max_displacement_px":distances.last(),"group_changes":group_changes,"within_rank_inversions":inversions,"row_band_changes":row_band_changes(&common),"anchor_residual_max_px":residual.into_iter().max_by(f64::total_cmp),"reason":after.metrics.stability_reason,"geometry":geometry(&after.scene)}));
     }
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nearest_rank_p95;
+
+    #[test]
+    fn p95_uses_nearest_rank() {
+        let values = (0..93).map(f64::from).collect::<Vec<_>>();
+        assert_eq!(nearest_rank_p95(&values), 88.0);
+        let twenty = (0..20).map(f64::from).collect::<Vec<_>>();
+        assert_eq!(nearest_rank_p95(&twenty), 18.0);
+    }
 }
