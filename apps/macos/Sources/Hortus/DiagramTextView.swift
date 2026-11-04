@@ -160,6 +160,12 @@ struct NoteText: NSViewRepresentable {
             view.isEditable = input.document != nil && input.document?.readOnlyReason == nil && input.document?.issue != .recovery && !loading
             view.setAccessibilityLabel(view.isEditable ? L10n.string("Note") : L10n.string("Note, read-only"))
             view.onWidthOrThemeChange = { [weak self] in self?.schedule(); self?.scheduleStyles(force: true) }
+            view.onFreshRender = { [weak self] in
+                guard let self else { return }
+                await self.input?.service.discardPrevious()
+                for index in self.blocks.indices { self.blocks[index].previous = nil }
+                self.schedule(force: true)
+            }
             view.onToggle = { [weak self] ordinal, id in self?.toggle(ordinal: ordinal, id: id) }
             view.onEditSource = { [weak self] ordinal in self?.editSource(ordinal) }
             view.onSourceRange = { [weak self] ordinal, range in self?.locateSource(ordinal, range: range) }
@@ -713,6 +719,8 @@ final class DiagramTextView: NSTextView {
     var diagramPending = false
     var diagramIssue: String?
     var onWidthOrThemeChange: (() -> Void)?
+    /// 仅验收使用：按当前宽度丢弃旧图锚点，重新做一次初排。
+    var onFreshRender: (() async -> Void)?
     var onToggle: ((UInt32, String) -> Void)?
     var onEditSource: ((UInt32) -> Void)?
     var onSourceRange: ((UInt32, NSRange) -> Void)?

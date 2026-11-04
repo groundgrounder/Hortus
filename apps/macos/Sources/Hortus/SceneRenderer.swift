@@ -117,15 +117,13 @@ enum SceneRenderer {
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): span.color.cgColor,
         ]
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: span.text, attributes: attributes))
-        if span.fontFamily == "Apple Color Emoji" {
-            // CoreText 自动放大 sbix 字体；用字体矩阵恢复 Rust 所用的 OpenType em 度量。
-            let width = CTLineGetTypographicBounds(line, nil, nil, nil)
-            if width > 0, span.width > 0 {
-                let scale = span.width / width
-                var matrix = CGAffineTransform(scaleX: scale, y: scale)
-                attributes[NSAttributedString.Key(kCTFontAttributeName as String)] = CTFontCreateCopyWithAttributes(font, span.fontSize, &matrix, nil)
-                return CTLineCreateWithAttributedString(NSAttributedString(string: span.text, attributes: attributes))
-            }
+        let width = CTLineGetTypographicBounds(line, nil, nil, nil)
+        if width > 0, span.width > 0, abs(width - span.width) > 0.01 {
+            // 平台按 Rust 排版宽度绘制；字体实现差异只允许落在不可见的亚像素内。
+            let scale = span.width / width
+            var matrix = CGAffineTransform(scaleX: scale, y: span.fontFamily == "Apple Color Emoji" ? scale : 1)
+            attributes[NSAttributedString.Key(kCTFontAttributeName as String)] = CTFontCreateCopyWithAttributes(font, span.fontSize, &matrix, nil)
+            return CTLineCreateWithAttributedString(NSAttributedString(string: span.text, attributes: attributes))
         }
         return line
     }
@@ -194,9 +192,19 @@ enum SceneRenderer {
         switch primitive {
         case let .roundedRect(rect, radius, _):
             return DiagramDrawing(bounds: rect.cgRect, paths: [CGPath(roundedRect: rect.cgRect, cornerWidth: radius, cornerHeight: radius, transform: nil)])
-        case let .graphShape(rect, _, outline, details, _, _, width):
+        case let .graphShape(rect, shape, outline, details, _, _, width):
+            let body: CGPath
+            if outline.isEmpty && (shape == "Rectangle" || shape == "Rounded") {
+                let radius = min(10.0, rect.height / 2)
+                body = CGPath(roundedRect: rect.cgRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+            } else if outline.isEmpty && shape == "Stadium" {
+                let radius = min(rect.width, rect.height) / 2
+                body = CGPath(roundedRect: rect.cgRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+            } else {
+                body = path(outline, closed: true)
+            }
             return DiagramDrawing(bounds: rect.cgRect.insetBy(dx: -width, dy: -width),
-                                  paths: [path(outline, closed: true)] + details.map { path($0) })
+                                  paths: [body] + details.map { path($0) })
         case let .graphPath(_, radius, points, _, _, _, _, _, _, _, _, _):
             guard let first = points.first else { return nil }
             var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y

@@ -134,8 +134,14 @@ fn layout_graph_with_order(
                 limit
             };
             for line in wrap_label(body, word_width, size, weight, fonts) {
-                let measured = fonts.measure(&line, size, weight);
-                label_lines.push((line, measured.width, measured.ascent, size));
+                // 行尾空白不参与可见排版；CoreText 与 OpenType 对空格宽度定义不同，
+                // 保留会在窄标签上放大成可测的字宽误差。
+                let line = line.trim_end();
+                if line.is_empty() {
+                    continue;
+                }
+                let measured = fonts.measure(line, size, weight);
+                label_lines.push((line.to_string(), measured.width, measured.ascent, size));
             }
         }
         let content_width = label_lines
@@ -257,7 +263,7 @@ fn layout_graph_with_order(
         .map(|edge| {
             edge.label
                 .as_ref()
-                .map(|label| fonts.measure(label, 13.0, 400).width)
+                .map(|label| fonts.measure(label.trim_end(), 13.0, 400).width)
         })
         .collect::<Vec<_>>();
     let routed = crate::graph_router::route(
@@ -293,6 +299,7 @@ fn layout_graph_with_order(
     }
     for (index, edge) in graph.edges.iter().enumerate() {
         if let Some(label) = &edge.label {
+            let label = label.trim_end();
             let measured = fonts.measure(label, 13.0, 400);
             let rect =
                 routed.labels[index].ok_or_else(|| LayoutError("Missing edge label".into()))?;
@@ -1516,43 +1523,55 @@ pub(crate) fn place_edge_label(
     let mut candidates = Vec::new();
     for (segment, pair) in paths[index].windows(2).enumerate() {
         let length = (pair[1].x - pair[0].x).abs() + (pair[1].y - pair[0].y).abs();
+        let horizontal = (pair[0].y - pair[1].y).abs() < 0.001;
         for fraction in [0.5, 0.3, 0.7, 0.15, 0.85] {
             let center = Point {
                 x: pair[0].x + (pair[1].x - pair[0].x) * fraction,
                 y: pair[0].y + (pair[1].y - pair[0].y) * fraction,
             };
-            let rect = Rect {
-                x: center.x - width / 2.0 - 5.0,
-                y: center.y - 10.0,
-                width: width + 10.0,
-                height: 20.0,
-            };
-            if rect.x < 4.0 || rect.x + rect.width > canvas_width - 4.0 || rect.y < 4.0 {
-                continue;
+            // 长标签在密集 LR 图里放不进边线正中；允许垂直/水平让位到相邻空白。
+            for offset in [0.0, 12.0, -12.0, 22.0, -22.0, 32.0, -32.0] {
+                let (dx, dy) = if horizontal {
+                    (0.0, offset)
+                } else {
+                    (offset, 0.0)
+                };
+                let rect = Rect {
+                    x: center.x + dx - width / 2.0 - 5.0,
+                    y: center.y + dy - 10.0,
+                    width: width + 10.0,
+                    height: 20.0,
+                };
+                if rect.x < 4.0 || rect.x + rect.width > canvas_width - 4.0 || rect.y < 4.0 {
+                    continue;
+                }
+                let margin = Rect {
+                    x: rect.x - 2.0,
+                    y: rect.y - 2.0,
+                    width: rect.width + 4.0,
+                    height: rect.height + 4.0,
+                };
+                if nodes.iter().any(|node| margin.intersects(*node))
+                    || labels.iter().any(|label| margin.intersects(*label))
+                {
+                    continue;
+                }
+                if paths.iter().enumerate().any(|(other, path)| {
+                    other != index
+                        && path
+                            .windows(2)
+                            .any(|pair| segment_hits_rect(pair[0], pair[1], margin))
+                }) {
+                    continue;
+                }
+                candidates.push((
+                    -(length.min(100.0))
+                        + (fraction - 0.5).abs() * 30.0
+                        + offset.abs() * 1.5
+                        + segment as f64 * 0.01,
+                    rect,
+                ));
             }
-            let margin = Rect {
-                x: rect.x - 2.0,
-                y: rect.y - 2.0,
-                width: rect.width + 4.0,
-                height: rect.height + 4.0,
-            };
-            if nodes.iter().any(|node| margin.intersects(*node))
-                || labels.iter().any(|label| margin.intersects(*label))
-            {
-                continue;
-            }
-            if paths.iter().enumerate().any(|(other, path)| {
-                other != index
-                    && path
-                        .windows(2)
-                        .any(|pair| segment_hits_rect(pair[0], pair[1], margin))
-            }) {
-                continue;
-            }
-            candidates.push((
-                -(length.min(100.0)) + (fraction - 0.5).abs() * 30.0 + segment as f64 * 0.01,
-                rect,
-            ));
         }
     }
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
