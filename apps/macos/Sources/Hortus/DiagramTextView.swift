@@ -745,6 +745,7 @@ final class DiagramTextView: NSTextView {
     var layoutRefreshCount = 0
     var layoutRenderCount = 0
     var layoutCancellationCount = 0
+    var minimumDocumentHeightForTesting: CGFloat = 0
     private var lastStableContentWidth = 0.0
     var onWidthOrThemeChange: (() -> Void)?
     var onToggle: ((UInt32, String) -> Void)?
@@ -976,7 +977,8 @@ final class DiagramTextView: NSTextView {
             contentHeight = view.frame.maxY + textContainerInset.height
         } else { contentHeight = (textLayoutManager?.usageBoundsForTextContainer.maxY ?? 0) + 2 * textContainerInset.height }
         let width = (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? frame.width
-        let height = max(enclosingScrollView?.contentView.bounds.height ?? 0, contentHeight)
+        let height = max(enclosingScrollView?.contentView.bounds.height ?? 0, contentHeight,
+                         minimumDocumentHeightForTesting)
         if abs(frame.height - height) > 0.5 {
             DiagramInspection.recordScrollStability(event: "document_resize", view: self,
                                                      details: ["content_height": contentHeight,

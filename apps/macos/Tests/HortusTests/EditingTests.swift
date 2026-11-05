@@ -31,10 +31,14 @@ struct EditingTests {
             view.frame = scroll.bounds; view.allowsUndo = true; view.isRichText = false
             view.isVerticallyResizable = true; view.textContainer?.widthTracksTextView = true
             view.textContainerInset = NSSize(width: 30, height: 24)
-            scroll.documentView = view
+            view.minimumDocumentHeightForTesting = 100_000
             window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false)
-            window.isReleasedWhenClosed = false; window.contentView = scroll
-            window.makeKeyAndOrderFront(nil); window.makeFirstResponder(view)
+            window.isReleasedWhenClosed = false
+            window.contentView = scroll
+            window.makeKeyAndOrderFront(nil); window.orderFrontRegardless(); window.makeKey()
+            scroll.documentView = view
+            window.makeFirstResponder(view)
+            window.display()
             coordinator.view = view
             coordinator.update(NoteText(text: source, path: "note.md", vault: vault.path, fontSize: 15,
                                         service: service, core: nil, document: document) { _, _ in })
@@ -44,8 +48,12 @@ struct EditingTests {
         }
         func close() async {
             _ = await document.prepareToClose()
-            coordinator.task?.cancel(); document.onReload = nil
+            coordinator.detach(); document.onReload = nil
             view.delegate = nil; view.textStorage?.delegate = nil
+            view.enclosingScrollView?.isFindBarVisible = false
+            window.makeFirstResponder(nil)
+            window.contentView = nil
+            window.resignKey(); window.resignMain(); window.orderOut(nil)
             window.close()
             try? FileManager.default.removeItem(at: directory)
         }
