@@ -127,6 +127,7 @@ struct NoteText: NSViewRepresentable {
         private var changeScheduled = false
 
         func detach() {
+            view?.finishComposition()
             task?.cancel(); task = nil; generation += 1
             styling.reset()
             if document?.viewOwner === self {
@@ -144,6 +145,7 @@ struct NoteText: NSViewRepresentable {
         func update(_ input: NoteText) {
             let changed = self.input?.path != input.path || self.input?.vault != input.vault
                 || self.input?.document !== input.document || (input.document == nil && self.input?.text != input.text)
+            if changed { view?.finishComposition() }
             if changed, self.input?.document?.viewOwner === self {
                 self.input?.document?.onReload = nil
                 self.input?.document?.onClosing = nil; self.input?.document?.onStateChange = nil
@@ -589,14 +591,16 @@ final class DiagramTextView: NSTextView {
     override func resignFirstResponder() -> Bool {
         // 组合中输入法把标记文本留在存储里；交还第一响应者时先结束组合，
         // 否则 hasMarkedText() 不再变化，文档会停在 marked 并拒绝保存。
-        if hasMarkedText() {
-            unmarkText()
-            // 先保留已显示的组合正文，再结束输入法会话，避免重新聚焦时重放旧 preedit。
-            inputContext?.discardMarkedText()
-        }
+        finishComposition()
         let accepted = super.resignFirstResponder(); redrawInlineMath()
         UndoMenuState.scheduleRefresh()
         return accepted
+    }
+    /// 保留已显示的组合正文，再结束输入法会话；文档切换和失焦共用同一收尾顺序。
+    func finishComposition() {
+        guard hasMarkedText() else { return }
+        unmarkText()
+        inputContext?.discardMarkedText()
     }
     @objc private func redrawInlineMath() {
         for formula in inlineMathViews {
