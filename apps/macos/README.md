@@ -62,7 +62,7 @@ python3 -B tools/check-edit-and-save.py
 python3 -B tools/check-real-edit.py --output target/reports/real-edit
 ```
 
-默认独立启动三次组合焦点场景和撤销场景，再运行一次编辑、阅读、终端与搜索框的撤销矩阵。组合场景按真实操作逐步构造完整期望正文，并核对光标、组合范围、修订号和输入法上下文；`summary.json` 给出总判定，各场景的 `phases.jsonl`、`observations.jsonl`、应用日志和 `verdict.json` 分别记录阶段状态、外部磁盘观察与失败原因。
+默认独立启动三次组合焦点、标签切换和搜索结果切换场景，独立启动三次撤销场景，再运行一次编辑、阅读、终端与搜索框的撤销矩阵。两个文档切换场景都从预开 A/B 双标签的 pristine 会话开始：标签场景真实点击工具栏标签，搜索场景先通过 ⇧⌘F 和真实查询显示 B 结果，再点击 B 结果；随后核对 A/B 的 marked、修订号、视图与磁盘正文，以及 A 的自动保存、切回后的 ⌘S 和 ⌘E。组合场景按真实操作逐步构造完整期望正文，并核对光标、组合范围、输入法上下文和阶段 ACK；`summary.json` 给出总判定，各场景的 `phases.jsonl`、`observations.jsonl`、应用日志和 `verdict.json` 分别记录阶段状态、外部磁盘观察与失败原因。
 
 P1-05 的样式和性能验收：
 

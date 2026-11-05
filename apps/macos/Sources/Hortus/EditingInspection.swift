@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Carbon
 import HortusCore
 
@@ -10,6 +11,8 @@ enum EditingInspection {
         let mode = arguments.first(where: { $0.hasPrefix("--edit-mode=") }).map { String($0.dropFirst("--edit-mode=".count)) } ?? "lifecycle"
         // 真实编辑检查只走 SCIM ITABC 的纯 keycode 事件；每个阶段等待外部读盘 ack。
         if mode == "composition-focus-loss" { return try await compositionFocusLoss(workspace: workspace, arguments: arguments) }
+        if mode == "composition-tab-switch" { return try await compositionDocumentSwitch(workspace: workspace, arguments: arguments, route: .tab) }
+        if mode == "composition-search-switch" { return try await compositionDocumentSwitch(workspace: workspace, arguments: arguments, route: .search) }
         if mode == "undo-redo" { return try await undoRedo(workspace: workspace, arguments: arguments) }
         if mode == "undo-matrix" { return try await undoMatrix(workspace: workspace, arguments: arguments) }
         if document.reading { await workspace.toggleCurrentView() }
@@ -179,6 +182,471 @@ enum EditingInspection {
                 "switch_save": switchSave, "library_save": librarySave, "close_save": closeSaved, "external_delay_seconds": externalDelay,
                 "selection_preserved": caret == selected, "undo_cleared": undoCleared,
                 "dirty_before_exit": workspace.current?.document?.dirty == true]
+    }
+
+    private enum DocumentSwitchRoute: String, Equatable {
+        case tab
+        case search
+    }
+
+    /// 从公开双标签会话开始，经真实 IME 组合后点击标签或已显示搜索结果。
+    /// 外部驱动在每个阶段读取两篇笔记；本函数不读磁盘，也不以内部状态替代用户路径。
+    private static func compositionDocumentSwitch(
+        workspace: Workspace, arguments: [String], route: DocumentSwitchRoute
+    ) async throws -> [String: Any] {
+        let mode = "composition-\(route.rawValue)-switch"
+        let bridge = try PhaseBridge(arguments: arguments)
+        defer { bridge.close() }
+        let originalInputSource = selectedInputSourceID()
+        var result: [String: Any] = ["mode": mode, "event_tap": "cghidEventTap"]
+        defer { _ = restoreInputSource(originalInputSource) }
+        let alphaPath = "alpha.md", betaPath = "beta.md"
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
+              let alpha = workspace.tabs.first(where: { $0.path == alphaPath })?.document,
+              let beta = workspace.tabs.first(where: { $0.path == betaPath })?.document,
+              workspace.selected == alphaPath else {
+            result["status"] = "environment_failed"
+            result["prerequisites"] = ["window": false, "alpha_document": false, "beta_document": false,
+                                       "alpha_selected": workspace.selected == alphaPath]
+            return result
+        }
+        let access = CGPreflightPostEventAccess()
+        let activation = await activate(window)
+        var prerequisites: [String: Any] = [
+            "event_access": access, "application_active": NSApp.isActive,
+            "activation_converged": activation, "key_window": window.isKeyWindow,
+            "alpha_loaded": !(workspace.tabs.first(where: { $0.path == alphaPath })?.loading ?? true),
+            "beta_loaded": !(workspace.tabs.first(where: { $0.path == betaPath })?.loading ?? true),
+            "alpha_selected": workspace.selected == alphaPath,
+            "input_source_before": originalInputSource ?? "",
+        ]
+        result["input_source_before"] = originalInputSource ?? ""
+        result["focus_event_tap"] = "cghidEventTap"
+        guard access, activation, window.isKeyWindow,
+              workspace.tabs.first(where: { $0.path == alphaPath })?.loading == false,
+              workspace.tabs.first(where: { $0.path == betaPath })?.loading == false else {
+            result["status"] = "environment_failed"
+            result["prerequisites"] = prerequisites
+            return result
+        }
+
+        let alphaView = try await DiagramInspection.settled(document: alpha)
+        guard !alpha.reading, alphaView.isEditable else {
+            result["status"] = "environment_failed"
+            result["prerequisites"] = prerequisites.merging(["alpha_editing": false]) { _, new in new }
+            return result
+        }
+
+        var tabTarget: [String: Any]?
+        var searchTarget: AccessibilityTarget?
+        if route == .tab {
+            guard let button = tabButton(in: window, path: betaPath) else {
+                result["status"] = "environment_failed"
+                result["prerequisites"] = prerequisites.merging(["beta_tab_visible": false]) { _, new in new }
+                return result
+            }
+            tabTarget = ["path": button.path, "label": button.accessibilityLabel() ?? "",
+                         "frame": NSStringFromRect(window.convertToScreen(button.convert(button.bounds, to: nil))),
+                         "selected": button.title]
+        } else {
+            let lastEvent = await press(3, flags: [.maskCommand, .maskShift])
+            guard let content = window.contentView,
+                  await waitUntil(5, { firstView(of: NativeSearchField.self, in: content)?.isHiddenOrHasHiddenAncestor == false }),
+                  let field = firstView(of: NativeSearchField.self, in: content) else {
+                result["status"] = "environment_failed"
+                result["prerequisites"] = prerequisites.merging(["search_panel": false]) { _, new in new }
+                return result
+            }
+            let latin = selectInputSource(ABCInputSourceID)
+            prerequisites["search_input_source_selected"] = latin.available && latin.selected
+            prerequisites["search_panel"] = true
+            result["search_input_source_selected"] = latin.selected
+            guard latin.available, latin.selected else {
+                result["status"] = "environment_failed"
+                result["prerequisites"] = prerequisites
+                return result
+            }
+            await click(center(of: field, in: window), window: window)
+            let fieldFocused = await waitUntil(5) { field.currentEditor() != nil }
+            prerequisites["search_field_focused"] = fieldFocused
+            guard fieldFocused else {
+                result["status"] = "environment_failed"
+                result["prerequisites"] = prerequisites
+                return result
+            }
+            await typeText("searchb")
+            _ = await waitUntil(5) {
+                workspace.searchQuery == "searchb" && !workspace.searchLoading
+                    && workspace.searchResults.map(\.path) == [betaPath]
+            }
+            searchTarget = await waitForAccessibilityButton(in: window, containing: "searchb", seconds: 5)
+            result["search_results"] = workspace.searchResults.map(\.path)
+            result["search_query"] = workspace.searchQuery
+            if let searchTarget {
+                result["search_target"] = searchTarget.evidence
+            } else {
+                result["accessibility_candidates"] = accessibilityCandidates(in: window)
+            }
+            let validResults = workspace.searchResults.count == 1 && workspace.searchResults[0].path == betaPath
+            prerequisites["single_beta_result"] = validResults
+            prerequisites["beta_result_visible"] = searchTarget != nil
+            guard validResults, searchTarget != nil else {
+                result["status"] = "environment_failed"
+                result["prerequisites"] = prerequisites
+                return result
+            }
+            await click(textPoint(of: alphaView, in: window), window: window)
+            let returnedToEditor = await waitUntil(5) {
+                window.firstResponder === alphaView && (field.currentEditor() as? NSTextView)?.hasMarkedText() != true
+            }
+            let scim = selectSCIM()
+            prerequisites["editor_focused"] = returnedToEditor
+            prerequisites["input_source_available"] = scim.available
+            prerequisites["input_source_selected"] = scim.selected
+            prerequisites["search_not_refocused"] = !(field.currentEditor() != nil && window.firstResponder === field.currentEditor())
+            result["input_source_status"] = scim.status
+            result["input_source_available"] = scim.available
+            result["input_source_selected"] = scim.selected
+            result["input_source_after_select"] = selectedInputSourceID() ?? ""
+            guard returnedToEditor, scim.available, scim.selected else {
+                result["status"] = "environment_failed"
+                result["prerequisites"] = prerequisites
+                return result
+            }
+            result["search_last_preparation_event"] = lastEvent
+        }
+
+        if route == .tab {
+            let scim = selectSCIM()
+            prerequisites["input_source_available"] = scim.available
+            prerequisites["input_source_selected"] = scim.selected
+            result["input_source_status"] = scim.status
+            result["input_source_available"] = scim.available
+            result["input_source_selected"] = scim.selected
+            result["input_source_after_select"] = selectedInputSourceID() ?? ""
+            guard scim.available, scim.selected else {
+                result["status"] = "environment_failed"
+                result["prerequisites"] = prerequisites
+                return result
+            }
+            await click(textPoint(of: alphaView, in: window), window: window)
+            let focused = await waitUntil(5) { window.firstResponder === alphaView }
+            prerequisites["editor_focused"] = focused
+            guard focused else {
+                result["status"] = "environment_failed"
+                result["prerequisites"] = prerequisites
+                return result
+            }
+        }
+
+        try await bridge.emit("before_composition", state: switchSnapshot(
+            workspace: workspace, window: window, trackedView: alphaView, lastEvent: [:], field: firstSearchField(in: window)))
+        let compositionEvent = await typeText("nihao")
+        let compositionStarted = await waitUntil(5) { alphaView.hasMarkedText() && alpha.marked }
+        let beforeClick = switchSnapshot(workspace: workspace, window: window, trackedView: alphaView,
+                                         lastEvent: compositionEvent, field: firstSearchField(in: window))
+        let beforeClickTargetOK: Bool
+        if route == .tab {
+            beforeClickTargetOK = window.firstResponder === alphaView && alphaView.hasMarkedText() && alpha.marked
+                && (beforeClick["search_editor_active"] as? Bool) != true
+        } else {
+            let visible = accessibilityButton(in: window, containing: "searchb") != nil
+            beforeClickTargetOK = window.firstResponder === alphaView && alphaView.hasMarkedText() && alpha.marked
+                && (beforeClick["search_editor_active"] as? Bool) == false && visible
+        }
+        prerequisites["composition_started"] = compositionStarted
+        prerequisites["switch_preconditions"] = beforeClickTargetOK
+        result["prerequisites"] = prerequisites
+        result["tab_target"] = tabTarget
+        try await bridge.emit("composition_active", state: beforeClick)
+        guard compositionStarted, beforeClickTargetOK else {
+            result["status"] = "environment_failed"
+            if alphaView.hasMarkedText() { _ = await press(53, flags: []) }
+            return result
+        }
+
+        let switchedAt = ProcessInfo.processInfo.systemUptime
+        if route == .tab {
+            guard let button = tabButton(in: window, path: betaPath) else {
+                result["status"] = "environment_failed"
+                return result
+            }
+            await click(center(of: button, in: window), window: window)
+        } else if let searchTarget {
+            await click(accessibilityFrame: searchTarget.frame, window: window)
+        }
+        let switched = await waitUntil(5) {
+            workspace.selected == betaPath && workspace.current?.document === beta
+                && DiagramInspection.current(document: beta)?.representedPath == betaPath
+                && DiagramInspection.current(document: beta)?.string == beta.text
+        }
+        result["switched_to_beta"] = switched
+        try await bridge.emit("after_switch", state: switchSnapshot(
+            workspace: workspace, window: window, trackedView: alphaView, lastEvent: [:], field: firstSearchField(in: window)))
+
+        let autosaved = await waitUntil(2.0) { !alpha.marked && !alpha.dirty }
+        result["alpha_autosave_seconds"] = ProcessInfo.processInfo.systemUptime - switchedAt
+        result["alpha_autosaved"] = autosaved
+        try await bridge.emit("after_autosave", state: switchSnapshot(
+            workspace: workspace, window: window, trackedView: alphaView, lastEvent: [:], field: firstSearchField(in: window)))
+
+        var betaInput = false
+        if let betaView = try? await DiagramInspection.settled(document: beta) {
+            await click(textPoint(of: betaView, in: window), window: window)
+            _ = await waitUntil(5) { window.firstResponder === betaView && betaView.inputContext === NSTextInputContext.current }
+            await typeText("zhong")
+            let lastEvent = await press(49, flags: [])
+            betaInput = await waitUntil(8) { !betaView.hasMarkedText() && !beta.marked && !beta.dirty }
+            result["beta_input_settled"] = betaInput
+            try await bridge.emit("after_beta_input", state: switchSnapshot(
+                workspace: workspace, window: window, trackedView: alphaView, lastEvent: lastEvent, field: firstSearchField(in: window)))
+        } else {
+            result["beta_input_settled"] = false
+        }
+
+        if let button = tabButton(in: window, path: alphaPath) {
+            await click(center(of: button, in: window), window: window)
+        }
+        let returned = await waitUntil(5) {
+            workspace.selected == alphaPath && DiagramInspection.current(document: alpha)?.representedPath == alphaPath
+        }
+        result["switched_back_to_alpha"] = returned
+        let alphaViewAfter = (try? await DiagramInspection.settled(document: alpha)) ?? alphaView
+        if returned { await click(textPoint(of: alphaViewAfter, in: window), window: window) }
+        _ = await waitUntil(2) { window.firstResponder === alphaViewAfter }
+        try await bridge.emit("switched_back", state: switchSnapshot(
+            workspace: workspace, window: window, trackedView: alphaViewAfter, lastEvent: [:], field: firstSearchField(in: window)))
+
+        await typeText("zhong")
+        var lastEvent = await press(49, flags: [])
+        let alphaInput = await waitUntil(5) {
+            !alphaViewAfter.hasMarkedText() && !alpha.marked
+                && alphaViewAfter.string == "中" + "ni hao" + alpha.text
+        }
+        result["alpha_return_input_settled"] = alphaInput
+        try await bridge.emit("alpha_refocused_input", state: switchSnapshot(
+            workspace: workspace, window: window, trackedView: alphaViewAfter, lastEvent: lastEvent, field: firstSearchField(in: window)))
+
+        lastEvent = await press(1, flags: .maskCommand)
+        let saved = await waitUntil(5) { !alpha.marked && !alpha.dirty }
+        result["command_s_after_return"] = saved
+        try await bridge.emit("command_s_after_return", state: switchSnapshot(
+            workspace: workspace, window: window, trackedView: alphaViewAfter, lastEvent: lastEvent, field: firstSearchField(in: window)))
+        lastEvent = await press(14, flags: .maskCommand)
+        let reading = await waitUntil(5) { alpha.reading }
+        result["command_e_after_return"] = reading
+        try await bridge.emit("command_e_after_return", state: switchSnapshot(
+            workspace: workspace, window: window, trackedView: alphaViewAfter, lastEvent: lastEvent, field: firstSearchField(in: window)))
+
+        result["status"] = "completed"
+        result["phase_count"] = bridge.phaseCount
+        result["ack_count"] = bridge.ackCount
+        result["input_source_restored"] = restoreInputSource(originalInputSource)
+        result["input_source_after_run"] = selectedInputSourceID() ?? ""
+        return result
+    }
+
+    private struct AccessibilityTarget {
+        let object: AnyObject
+        let role: String
+        let label: String
+        let help: String
+        let frame: NSRect
+        var evidence: [String: Any] {
+            ["role": role, "label": label, "help": help, "frame": NSStringFromRect(frame),
+             "object": String(describing: ObjectIdentifier(object))]
+        }
+    }
+
+    private struct AccessibilityInfo {
+        let role: String
+        let label: String
+        let help: String
+        let frame: NSRect
+    }
+
+    private static func accessibilityInfo(_ object: Any) -> AccessibilityInfo? {
+        if let view = object as? NSView {
+            return AccessibilityInfo(role: view.accessibilityRole()?.rawValue ?? "",
+                                     label: view.accessibilityLabel() ?? "", help: view.accessibilityHelp() ?? "",
+                                     frame: view.accessibilityFrame())
+        }
+        if let element = object as? NSAccessibilityElement {
+            return AccessibilityInfo(role: element.accessibilityRole()?.rawValue ?? "",
+                                     label: element.accessibilityLabel() ?? "", help: element.accessibilityHelp() ?? "",
+                                     frame: element.accessibilityFrame())
+        }
+        return nil
+    }
+
+    private static func accessibilityChildren(_ object: Any) -> [Any] {
+        if let view = object as? NSView { return view.accessibilityChildren() ?? [] }
+        if let element = object as? NSAccessibilityElement { return element.accessibilityChildren() ?? [] }
+        return []
+    }
+
+    private static func accessibilityTargets(in window: NSWindow, limit: Int = 1_500) -> [AccessibilityTarget] {
+        guard let root = window.contentView else { return [] }
+        var queue: [(Any, Int)] = [(root, 0)]
+        var seen = Set<ObjectIdentifier>()
+        var values: [AccessibilityTarget] = []
+        while !queue.isEmpty, values.count < limit {
+            let (object, depth) = queue.removeFirst()
+            guard depth <= 24 else { continue }
+            if let object = object as AnyObject?, seen.insert(ObjectIdentifier(object)).inserted == false { continue }
+            if let info = accessibilityInfo(object), !info.role.isEmpty {
+                values.append(AccessibilityTarget(object: object as AnyObject, role: info.role,
+                                                  label: info.label, help: info.help, frame: info.frame))
+            }
+            if depth < 24 {
+                queue.append(contentsOf: accessibilityChildren(object).map { ($0, depth + 1) })
+            }
+        }
+        for target in axAccessibilityTargets(limit: limit) where !values.contains(where: {
+            $0.role == target.role && $0.label == target.label && $0.help == target.help
+                && abs($0.frame.midX - target.frame.midX) < 1 && abs($0.frame.midY - target.frame.midY) < 1
+        }) {
+            values.append(target)
+        }
+        return values
+    }
+
+    private static func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        return value
+    }
+
+    private static func axAccessibilityTargets(limit: Int) -> [AccessibilityTarget] {
+        let app = AXUIElementCreateApplication(getpid())
+        var queue: [(AXUIElement, Int)] = [(app, 0)]
+        var seen = Set<CFHashCode>()
+        var values: [AccessibilityTarget] = []
+        let top = NSScreen.screens.max { $0.frame.maxY < $1.frame.maxY }?.frame.maxY
+            ?? NSScreen.main?.frame.height ?? 0
+        while !queue.isEmpty, values.count < limit {
+            let (element, depth) = queue.removeFirst()
+            guard depth <= 32, seen.insert(CFHash(element)).inserted else { continue }
+            let role = (axAttribute(element, kAXRoleAttribute) as? String) ?? ""
+            let texts = [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute, kAXHelpAttribute]
+                .compactMap { axAttribute(element, $0) as? String }
+                .filter { !$0.isEmpty }
+            if !role.isEmpty {
+                var frame = NSRect.zero
+                if let positionRaw = axAttribute(element, kAXPositionAttribute),
+                   let sizeRaw = axAttribute(element, kAXSizeAttribute),
+                   CFGetTypeID(positionRaw) == AXValueGetTypeID(),
+                   CFGetTypeID(sizeRaw) == AXValueGetTypeID() {
+                    let positionValue = unsafeDowncast(positionRaw, to: AXValue.self)
+                    let sizeValue = unsafeDowncast(sizeRaw, to: AXValue.self)
+                    var point = CGPoint.zero, size = CGSize.zero
+                    if AXValueGetValue(positionValue, .cgPoint, &point), AXValueGetValue(sizeValue, .cgSize, &size) {
+                        frame = NSRect(x: point.x, y: top - point.y - size.height, width: size.width, height: size.height)
+                    }
+                }
+                let label = texts.first ?? ""
+                let help = (axAttribute(element, kAXHelpAttribute) as? String) ?? ""
+                values.append(AccessibilityTarget(object: element, role: role, label: label, help: help, frame: frame))
+            }
+            if depth < 32, let children = axAttribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+                queue.append(contentsOf: children.map { ($0, depth + 1) })
+            }
+        }
+        return values
+    }
+
+    private static func accessibilityButton(in window: NSWindow, containing text: String) -> AccessibilityTarget? {
+        let query = text.lowercased()
+        let screen = window.screen?.frame ?? NSScreen.main?.frame ?? .zero
+        return accessibilityTargets(in: window).first { target in
+            target.role == NSAccessibility.Role.button.rawValue
+                && (target.label.lowercased().contains(query) || target.help.lowercased().contains(query))
+                && target.frame.width > 0 && target.frame.height > 0 && screen.intersects(target.frame)
+        }
+    }
+
+    private static func waitForAccessibilityButton(in window: NSWindow, containing text: String,
+                                                    seconds: Double) async -> AccessibilityTarget? {
+        let deadline = ProcessInfo.processInfo.systemUptime + seconds
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if let target = accessibilityButton(in: window, containing: text) { return target }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return accessibilityButton(in: window, containing: text)
+    }
+
+    private static func accessibilityCandidates(in window: NSWindow) -> [[String: Any]] {
+        accessibilityTargets(in: window)
+            .filter { $0.role == NSAccessibility.Role.button.rawValue }
+            .prefix(80)
+            .map(\.evidence)
+    }
+
+    private static func tabButton(in window: NSWindow, path: String) -> TabDragButton.Button? {
+        guard let toolbar = window.toolbar?.items.first(where: { $0.itemIdentifier.rawValue == "editor-tabs" })?.view else {
+            return nil
+        }
+        func find(in view: NSView) -> TabDragButton.Button? {
+            if let button = view as? TabDragButton.Button, button.path == path { return button }
+            for child in view.subviews {
+                if let found = find(in: child) { return found }
+            }
+            return nil
+        }
+        return find(in: toolbar)
+    }
+
+    private static func firstSearchField(in window: NSWindow) -> NativeSearchField? {
+        window.contentView.flatMap { firstView(of: NativeSearchField.self, in: $0) }
+    }
+
+    private static func switchSnapshot(workspace: Workspace, window: NSWindow, trackedView: DiagramTextView?,
+                                       lastEvent: [String: Any], field: NativeSearchField?) -> [String: Any] {
+        var state = snapshot(workspace: workspace, window: window, lastEvent: lastEvent)
+        state["selected_path"] = workspace.selected ?? ""
+        state["tabs"] = workspace.tabs.map(\.path)
+        var documents: [String: Any] = [:]
+        for tab in workspace.tabs {
+            guard let document = tab.document else {
+                documents[tab.path] = ["present": false, "loading": tab.loading]
+                continue
+            }
+            let id = ObjectIdentifier(document)
+            let view = DiagramInspection.current(document: document)
+            var value: [String: Any] = [
+                "present": true, "document_id": String(describing: id), "loading": tab.loading,
+                "marked": document.marked, "dirty": document.dirty, "revision": document.revision,
+                "text_revision": document.textRevision, "reading": document.reading,
+                "issue": String(describing: document.issue), "stored_text": document.text,
+                "view_present": view != nil,
+            ]
+            if let view { value["view"] = diagramViewState(view) }
+            documents[tab.path] = value
+        }
+        state["documents"] = documents
+        state["tracked_view"] = trackedView.map(diagramViewState) ?? [:]
+        state["search_field_focused"] = field?.currentEditor() != nil
+        return state
+    }
+
+    private static func diagramViewState(_ view: DiagramTextView) -> [String: Any] {
+        let selection = view.selectedRange()
+        let context = view.inputContext
+        return [
+            "object": String(describing: ObjectIdentifier(view)),
+            "path": view.representedPath,
+            "document": view.representedDocument.map(String.init(describing:)) ?? "",
+            "text": view.string, "length": view.textStorage?.length ?? -1,
+            "marked_text": view.hasMarkedText(), "composition": view.compositionActive,
+            "selection": ["location": selection.location, "length": selection.length],
+            "editable": view.isEditable, "reading": view.isReading,
+            "marked_range": view.markedRange().location == NSNotFound
+                ? NSNull()
+                : ["location": view.markedRange().location, "length": view.markedRange().length],
+            "input_context_id": context.map { String(describing: ObjectIdentifier($0)) } ?? "",
+            "current_input_context_id": NSTextInputContext.current.map { String(describing: ObjectIdentifier($0)) } ?? "",
+            "input_context_current": context != nil && context === NSTextInputContext.current,
+        ]
     }
     /// 真实点击编辑器建立焦点，由 SCIM ITABC 建立组合，再真实点击底部终端让焦点离开。
     /// 每个阶段都由外部驱动读盘并 ack；本函数不读取磁盘，也不替外部结论作判定。
@@ -586,15 +1054,18 @@ enum EditingInspection {
         return predicate()
     }
 
-    private static func typeText(_ word: String) async {
+    @discardableResult
+    private static func typeText(_ word: String) async -> [String: Any] {
         let keys: [Character: CGKeyCode] = ["a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5,
             "z": 6, "x": 7, "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14,
             "r": 15, "y": 16, "t": 17, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37,
             "j": 38, "k": 40, "n": 45, "m": 46]
+        var lastEvent: [String: Any] = [:]
         for character in word {
             guard let key = keys[character] else { continue }
-            _ = await press(key, flags: [])
+            lastEvent = await press(key, flags: [])
         }
+        return lastEvent
     }
 
     @discardableResult
@@ -613,6 +1084,21 @@ enum EditingInspection {
         let screen = window.convertPoint(toScreen: point)
         let height = NSScreen.screens.max { $0.frame.maxY < $1.frame.maxY }?.frame.maxY ?? NSScreen.main?.frame.height ?? 0
         let location = CGPoint(x: screen.x, y: height - screen.y)
+        let source = CGEventSource(stateID: .hidSystemState)
+        for type in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
+            let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                mouseCursorPosition: location, mouseButton: .left)
+            event?.flags = []
+            event?.post(tap: .cghidEventTap)
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+    }
+
+    private static func click(accessibilityFrame: NSRect, window: NSWindow) async {
+        let point = NSPoint(x: accessibilityFrame.midX, y: accessibilityFrame.midY)
+        let top = NSScreen.screens.max { $0.frame.maxY < $1.frame.maxY }?.frame.maxY
+            ?? NSScreen.main?.frame.height ?? 0
+        let location = CGPoint(x: point.x, y: top - point.y)
         let source = CGEventSource(stateID: .hidSystemState)
         for type in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
             let event = CGEvent(mouseEventSource: source, mouseType: type,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P1-38 real-edit regression with an external disk observer.
+"""P1-39 real-edit regression with an external disk observer.
 
 The app sends only physical keycode events through the HID event tap. After
 each named phase it waits for this script to read the public vault and write an
@@ -28,6 +28,13 @@ FIRST_PREEDIT = "ni hao"
 FIRST_COMMITTED = "中" + FIRST_PREEDIT + NOTE_TEXT
 SECOND_PREEDIT = "hao"
 SECOND_COMMITTED = SECOND_PREEDIT + FIRST_COMMITTED
+ALPHA_NAME = "alpha.md"
+BETA_NAME = "beta.md"
+ALPHA_TEXT = "# 公开夹具 A\n\n标签路径的公开正文。\n"
+BETA_TEXT = "# 公开夹具 B\n\n搜索结果专用词 searchb。\n"
+ALPHA_PREEDIT = "ni hao" + ALPHA_TEXT
+BETA_COMMITTED = "中" + BETA_TEXT
+SWITCH_MODES = {"composition-tab-switch", "composition-search-switch"}
 SESSION = '''last_vault = "{vault}"
 
 [[recent]]
@@ -57,6 +64,39 @@ left = true
 
 [default_visible]
 bottom = true
+left = true
+'''
+SWITCH_SESSION = '''last_vault = "{vault}"
+
+[[recent]]
+path = "{vault}"
+tabs = ["{alpha}", "{beta}"]
+selected = "{alpha}"
+
+[recent.views]
+"{alpha}" = "editing"
+"{beta}" = "editing"
+
+[recent.visible]
+bottom = false
+left = true
+
+[[windows]]
+id = "p1-39"
+path = "{vault}"
+tabs = ["{alpha}", "{beta}"]
+selected = "{alpha}"
+
+[windows.views]
+"{alpha}" = "editing"
+"{beta}" = "editing"
+
+[windows.visible]
+bottom = false
+left = true
+
+[default_visible]
+bottom = false
 left = true
 '''
 
@@ -96,17 +136,76 @@ def composition_expectation(phase):
     }
 
 
-def initialise_run(base):
+def switch_expectation(mode, phase):
+    alpha_disk = ALPHA_TEXT
+    alpha_text = ALPHA_TEXT
+    beta_disk = BETA_TEXT
+    beta_text = BETA_TEXT
+    current = ALPHA_NAME
+    selection = 0
+    if phase == "composition_active":
+        alpha_text = ALPHA_PREEDIT
+        selection = len("ni hao")
+    elif phase == "after_switch":
+        alpha_text = ALPHA_PREEDIT
+        current = BETA_NAME
+    elif phase == "after_autosave":
+        alpha_text = ALPHA_PREEDIT
+        alpha_disk = ALPHA_PREEDIT
+        current = BETA_NAME
+    elif phase == "after_beta_input":
+        alpha_text = ALPHA_PREEDIT
+        alpha_disk = ALPHA_PREEDIT
+        beta_text = BETA_COMMITTED
+        beta_disk = BETA_COMMITTED
+        current = BETA_NAME
+        selection = 1
+    elif phase == "switched_back":
+        alpha_text = ALPHA_PREEDIT
+        alpha_disk = ALPHA_PREEDIT
+        beta_text = BETA_COMMITTED
+        beta_disk = BETA_COMMITTED
+        selection = 0
+    elif phase == "alpha_refocused_input":
+        alpha_text = "中" + ALPHA_PREEDIT
+        alpha_disk = ALPHA_PREEDIT
+        beta_text = BETA_COMMITTED
+        beta_disk = BETA_COMMITTED
+        selection = 1
+    elif phase in {"command_s_after_return", "command_e_after_return"}:
+        alpha_text = "中" + ALPHA_PREEDIT
+        alpha_disk = "中" + ALPHA_PREEDIT
+        beta_text = BETA_COMMITTED
+        beta_disk = BETA_COMMITTED
+    return {
+        "mode": mode,
+        "phase": phase,
+        "current": current,
+        "selection_location": selection,
+        "alpha": {"text": alpha_text, "disk": alpha_disk},
+        "beta": {"text": beta_text, "disk": beta_disk},
+        "after_switch_alpha_disk_choices": [ALPHA_TEXT, ALPHA_PREEDIT] if phase == "after_switch" else None,
+    }
+
+
+def initialise_run(base, switch=False):
     vault = base / "vault"
     vault.mkdir(parents=True)
-    (vault / NOTE_NAME).write_text(NOTE_TEXT, encoding="utf-8")
-    (base / "pristine-note.md").write_text(NOTE_TEXT, encoding="utf-8")
+    if switch:
+        (vault / ALPHA_NAME).write_text(ALPHA_TEXT, encoding="utf-8")
+        (vault / BETA_NAME).write_text(BETA_TEXT, encoding="utf-8")
+        (base / "pristine-alpha.md").write_text(ALPHA_TEXT, encoding="utf-8")
+        (base / "pristine-beta.md").write_text(BETA_TEXT, encoding="utf-8")
+    else:
+        (vault / NOTE_NAME).write_text(NOTE_TEXT, encoding="utf-8")
+        (base / "pristine-note.md").write_text(NOTE_TEXT, encoding="utf-8")
     config = base / "config"
     config.mkdir()
     (config / "config.toml").write_text('font_size = 15.0\ndefault_view = "editing"\n', encoding="utf-8")
     cache = base / "cache"
     cache.mkdir()
-    (cache / "session.toml").write_text(SESSION.format(vault=vault, note=NOTE_NAME), encoding="utf-8")
+    session = SWITCH_SESSION.format(vault=vault, alpha=ALPHA_NAME, beta=BETA_NAME) if switch else SESSION.format(vault=vault, note=NOTE_NAME)
+    (cache / "session.toml").write_text(session, encoding="utf-8")
     return vault, config, cache
 
 
@@ -129,6 +228,21 @@ def disk_observation(vault):
     }
 
 
+def switch_disk_observation(vault):
+    declared = {ALPHA_NAME, BETA_NAME}
+    notes = {}
+    for name in sorted(declared):
+        path = vault / name
+        raw = path.read_bytes()
+        attributes = path.stat()
+        notes[name] = {
+            "bytes": len(raw), "mtime_ns": attributes.st_mtime_ns,
+            "sha256": sha256(raw), "text": raw.decode("utf-8"),
+        }
+    unexpected = sorted(str(path.relative_to(vault)) for path in vault.rglob("*") if str(path.relative_to(vault)) not in declared)
+    return {"notes": notes, "unexpected_entries": unexpected}
+
+
 def read_phase_lines(path):
     if not path.exists():
         return []
@@ -143,7 +257,7 @@ def read_phase_lines(path):
     return values
 
 
-def acknowledge_phase(run_dir, ack_dir, phase, observation):
+def acknowledge_phase(run_dir, ack_dir, phase, observation, mode):
     sequence = phase["sequence"]
     ack = {
         "run_id": phase["run_id"],
@@ -160,7 +274,7 @@ def acknowledge_phase(run_dir, ack_dir, phase, observation):
         "phase": phase["phase"],
         "state": phase.get("state", {}),
         "disk": observation,
-        "expectation": composition_expectation(phase["phase"]),
+        "expectation": switch_expectation(mode, phase["phase"]) if mode in SWITCH_MODES else composition_expectation(phase["phase"]),
         "ack_wall_time": time.time(),
     }
     with (run_dir / "observations.jsonl").open("a", encoding="utf-8") as handle:
@@ -174,12 +288,14 @@ def run_app(app, mode, output, label):
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
     base = Path(tempfile.mkdtemp(prefix=f"hortus-{mode}-"))
-    vault, config, cache = initialise_run(base)
+    switch = mode in SWITCH_MODES
+    vault, config, cache = initialise_run(base, switch=switch)
     result_path = run_dir / "result.json"
     phase_log = run_dir / "phases.jsonl"
     ack_dir = run_dir / "acks"
     ack_dir.mkdir()
-    initial = disk_observation(vault)
+    observe_disk = switch_disk_observation if switch else disk_observation
+    initial = observe_disk(vault)
     write_json(run_dir / "initial-disk.json", initial)
     run_id = str(uuid.uuid4())
     environment = dict(os.environ, HORTUS_CONFIG_DIR=str(config), HORTUS_CACHE_DIR=str(cache))
@@ -208,7 +324,7 @@ def run_app(app, mode, output, label):
                     continue
                 if sequence != seen + 1:
                     raise RuntimeError(f"phase sequence gap: expected {seen + 1}, got {sequence}")
-                observations.append(acknowledge_phase(run_dir, ack_dir, phase, disk_observation(vault)))
+                observations.append(acknowledge_phase(run_dir, ack_dir, phase, observe_disk(vault), mode))
                 seen = sequence
             if process.poll() is not None:
                 break
@@ -226,9 +342,9 @@ def run_app(app, mode, output, label):
     for phase in read_phase_lines(phase_log):
         sequence = phase.get("sequence")
         if phase.get("kind") == "phase" and isinstance(sequence, int) and sequence > seen:
-            observations.append(acknowledge_phase(run_dir, ack_dir, phase, disk_observation(vault)))
+            observations.append(acknowledge_phase(run_dir, ack_dir, phase, observe_disk(vault), mode))
             seen = sequence
-    final_disk = disk_observation(vault)
+    final_disk = observe_disk(vault)
     write_json(run_dir / "final-disk.json", final_disk)
     result = None
     result_error = None
@@ -286,6 +402,13 @@ def require_prerequisites(run, errors):
 
 def require_common_disk(run, errors):
     for item in run["observations"]:
+        if "notes" in item["disk"]:
+            require(item["disk"].get("unexpected_entries") == [],
+                    f"unexpected vault entries after {item['phase']}: {item['disk'].get('unexpected_entries')}", errors)
+            for name, note in item["disk"]["notes"].items():
+                require(note["bytes"] == len(note["text"].encode("utf-8")),
+                        f"{name} byte count mismatch after {item['phase']}", errors)
+            continue
         require(item["disk"]["temporary_entries"] == [],
                 f"temporary vault entries after {item['phase']}: {item['disk']['temporary_entries']}", errors)
         require(item["disk"]["bytes"] == len(item["disk"]["text"].encode("utf-8")),
@@ -525,11 +648,160 @@ def evaluate_matrix(run):
     return {"passed": not errors, "errors": errors}
 
 
+def switch_notes(record):
+    return record["disk"].get("notes", {})
+
+
+def switch_document(record, name):
+    return (record["state"].get("documents") or {}).get(name, {})
+
+
+def evaluate_switch(run, mode):
+    errors = []
+    result = run["result"] or {}
+    require(run["returncode"] == 0, f"app exited {run['returncode']}", errors)
+    require(not run["timed_out"], "app timed out", errors)
+    require(run["result_error"] is None, f"result error: {run['result_error']}", errors)
+    require(result.get("status") == "completed", f"status={result.get('status')}", errors)
+    prerequisites = result.get("prerequisites", {})
+    for key in ("event_access", "application_active", "activation_converged", "key_window",
+                "alpha_loaded", "beta_loaded", "alpha_selected", "editor_focused",
+                "composition_started", "switch_preconditions"):
+        require(prerequisites.get(key) is True, f"prerequisite {key}=false", errors)
+    require(prerequisites.get("input_source_available") is True, "SCIM ITABC unavailable", errors)
+    require(prerequisites.get("input_source_selected") is True, "SCIM ITABC was not selected", errors)
+    require(result.get("input_source_after_select") == SCIM_ID, "input source identity mismatch", errors)
+    require(result.get("input_source_restored") is True, "original input source was not restored", errors)
+    require(result.get("input_source_after_run") == prerequisites.get("input_source_before"),
+            "input source restore identity mismatch", errors)
+    require(result.get("event_tap") == "cghidEventTap", "events were not sent through cghidEventTap", errors)
+    require(result.get("focus_event_tap") == "cghidEventTap", "focus click was not sent through cghidEventTap", errors)
+    if mode == "composition-tab-switch":
+        require((result.get("tab_target") or {}).get("path") == BETA_NAME,
+                "toolbar target was not the beta tab", errors)
+    else:
+        require(prerequisites.get("search_input_source_selected") is True,
+                "ABC input source could not be selected for the real search entry", errors)
+        require(prerequisites.get("search_panel") is True, "real search shortcut did not open the panel", errors)
+        require(prerequisites.get("search_field_focused") is True, "real search field click did not focus it", errors)
+        require(prerequisites.get("single_beta_result") is True, "real query did not resolve only to beta", errors)
+        require(prerequisites.get("beta_result_visible") is True, "beta result row was not visible", errors)
+        require(prerequisites.get("search_not_refocused") is True, "search field regained focus during composition", errors)
+        require(result.get("search_results") == [BETA_NAME], "search result path evidence mismatch", errors)
+        require((result.get("search_target") or {}).get("role") == "AXButton",
+                "search click target was not an accessibility button", errors)
+        require("searchb" in (result.get("search_target") or {}).get("label", "").lower(),
+                "visible search result target did not identify the unique beta match", errors)
+
+    require_common_disk(run, errors)
+    phases = observation_map(run)
+    names = ["before_composition", "composition_active", "after_switch", "after_autosave",
+             "after_beta_input", "switched_back", "alpha_refocused_input",
+             "command_s_after_return", "command_e_after_return"]
+    require(sorted(phases) == sorted(names), f"phase set mismatch: {sorted(phases)}", errors)
+    if not set(names).issubset(phases):
+        return {"passed": False, "errors": errors}
+    before = phases["before_composition"]
+    active = phases["composition_active"]
+    switched = phases["after_switch"]
+    autosaved = phases["after_autosave"]
+    beta_input = phases["after_beta_input"]
+    returned = phases["switched_back"]
+    alpha_input = phases["alpha_refocused_input"]
+    saved = phases["command_s_after_return"]
+    reading = phases["command_e_after_return"]
+
+    for record in (before, active, switched, autosaved, beta_input, returned, alpha_input, saved, reading):
+        phase = record["phase"]
+        notes = switch_notes(record)
+        require(set(notes) == {ALPHA_NAME, BETA_NAME}, f"{phase}: declared notes missing", errors)
+        expectation = switch_expectation(mode, phase)
+        allowed_alpha = expectation.get("after_switch_alpha_disk_choices")
+        if allowed_alpha is not None:
+            alpha_disk = notes.get(ALPHA_NAME, {}).get("text")
+            require(alpha_disk in allowed_alpha, f"{phase}: unexpected alpha disk transition {alpha_disk!r}", errors)
+        else:
+            require(notes.get(ALPHA_NAME, {}).get("text") == expectation["alpha"]["disk"],
+                    f"{phase}: alpha disk mismatch; expected {expectation['alpha']['disk']!r}, got {notes.get(ALPHA_NAME, {}).get('text')!r}", errors)
+        require(notes.get(BETA_NAME, {}).get("text") == expectation["beta"]["disk"],
+                f"{phase}: beta disk mismatch; expected {expectation['beta']['disk']!r}, got {notes.get(BETA_NAME, {}).get('text')!r}", errors)
+        require(record["state"].get("selected_path") == expectation["current"],
+                f"{phase}: selected={record['state'].get('selected_path')} expected={expectation['current']}", errors)
+
+    before_alpha = switch_document(before, ALPHA_NAME)
+    active_alpha = switch_document(active, ALPHA_NAME)
+    require(before_alpha.get("marked") is False and before_alpha.get("dirty") is False,
+            "before composition: alpha did not start clean", errors)
+    require((before.get("state").get("documents") or {}).get(ALPHA_NAME, {}).get("view_present") is True,
+            "before composition: alpha editor was not visible", errors)
+    require(active.get("state").get("first_responder") == "DiagramTextView",
+            "composition: editor was not first responder", errors)
+    require(active_alpha.get("marked") is True and active_alpha.get("view_present") is True,
+            "composition: alpha document/view was not marked", errors)
+    active_view = active.get("state").get("tracked_view") or {}
+    require(active_view.get("text") == ALPHA_PREEDIT and active_view.get("marked_text") is True,
+            "composition: visible preedit did not remain in alpha", errors)
+    require(active.get("state").get("marked_range") == {"location": 0, "length": len("ni hao")},
+            f"composition: marked range={active.get('state').get('marked_range')}", errors)
+    if mode == "composition-search-switch":
+        require(active.get("state").get("search_editor_active") is False,
+                "composition: search field became the active field", errors)
+
+    switched_alpha = switch_document(switched, ALPHA_NAME)
+    switched_beta = switch_document(switched, BETA_NAME)
+    require(switched_alpha.get("marked") is False, "after switch: alpha remained marked", errors)
+    require(switched.get("state").get("first_responder") == "DiagramTextView" and
+            switched_beta.get("view_present") is True, "after switch: beta editor view missing", errors)
+    require(switched.get("state").get("view_text") == BETA_TEXT, "after switch: beta view contains foreign text", errors)
+    require((switched.get("state").get("tracked_view") or {}).get("path") == BETA_NAME,
+            "after switch: editor was not rebound to beta", errors)
+
+    autosave_alpha = switch_document(autosaved, ALPHA_NAME)
+    require(autosave_alpha.get("marked") is False and autosave_alpha.get("dirty") is False,
+            "autosave: alpha did not settle without new input", errors)
+    seconds = result.get("alpha_autosave_seconds")
+    require(isinstance(seconds, (int, float)) and seconds <= 2.0,
+            f"autosave: alpha settled after {seconds}s, limit 2s", errors)
+    require(switch_notes(autosaved)[ALPHA_NAME]["text"] == ALPHA_PREEDIT,
+            "autosave: alpha expected body was not written", errors)
+
+    beta_document = switch_document(beta_input, BETA_NAME)
+    require(beta_input.get("state").get("view_text") == BETA_COMMITTED,
+            "beta input: visible body mismatch", errors)
+    require(beta_document.get("marked") is False and beta_document.get("dirty") is False,
+            "beta input: edit did not settle", errors)
+    require("ni hao" not in beta_input.get("state").get("view_text", ""),
+            "beta input: alpha preedit leaked into beta view", errors)
+    require("ni hao" not in switch_notes(beta_input)[BETA_NAME]["text"],
+            "beta input: alpha preedit leaked into beta disk", errors)
+
+    require(returned.get("state").get("view_text") == ALPHA_PREEDIT,
+            "return to alpha: expected body missing", errors)
+    require(switch_document(returned, ALPHA_NAME).get("marked") is False,
+            "return to alpha: marked state remained", errors)
+    require(result.get("alpha_return_input_settled") is True,
+            "return to alpha: real IME input did not settle", errors)
+    require(alpha_input.get("state").get("view_text") == "中" + ALPHA_PREEDIT,
+            "return to alpha: real input body mismatch", errors)
+    require(switch_notes(alpha_input)[ALPHA_NAME]["text"] == ALPHA_PREEDIT,
+            "return to alpha: unsaved input reached disk before ⌘S", errors)
+    require(event_is(saved["state"], 1, ["command"]), "returned alpha save was not real ⌘S", errors)
+    require(saved["state"].get("dirty") is False, "real ⌘S did not settle alpha", errors)
+    require(switch_notes(saved)[ALPHA_NAME]["text"] == "中" + ALPHA_PREEDIT,
+            "real ⌘S did not write the returned alpha body", errors)
+    require(event_is(reading["state"], 14, ["command"]), "returned alpha switch was not real ⌘E", errors)
+    require(reading["state"].get("reading") is True, "real ⌘E did not enter reading view", errors)
+    require(reading["state"].get("marked") is False, "reading switch retained marked state", errors)
+    return {"passed": not errors, "errors": errors}
+
+
 def evaluate_run(mode, run):
     if mode == "composition-focus-loss":
         return evaluate_composition(run)
     if mode == "undo-redo":
         return evaluate_undo(run)
+    if mode in SWITCH_MODES:
+        return evaluate_switch(run, mode)
     return evaluate_matrix(run)
 
 
@@ -538,14 +810,16 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "target/reports/real-edit")
     parser.add_argument("--app", type=Path, default=APP)
     parser.add_argument("--runs", type=int, default=3)
-    parser.add_argument("--scenario", choices=["all", "composition-focus-loss", "undo-redo", "undo-matrix"],
+    parser.add_argument("--scenario", choices=["all", "composition-focus-loss", "undo-redo", "undo-matrix",
+                                               "composition-tab-switch", "composition-search-switch"],
                         default="all")
     args = parser.parse_args()
     if args.runs < 1:
         parser.error("--runs must be positive")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    selected = ["composition-focus-loss", "undo-redo", "undo-matrix"] if args.scenario == "all" else [args.scenario]
+    selected = ["composition-focus-loss", "undo-redo", "undo-matrix",
+                "composition-tab-switch", "composition-search-switch"] if args.scenario == "all" else [args.scenario]
     summary = {"status": "passed", "scenarios": {}, "runs": args.runs, "app": str(args.app.resolve())}
     for mode in selected:
         runs = []
