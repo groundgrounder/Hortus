@@ -54,7 +54,26 @@ P1-04 的自动验收使用隔离临时库，绝不改动公开示例或私人�
 python3 -B tools/check-edit-and-save.py
 ```
 
-它覆盖真实保存菜单、窗口失焦、标签和库切换、退出恢复、1 MiB 文档的 300 次连续按键与可见布局，以及编辑后两组各 30 秒的 CPU 时间增量。`--edit-inspection=路径` 和 `--edit-mode=` 只用于验收；`--skip-cpu` / `--cpu-only` 可拆开运行。
+它覆盖真实保存菜单、窗口失焦、标签和库切换、退出恢复、1 MiB 文档的 300 次连续按键与可见布局，以及编辑后两组各 30 秒的 CPU 时间增量。`--edit-inspection=路径` 和 `--edit-mode=` 只用于验收；`--skip-cpu` / `--cpu-only` 可拆开运行。`--scrollbars=always|when-scrolling` 只向本进程传入 `-AppleShowScrollBars`，并在 performance 与稳定性 JSON 中记录设置值、实际 `NSScroller.Style`、`diagramPending` 和稳定内容宽度。`--inspect-exit-after=秒` 只供自动化检查在 blocked 或 hold-open 模式下限时退出。
+
+阅读与编辑共用 `DiagramScrollView`：legacy 且启用垂直滚动条时固定预留系统滚动条宽度，overlay 不预留；两者从同一稳定内容宽度计算正文、图、表格、公式和图片。文档宽度通知只响应稳定内容宽度变化，忽略滚动条显隐造成的瞬时 frame 改写；文档高度使用固定 clip 视口高度与内容高度，不读取随滚动条显隐变化的 `contentSize.height`。下面四次真实窗口检查分别覆盖 legacy/overlay 与阅读/编辑：
+
+```sh
+python3 -B tools/check-diagram-scroll-stability.py --scrollbars=always --mode=reading --output target/reports/scroll-stability/always-reading
+python3 -B tools/check-diagram-scroll-stability.py --scrollbars=always --mode=editing --output target/reports/scroll-stability/always-editing
+python3 -B tools/check-diagram-scroll-stability.py --scrollbars=when-scrolling --mode=reading --output target/reports/scroll-stability/overlay-reading
+python3 -B tools/check-diagram-scroll-stability.py --scrollbars=when-scrolling --mode=editing --output target/reports/scroll-stability/overlay-editing
+```
+
+`--diagram-scroll-stability=路径` 是显式观察入口，按 20 ms 记录内容宽度、Scene 宽度、refresh/render/cancel 计数、pending 与实际滚动条样式；`--diagram-stability-resize` 还改变窗口高度并显隐滚动条。观察字段不参与布局决策。
+
+真实编辑回归需要简体拼音输入法 `com.apple.inputmethod.SCIM.ITABC`，并允许运行终端控制电脑（系统设置 → 隐私与安全性 → 辅助功能）。检查通过纯 keycode 的 HID 事件输入，在每个阶段等待外部驱动读取公开 vault 后继续：
+
+```sh
+python3 -B tools/check-real-edit.py --output target/reports/real-edit
+```
+
+默认独立启动三次组合焦点、标签切换和搜索结果切换场景，独立启动三次撤销场景，再运行一次编辑、阅读、终端与搜索框的撤销矩阵。两个文档切换场景都从预开 A/B 双标签的 pristine 会话开始：标签场景真实点击工具栏标签，搜索场景先通过 ⇧⌘F 和真实查询显示 B 结果，再点击 B 结果；随后核对 A/B 的 marked、修订号、视图与磁盘正文，以及 A 的自动保存、切回后的 ⌘S 和 ⌘E。组合场景按真实操作逐步构造完整期望正文，并核对光标、组合范围、输入法上下文和阶段 ACK；`summary.json` 给出总判定，各场景的 `phases.jsonl`、`observations.jsonl`、应用日志和 `verdict.json` 分别记录阶段状态、外部磁盘观察与失败原因。
 
 P1-05 的样式和性能验收：
 

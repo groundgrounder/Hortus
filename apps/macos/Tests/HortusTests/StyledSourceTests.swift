@@ -127,7 +127,9 @@ struct StyledSourceTests {
         let f = try EditingTests.Fixture(source); try await ready(f)
         f.view.appearance = NSAppearance(named: .darkAqua)
         f.view.contrastForInspection = true
-        f.coordinator.styling.schedule(view: f.view, document: f.document, size: 18, force: true)
+        // 字号经正常输入入口更新，避免主题回调仍以夹具初始的 15 pt 覆盖样式请求。
+        f.coordinator.update(NoteText(text: source, path: "note.md", vault: f.vault.path, fontSize: 18,
+            service: f.service, core: nil, document: f.document) { _, _ in })
         try await ready(f)
         #expect(f.view.increasedContrast)
         #expect((f.coordinator.styling.style(1)[.foregroundColor] as? NSColor)?.isEqual(NSColor.secondaryLabelColor) == true)

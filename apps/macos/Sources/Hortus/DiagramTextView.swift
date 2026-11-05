@@ -155,6 +155,7 @@ struct NoteText: NSViewRepresentable {
         private var changeScheduled = false
 
         func detach() {
+            view?.finishComposition()
             task?.cancel(); task = nil; generation += 1
             styling.reset()
             if document?.viewOwner === self {
@@ -172,6 +173,7 @@ struct NoteText: NSViewRepresentable {
         func update(_ input: NoteText) {
             let changed = self.input?.path != input.path || self.input?.vault != input.vault
                 || self.input?.document !== input.document || (input.document == nil && self.input?.text != input.text)
+            if changed { view?.finishComposition() }
             if changed, self.input?.document?.viewOwner === self {
                 self.input?.document?.onReload = nil
                 self.input?.document?.onClosing = nil; self.input?.document?.onStateChange = nil
@@ -348,7 +350,8 @@ struct NoteText: NSViewRepresentable {
                                                      details: ["content_width": width])
             lastWidth = width; lastDark = dark
             generation += 1; let token = generation
-            task?.cancel(); view.diagramPending = true
+            task?.cancel(); view.layoutCancellationCount += 1; view.diagramPending = true
+            DiagramInspection.recordScrollStability(event: "editing_cancel", view: view)
             let expected = document?.revision
             task = Task { [weak self] in
                 guard let self else { return }
@@ -644,10 +647,23 @@ final class DiagramTextView: NSTextView {
         redrawInlineMath()
     }
     override func becomeFirstResponder() -> Bool {
-        let accepted = super.becomeFirstResponder(); redrawInlineMath(); return accepted
+        let accepted = super.becomeFirstResponder(); redrawInlineMath()
+        UndoMenuState.scheduleRefresh()
+        return accepted
     }
     override func resignFirstResponder() -> Bool {
-        let accepted = super.resignFirstResponder(); redrawInlineMath(); return accepted
+        // 组合中输入法把标记文本留在存储里；交还第一响应者时先结束组合，
+        // 否则 hasMarkedText() 不再变化，文档会停在 marked 并拒绝保存。
+        finishComposition()
+        let accepted = super.resignFirstResponder(); redrawInlineMath()
+        UndoMenuState.scheduleRefresh()
+        return accepted
+    }
+    /// 保留已显示的组合正文，再结束输入法会话；文档切换和失焦共用同一收尾顺序。
+    func finishComposition() {
+        guard hasMarkedText() else { return }
+        unmarkText()
+        inputContext?.discardMarkedText()
     }
     @objc private func redrawInlineMath() {
         for formula in inlineMathViews {
@@ -755,9 +771,12 @@ final class DiagramTextView: NSTextView {
     var mediaPaintedAt = 0.0
     var diagramPending = false
     var diagramIssue: String?
-    /// 验收观察值：只记录调度与完成次数，不参与布局决策。
+    /// 验收观察值：只记录调度、取消与完成次数，不参与布局决策。
     var layoutRefreshCount = 0
     var layoutRenderCount = 0
+    var layoutCancellationCount = 0
+    var minimumDocumentHeightForTesting: CGFloat = 0
+    private var lastStableContentWidth = 0.0
     var onWidthOrThemeChange: (() -> Void)?
     /// 仅验收使用：按当前宽度丢弃旧图锚点，重新做一次初排。
     var onFreshRender: (() async -> Void)?
@@ -784,16 +803,18 @@ final class DiagramTextView: NSTextView {
         onCompositionState?(true)
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
         settingMarked = false
+        UndoMenuState.scheduleRefresh()
     }
     override func insertText(_ string: Any, replacementRange: NSRange) {
         super.insertText((string as? NSAttributedString)?.string ?? string, replacementRange: replacementRange)
         if !hasMarkedText() { onCompositionState?(false); onCommit?() }
+        UndoMenuState.scheduleRefresh()
     }
     override func unmarkText() {
         super.unmarkText()
         if !settingMarked { onCompositionState?(false); onCommit?() }
+        UndoMenuState.scheduleRefresh()
     }
-
     func shiftBlocks(for range: NSRange, delta: Int) {
         var keptMedia: [NoteMedia] = []
         var keptViews: [MediaView] = []
@@ -830,12 +851,19 @@ final class DiagramTextView: NSTextView {
     }
 
     override func setFrameSize(_ newSize: NSSize) {
-        let changed = abs(frame.width - newSize.width) > 0.25
+        let stableWidth = (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? newSize.width
+        let changed = abs(stableWidth - lastStableContentWidth) > 0.25
+        let frameChanged = abs(frame.width - newSize.width) > 0.25
         super.setFrameSize(newSize)
-        if changed {
+        if frameChanged {
             DiagramInspection.recordScrollStability(event: "frame_width", view: self,
                                                      details: ["new_width": newSize.width,
                                                                "new_height": newSize.height])
+        }
+        if changed {
+            lastStableContentWidth = stableWidth
+            DiagramInspection.recordScrollStability(event: "stable_width", view: self,
+                                                     details: ["stable_width": stableWidth])
             onWidthOrThemeChange?()
         }
     }
@@ -957,7 +985,7 @@ final class DiagramTextView: NSTextView {
         fragment.replacementPrefix = nil
         fragment.previewHeight = 0
         fragment.reason = nil
-        fragment.noticeWidth = bounds.width - 2 * textContainerInset.width
+        fragment.noticeWidth = layoutContentWidth
         let bodyFont = sourceTypingAttributes?[.font] as? NSFont ?? font ?? NSFont.systemFont(ofSize: 15)
         fragment.extraLineHeight = ceil(bodyFont.ascender - bodyFont.descender + bodyFont.leading) + 4
         fragment.sourceMask = 0
@@ -1013,7 +1041,8 @@ final class DiagramTextView: NSTextView {
             contentHeight = view.frame.maxY + textContainerInset.height
         } else { contentHeight = (textLayoutManager?.usageBoundsForTextContainer.maxY ?? 0) + 2 * textContainerInset.height }
         let width = (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? frame.width
-        let height = max(enclosingScrollView?.contentView.bounds.height ?? 0, contentHeight)
+        let height = max(enclosingScrollView?.contentView.bounds.height ?? 0, contentHeight,
+                         minimumDocumentHeightForTesting)
         if abs(frame.height - height) > 0.5 {
             DiagramInspection.recordScrollStability(event: "document_resize", view: self,
                                                      details: ["content_height": contentHeight,

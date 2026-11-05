@@ -18,10 +18,12 @@ enum DiagramInspection {
     static func textViews(in view: NSView) -> [DiagramTextView] {
         (view as? DiagramTextView).map { [$0] } ?? view.subviews.flatMap { textViews(in: $0) }
     }
-    static func current(document: NoteDocument?) -> DiagramTextView? {
+    static func current(document: NoteDocument? = nil) -> DiagramTextView? {
         let views = NSApp.windows.filter(\.isVisible).compactMap(\.contentView).flatMap { textViews(in: $0) }
-        guard let document else { return nil }
-        return views.first { $0.representedDocument == ObjectIdentifier(document) }
+        if let document { return views.first { $0.representedDocument == ObjectIdentifier(document) } }
+        if let view = NSApp.keyWindow?.contentView.flatMap({ textViews(in: $0).first }) { return view }
+        // 显式单窗口检查可能在应用尚未取得 key 状态时开始；多个窗口时不猜测目标。
+        return views.count == 1 ? views.first : nil
     }
     static func sceneSignature(_ scene: DiagramScene) -> String {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
@@ -44,7 +46,7 @@ enum DiagramInspection {
             NSApp.postEvent(event, atStart: false)
         }
     }
-    static func settled(source: String? = nil, document: NoteDocument?) async throws -> DiagramTextView {
+    static func settled(source: String? = nil, document: NoteDocument? = nil) async throws -> DiagramTextView {
         for _ in 0..<500 {
             if let view = current(document: document), !view.diagramPending, source == nil || view.string == source {
                 autoreleasepool { view.layoutSubtreeIfNeeded() }
@@ -55,7 +57,7 @@ enum DiagramInspection {
         throw CocoaError(.coderValueNotFound)
     }
 
-    private static func scrollerStyleName(_ style: NSScroller.Style) -> String {
+    static func scrollerStyleName(_ style: NSScroller.Style) -> String {
         style == .legacy ? "legacy" : "overlay"
     }
 
@@ -91,6 +93,7 @@ enum DiagramInspection {
         ]
         if let view, let scroll {
             let verticalScroller = scroll.verticalScroller
+            let stableWidth = (scroll as? DiagramScrollView)?.stableContentWidth ?? view.bounds.width
             row.merge([
                 "view_kind": view.isReading ? "reading" : "editing",
                 "scroll_bounds": NSStringFromRect(scroll.bounds),
@@ -101,11 +104,13 @@ enum DiagramInspection {
                 "scroll_origin": [scroll.contentView.bounds.origin.x, scroll.contentView.bounds.origin.y],
                 "vertical_scroller_visible": verticalScroller?.isHidden == false,
                 "content_width": view.layoutContentWidth,
+                "stable_content_width": stableWidth,
                 "scene_widths": view.blocks.compactMap { $0.prepared?.scene.width },
                 "scene_heights": view.blocks.compactMap { $0.prepared?.scene.height },
                 "pending": view.diagramPending,
                 "refresh_count": view.layoutRefreshCount,
                 "render_count": view.layoutRenderCount,
+                "cancellation_count": view.layoutCancellationCount,
                 "window_width": view.window?.frame.width ?? 0,
             ]) { _, replacement in replacement }
         }
@@ -116,7 +121,7 @@ enum DiagramInspection {
         try? handle.write(contentsOf: Data(line.utf8))
     }
 
-    /// 在真实窗口中按固定间隔记录滚动布局状态，供两种系统滚动条设置重算。
+    /// 在真实窗口中按固定间隔记录滚动布局状态，供 legacy / overlay 两态重算。
     static func scrollStability(workspace: Workspace, arguments: [String], output: URL) async throws {
         if stabilityHandle == nil { startScrollStabilityRecorder(arguments: arguments) }
         _ = output
@@ -142,8 +147,18 @@ enum DiagramInspection {
         }
         recordScrollStability(event: "observation_started", view: view)
         let started = ProcessInfo.processInfo.systemUptime
+        let resizeViewport = arguments.contains("--diagram-stability-resize")
+        let originalWindowFrame = view.window?.frame
         var index = 0
         repeat {
+            if resizeViewport, index.isMultiple(of: 40), let window = view.window, let originalWindowFrame {
+                var frame = originalWindowFrame
+                frame.size.height = index.isMultiple(of: 80) ? 560 : 760
+                window.setFrame(frame, display: true)
+                scroll.contentView.scroll(to: CGPoint(x: 0, y: index.isMultiple(of: 80) ? 0 : 64))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                scroll.flashScrollers()
+            }
             recordScrollStability(event: "sample", view: view,
                                   details: ["sample": index, "observation_seconds": ProcessInfo.processInfo.systemUptime - started])
             if ProcessInfo.processInfo.systemUptime - started >= 8 { break }
@@ -151,6 +166,7 @@ enum DiagramInspection {
             try await Task.sleep(for: .milliseconds(20))
         } while true
         recordScrollStability(event: "finished", view: view, details: ["samples": index + 1])
+        if let originalWindowFrame { view.window?.setFrame(originalWindowFrame, display: true) }
     }
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         let reading = arguments.contains("--diagram-reading")

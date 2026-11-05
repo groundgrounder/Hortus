@@ -6,4 +6,4 @@ python3 -B tools/test-math-checks.py
 swift test --package-path apps/macos -Xswiftc -warnings-as-errors \
   -Xlinker "$PWD/target/release/libhortus_ffi.a" \
   -Xlinker -framework -Xlinker CoreFoundation -Xlinker -framework -Xlinker CoreServices \
-  -Xlinker -framework -Xlinker Security -Xlinker -liconv
+  -Xlinker -framework -Xlinker Security -Xlinker -liconv --no-parallel

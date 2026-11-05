@@ -16,6 +16,12 @@ SPEC = spec_from_file_location('toolbar_check', ROOT / 'tools/check-tabs-in-tool
 HELPERS = module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPERS)
 
+SCROLLBAR_ARGUMENTS = {
+    'always': ['-AppleShowScrollBars', 'Always'],
+    'when-scrolling': ['-AppleShowScrollBars', 'WhenScrolling'],
+}
+SCROLLER_STYLES = {'always': 'legacy', 'when-scrolling': 'overlay'}
+
 
 def editing_environment(state):
     # 编辑检查直接打开源码视图，不把检查器启动后的视图切换计入打开耗时。
@@ -25,12 +31,12 @@ def editing_environment(state):
     return HELPERS.environment(state)
 
 
-def run(state, output, name, vault, mode):
+def run(state, output, name, vault, mode, scrollbar_arguments):
     target = output / f'{name}.json'
     target.unlink(missing_ok=True)
     allowed = {str(p.relative_to(vault)) for p in vault.rglob('*')}
     arguments = [str(APP), f'--vault={vault}', '--note=note.md', '--light',
-                 f'--edit-inspection={target}', f'--edit-mode={mode}']
+                 f'--edit-inspection={target}', f'--edit-mode={mode}', *scrollbar_arguments]
     with subprocess.Popen(arguments, env=editing_environment(state)) as process:
         try:
             deadline = time.monotonic() + 30
@@ -53,13 +59,13 @@ def run(state, output, name, vault, mode):
                 process.wait(timeout=6)
 
 
-def run_blocked(state, output, name, vault, mode):
+def run_blocked(state, output, name, vault, mode, scrollbar_arguments):
     """笔记与恢复稿都写不进去时，退出必须被拦下；进程保持运行并等待用户决定。"""
     target = output / f'{name}.json'
     target.unlink(missing_ok=True)
     before = (vault / 'note.md').read_text()
     arguments = [str(APP), f'--vault={vault}', '--note=note.md', '--light',
-                 f'--edit-inspection={target}', f'--edit-mode={mode}']
+                 f'--edit-inspection={target}', f'--edit-mode={mode}', *scrollbar_arguments]
     recovery = state / 'cache/recovery'
     with subprocess.Popen(arguments, env=editing_environment(state)) as process:
         try:
@@ -90,9 +96,11 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/edit-and-save')
     parser.add_argument('--skip-cpu', action='store_true')
     parser.add_argument('--cpu-only', action='store_true')
+    parser.add_argument('--scrollbars', choices=SCROLLBAR_ARGUMENTS, default='when-scrolling')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    scrollbar_arguments = SCROLLBAR_ARGUMENTS[args.scrollbars]
     with tempfile.TemporaryDirectory(prefix='hortus-edit-check-') as temporary:
         base = Path(temporary)
         vault = base / 'vault'
@@ -104,44 +112,50 @@ def main():
         alternate.mkdir()
         (alternate / 'note.md').write_text('# Alternate\n')
         if not args.cpu_only:
-            lifecycle = run(base / 'lifecycle', output, 'lifecycle', vault, 'lifecycle')
+            lifecycle = run(base / 'lifecycle', output, 'lifecycle', vault, 'lifecycle', scrollbar_arguments)
             assert .9 <= lifecycle['autosave_delay_seconds'] <= 1.5, lifecycle
             assert all(lifecycle[key] for key in ['command_save', 'focus_save', 'switch_save', 'library_save', 'close_save',
                                                   'selection_preserved', 'undo_cleared', 'dirty_before_exit']), lifecycle
             assert lifecycle['external_delay_seconds'] <= 1, lifecycle
             assert (vault / 'note.md').read_text().startswith('退出保存'), '退出时没有保存'
-            failed = run(base / 'recovery', output, 'shutdown-failure', vault, 'shutdown-failure')
+            failed = run(base / 'recovery', output, 'shutdown-failure', vault, 'shutdown-failure', scrollbar_arguments)
             # 笔记写入失败但恢复稿成功：最新正文已落盘，退出不必等待也很难被拖慢。
             assert 0 <= failed['exit_seconds_after_result'] <= 2, failed
             recovery = list((base / 'recovery/cache/recovery').glob('*.json'))
             assert len(recovery) == 1
             assert json.loads(recovery[0].read_text())['text'].startswith('退出恢复😀')
             (vault / 'note.md').chmod(0o644)
-            restored = run(base / 'recovery', output, 'restart-recovery', vault, 'recovery')
+            restored = run(base / 'recovery', output, 'restart-recovery', vault, 'recovery', scrollbar_arguments)
             assert restored['recovery_prompt'] and restored['recovered'] and restored['saved'], restored
             assert not list((base / 'recovery/cache/recovery').glob('*.json'))
             # 笔记与恢复稿都失败：不能放行退出；进程留在提示界面等待用户决定。
-            blocked = run_blocked(base / 'blocked', output, 'shutdown-blocked', vault, 'shutdown-blocked')
+            blocked = run_blocked(base / 'blocked', output, 'shutdown-blocked', vault, 'shutdown-blocked', scrollbar_arguments)
             assert blocked['exit_blocked']
             block = '\n```mermaid\nmindmap\n  Root\n    One\n    Two\n    Three\n```\n'
             chunk = 'Ordinary Markdown source text for incremental editing.\n' * 3300
             large = '\n'.join(chunk + block for _ in range(6))
             (vault / 'note.md').write_text(large)
-            performance = run(base / 'performance', output, 'performance', vault, 'performance')
+            performance = run(base / 'performance', output, 'performance', vault, 'performance', scrollbar_arguments)
+            assert performance['scrollbar_setting'].lower() == args.scrollbars.replace('-', ''), performance
+            assert performance['actual_scroller_style'] == SCROLLER_STYLES[args.scrollbars], performance
             assert performance['utf8_bytes'] >= 1024 * 1024 and performance['blocks'] == 6, performance
             assert performance['key_p95_ms'] <= 8, performance
             assert performance['core_matches_native'] and performance['saved'], performance
+            assert performance['diagramPending'] is False, performance
         if not args.skip_cpu:
-            empty = HELPERS.idle_cpu(base / 'cpu-empty', [])
+            empty = HELPERS.idle_cpu(base / 'cpu-empty', scrollbar_arguments)
             print('未打开库的 30 s CPU 采样完成', flush=True)
             (vault / 'note.md').write_text(source)
             ready = output / 'idle-ready.json'
             ready.unlink(missing_ok=True)
             opened = HELPERS.idle_cpu(base / 'cpu-opened', [f'--vault={vault}', '--note=note.md',
-                f'--edit-inspection={ready}', '--edit-mode=idle', '--inspect-hold-open'])
-            assert json.loads(ready.read_text())['saved']
+                f'--edit-inspection={ready}', '--edit-mode=idle', '--inspect-hold-open', *scrollbar_arguments])
+            ready_result = json.loads(ready.read_text())
+            assert ready_result['saved']
+            assert ready_result['actual_scroller_style'] == SCROLLER_STYLES[args.scrollbars], ready_result
             difference = opened['average_cpu_percent'] - empty['average_cpu_percent']
-            result = {'empty': empty, 'edited_and_saved': opened, 'difference_percentage_points': difference}
+            result = {'scrollbar_setting': args.scrollbars, 'actual_scroller_style': ready_result['actual_scroller_style'],
+                      'empty': empty, 'edited_and_saved': opened, 'difference_percentage_points': difference}
             (output / 'idle-cpu.json').write_text(json.dumps(result, indent=2) + '\n')
             print(json.dumps(result, indent=2), flush=True)
             assert abs(difference) <= .1, result

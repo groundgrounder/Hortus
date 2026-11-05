@@ -3,78 +3,171 @@ import Darwin
 import ScreenCaptureKit
 import CoreGraphics
 
+@MainActor
+enum UndoCommandRouter {
+    private static func target(in window: NSWindow?) -> NSTextView? {
+        guard let text = window?.firstResponder as? NSTextView,
+              text.isEditable, !text.hasMarkedText() else { return nil }
+        return text
+    }
+
+    static func canUndo(in window: NSWindow? = NSApp.keyWindow) -> Bool {
+        target(in: window)?.undoManager?.canUndo == true
+    }
+
+    static func canRedo(in window: NSWindow? = NSApp.keyWindow) -> Bool {
+        target(in: window)?.undoManager?.canRedo == true
+    }
+
+    static func undo(in window: NSWindow? = NSApp.keyWindow) {
+        guard let manager = target(in: window)?.undoManager, manager.canUndo else { return }
+        manager.undo()
+    }
+
+    static func redo(in window: NSWindow? = NSApp.keyWindow) {
+        guard let manager = target(in: window)?.undoManager, manager.canRedo else { return }
+        manager.redo()
+    }
+}
+
+/// SwiftUI 命令保留 action，只同步 AppKit 菜单项的启用状态；直接替换 SwiftUI
+/// 菜单项的 target/action 会在 SwiftUI 更新图时崩溃。
+@MainActor
+enum UndoMenuState {
+    private static var refreshScheduled = false
+
+    static func scheduleRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            refreshScheduled = false
+            refresh()
+        }
+    }
+
+    static func refresh() {
+        let undo = UndoCommandRouter.canUndo()
+        let redo = UndoCommandRouter.canRedo()
+        func visit(_ menu: NSMenu) {
+            for item in menu.items {
+                if item.keyEquivalent.lowercased() == "z", item.keyEquivalentModifierMask.contains(.command) {
+                    let shifted = item.keyEquivalentModifierMask.contains(.shift)
+                    let enabled = shifted ? redo : undo
+                    if item.isEnabled != enabled { item.isEnabled = enabled }
+                }
+                if let submenu = item.submenu { visit(submenu) }
+            }
+        }
+        if let main = NSApp.mainMenu { visit(main) }
+    }
+}
+
 @main
 struct HortusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var application = ApplicationWorkspace()
-    private var workspace: Workspace { application.active?.workspace ?? application.initial.workspace }
-    private var layout: Layout { application.active?.layout ?? application.initial.layout }
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        WindowGroup("Hortus", id: "main", for: String.self) { $id in
+        let open = openWindow
+        let _ = delegate.presentInitialWindow = { open(id: "main") }
+        // 所有窗口都由应用请求创建；首窗在启动完成时打开，附加窗按记录标识打开。
+        Window("Hortus", id: "main") {
+            VaultWindowRoot(application: application, record: application.initial, delegate: delegate)
+        }
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
+        .defaultSize(width: 1320, height: 840)
+        .windowToolbarStyle(.unified(showsTitle: false))
+        .commands { HortusCommands(application: application, delegate: delegate) }
+
+        WindowGroup("Hortus", id: "vault", for: String.self) { $id in
             if let record = application.record(id) {
                 VaultWindowRoot(application: application, record: record, delegate: delegate)
             }
         }
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified(showsTitle: false))
-        .commands {
-            CommandGroup(replacing: .appInfo) {
-                Button("About Hortus") { delegate.showAboutPanel() }
+        .commands { HortusCommands(application: application, delegate: delegate) }
+    }
+}
+
+private struct HortusCommands: Commands {
+    @Bindable var application: ApplicationWorkspace
+    let delegate: AppDelegate
+    private var workspace: Workspace { application.active?.workspace ?? application.initial.workspace }
+    private var layout: Layout { application.active?.layout ?? application.initial.layout }
+
+    var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About Hortus") { delegate.showAboutPanel() }
+        }
+        CommandGroup(replacing: .undoRedo) {
+            Button("Undo") {
+                UndoCommandRouter.undo()
+                UndoMenuState.scheduleRefresh()
             }
-            CommandGroup(replacing: .newItem) {
-                Button("Open Folder…") { workspace.chooseFolder() }.keyboardShortcut("o", modifiers: .command)
-                Menu("Recent") {
-                    if workspace.recent.isEmpty { Text("No recently opened folders") }
-                    ForEach(workspace.recent) { recent in
-                        Button(recent.path) { Task { await workspace.openFolder(recent.path) } }
-                    }
+            .keyboardShortcut("z", modifiers: .command)
+            Button("Redo") {
+                UndoCommandRouter.redo()
+                UndoMenuState.scheduleRefresh()
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+        }
+        CommandGroup(replacing: .newItem) {
+            Button("Open Folder…") { workspace.chooseFolder() }.keyboardShortcut("o", modifiers: .command)
+            Menu("Recent") {
+                if workspace.recent.isEmpty { Text("No recently opened folders") }
+                ForEach(workspace.recent) { recent in
+                    Button(recent.path) { Task { await workspace.openFolder(recent.path) } }
                 }
-                Divider()
-                Button("Close Tab") { workspace.closeTab() }.keyboardShortcut("w", modifiers: .command)
-                    .disabled(workspace.selected == nil)
             }
-            CommandGroup(replacing: .saveItem) {
-                Button("Save") { workspace.saveCurrent() }.keyboardShortcut("s", modifiers: .command)
-                    .disabled(workspace.current?.document == nil)
-            }
-            CommandGroup(after: .textEditing) {
-                Button("Align Table Source") { NSApp.sendAction(#selector(DiagramTextView.alignTableSource(_:)), to: nil, from: nil) }
-                    .keyboardShortcut("t", modifiers: [.option, .command])
-                    .disabled(workspace.current?.document?.reading != false)
-                Button("Find…") { find(.showFindInterface) }.keyboardShortcut("f", modifiers: .command)
-                Button("Find Next") { find(.nextMatch) }.keyboardShortcut("g", modifiers: .command)
-                Button("Find Previous") { find(.previousMatch) }.keyboardShortcut("g", modifiers: [.shift, .command])
-                Button("Find and Replace…") { find(.showReplaceInterface) }.keyboardShortcut("f", modifiers: [.option, .command])
-                Divider()
-                Button(L10n.string("Quick Open")) { workspace.presentQuickOpen() }
-                    .keyboardShortcut("p", modifiers: .command)
-                Button(L10n.string("Search Notes")) { workspace.showSearchPanel() }
-                    .keyboardShortcut("f", modifiers: [.shift, .command])
-            }
-            CommandGroup(after: .toolbar) {
-                Button(workspace.current?.document?.reading == true ? "Switch to Editing" : "Switch to Reading") { workspace.toggleView() }
-                    .keyboardShortcut("e", modifiers: .command).disabled(workspace.current?.document == nil)
-            }
-            CommandMenu("View") {
-                Toggle(L10n.string("Show Terminal"), isOn: Binding(
-                    get: { layout.terminalVisible },
-                    set: { shown in
-                        layout.setTerminalVisible(shown)
-                        if shown { DispatchQueue.main.async { workspace.terminal.focus() } }
-                    }))
-                    .keyboardShortcut("`", modifiers: .control)
-                Button(L10n.string("Clear Terminal")) { workspace.terminal.clearScreen() }
-                    .keyboardShortcut("k", modifiers: .command)
-                    .disabled(workspace.terminal.state != .running)
-            }
-            CommandMenu("Panels") {
-                Toggle("Left Sidebar", isOn: shown(.left)).keyboardShortcut("s", modifiers: [.control, .command])
-                Toggle("Right Sidebar", isOn: shown(.right)).keyboardShortcut("i", modifiers: [.option, .command])
-                Toggle("Bottom Panel", isOn: shown(.bottom)).keyboardShortcut("j", modifiers: .command)
-                Divider()
-                Button("Reset Layout") { layout.reset() }
-            }
+            Divider()
+            Button("Close Tab") { workspace.closeTab() }.keyboardShortcut("w", modifiers: .command)
+                .disabled(workspace.selected == nil)
+        }
+        CommandGroup(after: .newItem) {
+            Button("Save") { workspace.saveCurrent() }.keyboardShortcut("s", modifiers: .command)
+                .disabled(workspace.current?.document == nil)
+        }
+        CommandGroup(after: .textEditing) {
+            Button("Align Table Source") { NSApp.sendAction(#selector(DiagramTextView.alignTableSource(_:)), to: nil, from: nil) }
+                .keyboardShortcut("t", modifiers: [.option, .command])
+                .disabled(workspace.current?.document?.reading != false)
+            Button("Find…") { find(.showFindInterface) }.keyboardShortcut("f", modifiers: .command)
+            Button("Find Next") { find(.nextMatch) }.keyboardShortcut("g", modifiers: .command)
+            Button("Find Previous") { find(.previousMatch) }.keyboardShortcut("g", modifiers: [.shift, .command])
+            Button("Find and Replace…") { find(.showReplaceInterface) }.keyboardShortcut("f", modifiers: [.option, .command])
+            Divider()
+            Button(L10n.string("Quick Open")) { workspace.presentQuickOpen() }
+                .keyboardShortcut("p", modifiers: .command)
+            Button(L10n.string("Search Notes")) { workspace.showSearchPanel() }
+                .keyboardShortcut("f", modifiers: [.shift, .command])
+        }
+        CommandGroup(after: .toolbar) {
+            Button(workspace.current?.document?.reading == true ? "Switch to Editing" : "Switch to Reading") { workspace.toggleView() }
+                .keyboardShortcut("e", modifiers: .command).disabled(workspace.current?.document == nil)
+        }
+        CommandMenu("View") {
+            Toggle(L10n.string("Show Terminal"), isOn: Binding(
+                get: { layout.terminalVisible },
+                set: { shown in
+                    layout.setTerminalVisible(shown)
+                    if shown { DispatchQueue.main.async { workspace.terminal.focus() } }
+                }))
+                .keyboardShortcut("`", modifiers: .control)
+            Button(L10n.string("Clear Terminal")) { workspace.terminal.clearScreen() }
+                .keyboardShortcut("k", modifiers: .command)
+                .disabled(workspace.terminal.state != .running)
+        }
+        CommandMenu("Panels") {
+            Toggle("Left Sidebar", isOn: shown(.left)).keyboardShortcut("s", modifiers: [.control, .command])
+            Toggle("Right Sidebar", isOn: shown(.right)).keyboardShortcut("i", modifiers: [.option, .command])
+            Toggle("Bottom Panel", isOn: shown(.bottom)).keyboardShortcut("j", modifiers: .command)
+            Divider()
+            Button("Reset Layout") { layout.reset() }
         }
     }
 
@@ -90,6 +183,7 @@ struct HortusApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var application: ApplicationWorkspace?
+    var presentInitialWindow: (() -> Void)?
     var workspace: Workspace? { application?.initial.workspace }
     var layout: Layout? { application?.initial.layout }
     var ready = false
@@ -101,10 +195,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var launchTime = ContinuousClock.now
     private var focusObserver: NSObjectProtocol?
     private var toolbarFocusObserver: NSObjectProtocol?
+    private var commandAvailabilityObservers: [NSObjectProtocol] = []
 
     func showAboutPanel() {
         let info = Bundle.main.infoDictionary ?? [:]
-        let version = info["CFBundleShortVersionString"] as? String ?? "0.1.2"
+        let version = info["CFBundleShortVersionString"] as? String ?? "0.1.3"
         let build = info["CFBundleVersion"] as? String ?? ""
         // 居中和标题对齐；显式用 labelColor，否则深色模式下默认黑字看不清
         let paragraph = NSMutableParagraphStyle()
@@ -146,8 +241,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if args.contains("--dark") { NSApp.appearance = NSAppearance(named: .darkAqua) }
         if args.contains("--light") { NSApp.appearance = NSAppearance(named: .aqua) }
         if args.contains("--simulate-high-contrast") { NSApp.appearance = NSAppearance(named: .aqua) }
-        NSApp.activate()
         DiagramInspection.startScrollStabilityRecorder(arguments: args)
+        presentInitialWindow?()
+        NSApp.activate()
+        UndoMenuState.scheduleRefresh()
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+                     NSWindow.didUpdateNotification, NSText.didChangeNotification,
+                     NSMenu.didChangeItemNotification] {
+            commandAvailabilityObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { UndoMenuState.scheduleRefresh() }
+            })
+        }
         focusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
             nonisolated(unsafe) let object = note.object
             Task { @MainActor in
@@ -259,6 +365,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func finishInspection() async {
         guard let workspace else { return }
         let args = ProcessInfo.processInfo.arguments
+        if let argument = args.first(where: { $0.hasPrefix("--inspect-exit-after=") }),
+           let seconds = Double(argument.dropFirst("--inspect-exit-after=".count)), seconds > 0 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { exit(0) }
+        }
         do {
             #if DEBUG
             if let arg = args.first(where: { $0.hasPrefix(TerminalFontInspection.argumentPrefix) }), let layout {
@@ -269,7 +379,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             #endif
-            if let arg = args.first(where: { $0.hasPrefix("--diagram-scroll-stability=") }) {
+            if let arg = args.first(where: { $0.hasPrefix("--diagram-scroll-stability=") }),
+               !args.contains(where: { $0.hasPrefix("--edit-inspection=") }) {
                 try await DiagramInspection.scrollStability(workspace: workspace, arguments: args,
                     output: URL(fileURLWithPath: String(arg.dropFirst("--diagram-scroll-stability=".count))))
                 NSApp.terminate(nil)
@@ -398,6 +509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if args.contains("--inspect-hold-open") { return }
             }
             if args.contains("--inspect-slow-shutdown") { workspace.shutdownDelayForInspection = 10 }
+            if args.contains("--inspect-hold-open") { return }
             NSApp.terminate(nil)
         } catch { fputs("Hortus 自检失败：\(error)\n", stderr); exit(1) }
     }
@@ -439,7 +551,7 @@ private struct VaultWindowRoot: View {
             } message: { Text(record.workspace.error ?? "") }
             .task {
                 let open = openWindow
-                application.showWindow = { id in open(id: "main", value: id) }
+                application.showWindow = { id in open(id: "vault", value: id) }
                 delegate.application = application
                 let first = record === application.initial
                 if first {
@@ -463,12 +575,10 @@ private struct VaultWindowRoot: View {
                     if args.contains("--inspect-hide-left") { layout.visible[.left] = false }
                     if let arg = args.first(where: { $0.hasPrefix("--inspect-left-width=") }), let width = Double(arg.dropFirst("--inspect-left-width=".count)) { layout.size[.left] = width }
                     delegate.ready = true
-                    #if DEBUG
                     if let arg = args.first(where: { $0.hasPrefix("--multi-window-inspection=") }) {
                         await MultiWindowInspection.baseline(workspace: workspace, output: String(arg.dropFirst("--multi-window-inspection=".count)))
                         return
                     }
-                    #endif
                     if let arg = args.first(where: { $0.hasPrefix("--check-vault-lifecycle=") }) {
                         await WorkspaceInspection.checkLifecycle(workspace, output: String(arg.dropFirst("--check-vault-lifecycle=".count)))
                     }

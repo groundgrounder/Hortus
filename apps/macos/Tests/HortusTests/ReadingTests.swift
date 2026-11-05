@@ -32,6 +32,7 @@ struct ReadingTests {
         }
         func ready() async throws {
             try await eventually { !self.coordinator.pending && self.coordinator.model?.revision == self.document.revision }
+            view.needsLayout = true
             view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
         }
         func close() async {
@@ -152,8 +153,9 @@ struct ReadingTests {
 
         count = f.coordinator.submittedRequests
         f.coordinator.refresh()
-        let scroll = try #require(f.view.enclosingScrollView)
-        scroll.setFrameSize(NSSize(width: scroll.bounds.width + 20, height: scroll.bounds.height))
+        let scroll = try #require(f.view.enclosingScrollView as? DiagramScrollView)
+        scroll.setFrameSize(NSSize(width: scroll.frame.width + 20, height: scroll.frame.height))
+        scroll.layoutSubtreeIfNeeded()
         f.coordinator.refresh()
         f.coordinator.refresh()
         #expect(f.coordinator.submittedRequests == count + 1)

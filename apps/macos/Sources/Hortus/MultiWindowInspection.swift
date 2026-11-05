@@ -1,4 +1,3 @@
-#if DEBUG
 import AppKit
 import Darwin
 import ScreenCaptureKit
@@ -11,10 +10,12 @@ enum MultiWindowInspection {
         do {
             guard let application = workspace.application else { throw CocoaError(.coderValueNotFound) }
             let args = ProcessInfo.processInfo.arguments
+            #if DEBUG
             if args.contains("--multi-window-tab-drag") {
                 try await TabDragInspection.run(application, output: output)
                 return
             }
+            #endif
             let restoring = args.contains("--multi-window-restore")
             var result: [String: Any] = [:]
             if args.contains("--multi-window-edge") {
@@ -330,7 +331,15 @@ enum MultiWindowInspection {
         }
         application.activate(first)
         NSApp.activate(ignoringOtherApps: true)
+        first.window?.makeKeyAndOrderFront(nil)
+        guard CGPreflightPostEventAccess() else { throw CocoaError(.fileWriteNoPermission) }
         try await wait { NSApp.isActive && first.window?.isKeyWindow == true }
+        // 等实际拖动源与工具栏落点安装完毕，再发送真实鼠标事件。
+        try await wait {
+            guard let window = first.window, let content = window.contentView else { return false }
+            return findView(content, named: "panel-tab-outline") != nil
+                && window.toolbar?.items.first { $0.itemIdentifier.rawValue == "bottom-panel" }?.view != nil
+        }
         try await Task.sleep(for: .milliseconds(150))
         let window = try require(first.window)
         let content = try require(window.contentView)
@@ -369,6 +378,7 @@ enum MultiWindowInspection {
             }
             return false
         }
+        fputs("multi-window drag window=\(NSStringFromRect(window.frame)) source=\(NSStringFromRect(source.convert(source.bounds, to: nil))) target=\(NSStringFromRect(target.convert(target.bounds, to: nil))) from=\(from) to=\(to) active=\(NSApp.isActive) key=\(window.isKeyWindow)\n", stderr)
         await withCheckedContinuation { continuation in
             sendDrag(from: from, to: to) { continuation.resume() }
         }
@@ -386,6 +396,9 @@ enum MultiWindowInspection {
             && first.layout.groups(in: .bottom).map(\.tabs) == second.layout.groups(in: .bottom).map(\.tabs)
         diagnostics["groups_shared"] = shared
         diagnostics["second_region"] = second.layout.region(containing: .outline).map(String.init(describing:)) ?? "nil"
+        if !changed {
+            fputs("multi-window drag result first=\(String(describing: first.layout.region(containing: .outline))) second=\(String(describing: second.layout.region(containing: .outline)))\n", stderr)
+        }
         return (changed && shared, diagnostics)
     }
 
@@ -434,4 +447,3 @@ enum MultiWindowInspection {
         throw CocoaError(.coderValueNotFound)
     }
 }
-#endif

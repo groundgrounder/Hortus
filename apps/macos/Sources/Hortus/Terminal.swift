@@ -80,6 +80,7 @@ final class TerminalSession {
     func focus() {
         guard let view, let window = view.window else { return }
         window.makeFirstResponder(view)
+        UndoMenuState.scheduleRefresh()
     }
 
     func clearScreen() {
