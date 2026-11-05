@@ -159,9 +159,10 @@ enum DiagramInspection {
                 scroll.reflectScrolledClipView(scroll.contentView)
                 scroll.flashScrollers()
             }
+            let observationSeconds = ProcessInfo.processInfo.systemUptime - started
             recordScrollStability(event: "sample", view: view,
-                                  details: ["sample": index, "observation_seconds": ProcessInfo.processInfo.systemUptime - started])
-            if ProcessInfo.processInfo.systemUptime - started >= 8 { break }
+                                  details: ["sample": index, "observation_seconds": observationSeconds])
+            if observationSeconds >= 8 { break }
             index += 1
             try await Task.sleep(for: .milliseconds(20))
         } while true
