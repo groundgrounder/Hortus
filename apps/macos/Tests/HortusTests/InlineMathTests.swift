@@ -451,11 +451,11 @@ struct InlineMathTests {
         #expect(dark.reduce(0, +) / Double(dark.count) > 0.5)
         let attachment = try #require(f.view.inlineMath.values.first { $0.wide })
         let oldBlock = try #require(f.view.mathViews.first)
-        let width = f.view.bounds.width
         f.view.enclosingScrollView?.scrollerStyle = .legacy
         NotificationCenter.default.post(name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
         try await f.ready()
-        #expect(f.view.bounds.width == width)
+        let width = (f.view.enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? f.view.bounds.width
+        #expect(abs(f.view.layoutContentWidth - (width - 60)) < 0.001)
         let thickness = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
         let legacy = try #require(f.view.inlineMath.values.first { $0.wide })
         #expect(legacy !== attachment)

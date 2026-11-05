@@ -183,7 +183,7 @@ struct ReadingText: NSViewRepresentable {
     let remember: (UInt32, [String]) -> Void
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = DiagramScrollView()
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         let view = DiagramTextView(diagramLayout: true)
         view.isReading = true; view.isEditable = false; view.isSelectable = true; view.isRichText = true
@@ -272,7 +272,7 @@ struct ReadingText: NSViewRepresentable {
             view.onWidthOrThemeChange = { [weak self, weak view] in
                 guard let self, let view else { return }
                 let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                if abs(width - max(120, view.bounds.width - 60)) > 0.25 || self.dark != dark
+                if abs(width - view.layoutContentWidth) > 0.25 || self.dark != dark
                     || scrollerStyle != view.formulaScrollerStyle { refresh() }
             }
             view.onToggle = { [weak self] ordinal, id in
@@ -308,7 +308,7 @@ struct ReadingText: NSViewRepresentable {
         }
         func refresh(force: Bool = false) {
             guard let input, let view else { return }
-            let width = max(120, view.bounds.width - 60)
+            let width = view.layoutContentWidth
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             if force { forcedGeneration &+= 1 }
             let key = RefreshKey(revision: input.document.revision, width: width, dark: dark,

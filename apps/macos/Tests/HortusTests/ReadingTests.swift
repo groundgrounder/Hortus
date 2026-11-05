@@ -160,4 +160,44 @@ struct ReadingTests {
         #expect(f.coordinator.submittedRequests == count + 2)
         await f.close()
     }
+
+    @Test func scrollbarStylesUseStableContentWidthWithoutRefreshFeedback() async throws {
+        let source = "# 稳定宽度\n\n" + String(repeating: "段落内容。\n\n", count: 80)
+            + "```mermaid\nflowchart TB\nA[开始] --> B[结束]\n```\n"
+        let f = try Fixture(source)
+        let scroll = try #require(f.view.enclosingScrollView as? DiagramScrollView)
+        scroll.scrollerStyle = .legacy
+        try await f.start()
+        let legacyWidth = scroll.stableContentWidth
+        #expect(abs(f.view.frame.width - legacyWidth) <= 0.5)
+        #expect(abs(f.view.layoutContentWidth - (legacyWidth - 60)) <= 0.5)
+        #expect(f.view.blocks.compactMap { $0.prepared?.scene.width }
+            .allSatisfy { abs($0 - f.view.layoutContentWidth) <= 0.5 })
+
+        let legacyRequests = f.coordinator.submittedRequests
+        for height in [100.0, 5_000, 120, 8_000, 200] {
+            f.view.setFrameSize(NSSize(width: f.view.frame.width, height: height))
+            scroll.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try await f.ready()
+        #expect(f.coordinator.submittedRequests == legacyRequests)
+        #expect(abs(f.view.layoutContentWidth - (legacyWidth - 60)) <= 0.5)
+
+        scroll.scrollerStyle = .overlay
+        NotificationCenter.default.post(name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
+        try await eventually {
+            !f.coordinator.pending && abs(f.view.frame.width - scroll.stableContentWidth) <= 0.5
+        }
+        let overlayRequests = f.coordinator.submittedRequests
+        for height in [100.0, 5_000, 120, 8_000, 200] {
+            f.view.setFrameSize(NSSize(width: f.view.frame.width, height: height))
+            scroll.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try await f.ready()
+        #expect(f.coordinator.submittedRequests == overlayRequests)
+        #expect(abs(f.view.layoutContentWidth - (scroll.stableContentWidth - 60)) <= 0.5)
+        await f.close()
+    }
 }

@@ -192,6 +192,67 @@ struct DiagramTests {
         }
     }
 
+    @Test func editorScrollbarStylesKeepSceneWidthStable() async throws {
+        let source = "```mermaid\nflowchart TB\nA --> B\nB --> C\n```\n"
+            + String(repeating: "普通正文。\n\n", count: 100)
+        let scroll = DiagramScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .legacy
+        let view = DiagramTextView(diagramLayout: true)
+        view.frame = NSRect(x: 0, y: 0, width: scroll.stableContentWidth,
+                            height: scroll.contentView.bounds.height)
+        view.isVerticallyResizable = true
+        view.textContainerInset = NSSize(width: 30, height: 24)
+        view.textContainer?.lineFragmentPadding = 0
+        view.textContainer?.widthTracksTextView = true
+        scroll.documentView = view
+        let window = NSWindow(contentRect: scroll.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = scroll
+        window.orderFront(nil)
+        let coordinator = NoteText.EditorCoordinator()
+        defer {
+            coordinator.detach()
+            window.close()
+        }
+        coordinator.view = view
+        view.textLayoutManager?.delegate = coordinator
+        let service = DiagramService()
+        coordinator.update(NoteText(text: source, path: "scroll.md", vault: "test", fontSize: 15,
+                                    service: service, core: nil) { _, _ in })
+        try await wait(view)
+        let legacyWidth = view.layoutContentWidth
+        #expect(abs(legacyWidth - (scroll.stableContentWidth - 60)) <= 0.5)
+        #expect(view.blocks.compactMap { $0.prepared?.scene.width }
+            .allSatisfy { abs($0 - legacyWidth) <= 0.5 })
+
+        let legacyRenders = view.layoutRenderCount
+        for height in [100.0, 5_000, 120, 8_000, 200] {
+            view.setFrameSize(NSSize(width: view.frame.width, height: height))
+            scroll.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try await wait(view)
+        #expect(view.layoutRenderCount == legacyRenders)
+
+        scroll.scrollerStyle = .overlay
+        NotificationCenter.default.post(name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
+        try await wait(view)
+        let overlayWidth = view.layoutContentWidth
+        #expect(abs(overlayWidth - (scroll.stableContentWidth - 60)) <= 0.5)
+        #expect(view.blocks.compactMap { $0.prepared?.scene.width }
+            .allSatisfy { abs($0 - overlayWidth) <= 0.5 })
+        let overlayRenders = view.layoutRenderCount
+        for height in [100.0, 5_000, 120, 8_000, 200] {
+            view.setFrameSize(NSSize(width: view.frame.width, height: height))
+            scroll.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try await wait(view)
+        #expect(view.layoutRenderCount == overlayRenders)
+    }
+
     private func wait(_ view: DiagramTextView) async throws {
         for _ in 0..<250 {
             if !view.diagramPending { view.layoutSubtreeIfNeeded(); return }
