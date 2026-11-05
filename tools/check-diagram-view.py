@@ -108,6 +108,9 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
         if '--diagram-reference' in extra:
             assert data['initial_scene_widths'] and len(data['initial_scene_widths']) == data['diagrams'], data
             assert all(abs(value - width) <= .5 for value in data['initial_scene_widths']), data
+            initial_heights = [json.loads(scene)['height'] for scene in data['initial_semantic_scenes']]
+            assert len(initial_heights) == len(data['scene_heights']), data
+            assert all(abs(after - before) <= .5 for before, after in zip(initial_heights, data['scene_heights'])), data
             assert data['initial_row_counts'] == data['row_counts'], data
     else:
         assert data['scene_widths'] == [], data

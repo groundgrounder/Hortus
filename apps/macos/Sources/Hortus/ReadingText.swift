@@ -200,6 +200,7 @@ struct ReadingText: NSViewRepresentable {
         coordinator.detach()
         guard let view = scroll.documentView as? DiagramTextView else { return }
         view.onWidthOrThemeChange = nil; view.onToggle = nil; view.onSourceRange = nil; view.readingCoordinator = nil
+        view.onFreshRender = nil
         for diagram in view.diagramViews.values { diagram.detach() }
         for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
         view.mediaViews = []; view.mediaBlocks = []
@@ -274,6 +275,12 @@ struct ReadingText: NSViewRepresentable {
                 let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                 if abs(width - view.layoutContentWidth) > 0.25 || self.dark != dark
                     || scrollerStyle != view.formulaScrollerStyle { refresh() }
+            }
+            view.onFreshRender = { [weak self] in
+                guard let self else { return }
+                await self.input?.service.discardPrevious()
+                for index in self.rendered.indices { self.rendered[index].previous = nil }
+                self.refresh(force: true)
             }
             view.onSourceRange = { [weak self] ordinal, range in
                 guard let self, let block = rendered.first(where: { $0.ordinal == ordinal }),
