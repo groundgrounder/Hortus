@@ -141,6 +141,7 @@ def main():
             assert performance['utf8_bytes'] >= 1024 * 1024 and performance['blocks'] == 6, performance
             assert performance['key_p95_ms'] <= 8, performance
             assert performance['core_matches_native'] and performance['saved'], performance
+            assert performance['diagramPending'] is False, performance
         if not args.skip_cpu:
             empty = HELPERS.idle_cpu(base / 'cpu-empty', scrollbar_arguments)
             print('未打开库的 30 s CPU 采样完成', flush=True)

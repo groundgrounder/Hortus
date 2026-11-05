@@ -79,6 +79,7 @@ enum DiagramInspection {
         ]
         if let view, let scroll {
             let verticalScroller = scroll.verticalScroller
+            let stableWidth = (scroll as? DiagramScrollView)?.stableContentWidth ?? view.bounds.width
             row.merge([
                 "view_kind": view.isReading ? "reading" : "editing",
                 "scroll_bounds": NSStringFromRect(scroll.bounds),
@@ -89,6 +90,7 @@ enum DiagramInspection {
                 "scroll_origin": [scroll.contentView.bounds.origin.x, scroll.contentView.bounds.origin.y],
                 "vertical_scroller_visible": verticalScroller?.isHidden == false,
                 "content_width": view.layoutContentWidth,
+                "stable_content_width": stableWidth,
                 "scene_widths": view.blocks.compactMap { $0.prepared?.scene.width },
                 "scene_heights": view.blocks.compactMap { $0.prepared?.scene.height },
                 "pending": view.diagramPending,
@@ -131,8 +133,18 @@ enum DiagramInspection {
         }
         recordScrollStability(event: "observation_started", view: view)
         let started = ProcessInfo.processInfo.systemUptime
+        let resizeViewport = arguments.contains("--diagram-stability-resize")
+        let originalWindowFrame = view.window?.frame
         var index = 0
         repeat {
+            if resizeViewport, index.isMultiple(of: 40), let window = view.window, let originalWindowFrame {
+                var frame = originalWindowFrame
+                frame.size.height = index.isMultiple(of: 80) ? 560 : 760
+                window.setFrame(frame, display: true)
+                scroll.contentView.scroll(to: CGPoint(x: 0, y: index.isMultiple(of: 80) ? 0 : 64))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                scroll.flashScrollers()
+            }
             recordScrollStability(event: "sample", view: view,
                                   details: ["sample": index, "observation_seconds": ProcessInfo.processInfo.systemUptime - started])
             if ProcessInfo.processInfo.systemUptime - started >= 8 { break }
@@ -140,6 +152,7 @@ enum DiagramInspection {
             try await Task.sleep(for: .milliseconds(20))
         } while true
         recordScrollStability(event: "finished", view: view, details: ["samples": index + 1])
+        if let originalWindowFrame { view.window?.setFrame(originalWindowFrame, display: true) }
     }
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         if workspace.current?.document?.reading == true { await workspace.toggleCurrentView() }

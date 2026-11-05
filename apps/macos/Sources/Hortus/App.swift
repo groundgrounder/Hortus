@@ -279,8 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 自检只设置两次一次性唤醒，其余等待由界面状态变更触发。
         let deadline = DispatchWorkItem { fputs("Hortus 自检超时\n", stderr); exit(2) }
         inspectionDeadline = deadline
-        let stabilityInspection = args.contains { $0.hasPrefix("--diagram-scroll-stability=") }
-        DispatchQueue.main.asyncAfter(deadline: .now() + (stabilityInspection ? 30 : 15), execute: deadline)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: deadline)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.inspectWhenReady() }
     }
 
@@ -348,14 +347,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let diagramViews = NSApp.windows.compactMap(\.contentView).flatMap { DiagramInspection.textViews(in: $0) }
         let stabilityInspection = ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--diagram-scroll-stability=") }
-        guard stabilityInspection || !diagramViews.contains(where: \.diagramPending) else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.inspectWhenReady() }
-            return
-        }
-        guard settled, launchTime.duration(to: .now) >= .seconds(1) else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.inspectWhenReady() }
-            return
-        }
+        guard stabilityInspection || !diagramViews.contains(where: \.diagramPending) else { return }
+        guard settled, launchTime.duration(to: .now) >= .seconds(1) else { return }
         inspectionStarted = true
         inspectionDeadline?.cancel()
         Task { await finishInspection() }
@@ -364,6 +357,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func finishInspection() async {
         guard let workspace else { return }
         let args = ProcessInfo.processInfo.arguments
+        if let argument = args.first(where: { $0.hasPrefix("--inspect-exit-after=") }),
+           let seconds = Double(argument.dropFirst("--inspect-exit-after=".count)), seconds > 0 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { exit(0) }
+        }
         do {
             #if DEBUG
             if let arg = args.first(where: { $0.hasPrefix(TerminalFontInspection.argumentPrefix) }), let layout {
@@ -374,7 +371,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             #endif
-            if let arg = args.first(where: { $0.hasPrefix("--diagram-scroll-stability=") }) {
+            if let arg = args.first(where: { $0.hasPrefix("--diagram-scroll-stability=") }),
+               !args.contains(where: { $0.hasPrefix("--edit-inspection=") }) {
                 try await DiagramInspection.scrollStability(workspace: workspace, arguments: args,
                     output: URL(fileURLWithPath: String(arg.dropFirst("--diagram-scroll-stability=".count))))
                 NSApp.terminate(nil)
@@ -503,6 +501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if args.contains("--inspect-hold-open") { return }
             }
             if args.contains("--inspect-slow-shutdown") { workspace.shutdownDelayForInspection = 10 }
+            if args.contains("--inspect-hold-open") { return }
             NSApp.terminate(nil)
         } catch { fputs("Hortus 自检失败：\(error)\n", stderr); exit(1) }
     }

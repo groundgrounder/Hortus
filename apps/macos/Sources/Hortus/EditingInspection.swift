@@ -113,6 +113,8 @@ enum EditingInspection {
                     "open_ffi_ms": view.sourceStyling?.openFFIMilliseconds ?? 0, "style_latencies_ms": styleLatencies,
                     "style_update_max_ms": styleLatencies.max() ?? 0, "style_patch_characters": patchSizes,
                     "style_phases": stylePhases,
+                    "diagramPending": view.diagramPending, "content_width": view.layoutContentWidth,
+                    "stable_content_width": (view.enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? view.frame.width,
                     "scrollbar_setting": UserDefaults.standard.string(forKey: "AppleShowScrollBars") ?? "system",
                     "actual_scroller_style": DiagramInspection.scrollerStyleName(view.formulaScrollerStyle)]
         }
