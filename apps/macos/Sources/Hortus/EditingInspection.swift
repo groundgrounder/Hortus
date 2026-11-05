@@ -112,14 +112,20 @@ enum EditingInspection {
                     "open_phases": view.sourceStyling?.openPhases ?? [:], "open_note_phases": workspace.noteOpenPhases,
                     "open_ffi_ms": view.sourceStyling?.openFFIMilliseconds ?? 0, "style_latencies_ms": styleLatencies,
                     "style_update_max_ms": styleLatencies.max() ?? 0, "style_patch_characters": patchSizes,
-                    "style_phases": stylePhases]
+                    "style_phases": stylePhases,
+                    "scrollbar_setting": UserDefaults.standard.string(forKey: "AppleShowScrollBars") ?? "system",
+                    "actual_scroller_style": DiagramInspection.scrollerStyleName(view.formulaScrollerStyle)]
         }
         view.insertText("自动保存😀", replacementRange: NSRange(location: 0, length: 0))
         let autosaveStart = ProcessInfo.processInfo.systemUptime
         try await wait { !document.dirty }
         let autosaveDelay = ProcessInfo.processInfo.systemUptime - autosaveStart
         fputs("编辑验收：自动保存完成\n", stderr)
-        if mode == "idle" { return ["saved": true, "autosave_delay_seconds": autosaveDelay] }
+        if mode == "idle" {
+            return ["saved": true, "autosave_delay_seconds": autosaveDelay,
+                    "scrollbar_setting": UserDefaults.standard.string(forKey: "AppleShowScrollBars") ?? "system",
+                    "actual_scroller_style": DiagramInspection.scrollerStyleName(view.formulaScrollerStyle)]
+        }
         view.insertText("命令保存", replacementRange: NSRange(location: 0, length: 0))
         NSApp.mainMenu?.update()
         if let fileMenu = NSApp.mainMenu?.items.first(where: { $0.submenu?.items.contains(where: { $0.keyEquivalent == "s" }) == true })?.submenu {
@@ -181,7 +187,9 @@ enum EditingInspection {
         return ["autosave_delay_seconds": autosaveDelay, "command_save": commandSave, "focus_save": focusSave,
                 "switch_save": switchSave, "library_save": librarySave, "close_save": closeSaved, "external_delay_seconds": externalDelay,
                 "selection_preserved": caret == selected, "undo_cleared": undoCleared,
-                "dirty_before_exit": workspace.current?.document?.dirty == true]
+                "dirty_before_exit": workspace.current?.document?.dirty == true,
+                "scrollbar_setting": UserDefaults.standard.string(forKey: "AppleShowScrollBars") ?? "system",
+                "actual_scroller_style": DiagramInspection.scrollerStyleName(view.formulaScrollerStyle)]
     }
 
     private enum DocumentSwitchRoute: String, Equatable {

@@ -336,6 +336,9 @@ struct ReadingText: NSViewRepresentable {
             let io = input.document.io
             let queuedAt = ProcessInfo.processInfo.systemUptime
             submittedRequests += 1
+            view.layoutRefreshCount += 1
+            DiagramInspection.recordScrollStability(event: "reading_refresh", view: view,
+                                                     details: ["content_width": width])
             io.submit({ session in
                     let modelStart = ProcessInfo.processInfo.systemUptime
                     let wire = try session.readingModelSince(since: modelRevision)
@@ -456,6 +459,8 @@ struct ReadingText: NSViewRepresentable {
             phaseMilliseconds = result.phases
             phaseMilliseconds["install_ms"] = (ProcessInfo.processInfo.systemUptime - installStart) * 1000
             rendered = diagrams; pending = false; view.diagramPending = false
+            view.layoutRenderCount += 1
+            DiagramInspection.recordScrollStability(event: "reading_render", view: view)
             let layoutStart = ProcessInfo.processInfo.systemUptime
             if let source = pendingInitialSource {
                 pendingInitialSource = nil

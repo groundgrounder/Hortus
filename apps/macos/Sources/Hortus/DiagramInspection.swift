@@ -5,6 +5,11 @@ import Darwin
 /// 所有循环、等待、离屏计量都只在显式验收参数下执行。
 @MainActor
 enum DiagramInspection {
+    private static var stabilityHandle: FileHandle?
+    private static var stabilityStarted = 0.0
+    private static var stabilityStartedAt = Date()
+    private static let stabilityFormatter = ISO8601DateFormatter()
+
     private final class WeakView {
         weak var value: NSView?
         init(_ value: NSView) { self.value = value }
@@ -36,6 +41,105 @@ enum DiagramInspection {
             try await Task.sleep(for: .milliseconds(10))
         }
         throw CocoaError(.coderValueNotFound)
+    }
+
+    static func scrollerStyleName(_ style: NSScroller.Style) -> String {
+        style == .legacy ? "legacy" : "overlay"
+    }
+
+    static func startScrollStabilityRecorder(arguments: [String]) {
+        guard let argument = arguments.first(where: { $0.hasPrefix("--diagram-scroll-stability=") }) else { return }
+        let output = URL(fileURLWithPath: String(argument.dropFirst("--diagram-scroll-stability=".count)))
+        try? FileManager.default.createDirectory(at: output.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: output.path, contents: nil,
+                                       attributes: [.posixPermissions: 0o600])
+        guard let handle = FileHandle(forWritingAtPath: output.path) else { return }
+        _ = try? handle.seekToEnd()
+        stabilityHandle = handle
+        stabilityStarted = ProcessInfo.processInfo.systemUptime
+        stabilityStartedAt = Date()
+        recordScrollStability(event: "started", view: nil)
+    }
+
+    /// 从主线程同步追加原始事件；即使布局循环占满主队列，也能保留失败现场。
+    static func recordScrollStability(event: String, view: DiagramTextView?,
+                                      details: [String: Any] = [:]) {
+        guard let handle = stabilityHandle else { return }
+        let scroll = view?.enclosingScrollView
+        let style = scroll?.scrollerStyle ?? NSScroller.preferredScrollerStyle
+        let elapsed = ProcessInfo.processInfo.systemUptime - stabilityStarted
+        var row: [String: Any] = [
+            "timestamp": stabilityFormatter.string(from: stabilityStartedAt.addingTimeInterval(elapsed)),
+            "elapsed_seconds": elapsed,
+            "event": event,
+            "scrollbar_setting": UserDefaults.standard.string(forKey: "AppleShowScrollBars") ?? "system",
+            "preferred_scroller_style": scrollerStyleName(NSScroller.preferredScrollerStyle),
+            "scroller_style": scrollerStyleName(style),
+        ]
+        if let view, let scroll {
+            let verticalScroller = scroll.verticalScroller
+            row.merge([
+                "view_kind": view.isReading ? "reading" : "editing",
+                "scroll_bounds": NSStringFromRect(scroll.bounds),
+                "clip_bounds": NSStringFromRect(scroll.contentView.bounds),
+                "document_bounds": NSStringFromRect(view.bounds),
+                "document_frame": NSStringFromRect(view.frame),
+                "content_size": NSStringFromSize(scroll.contentSize),
+                "scroll_origin": [scroll.contentView.bounds.origin.x, scroll.contentView.bounds.origin.y],
+                "vertical_scroller_visible": verticalScroller?.isHidden == false,
+                "content_width": view.layoutContentWidth,
+                "scene_widths": view.blocks.compactMap { $0.prepared?.scene.width },
+                "scene_heights": view.blocks.compactMap { $0.prepared?.scene.height },
+                "pending": view.diagramPending,
+                "refresh_count": view.layoutRefreshCount,
+                "render_count": view.layoutRenderCount,
+                "cancellation_count": view.layoutCancellationCount,
+                "window_width": view.window?.frame.width ?? 0,
+            ]) { _, replacement in replacement }
+        }
+        row.merge(details) { _, replacement in replacement }
+        guard let data = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line.append("\n")
+        try? handle.write(contentsOf: Data(line.utf8))
+    }
+
+    /// 在真实窗口中按固定间隔记录滚动布局状态，供 legacy / overlay 两态重算。
+    static func scrollStability(workspace: Workspace, arguments: [String], output: URL) async throws {
+        if stabilityHandle == nil { startScrollStabilityRecorder(arguments: arguments) }
+        _ = output
+        let reading = arguments.contains("--diagram-reading")
+        if workspace.current?.document?.reading != reading { await workspace.toggleCurrentView() }
+        var inspected: DiagramTextView?
+        for _ in 0..<500 {
+            if let view = current(document: workspace.current?.document), view.isReading == reading {
+                inspected = view
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let view = inspected, let scroll = view.enclosingScrollView else {
+            throw CocoaError(.coderValueNotFound)
+        }
+        // 命令行默认域是按进程设置的测试输入；只在窗口内落实同一值，不写回系统设置。
+        let preferredStyle = NSScroller.preferredScrollerStyle
+        scroll.scrollerStyle = preferredStyle
+        let settleDeadline = ProcessInfo.processInfo.systemUptime + 5
+        while view.diagramPending, ProcessInfo.processInfo.systemUptime < settleDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        recordScrollStability(event: "observation_started", view: view)
+        let started = ProcessInfo.processInfo.systemUptime
+        var index = 0
+        repeat {
+            recordScrollStability(event: "sample", view: view,
+                                  details: ["sample": index, "observation_seconds": ProcessInfo.processInfo.systemUptime - started])
+            if ProcessInfo.processInfo.systemUptime - started >= 8 { break }
+            index += 1
+            try await Task.sleep(for: .milliseconds(20))
+        } while true
+        recordScrollStability(event: "finished", view: view, details: ["samples": index + 1])
     }
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         if workspace.current?.document?.reading == true { await workspace.toggleCurrentView() }

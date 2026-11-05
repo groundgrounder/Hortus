@@ -241,6 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if args.contains("--dark") { NSApp.appearance = NSAppearance(named: .darkAqua) }
         if args.contains("--light") { NSApp.appearance = NSAppearance(named: .aqua) }
         if args.contains("--simulate-high-contrast") { NSApp.appearance = NSAppearance(named: .aqua) }
+        DiagramInspection.startScrollStabilityRecorder(arguments: args)
         presentInitialWindow?()
         NSApp.activate()
         UndoMenuState.scheduleRefresh()
@@ -274,11 +275,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
         #endif
-        guard terminalFontInspection || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
+        guard terminalFontInspection || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
         // 自检只设置两次一次性唤醒，其余等待由界面状态变更触发。
         let deadline = DispatchWorkItem { fputs("Hortus 自检超时\n", stderr); exit(2) }
         inspectionDeadline = deadline
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: deadline)
+        let stabilityInspection = args.contains { $0.hasPrefix("--diagram-scroll-stability=") }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (stabilityInspection ? 30 : 15), execute: deadline)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.inspectWhenReady() }
     }
 
@@ -336,7 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminalFontInspection = TerminalFontInspection.requested
         #endif
         let visualInspection = terminalFontInspection || ProcessInfo.processInfo.arguments.contains {
-            $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--quick-open-query=") || $0.hasPrefix("--search-query=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || $0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top"
+            $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--quick-open-query=") || $0.hasPrefix("--search-query=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || $0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top"
         }
         let settled = withObservationTracking {
             ready && !workspace.scanning && !workspace.opening && !workspace.tabs.contains(where: \.loading)
@@ -345,8 +347,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.inspectWhenReady() }
         }
         let diagramViews = NSApp.windows.compactMap(\.contentView).flatMap { DiagramInspection.textViews(in: $0) }
-        guard !diagramViews.contains(where: \.diagramPending) else { return }
-        guard settled, launchTime.duration(to: .now) >= .seconds(1) else { return }
+        let stabilityInspection = ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--diagram-scroll-stability=") }
+        guard stabilityInspection || !diagramViews.contains(where: \.diagramPending) else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.inspectWhenReady() }
+            return
+        }
+        guard settled, launchTime.duration(to: .now) >= .seconds(1) else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.inspectWhenReady() }
+            return
+        }
         inspectionStarted = true
         inspectionDeadline?.cancel()
         Task { await finishInspection() }
@@ -365,6 +374,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             #endif
+            if let arg = args.first(where: { $0.hasPrefix("--diagram-scroll-stability=") }) {
+                try await DiagramInspection.scrollStability(workspace: workspace, arguments: args,
+                    output: URL(fileURLWithPath: String(arg.dropFirst("--diagram-scroll-stability=".count))))
+                NSApp.terminate(nil)
+                return
+            }
             if let arg = args.first(where: { $0.hasPrefix("--reading-inspection=") }) {
                 let result = try await ReadingInspection.run(workspace: workspace, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])

@@ -301,9 +301,13 @@ struct NoteText: NSViewRepresentable {
             let width = max(120, view.bounds.width - view.textContainerInset.width * 2)
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             guard force || abs(width - lastWidth) > 0.25 || dark != lastDark else { return }
+            view.layoutRefreshCount += 1
+            DiagramInspection.recordScrollStability(event: "editing_refresh", view: view,
+                                                     details: ["content_width": width])
             lastWidth = width; lastDark = dark
             generation += 1; let token = generation
-            task?.cancel(); view.diagramPending = true
+            task?.cancel(); view.layoutCancellationCount += 1; view.diagramPending = true
+            DiagramInspection.recordScrollStability(event: "editing_cancel", view: view)
             let expected = document?.revision
             task = Task { [weak self] in
                 guard let self else { return }
@@ -336,6 +340,8 @@ struct NoteText: NSViewRepresentable {
                     // 初次打开保持图投影；用户后续移动选择才展开。
                     if debounce { selectionChanged() }
                     view.diagramPending = false
+                    view.layoutRenderCount += 1
+                    DiagramInspection.recordScrollStability(event: "editing_render", view: view)
                     (NSApp.delegate as? AppDelegate)?.inspectWhenReady()
                 } catch {
                     guard !Task.isCancelled, token == generation else { return }
@@ -619,6 +625,7 @@ final class DiagramTextView: NSTextView {
     private var accessibilityChildrenBuilt = false
     private(set) var formulaAccessibilityBuildCount = 0
     var formulaScrollerStyle: NSScroller.Style { enclosingScrollView?.scrollerStyle ?? NSScroller.preferredScrollerStyle }
+    var layoutContentWidth: CGFloat { max(120, bounds.width - textContainerInset.width * 2) }
     var formulaTooltips: [NSView.ToolTipTag: String] = [:]
     var mathViews: [MathBlockView] = [] { didSet { mathParagraphs.removeAll(keepingCapacity: true) } }
     var mathParagraphs: [Int: MathBlockView] = [:]
@@ -703,6 +710,10 @@ final class DiagramTextView: NSTextView {
     var mediaPaintedAt = 0.0
     var diagramPending = false
     var diagramIssue: String?
+    /// 验收观察值：只记录调度、取消与完成次数，不参与布局决策。
+    var layoutRefreshCount = 0
+    var layoutRenderCount = 0
+    var layoutCancellationCount = 0
     var onWidthOrThemeChange: (() -> Void)?
     var onToggle: ((UInt32, String) -> Void)?
     var onEditSource: ((UInt32) -> Void)?
@@ -773,7 +784,12 @@ final class DiagramTextView: NSTextView {
     override func setFrameSize(_ newSize: NSSize) {
         let changed = abs(frame.width - newSize.width) > 0.25
         super.setFrameSize(newSize)
-        if changed { onWidthOrThemeChange?() }
+        if changed {
+            DiagramInspection.recordScrollStability(event: "frame_width", view: self,
+                                                     details: ["new_width": newSize.width,
+                                                               "new_height": newSize.height])
+            onWidthOrThemeChange?()
+        }
     }
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -921,6 +937,11 @@ final class DiagramTextView: NSTextView {
             contentHeight = view.frame.maxY + textContainerInset.height
         } else { contentHeight = (textLayoutManager?.usageBoundsForTextContainer.maxY ?? 0) + 2 * textContainerInset.height }
         let height = max(enclosingScrollView?.contentSize.height ?? 0, contentHeight)
+        if abs(frame.height - height) > 0.5 {
+            DiagramInspection.recordScrollStability(event: "document_resize", view: self,
+                                                     details: ["content_height": contentHeight,
+                                                               "new_height": height])
+        }
         if abs(frame.height - height) > 0.5 { setFrameSize(NSSize(width: frame.width, height: height)) }
     }
     private func enumerateVisibleFragments(_ body: (NSTextLayoutFragment) -> Void) {
