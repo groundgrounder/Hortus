@@ -9,7 +9,7 @@ pub(crate) fn outline(shape: Shape, r: Rect) -> Vec<Point> {
     };
     match shape {
         Shape::Circle | Shape::DoubleCircle => ellipse(r, 0.0, std::f64::consts::TAU, 96),
-        Shape::Rectangle | Shape::Rounded | Shape::Stadium => {
+        Shape::Rectangle | Shape::Container | Shape::Rounded | Shape::Stadium => {
             let radius = if shape == Shape::Stadium {
                 h.min(w) / 2.0
             } else {
