@@ -34,6 +34,12 @@ open /Applications/Hortus.app
 
 Both ways were tested on macOS 27.2. The wording of the system prompt may differ on other macOS versions.
 
+## Continuous integration
+
+CI runs on pull requests, pushes to `main`, and manual dispatches. Ubuntu 24.04 checks Rust formatting, Clippy, workspace tests, and math-check tests. GitHub's public-preview `xcode-27` image builds the macOS app with warnings treated as errors, runs the Swift tests, and checks the public tree and app bundle. Its documented image has macOS 27.0.1, Xcode 27.1, and Swift 6.4.
+
+CI does not create release packages, notarize, publish, or replace local release, real-window, TCC, or performance validation. Job logs remain available in each Actions run.
+
 ## Known issues
 
 - The 0.1.3 download is ad-hoc signed. A replacement download or update may require first-launch approval again.

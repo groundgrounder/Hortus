@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-and-math:
+    name: Rust and math checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Show tool versions
+        run: |
+          rustc --version
+          cargo --version
+          rustfmt --version
+          cargo clippy --version
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+      - name: Test math checkers
+        run: python3 -B tools/test-math-checks.py
+
+  macos-and-public-tree:
+    name: macOS app and public tree
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Verify required macOS toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          swift --version
+          rustc --version
+          cargo --version
+
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 27
+          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "27.1"
+          swift --version 2>&1 | grep -Eq 'Apple Swift version 6\.4([ .]|$)'
+
+      - name: Build and test macOS app
+        run: ./tools/test-macos.sh
+
+      - name: Check public tree and app bundle
+        run: python3 -B tools/check-public-tree.py
