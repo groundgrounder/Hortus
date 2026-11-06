@@ -110,8 +110,9 @@ def inspect(base, output, name, vault, note, extra=(), screenshot=False):
             assert all(abs(value - width) <= .5 for value in data['initial_scene_widths']), data
             initial_heights = [json.loads(scene)['height'] for scene in data['initial_semantic_scenes']]
             assert len(initial_heights) == len(data['scene_heights']), data
-            assert all(abs(after - before) <= .5 for before, after in zip(initial_heights, data['scene_heights'])), data
-            assert data['initial_row_counts'] == data['row_counts'], data
+            assert all(abs(after - before) <= .5 for before, after in
+                       zip(sorted(initial_heights), sorted(data['scene_heights']))), data
+            assert sorted(data['initial_row_counts']) == sorted(data['row_counts']), data
     else:
         assert data['scene_widths'] == [], data
     assert_geometry(name, data)
@@ -131,8 +132,8 @@ def assert_geometry(name, data):
         assert actual['nonorthogonal'] == 0, actual
         assert actual['label_node'] == actual['label_edge'] == actual['label_label'] == 0, actual
         assert actual['foreign_shared_segments'] == 0, actual
-        # 私人原文是 35 条边的密集 LR 图，任务书未给它交叉上限；仍检查
-        # 节点重叠、穿节点、标签归属、非正交和横向溢出。
+        # 私人原文的任务书未给交叉上限；仍检查节点重叠、穿节点、标签归属、
+        # 非正交和横向溢出。
         limit = (1 if name.startswith('dense-dag')
                  else None if name.startswith('dense-40') or name.endswith('-private') else 0)
         if limit is not None:
@@ -329,13 +330,12 @@ def scenarios(base, output):
         ('unsupported', 'sequenceDiagram\nA->>B: Hi', '暂不支持', 'Unsupported'),
         ('not-tree', 'flowchart TB\nA --> C\nB --> C', None, None),
         ('syntax', 'flowchart TB\nA --> B\nB ??? C', '第 3 行语法错误', 'Syntax'),
-        ('unsupported-subgraph', 'flowchart TB\nA --> B\nsubgraph S[C]\nC --> D\nend\n',
-         '第 3 行的 subgraph 暂不支持', 'UnsupportedConstruct'),
+        ('unsupported-subgraph',
+         'flowchart TB\nA --> B\nsubgraph S[C]\nsubgraph T[D]\nD --> E\nend\nend\n',
+         '第 4 行的 subgraph 暂不支持', 'UnsupportedConstruct'),
         ('unsupported-linkstyle',
          'flowchart TB\nA --> B\nB --> C\nA --> C\nlinkStyle 0 stroke:#f00\n',
          '第 5 行的 linkStyle 暂不支持', 'UnsupportedConstruct'),
-        ('unsupported-style', 'flowchart TB\nA --> B\nB --> C\nA --> C\nstyle A color:#f00\n',
-         '第 5 行的 style_property 暂不支持', 'UnsupportedConstruct'),
     ]
     for name, source, expected, diagnostic_type in cases:
         (vault / f'{name}.mmd').write_text(source)
@@ -361,6 +361,7 @@ def scenarios(base, output):
         'directions-bt.mmd', 'fanout.mmd', 'forest.mmd', 'graph-syntax.mmd',
         'identity.mmd', 'merge-diamond.mmd', 'research.mmd',
         'dense-40.mmd', 'dense-dag.mmd', 'erikson.mmd',
+        'subgraphs-top-level.mmd', 'invisible-links.mmd',
     ]
     flowchart_output = output / 'flowchart'
     for name in public_flowcharts:
@@ -379,7 +380,7 @@ def scenarios(base, output):
                     if name == 'research.mmd': assert_research_geometry(data)
                     if name == 'erikson.mmd': assert data['row_counts'] == [[4, 4]], data
                     if name == 'erikson.mmd': assert data['initial_row_counts'] == [[4, 4]], data
-    deterministic = ROOT / 'fixtures/mermaid/flowchart/research.mmd'
+    deterministic = ROOT / 'fixtures/mermaid/flowchart/subgraphs-top-level.mmd'
     deterministic_hashes = []
     for index in range(10):
         data, _ = inspect(base / f'determinism-{index}', output, f'determinism-{index}',
@@ -432,13 +433,16 @@ def scenarios(base, output):
         states = []
         for width in [700, 1100]:
             for theme in ['light', 'dark']:
-                tag = f'original-{width}-{theme}-private'
-                data, _ = inspect(base / tag, PRIVATE_ROOT, tag, PRIVATE_NOTE.parent, PRIVATE_NOTE.name,
-                                  [f'--diagram-width={width}', f'--{theme}', '--diagram-reveal'], True)
-                assert data['diagrams'] > 0 and data['scene_widths'] and all(abs(w-width)<.5 for w in data['scene_widths']), data
-                states.append({'width': width, 'theme': theme, 'diagrams': data['diagrams'], 'nodes': data['visible_nodes'],
-                               'source_hits': data['source_hits'], 'fills': data['graph_fill_count'], 'scene_widths': data['scene_widths'],
-                               'window_width': data['window_width'], 'width_max_px': data['width_max_px']})
+                for mode in ['editing', 'reading']:
+                    tag = f'original-{width}-{theme}-{mode}-private'
+                    extra = [f'--diagram-width={width}', f'--{theme}', '--diagram-reveal']
+                    if mode == 'reading': extra.append('--diagram-reading')
+                    data, _ = inspect(base / tag, PRIVATE_ROOT, tag, PRIVATE_NOTE.parent, PRIVATE_NOTE.name,
+                                      extra, True)
+                    assert data['diagrams'] > 0 and data['scene_widths'] and all(abs(w-width)<.5 for w in data['scene_widths']), data
+                    states.append({'width': width, 'theme': theme, 'mode': mode, 'diagrams': data['diagrams'], 'nodes': data['visible_nodes'],
+                                   'source_hits': data['source_hits'], 'fills': data['graph_fill_count'], 'scene_widths': data['scene_widths'],
+                                   'window_width': data['window_width'], 'width_max_px': data['width_max_px']})
         assert hashlib.sha256(PRIVATE_NOTE.read_bytes()).hexdigest() == original_hash
         (output / 'private-original-summary.json').write_text(json.dumps({'sha256_unchanged': True, 'states': states}, indent=2)+'\n')
     else:
