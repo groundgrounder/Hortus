@@ -31,9 +31,74 @@ struct ReadingTests {
             try await ready()
         }
         func ready() async throws {
-            try await eventually { !self.coordinator.pending && self.coordinator.model?.revision == self.document.revision }
-            view.needsLayout = true
-            view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
+            for _ in 0..<500 {
+                self.editing.layoutHost()
+                if self.editing.hostReady && !self.coordinator.pending
+                    && self.coordinator.model?.revision == self.document.revision {
+                    editing.layoutHost()
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            Issue.record("阅读视图宿主未就绪: \(diagnostics(target: .zero))")
+        }
+        func revealAndWait(source: Int) async throws -> (display: Int, target: CGRect) {
+            coordinator.reveal(source: source)
+            return try await waitUntilVisible(source: source)
+        }
+        func waitUntilVisible(source: Int) async throws -> (display: Int, target: CGRect) {
+            let display = coordinator.displayPosition(source: source)
+            for _ in 0..<500 {
+                self.editing.layoutHost()
+                if self.view.visibleRect.intersects(self.coordinator.rect(at: display)) {
+                    editing.layoutHost()
+                    return (display, coordinator.rect(at: display))
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let target = coordinator.rect(at: display)
+            Issue.record("阅读位置未完成 reveal: \(diagnostics(target: target))")
+            return (display, target)
+        }
+        func waitForRefresh(
+            text: String,
+            document: NoteDocument,
+            coordinator: ReadingText.Coordinator
+        ) async throws {
+            for _ in 0..<500 {
+                self.editing.layoutHost()
+                if document.text == text && !coordinator.pending
+                    && coordinator.model?.revision == document.revision
+                    && self.editing.hostReady {
+                    try await waitForViewportToSettle()
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            Issue.record("阅读刷新未完成: \(diagnostics(target: .zero))")
+        }
+        func waitForViewportToSettle() async throws {
+            var previous = ""
+            var stableSamples = 0
+            for _ in 0..<500 {
+                editing.layoutHost()
+                let clip = editing.scroll.contentView
+                let anchor = coordinator.visibleAnchor()
+                let state = "\(NSStringFromRect(clip.bounds))|\(NSStringFromRect(view.visibleRect))|\(NSStringFromRect(view.frame))|\(coordinator.pending)|\(coordinator.model?.revision ?? .max)|\(anchor?.id.description ?? "nil"):\(anchor?.source.description ?? "nil"):\(anchor?.offset ?? .nan)"
+                if state == previous {
+                    stableSamples += 1
+                    if stableSamples == 2 { return }
+                } else {
+                    previous = state
+                    stableSamples = 0
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            Issue.record("阅读视图布局与滚动状态未稳定: \(editing.layoutDiagnostics(target: .zero))")
+        }
+        func diagnostics(target: CGRect) -> String {
+            editing.layoutDiagnostics(target: target)
+                + "reading=pending:\(coordinator.pending),model-revision:\(coordinator.model?.revision.description ?? "nil"),document-revision:\(document.revision),text-revision:\(document.textRevision)"
         }
         func close() async {
             coordinator.detach(); view.readingCoordinator = nil
@@ -77,9 +142,8 @@ struct ReadingTests {
             let display = f.coordinator.displayPosition(source: source)
             let back = f.coordinator.sourcePosition(at: display)
             #expect(back >= Int(block.sourceStart) && back < Int(block.sourceStart + block.sourceLength))
-            f.coordinator.reveal(source: source)
-            f.view.layoutSubtreeIfNeeded()
-            #expect(f.view.visibleRect.intersects(f.coordinator.rect(at: display)))
+            let revealed = try await f.revealAndWait(source: source)
+            #expect(f.view.visibleRect.intersects(revealed.target), "\(f.diagnostics(target: revealed.target))")
         }
         await f.close()
     }
@@ -127,17 +191,17 @@ struct ReadingTests {
     @Test func externalMiddleChangeRebuildsOneBlockAndKeepsAnchor() async throws {
         let source = (0..<600).map { "Paragraph \($0) **bold** 中文😀.\n\n" }.joined()
         let f = try Fixture(source); try await f.start()
-        f.coordinator.reveal(source: source.utf16.count / 2)
-        f.view.layoutSubtreeIfNeeded()
+        _ = try await f.revealAndWait(source: source.utf16.count / 2)
         let before = try #require(f.coordinator.visibleAnchor())
         let changed = source.replacingOccurrences(of: "Paragraph 300", with: "Modified paragraph 300")
         try Data(changed.utf8).write(to: f.document.io.url)
         f.document.refresh()
-        try await eventually { f.document.text == changed && !f.coordinator.pending && f.coordinator.model?.revision == f.document.revision }
+        try await f.waitForRefresh(text: changed, document: f.document, coordinator: f.coordinator)
         let after = try #require(f.coordinator.visibleAnchor())
         #expect(f.coordinator.model?.rebuilt == 1)
         #expect(before.id == after.id)
-        #expect(abs(before.offset - after.offset) <= 1)
+        #expect(abs(before.offset - after.offset) <= 1,
+                "before=\(before.id):\(before.offset),after=\(after.id):\(after.offset);\n\(f.diagnostics(target: .zero))")
         await f.close()
     }
 

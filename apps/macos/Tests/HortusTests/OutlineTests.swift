@@ -43,9 +43,9 @@ struct OutlineTests {
         workspace.selected = "note.md"
         let heading = try #require(fixture.document.headings.last)
         workspace.revealHeading(heading)
-        fixture.view.layoutSubtreeIfNeeded()
-        let display = fixture.coordinator.displayPosition(source: Int(heading.start))
-        #expect(fixture.view.visibleRect.intersects(fixture.coordinator.rect(at: display)))
+        let revealed = try await fixture.waitUntilVisible(source: Int(heading.start))
+        #expect(fixture.view.visibleRect.intersects(revealed.target),
+                "\(fixture.diagnostics(target: revealed.target))")
         #expect(fixture.document.sourceAnchor == Int(heading.start))
         await fixture.close()
         let editing = try EditingTests.Fixture(source)

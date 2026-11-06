@@ -10,6 +10,7 @@ struct EditingTests {
         let vault: URL
         let core: WorkspaceCore
         let document: NoteDocument
+        let scroll: DiagramScrollView
         let view: DiagramTextView
         let window: NSWindow
         let coordinator = NoteText.EditorCoordinator()
@@ -24,27 +25,66 @@ struct EditingTests {
                                                    cache: directory.appendingPathComponent("cache").path)
             let session = try core.openDocument(vault: vault.path, path: "note.md")
             document = NoteDocument(io: DocumentIO(session: session, url: url), initial: try session.initial(), prepareSourceStyles: true)
-            let scroll = DiagramScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 540))
+            scroll = DiagramScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 540))
             scroll.hasVerticalScroller = true
             scroll.autohidesScrollers = true
             view = DiagramTextView(diagramLayout: true)
             view.frame = scroll.bounds; view.allowsUndo = true; view.isRichText = false
             view.isVerticallyResizable = true; view.textContainer?.widthTracksTextView = true
+            view.autoresizingMask = [.width]
             view.textContainerInset = NSSize(width: 30, height: 24)
             view.minimumDocumentHeightForTesting = 100_000
             window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.contentView = scroll
-            window.makeKeyAndOrderFront(nil); window.orderFrontRegardless(); window.makeKey()
             scroll.documentView = view
+            scroll.layoutSubtreeIfNeeded()
+            window.makeKeyAndOrderFront(nil); window.orderFrontRegardless(); window.makeKey()
             window.makeFirstResponder(view)
-            window.display()
+            window.contentView?.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
             coordinator.view = view
             coordinator.update(NoteText(text: source, path: "note.md", vault: vault.path, fontSize: 15,
                                         service: service, core: nil, document: document) { _, _ in })
         }
         func ready() async throws {
-            try await eventually { !self.view.diagramPending && self.view.isEditable }
+            for _ in 0..<500 {
+                self.layoutHost()
+                if !self.view.diagramPending && self.view.isEditable && self.hostReady { return }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            Issue.record("编辑视图宿主未就绪: \(layoutDiagnostics(target: .zero))")
+        }
+        var hostReady: Bool {
+            guard view.window === window, window.isVisible,
+                  let clip = view.enclosingScrollView?.contentView,
+                  clip.documentView === view else { return false }
+            return clip.bounds.height > 0
+        }
+        /// 先完成窗口显示、TextKit 全文布局和滚动视图排版，再开始测试可见位置。
+        func layoutHost() {
+            window.contentView?.layoutSubtreeIfNeeded()
+            scroll.layoutSubtreeIfNeeded()
+            if view.sourceUTF16Length < 65_536,
+               let manager = view.textLayoutManager,
+               let content = manager.textContentManager {
+                manager.ensureLayout(for: content.documentRange)
+            }
+            view.needsLayout = true
+            view.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+        }
+        func layoutDiagnostics(target: CGRect) -> String {
+            let clip = scroll.contentView
+            let occlusion = window.occlusionState.contains(.visible) ? "visible" : "not-visible"
+            return """
+                window=visible:\(window.isVisible),key:\(window.isKeyWindow),main:\(window.isMainWindow),occlusion:\(occlusion),app-active:\(NSApp.isActive),frame:\(NSStringFromRect(window.frame))
+                scroll=bounds:\(NSStringFromRect(scroll.bounds)),content:\(NSStringFromSize(scroll.contentSize))
+                clip=bounds:\(NSStringFromRect(clip.bounds)),origin:\(clip.bounds.origin),document:\(clip.documentView === view)
+                view=frame:\(NSStringFromRect(view.frame)),bounds:\(NSStringFromRect(view.bounds)),visibleRect:\(NSStringFromRect(view.visibleRect)),min:\(NSStringFromSize(view.minSize)),max:\(NSStringFromSize(view.maxSize)),autoresizing:\(view.autoresizingMask.rawValue),vertical:\(view.isVerticallyResizable),height-tracks:\(view.textContainer?.heightTracksTextView ?? false),utf16:\((view.string as NSString).length),blocks:\(view.blocks.count),usage:\(NSStringFromRect(view.textLayoutManager?.usageBoundsForTextContainer ?? .zero))
+                layout=needs:\(view.needsLayout),display:\(view.needsDisplay),clip-needs:\(clip.needsLayout),scroll-needs:\(scroll.needsLayout),pending:\(view.diagramPending),refreshes:\(view.layoutRefreshCount),renders:\(view.layoutRenderCount),minimum-height:\(view.minimumDocumentHeightForTesting)
+                target=\(NSStringFromRect(target))
+                """
         }
         func close() async {
             _ = await document.prepareToClose()
