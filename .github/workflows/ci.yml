@@ -70,6 +70,9 @@ jobs:
           test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "27.1"
           swift --version 2>&1 | grep -Eq 'Apple Swift version 6\.4([ .]|$)'
 
+      - name: Run macOS system-font diagram test
+        run: cargo test -p hortus-diagram research_ports_and_labels_use_centered_generic_rules
+
       - name: Build and test macOS app
         run: ./tools/test-macos.sh
 

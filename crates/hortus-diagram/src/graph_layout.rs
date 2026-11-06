@@ -2460,6 +2460,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn research_ports_and_labels_use_centered_generic_rules() {
         let graph = graph(include_str!(
             "../../../fixtures/mermaid/flowchart/research.mmd"
