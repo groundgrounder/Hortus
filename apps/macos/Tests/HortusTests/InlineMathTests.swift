@@ -46,6 +46,17 @@ struct InlineMathTests {
             #expect(range == item.range)
             let frame = f.view.accessibilityFrame(for: range)
             #expect(!frame.isEmpty)
+            let mounted = f.view.inlineMath[item.range.location].flatMap { attachment in
+                f.view.inlineMathViews.first { $0.attachment === attachment }
+            } ?? f.view.mathViews.first { $0.item.identity == item.identity }
+            if let mounted {
+                let expected = f.editing.window.convertToScreen(mounted.convert(mounted.bounds, to: nil))
+                #expect(abs(frame.minX - expected.minX) < 0.5
+                    && abs(frame.minY - expected.minY) < 0.5
+                    && abs(frame.width - expected.width) < 0.5
+                    && abs(frame.height - expected.height) < 0.5,
+                    "\(f.formulaAccessibilityDiagnostics(for: item))")
+            }
             let atPoint = f.view.accessibilityRange(for: CGPoint(x: frame.midX, y: frame.midY))
             #expect(atPoint == range)
             #expect((f.view.accessibilityString(for: atPoint) as NSString?)?.length == atPoint.length)
@@ -114,13 +125,17 @@ struct InlineMathTests {
         try await f.start(mathService: MathTests.service())
         let elements = (f.view.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
             .filter { $0.accessibilityRole() == .image }
-        #expect(elements.count == 3)
+        let diagnostic = (f.view.inlineMath.values.map(\.item) + f.view.mathViews.map(\.item))
+            .sorted { $0.range.location < $1.range.location }
+            .map(f.formulaAccessibilityDiagnostics)
+            .joined(separator: "\n") + "\n" + f.tableFormulaAccessibilityDiagnostics()
+        #expect(elements.count == 3, "\(diagnostic)")
         for element in elements {
             let frame = element.accessibilityFrame()
-            #expect(!frame.isEmpty)
+            #expect(!frame.isEmpty, "\(element.accessibilityLabel() ?? "")\n\(diagnostic)")
             let hit = f.editing.window.accessibilityHitTest(CGPoint(x: frame.midX, y: frame.midY))
             let matches = (hit as AnyObject?) === element
-            #expect(matches, "\(element.accessibilityLabel() ?? "")")
+            #expect(matches, "\(element.accessibilityLabel() ?? "")\n\(diagnostic)")
         }
         await f.close()
     }
@@ -387,9 +402,12 @@ struct InlineMathTests {
             let formula = try #require(f.view.inlineMathViews.min { $0.attachment.item.range.location < $1.attachment.item.range.location })
             let screen = f.view.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
             let textRect = f.view.convert(f.editing.window.convertFromScreen(screen), from: nil)
-            func inkBottom(_ rect: CGRect) throws -> Double {
-                let bitmap = try #require(f.view.bitmapImageRepForCachingDisplay(in: rect))
-                f.view.cacheDisplay(in: rect, to: bitmap)
+            func inkBottom(in root: NSView, rect: CGRect, label: String) throws -> Double {
+                let bitmap = try #require(root.bitmapImageRepForCachingDisplay(in: rect),
+                    "\(label), size=\(size): \(f.bitmapDiagnostics(in: root, rect: rect))")
+                root.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    root.cacheDisplay(in: rect, to: bitmap)
+                }
                 var last: Int?
                 for y in 0..<bitmap.pixelsHigh {
                     for x in 0..<bitmap.pixelsWide {
@@ -399,9 +417,13 @@ struct InlineMathTests {
                         }
                     }
                 }
-                return rect.minY + Double(try #require(last) + 1) * rect.height / Double(bitmap.pixelsHigh)
+                let diagnostic = f.bitmapDiagnostics(in: root, rect: rect)
+                let index = try #require(last, "\(label), size=\(size): \(diagnostic)")
+                return rect.minY + Double(index + 1) * rect.height / Double(bitmap.pixelsHigh)
             }
-            let textBottom = try inkBottom(textRect), formulaBottom = try inkBottom(formula.frame)
+            let textBottom = try inkBottom(in: f.view, rect: textRect, label: "text")
+            let formulaBottom = formula.frame.minY
+                + (try inkBottom(in: formula, rect: formula.bounds, label: "formula"))
             #expect(abs(textBottom - formulaBottom) <= 0.5, "size=\(size), ink text=\(textBottom), math=\(formulaBottom)")
             for view in f.view.inlineMathViews {
                 let next = f.view.firstRect(forCharacterRange: NSRange(location: NSMaxRange(view.attachment.item.range), length: 1), actualRange: nil)

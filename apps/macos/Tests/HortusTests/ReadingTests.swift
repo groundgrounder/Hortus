@@ -59,13 +59,13 @@ struct ReadingTests {
                 if let attachment = view.inlineMath[item.range.location],
                    let formula = view.inlineMathViews.first(where: { $0.attachment === attachment }) {
                     guard formula.superview === view, !formula.isHidden, !formula.frame.isEmpty,
-                          !needsDisplay(in: formula) else { return false }
+                          !needsDisplay(in: formula), !view.formulaAccessibilityFrame(item).isEmpty else { return false }
                     continue
                 }
                 if let formula = view.mathViews.first(where: { $0.item.identity == item.identity }) {
                     if !formula.isHidden {
                         guard formula.superview === view, !formula.frame.isEmpty,
-                              !needsDisplay(in: formula) else { return false }
+                              !needsDisplay(in: formula), !view.formulaAccessibilityFrame(item).isEmpty else { return false }
                         continue
                     }
                 }
@@ -96,6 +96,137 @@ struct ReadingTests {
         private func needsDisplay(in root: NSView) -> Bool {
             root.needsDisplay || root.subviews.contains(where: needsDisplay(in:))
         }
+        func formulaAccessibilityDiagnostics(for item: NoteMath) -> String {
+            var states = [
+                "identity=\(item.identity)",
+                "range=\(item.range.location)/\(item.range.length)",
+                "window=\(view.window != nil)",
+                "screen=\(view.window?.screen.map { NSStringFromRect($0.frame) } ?? "nil")",
+                "window-frame=\(view.window.map { NSStringFromRect($0.frame) } ?? "nil")",
+                "visible=\(view.window?.isVisible == true)",
+                "key=\(view.window?.isKeyWindow == true)",
+                "main=\(view.window?.isMainWindow == true)",
+                "occlusion=\(view.window?.occlusionState.rawValue ?? 0)",
+                "app-active=\(NSApp.isActive)"
+            ]
+            let manager = view.textLayoutManager
+            let content = manager?.textContentManager
+            let location = content.flatMap {
+                $0.location($0.documentRange.location, offsetBy: item.range.location)
+            }
+            let fragment = manager.flatMap { manager in
+                location.flatMap { manager.textLayoutFragment(for: $0) }
+            }
+            states.append("manager=\(manager != nil)")
+            states.append("content=\(content != nil)")
+            states.append("location=\(location != nil)")
+            states.append("fragment=\(fragment != nil)")
+            states.append("state=\(fragment?.state.rawValue.description ?? "nil")")
+            let fragmentText = fragment.map {
+                NSStringFromRect($0.layoutFragmentFrame.offsetBy(dx: view.textContainerInset.width,
+                                                               dy: view.textContainerInset.height))
+            }
+            states.append("fragment-frame=\(fragmentText ?? "nil")")
+            let fragmentRect = fragment.map {
+                $0.layoutFragmentFrame.offsetBy(dx: view.textContainerInset.width,
+                                                dy: view.textContainerInset.height)
+            }
+            states.append("visible-rect=\(NSStringFromRect(view.visibleRect))")
+            states.append("intersects=\(fragmentRect.map { view.visibleRect.intersects($0) } ?? false)")
+
+            let attachment = view.inlineMath[item.range.location]
+            states.append("attachment=\(attachment != nil)")
+            let attachmentFrame = fragment.flatMap { fragment in
+                location.map { fragment.frameForTextAttachment(at: $0) }
+            }
+            states.append("attachment-frame=\(attachmentFrame.map(NSStringFromRect) ?? "nil")")
+            let inline = attachment.flatMap { attachment in
+                view.inlineMathViews.first { $0.attachment === attachment }
+            }
+            states.append("inline-view=\(inline != nil)")
+            if let inline {
+                states.append("inline-frame=\(NSStringFromRect(inline.frame))")
+                states.append("inline-super=\(inline.superview === view)")
+                states.append("inline-hidden=\(inline.isHidden)")
+                states.append("inline-needs-display=\(needsDisplay(in: inline))")
+            }
+            let block = view.mathViews.first { $0.item.identity == item.identity }
+            states.append("block-view=\(block != nil)")
+            if let block {
+                states.append("block-frame=\(NSStringFromRect(block.frame))")
+                states.append("block-super=\(block.superview === view)")
+                states.append("block-hidden=\(block.isHidden)")
+                states.append("block-needs-display=\(needsDisplay(in: block))")
+            }
+            states.append("ax=\(NSStringFromRect(view.formulaAccessibilityFrame(item)))")
+            return states.joined(separator: ",")
+        }
+        func tableFormulaAccessibilityDiagnostics() -> String {
+            guard !view.mediaBlocks.isEmpty else { return "tables=none" }
+            return view.mediaBlocks.enumerated().map { mediaIndex, media in
+                guard mediaIndex < view.mediaViews.count else {
+                    return "table:\(media.prepared.block.blockId)=view-nil,range:\(media.range.location)/\(media.range.length)"
+                }
+                let mediaView = view.mediaViews[mediaIndex]
+                var states = [
+                    "table:\(media.prepared.block.blockId)",
+                    "range:\(media.range.location)/\(media.range.length)",
+                    "view-frame:\(NSStringFromRect(mediaView.frame))",
+                    "super:\(mediaView.superview === view)",
+                    "hidden:\(mediaView.isHidden)",
+                    "intersects:\(view.visibleRect.intersects(mediaView.frame))"
+                ]
+                for (cellIndex, formulas) in media.prepared.math.enumerated() {
+                    let row = cellIndex / max(1, media.prepared.block.columns.count)
+                    let column = cellIndex % max(1, media.prepared.block.columns.count)
+                    for formulaIndex in formulas.indices {
+                        let frame = mediaView.formulaFrame(row: row, column: column, formulaIndex: formulaIndex)
+                        states.append("formula:\(cellIndex)/\(formulaIndex),frame:"
+                            + (frame.map(NSStringFromRect) ?? "nil"))
+                    }
+                }
+                return states.joined(separator: ",")
+            }.joined(separator: ";")
+        }
+        func bitmapDiagnostics(in root: NSView, rect: CGRect) -> String {
+            let normalized = rect.standardized
+            guard !normalized.isEmpty, normalized.width.isFinite, normalized.height.isFinite else {
+                return "rect=\(NSStringFromRect(normalized)),unavailable"
+            }
+            guard let bitmap = root.bitmapImageRepForCachingDisplay(in: normalized) else {
+                return "view=\(type(of: root)),rect=\(NSStringFromRect(normalized)),bitmap=nil,"
+                    + "frame=\(NSStringFromRect(root.frame)),bounds=\(NSStringFromRect(root.bounds)),"
+                    + "window=\(root.window != nil),hidden=\(root.isHidden),"
+                    + "needs-layout=\(root.needsLayout),needs-display=\(root.needsDisplay)"
+            }
+            root.effectiveAppearance.performAsCurrentDrawingAppearance {
+                root.cacheDisplay(in: normalized, to: bitmap)
+            }
+            var opaque = 0, dark = 0
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                          color.alphaComponent > 0.5 else { continue }
+                    opaque += 1
+                    if max(color.redComponent, color.greenComponent, color.blueComponent) < 0.5 { dark += 1 }
+                }
+            }
+            let total = bitmap.pixelsWide * bitmap.pixelsHigh
+            return "view=\(type(of: root)),rect=\(NSStringFromRect(normalized)),"
+                + "frame=\(NSStringFromRect(root.frame)),bounds=\(NSStringFromRect(root.bounds)),"
+                + "window=\(root.window != nil),hidden=\(root.isHidden),"
+                + "pixels=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh),opaque=\(opaque),transparent=\(total - opaque),"
+                + "dark=\(dark),needs-layout=\(root.needsLayout),needs-display=\(root.needsDisplay),"
+                + "tree=\(viewTree(root))"
+        }
+        private func viewTree(_ root: NSView) -> String {
+            func describe(_ node: NSView) -> String {
+                let children = node.subviews.map(describe).joined(separator: ";")
+                return "\(type(of: node))[\(NSStringFromRect(node.frame)),hidden=\(node.isHidden),"
+                    + "needs=\(node.needsDisplay)\(children.isEmpty ? "" : ",{\(children)}")]"
+            }
+            return describe(root)
+        }
         func formulaDiagnostics() -> String {
             let manager = view.textLayoutManager
             let items = view.inlineMath.values.map(\.item) + view.mathViews.map(\.item)
@@ -103,20 +234,18 @@ struct ReadingTests {
                 let length = manager?.offset(from: range.location, to: range.endLocation) ?? -1
                 return "\(length)"
             } ?? "nil"
-            let fragments = items.sorted { $0.range.location < $1.range.location }.map { item in
-                guard let manager, let content = manager.textContentManager,
-                      let location = content.location(content.documentRange.location, offsetBy: item.range.location),
-                      let fragment = manager.textLayoutFragment(for: location) else {
-                    return "\(item.range.location)/\(item.range.length):fragment=nil"
-                }
-                let rect = fragment.layoutFragmentFrame.offsetBy(dx: view.textContainerInset.width,
-                                                                 dy: view.textContainerInset.height)
-                return "\(item.range.location)/\(item.range.length):state=\(fragment.state.rawValue),fragment=\(NSStringFromRect(rect)),visible=\(view.visibleRect.intersects(rect)),math=\(item.prepared.math != nil),reason=\(item.prepared.reason != nil),ax=\(NSStringFromRect(view.formulaAccessibilityFrame(item)))"
-            }.joined(separator: ";")
+            let itemStates = items.sorted { $0.range.location < $1.range.location }
+                .map(formulaAccessibilityDiagnostics)
+                .joined(separator: "\n")
             let mounted = view.inlineMathViews.sorted { $0.attachment.item.range.location < $1.attachment.item.range.location }.map {
                 "inline:\($0.attachment.item.range.location)=\(NSStringFromRect($0.frame)):super:\($0.superview === view):hidden:\($0.isHidden):needs:\(needsDisplay(in: $0))"
             } + view.mathViews.sorted { $0.item.range.location < $1.item.range.location }.map {
                 "block:\($0.item.range.location)=\(NSStringFromRect($0.frame)):super:\($0.superview === view):hidden:\($0.isHidden):needs:\(needsDisplay(in: $0))"
+            }
+            let formulaBitmaps = view.inlineMathViews.map {
+                "inline:\($0.attachment.item.range.location):\(bitmapDiagnostics(in: $0, rect: $0.bounds))"
+            } + view.mathViews.filter { !$0.isHidden }.map {
+                "block:\($0.item.range.location):\(bitmapDiagnostics(in: $0, rect: $0.bounds))"
             }
             let visible = view.visibleRect.intersection(view.bounds)
             let bitmapState: String
@@ -138,7 +267,12 @@ struct ReadingTests {
             } else {
                 bitmapState = "nil"
             }
-            return "formulas=viewport:\(viewport),items:\(items.count),inline:view:\(view.inlineMathViews.count),media:\(view.mediaViews.count),block:\(view.mathViews.count),bitmap:\(bitmapState) @ \(fragments) mounted=\(mounted.joined(separator: ","))"
+            return "formulas=viewport:\(viewport),items:\(items.count),inline:view:\(view.inlineMathViews.count),"
+                + "media:\(view.mediaViews.count),block:\(view.mathViews.count),bitmap:\(bitmapState)\n"
+                + "mounted=\(mounted.joined(separator: ","))\n"
+                + "item-states=\(itemStates)\n"
+                + "tables=\(tableFormulaAccessibilityDiagnostics())\n"
+                + "formula-bitmaps=\(formulaBitmaps.joined(separator: "\n"))"
         }
         func revealAndWait(source: Int) async throws -> (display: Int, target: CGRect) {
             coordinator.reveal(source: source)
