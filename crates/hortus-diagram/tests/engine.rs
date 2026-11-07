@@ -688,6 +688,185 @@ fn lr_subgraph_dag_keeps_forward_ranks_bands_and_sink_ports() {
 }
 
 #[test]
+fn lr_subgraph_edge_cases_separate_sink_ports_and_duplicate_channels() {
+    let source = include_str!("../../../fixtures/mermaid/flowchart/subgraph-lr-edge-cases.mmd");
+    let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
+        panic!("expected graph")
+    };
+    let scene = |width| {
+        layout_graph(
+            &graph,
+            &LayoutOptions {
+                width,
+                ..LayoutOptions::default()
+            },
+            &mut DeterministicMetrics,
+        )
+        .unwrap()
+    };
+    let narrow = scene(700.0);
+    let wide = scene(1100.0);
+    let paths_between = |result: &GraphScene, from: &str, to: &str| {
+        graph
+            .edges
+            .iter()
+            .filter(|edge| graph.nodes[edge.from].id == from && graph.nodes[edge.to].id == to)
+            .map(|edge| graph_path(result, edge.id).clone())
+            .collect::<Vec<_>>()
+    };
+    let sink_ports = |result: &GraphScene, sink: &str| {
+        let rect = graph_hit(result, sink).rect;
+        let mut ports = graph
+            .edges
+            .iter()
+            .filter(|edge| graph.nodes[edge.to].id == sink)
+            .map(|edge| *graph_path(result, edge.id).last().unwrap())
+            .collect::<Vec<_>>();
+        ports.sort_by(|a, b| a.y.total_cmp(&b.y));
+        for port in &ports {
+            assert!(
+                (port.x - rect.x).abs() < 0.01 && port.y > rect.y && port.y < rect.y + rect.height,
+                "{sink} 入口未落在左侧端口区：{port:?} / {rect:?}"
+            );
+        }
+        assert!(
+            ports.windows(2).all(|pair| pair[1].y - pair[0].y >= 6.0),
+            "{sink} 相邻入口中心间距不足：{ports:?}"
+        );
+        ports
+    };
+    let shared_segment = |a: &[Point], b: &[Point]| {
+        a.windows(2).any(|first| {
+            b.windows(2).any(|second| {
+                let (a0, a1) = (first[0], first[1]);
+                let (b0, b1) = (second[0], second[1]);
+                if (a0.y - a1.y).abs() < 0.01 && (b0.y - b1.y).abs() < 0.01 {
+                    (a0.y - b0.y).abs() < 0.01
+                        && a0.x.min(a1.x) < b0.x.max(b1.x) - 0.01
+                        && b0.x.min(b1.x) < a0.x.max(a1.x) - 0.01
+                } else if (a0.x - a1.x).abs() < 0.01 && (b0.x - b1.x).abs() < 0.01 {
+                    (a0.x - b0.x).abs() < 0.01
+                        && a0.y.min(a1.y) < b0.y.max(b1.y) - 0.01
+                        && b0.y.min(b1.y) < a0.y.max(a1.y) - 0.01
+                } else {
+                    false
+                }
+            })
+        })
+    };
+    for (result, cross_band) in [(&narrow, true), (&wide, false)] {
+        assert_eq!(result.metrics.node_overlaps, 0);
+        assert!(!result.metrics.horizontal_overflow);
+        assert_eq!(sink_ports(result, "S5").len(), 5);
+        assert_eq!(sink_ports(result, "T6").len(), 6);
+        for (preds, sink) in [
+            (["A1", "B1", "C1", "D1", "E1"].as_slice(), "S5"),
+            (["A2", "B2", "C2", "D2", "E2", "F2"].as_slice(), "T6"),
+        ] {
+            let target = graph_hit(result, sink).rect;
+            for from in preds {
+                let path = &paths_between(result, from, sink)[0];
+                let source = graph_hit(result, from).rect;
+                assert!((path[0].x - (source.x + source.width)).abs() < 0.01);
+                assert!((path.last().unwrap().x - target.x).abs() < 0.01);
+            }
+        }
+        for (from, to, count) in [("Q1", "Q2", 2), ("R1", "R2", 3)] {
+            let paths = paths_between(result, from, to);
+            assert_eq!(paths.len(), count, "{from}->{to}");
+            let source = graph_hit(result, from).rect;
+            let target = graph_hit(result, to).rect;
+            for (index, path) in paths.iter().enumerate() {
+                assert!((path[0].x - (source.x + source.width)).abs() < 0.01);
+                assert!((path.last().unwrap().x - target.x).abs() < 0.01);
+                for other in &paths[index + 1..] {
+                    assert_ne!(path, other);
+                    assert!(!shared_segment(path, other));
+                }
+            }
+            let mut ports = paths.iter().map(|path| path[0].y).collect::<Vec<_>>();
+            ports.sort_by(f64::total_cmp);
+            ports.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+            assert_eq!(ports.len(), count, "{from}->{to} 端口未分离");
+        }
+        let wrapped = paths_between(result, "W3", "W4");
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(
+            wrapped
+                .iter()
+                .map(|path| {
+                    let port = path[0];
+                    if cross_band {
+                        (port.x * 1000.0) as i64
+                    } else {
+                        (port.y * 1000.0) as i64
+                    }
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        for (index, path) in wrapped.iter().enumerate() {
+            for other in &wrapped[index + 1..] {
+                assert_ne!(path, other);
+                assert!(!shared_segment(path, other));
+            }
+        }
+        let mut targets = wrapped
+            .iter()
+            .map(|path| *path.last().unwrap())
+            .collect::<Vec<_>>();
+        targets.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        targets.dedup_by(|a, b| (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01);
+        assert_eq!(targets.len(), 3, "W3->W4 目标端口未分离");
+        let source = graph_hit(result, "W3").rect;
+        let target = graph_hit(result, "W4").rect;
+        for path in &wrapped {
+            if cross_band {
+                assert!((path[0].y - (source.y + source.height)).abs() < 0.01);
+                assert!((path.last().unwrap().y - target.y).abs() < 0.01);
+            } else {
+                assert!((path[0].x - (source.x + source.width)).abs() < 0.01);
+                assert!((path.last().unwrap().x - target.x).abs() < 0.01);
+            }
+        }
+        for edge in &graph.edges {
+            let path = graph_path(result, edge.id);
+            assert!(path.windows(2).all(|pair| {
+                (pair[0].x - pair[1].x).abs() < 0.01 || (pair[0].y - pair[1].y).abs() < 0.01
+            }));
+            for (segment, pair) in path.windows(2).enumerate() {
+                for node in &graph.nodes {
+                    if node.id == graph.nodes[edge.from].id || node.id == graph.nodes[edge.to].id {
+                        continue;
+                    }
+                    if node.kind == GraphNodeKind::Container {
+                        continue;
+                    }
+                    let rect = graph_hit(result, &node.id).rect;
+                    let intersects = if (pair[0].x - pair[1].x).abs() < 0.01 {
+                        pair[0].x > rect.x + 0.01
+                            && pair[0].x < rect.x + rect.width - 0.01
+                            && pair[0].y.min(pair[1].y) < rect.y + rect.height - 0.01
+                            && pair[0].y.max(pair[1].y) > rect.y + 0.01
+                    } else {
+                        pair[0].y > rect.y + 0.01
+                            && pair[0].y < rect.y + rect.height - 0.01
+                            && pair[0].x.min(pair[1].x) < rect.x + rect.width - 0.01
+                            && pair[0].x.max(pair[1].x) > rect.x + 0.01
+                    };
+                    assert!(
+                        !intersects,
+                        "edge {} segment {segment} crosses {}",
+                        edge.id, node.id
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn bare_subgraph_uses_its_id_as_the_title() {
     let source = "flowchart TB\nsubgraph plain\nA --> B\nend";
     let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {

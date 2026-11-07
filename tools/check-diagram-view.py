@@ -295,6 +295,178 @@ def assert_research_loop_label(data, source=None):
     return assert_research_geometry(data, source)
 
 
+def point_in_rect(point, rect, epsilon=.51):
+    return (rect['x'] - epsilon <= point['x'] <= rect['x'] + rect['width'] + epsilon
+            and rect['y'] - epsilon <= point['y'] <= rect['y'] + rect['height'] + epsilon)
+
+
+def lr_edge_metrics(scene):
+    """LR 容器的方向、汇点端口间距与重复边独立通道指标。
+
+    同 band 期望源 right→目标 left，跨 band 期望源 bottom→目标 top。重复边按
+    同一对节点的路径分组，要求各自有独立端口、路径互不相同、不共享线段，且
+    同一组内方向一致（不能用外侧回钩绕过 band 策略）。
+    """
+    containers = [primitive['rect'] for primitive in scene['primitives']
+                  if primitive['kind'] == 'graph_shape' and primitive['shape'] == 'container']
+    container_ids = {hit['node_id'] for hit in scene['hit_regions']
+                     if hit['rect'] in containers}
+    nodes = [hit for hit in scene['hit_regions'] if hit['node_id'] not in container_ids]
+
+    def owner(hit):
+        rect = hit['rect']
+        center = (rect['x'] + rect['width'] / 2, rect['y'] + rect['height'] / 2)
+        return next((index for index, outer in enumerate(containers)
+                     if outer['x'] - .01 <= center[0] <= outer['x'] + outer['width'] + .01
+                     and outer['y'] - .01 <= center[1] <= outer['y'] + outer['height'] + .01),
+                    None)
+
+    def endpoint(point):
+        matches = [hit for hit in nodes if point_in_rect(point, hit['rect'])]
+        return min(matches, key=lambda hit: hit['rect']['width'] * hit['rect']['height'],
+                   default=None)
+
+    owner_of = {hit['node_id']: owner(hit) for hit in nodes}
+
+    def touches(point, rect, side):
+        in_y = rect['y'] - .51 <= point['y'] <= rect['y'] + rect['height'] + .51
+        in_x = rect['x'] - .51 <= point['x'] <= rect['x'] + rect['width'] + .51
+        return ((side == 'right' and in_y
+                 and abs(point['x'] - (rect['x'] + rect['width'])) <= .51)
+                or (side == 'left' and in_y and abs(point['x'] - rect['x']) <= .51)
+                or (side == 'bottom' and in_x
+                    and abs(point['y'] - (rect['y'] + rect['height'])) <= .51)
+                or (side == 'top' and in_x and abs(point['y'] - rect['y']) <= .51))
+
+    def center(rect):
+        return (rect['x'] + rect['width'] / 2, rect['y'] + rect['height'] / 2)
+
+    def axis_gaps(ports, side):
+        offsets = sorted({round(point['y' if side == 'left' else 'x'], 3) for point in ports})
+        return [round(second - first, 3) for first, second in zip(offsets, offsets[1:])
+                if second - first > .001]
+
+    def shared_segment(first, second):
+        a0, a1 = first
+        b0, b1 = second
+        if abs(a0['y'] - a1['y']) <= .51 and abs(b0['y'] - b1['y']) <= .51:
+            return (abs(a0['y'] - b0['y']) <= .51
+                    and min(a0['x'], a1['x']) < max(b0['x'], b1['x']) - .51
+                    and min(b0['x'], b1['x']) < max(a0['x'], a1['x']) - .51)
+        if abs(a0['x'] - a1['x']) <= .51 and abs(b0['x'] - b1['x']) <= .51:
+            return (abs(a0['x'] - b0['x']) <= .51
+                    and min(a0['y'], a1['y']) < max(b0['y'], b1['y']) - .51
+                    and min(b0['y'], b1['y']) < max(a0['y'], a1['y']) - .51)
+        return False
+
+    counts = {'paths': 0, 'same_band_right_entries': 0, 'cross_band_down_entries': 0,
+              'reverse_edges': 0, 'invalid_entries': 0, 'container_overflow': 0}
+    sinks = {}
+    duplicates = {}
+    for path in (primitive for primitive in scene['primitives']
+                 if primitive['kind'] == 'graph_path'):
+        points = path['points']
+        if len(points) < 2:
+            counts['invalid_entries'] += 1
+            continue
+        source = endpoint(points[0])
+        target = endpoint(points[-1])
+        if source is None or target is None:
+            continue
+        container = owner_of[source['node_id']]
+        if container is None or container != owner_of[target['node_id']]:
+            continue
+        counts['paths'] += 1
+        outer = containers[container]
+        if not all(outer['x'] - .51 <= point['x'] <= outer['x'] + outer['width'] + .51
+                   and outer['y'] - .51 <= point['y'] <= outer['y'] + outer['height'] + .51
+                   for point in points):
+            counts['container_overflow'] += 1
+        before, after = points[-2], points[-1]
+        horizontal = abs(before['y'] - after['y']) <= .51
+        vertical = abs(before['x'] - after['x']) <= .51
+        source_center = center(source['rect'])
+        target_center = center(target['rect'])
+        entry = None
+        if horizontal and touches(points[0], source['rect'], 'right') \
+                and touches(points[-1], target['rect'], 'left') \
+                and target_center[0] > source_center[0] + .01:
+            counts['same_band_right_entries'] += 1
+            entry = 'left'
+        elif vertical and touches(points[0], source['rect'], 'bottom') \
+                and touches(points[-1], target['rect'], 'top') \
+                and target_center[1] > source_center[1] + .01:
+            counts['cross_band_down_entries'] += 1
+            entry = 'top'
+        elif target_center[0] <= source_center[0] + .01:
+            counts['reverse_edges'] += 1
+            entry = 'reverse'
+        else:
+            counts['invalid_entries'] += 1
+        if entry in ('left', 'top'):
+            sinks.setdefault((container, target['node_id'], entry), []).append(points[-1])
+        duplicates.setdefault((container, source['node_id'], target['node_id']), []).append(
+            {'points': points, 'entry': entry})
+
+    gaps = []
+    for (_, _, side), ports in sinks.items():
+        if len(ports) >= 2:
+            gaps.extend(axis_gaps(ports, side))
+    groups = []
+    for (_, source, target), paths in duplicates.items():
+        if len(paths) < 2:
+            continue
+        shared = 0
+        shapes = [tuple((round(point['x'], 3), round(point['y'], 3)) for point in item['points'])
+                  for item in paths]
+        for index, first in enumerate(paths):
+            first_segments = list(zip(first['points'], first['points'][1:]))
+            for second in paths[index + 1:]:
+                second_segments = list(zip(second['points'], second['points'][1:]))
+                shared += sum(shared_segment(a, b)
+                              for a in first_segments for b in second_segments)
+        first_ports = {shape[0] for shape in shapes}
+        last_ports = {shape[-1] for shape in shapes}
+        entries = [item['entry'] for item in paths]
+        groups.append({
+            'from': source,
+            'to': target,
+            'paths': len(paths),
+            'entries': entries,
+            'consistent': len(set(entries)) == 1 and entries[0] in ('left', 'top'),
+            'distinct': len(set(shapes)) == len(shapes),
+            'distinct_ports': len(first_ports) == len(shapes) == len(last_ports),
+            'shared_segments': shared,
+        })
+    return {**counts,
+            'sink_port_groups': sum(len(ports) >= 2 for ports in sinks.values()),
+            'min_sink_port_gap_px': round(min(gaps), 3) if gaps else None,
+            'duplicate_groups': groups}
+
+
+def assert_lr_edge_cases_geometry(data, width):
+    scene = json.loads(data['initial_semantic_scenes'][0])
+    metrics = lr_edge_metrics(scene)
+    assert metrics['paths'] == 25, metrics
+    assert metrics['min_sink_port_gap_px'] >= 6, metrics
+    assert metrics['reverse_edges'] == 0 and metrics['invalid_entries'] == 0, metrics
+    assert metrics['container_overflow'] == 0, metrics
+    groups = {(group['from'], group['to']): group for group in metrics['duplicate_groups']}
+    assert {key: group['paths'] for key, group in groups.items()} == {
+        ('Q1', 'Q2'): 2, ('R1', 'R2'): 3, ('W3', 'W4'): 3}, groups
+    assert all(group['consistent'] and group['distinct'] and group['distinct_ports']
+               and group['shared_segments'] == 0 for group in groups.values()), groups
+    if width == 700:
+        assert metrics['same_band_right_entries'] == 22, metrics
+        assert metrics['cross_band_down_entries'] == 3, metrics
+        assert groups[('W3', 'W4')]['entries'] == ['top', 'top', 'top'], groups
+    else:
+        assert metrics['same_band_right_entries'] == 25, metrics
+        assert metrics['cross_band_down_entries'] == 0, metrics
+        assert groups[('W3', 'W4')]['entries'] == ['left', 'left', 'left'], groups
+    return metrics
+
+
 def opening_main_thread_pass(samples, limit=33):
     values = list(samples)
     assert len(values) == 3, values
@@ -361,7 +533,8 @@ def scenarios(base, output):
         'directions-bt.mmd', 'fanout.mmd', 'forest.mmd', 'graph-syntax.mmd',
         'identity.mmd', 'merge-diamond.mmd', 'research.mmd',
         'dense-40.mmd', 'dense-dag.mmd', 'erikson.mmd',
-        'subgraphs-top-level.mmd', 'subgraph-lr-dag.mmd', 'invisible-links.mmd',
+        'subgraphs-top-level.mmd', 'subgraph-lr-dag.mmd', 'subgraph-lr-edge-cases.mmd',
+        'invisible-links.mmd',
     ]
     flowchart_output = output / 'flowchart'
     for name in public_flowcharts:
@@ -378,6 +551,7 @@ def scenarios(base, output):
                     assert data['scene_widths'] and all(abs(w - width) < .5 for w in data['scene_widths']), data
                     assert data['accessibility_nodes'] == data['visible_nodes'], data
                     if name == 'research.mmd': assert_research_geometry(data)
+                    if name == 'subgraph-lr-edge-cases.mmd': assert_lr_edge_cases_geometry(data, width)
                     if name == 'erikson.mmd': assert data['row_counts'] == [[4, 4]], data
                     if name == 'erikson.mmd': assert data['initial_row_counts'] == [[4, 4]], data
     deterministic = ROOT / 'fixtures/mermaid/flowchart/subgraphs-top-level.mmd'
