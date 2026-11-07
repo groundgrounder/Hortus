@@ -45,10 +45,16 @@ pub(crate) struct Routes {
     pub labels: Vec<Option<Rect>>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct RoutePolicy<'a> {
+    pub accepted: &'a [bool],
+    pub lr_bands: Option<&'a [usize]>,
+}
+
 pub(crate) fn route(
     graph: &Graph,
     nodes: &[(Rect, Shape)],
-    accepted: &[bool],
+    policy: RoutePolicy<'_>,
     width: f64,
     height: f64,
     label_widths: &[Option<f64>],
@@ -69,7 +75,7 @@ pub(crate) fn route(
         return route_grid(
             graph,
             nodes,
-            accepted,
+            policy,
             (width, height),
             label_widths,
             &seeds,
@@ -86,7 +92,7 @@ pub(crate) fn route(
     let mut best = route_grid(
         graph,
         nodes,
-        accepted,
+        policy,
         (width, height),
         label_widths,
         &seeds,
@@ -114,7 +120,7 @@ pub(crate) fn route(
                     if let Ok(candidate) = route_grid(
                         graph,
                         nodes,
-                        accepted,
+                        policy,
                         (width, height),
                         label_widths,
                         &fixed,
@@ -154,7 +160,7 @@ pub(crate) fn route(
                     if let Ok(candidate) = route_grid(
                         graph,
                         nodes,
-                        accepted,
+                        policy,
                         (width, height),
                         label_widths,
                         &fixed,
@@ -336,13 +342,17 @@ fn route_conflicts(graph: &Graph, paths: &[Vec<Point>]) -> (usize, Vec<usize>) {
 fn route_grid(
     graph: &Graph,
     nodes: &[(Rect, Shape)],
-    accepted: &[bool],
+    policy: RoutePolicy<'_>,
     size: (f64, f64),
     label_widths: &[Option<f64>],
     seeds: &[Option<Vec<Point>>],
     preferred: Option<(usize, usize)>,
 ) -> Result<Routes, LayoutError> {
     let (width, height) = size;
+    let accepted = policy.accepted;
+    let lr_bands = policy
+        .lr_bands
+        .filter(|_| graph.direction == Direction::LeftToRight);
     let vertical = matches!(
         graph.direction,
         Direction::TopToBottom | Direction::BottomToTop
@@ -386,6 +396,20 @@ fn route_grid(
             b_vertical = false;
             a_positive = true;
             b_positive = true;
+        } else if let Some(bands) = lr_bands {
+            if bands[edge.from] < bands[edge.to] {
+                // 真正跨 band 的边从源底部离开，并只在目标顶部汇入。
+                a_vertical = true;
+                b_vertical = true;
+                a_positive = true;
+                b_positive = false;
+            } else if bands[edge.from] == bands[edge.to] {
+                // 同一 band 的 LR 边固定走源右侧到目标左侧。
+                a_vertical = false;
+                b_vertical = false;
+                a_positive = true;
+                b_positive = false;
+            }
         } else if !vertical && (from.y - to.y).abs() > from.height.max(to.height) {
             // LR/RL 折回下一行，仍从下一行的源码起点继续阅读。
             a_vertical = true;
@@ -467,6 +491,21 @@ fn route_grid(
                 b_positive = sides & 2 != 0;
             }
         }
+        if let Some(bands) = lr_bands
+            && accepted[index]
+        {
+            if bands[edge.from] < bands[edge.to] {
+                a_vertical = true;
+                b_vertical = true;
+                a_positive = true;
+                b_positive = false;
+            } else if bands[edge.from] == bands[edge.to] {
+                a_vertical = false;
+                b_vertical = false;
+                a_positive = true;
+                b_positive = false;
+            }
+        }
         if backward {
             a_vertical = true;
             a_positive = !positive;
@@ -530,11 +569,19 @@ fn route_grid(
             graph.edges[edge_index].to
         };
         let incident = &port_groups[&(node_index, outgoing, is_vertical, is_positive)];
-        if nodes.len() > 48
-            || (incident.len() > 2
-                && incident
-                    .iter()
-                    .all(|index| graph.edges[*index].label.is_none()))
+        // LR 容器的汇点即使有三条以上无标签入边，也必须保留可分辨的端口。
+        let lr_container_sink = lr_bands.is_some()
+            && graph.direction == Direction::LeftToRight
+            && !outgoing
+            && incident
+                .iter()
+                .all(|index| graph.edges[*index].label.is_none());
+        if !lr_container_sink
+            && (nodes.len() > 48
+                || (incident.len() > 2
+                    && incident
+                        .iter()
+                        .all(|index| graph.edges[*index].label.is_none())))
         {
             return 0.0;
         }

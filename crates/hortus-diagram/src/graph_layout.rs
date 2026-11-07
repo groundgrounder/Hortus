@@ -13,6 +13,7 @@ const EDGE_LABEL_SIZE: f64 = 13.6;
 const EDGE_LABEL_HEIGHT: f64 = 22.0;
 const EDGE_LABEL_PAD_X: f64 = 2.0;
 const EDGE_LABEL_SIDE_CLEARANCE: f64 = 7.0;
+const LR_BAND_GAP: f64 = 48.0;
 
 /// 稀疏链保持紧凑步距；连边密集或节点多时保留较大层距，避免走线折点膨胀。
 fn rank_gap(graph: &Graph) -> f64 {
@@ -62,10 +63,19 @@ pub fn layout_graph(
     options: &LayoutOptions,
     fonts: &mut dyn FontMetrics,
 ) -> Result<GraphScene, LayoutError> {
+    layout_graph_with_context(graph, options, fonts, false)
+}
+
+fn layout_graph_with_context(
+    graph: &Graph,
+    options: &LayoutOptions,
+    fonts: &mut dyn FontMetrics,
+    container_members: bool,
+) -> Result<GraphScene, LayoutError> {
     if !graph.containers.is_empty() {
         return layout_container_graph(graph, options, fonts);
     }
-    let initial = layout_graph_with_order(graph, options, fonts, None)?;
+    let initial = layout_graph_with_order(graph, options, fonts, None, container_members)?;
     if graph.nodes.len() > 16 || initial.metrics.edge_crossings == 0 {
         return Ok(initial);
     }
@@ -82,7 +92,8 @@ pub fn layout_graph(
         for permutation in permutations {
             let mut order = base.clone();
             order[rank] = permutation;
-            if let Ok(candidate) = layout_graph_with_order(graph, options, fonts, Some(&order))
+            if let Ok(candidate) =
+                layout_graph_with_order(graph, options, fonts, Some(&order), container_members)
                 && candidate.metrics.edge_crossings < best.metrics.edge_crossings
             {
                 best = candidate;
@@ -208,7 +219,7 @@ fn layout_container_graph(
                 bounds: None,
             }
         } else {
-            let result = layout_graph(
+            let result = layout_graph_with_context(
                 &inner_graph,
                 &LayoutOptions {
                     width: inner_width,
@@ -216,6 +227,7 @@ fn layout_container_graph(
                     ..LayoutOptions::default()
                 },
                 fonts,
+                true,
             )?;
             ContainerContent {
                 bounds: scene_content_bounds(&result.scene),
@@ -301,7 +313,7 @@ fn layout_container_graph(
         forest: graph.forest,
         containers: Vec::new(),
     };
-    let outer = layout_graph(
+    let outer = layout_graph_with_context(
         &outer_graph,
         &LayoutOptions {
             width: options.width,
@@ -310,6 +322,7 @@ fn layout_container_graph(
             ..LayoutOptions::default()
         },
         fonts,
+        false,
     )?;
     let outer_rects = outer
         .scene
@@ -875,6 +888,7 @@ fn layout_graph_with_order(
     options: &LayoutOptions,
     fonts: &mut dyn FontMetrics,
     order_override: Option<&[Vec<usize>]>,
+    container_members: bool,
 ) -> Result<GraphScene, LayoutError> {
     let started = Instant::now();
     if !options.width.is_finite() || options.width < 120.0 {
@@ -893,6 +907,7 @@ fn layout_graph_with_order(
     let shape_fill = Color::oklch(if dark { 0.27 } else { 0.995 }, 0.008, 250.0);
     let shape_stroke = Color::oklch(if dark { 0.66 } else { 0.43 }, 0.055, 250.0);
     let visible_width = options.width - OUTER * 2.0;
+    let (mut ranks, rank_count, accepted) = assign_ranks(graph);
 
     let mut boxes = Vec::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
@@ -902,7 +917,11 @@ fn layout_graph_with_order(
             graph.direction,
             Direction::LeftToRight | Direction::RightToLeft
         );
-        let limit = if horizontal {
+        let limit = if horizontal && container_members && graph.direction == Direction::LeftToRight
+        {
+            let columns = rank_count.max(1) as f64;
+            (((visible_width - NODE_GAP * (columns - 1.0)) / columns) - 24.0).max(48.0)
+        } else if horizontal {
             ((visible_width - 32.0 * 3.0) / 4.0 - 8.0).max(48.0)
         } else {
             196.0_f64.min(visible_width - 24.0)
@@ -1020,18 +1039,21 @@ fn layout_graph_with_order(
 
     // 高扇出和汇合给每条边留独立端口，避免端点装饰互相覆盖。
     for (index, boxed) in boxes.iter_mut().enumerate() {
+        let incoming = graph.edges.iter().filter(|edge| edge.to == index).count();
         let degree = graph
             .edges
             .iter()
             .filter(|edge| edge.from == index)
             .count()
-            .max(graph.edges.iter().filter(|edge| edge.to == index).count());
+            .max(incoming);
         if degree >= 4 && graph.nodes.len() <= 48 {
             boxed.rect.height = boxed.rect.height.max((degree - 1) as f64 * 12.0 + 20.0);
         }
+        if container_members && graph.direction == Direction::LeftToRight && incoming >= 2 {
+            boxed.rect.height = boxed.rect.height.max((incoming as f64 - 1.0) * 14.0 + 20.0);
+        }
     }
 
-    let (mut ranks, rank_count, accepted) = assign_ranks(graph);
     // 只回到上游的终止反馈分支与判断节点同高，缩短回路。
     for (index, edge) in graph.edges.iter().enumerate() {
         if accepted[index] || edge.from == edge.to {
@@ -1057,7 +1079,15 @@ fn layout_graph_with_order(
     let order = order_override
         .map(<[Vec<usize>]>::to_vec)
         .unwrap_or_else(|| order_ranks(graph, &ranks, rank_count));
-    let (mut height, mut groups) = place_nodes(graph, &order, &ranks, &mut boxes, visible_width);
+    let (mut height, mut groups) = place_nodes(
+        graph,
+        &order,
+        &ranks,
+        &accepted,
+        &mut boxes,
+        visible_width,
+        container_members,
+    );
     let mut column_paths = None;
     let mut column_stability = None;
     // 近树分列对初排和 previous 使用同一几何契约：位置只由结构和可用宽度决定，
@@ -1114,13 +1144,18 @@ fn layout_graph_with_order(
             labels: vec![None; graph.edges.len()],
         }
     } else {
+        let lr_bands = (container_members && graph.direction == Direction::LeftToRight)
+            .then_some(groups.as_slice());
         crate::graph_router::route(
             graph,
             &boxes
                 .iter()
                 .map(|node| (node.rect, node.shape))
                 .collect::<Vec<_>>(),
-            &accepted,
+            crate::graph_router::RoutePolicy {
+                accepted: &accepted,
+                lr_bands,
+            },
             options.width,
             height,
             &label_widths,
@@ -1607,10 +1642,15 @@ fn place_nodes(
     graph: &Graph,
     order: &[Vec<usize>],
     ranks: &[usize],
+    accepted: &[bool],
     boxes: &mut [BoxedNode],
     available: f64,
+    container_members: bool,
 ) -> (f64, Vec<usize>) {
     let mut groups = vec![0; boxes.len()];
+    if container_members && graph.direction == Direction::LeftToRight {
+        return place_lr_container_nodes(graph, order, ranks, accepted, boxes, available);
+    }
     if matches!(
         graph.direction,
         Direction::LeftToRight | Direction::RightToLeft
@@ -1750,6 +1790,103 @@ fn place_nodes(
         }
     }
     (y - rank_gap(graph) + OUTER, groups)
+}
+
+/// 顶层 LR 容器的成员按宽度选择最少连续 band；所有 band 共用同一列起点。
+fn place_lr_container_nodes(
+    graph: &Graph,
+    order: &[Vec<usize>],
+    ranks: &[usize],
+    accepted: &[bool],
+    boxes: &mut [BoxedNode],
+    available: f64,
+) -> (f64, Vec<usize>) {
+    let mut groups = vec![0; boxes.len()];
+    if order.is_empty() {
+        return (OUTER * 2.0, groups);
+    }
+    let widths = order
+        .iter()
+        .map(|rank| {
+            rank.iter()
+                .map(|node| boxes[*node].rect.width)
+                .fold(0.0, f64::max)
+        })
+        .collect::<Vec<_>>();
+    let weights = widths
+        .iter()
+        .map(|width| width + NODE_GAP)
+        .collect::<Vec<_>>();
+    let band_width = |range: &std::ops::Range<usize>| {
+        widths[range.clone()].iter().sum::<f64>() + NODE_GAP * range.len().saturating_sub(1) as f64
+    };
+    let mut band_count = 1usize;
+    let ranges = loop {
+        let ranges = crate::partition(&weights, band_count);
+        if ranges
+            .iter()
+            .all(|range| band_width(range) <= available + 0.01)
+            || band_count == order.len()
+        {
+            break ranges;
+        }
+        band_count += 1;
+    };
+    let widest = ranges.iter().map(&band_width).fold(0.0, f64::max);
+    let origin = OUTER + (available - widest).max(0.0) / 2.0;
+    let mut top = OUTER;
+    for (band, range) in ranges.into_iter().enumerate() {
+        let mut x = origin;
+        for rank in range.clone() {
+            let mut node_y = top;
+            for node in &order[rank] {
+                boxes[*node].rect.x = x + (widths[rank] - boxes[*node].rect.width) / 2.0;
+                boxes[*node].rect.y = node_y;
+                groups[*node] = band;
+                node_y += boxes[*node].rect.height + NODE_GAP;
+            }
+            x += widths[rank] + NODE_GAP;
+        }
+
+        // 先按 rank 从左到右设定汇点的垂直中心，再在同一列内消解重叠。
+        for rank in range.clone() {
+            let mut next_y = top;
+            for node in &order[rank] {
+                let parents = graph
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, edge)| {
+                        accepted[*index]
+                            && edge.to == *node
+                            && edge.from != *node
+                            && ranks[edge.from] < rank
+                            && groups[edge.from] == band
+                    })
+                    .map(|(_, edge)| {
+                        let rect = boxes[edge.from].rect;
+                        rect.y + rect.height / 2.0
+                    })
+                    .collect::<Vec<_>>();
+                let desired_top = if parents.is_empty() {
+                    boxes[*node].rect.y
+                } else {
+                    parents.iter().sum::<f64>() / parents.len() as f64
+                        - boxes[*node].rect.height / 2.0
+                };
+                boxes[*node].rect.y = desired_top.max(next_y);
+                next_y = boxes[*node].rect.y + boxes[*node].rect.height + NODE_GAP;
+            }
+        }
+        top = boxes
+            .iter()
+            .zip(&groups)
+            .filter(|(_, group)| **group == band)
+            .map(|(node, _)| node.rect.y + node.rect.height)
+            .fold(top, f64::max)
+            + LR_BAND_GAP;
+    }
+    (top - LR_BAND_GAP + OUTER, groups)
 }
 
 /// 从 previous 还原列成员与列内次序；结构不闭合时返回 None，退回 BFS 分列。
