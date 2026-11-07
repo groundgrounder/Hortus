@@ -1209,9 +1209,24 @@ final class DiagramTextView: NSTextView {
         return nil
     }
     func formulaAccessibilityFrame(_ item: NoteMath) -> NSRect {
-        guard let window, let manager = textLayoutManager, let content = manager.textContentManager,
+        guard let window else { return .zero }
+        // 已挂载公式的视图就是当前绘制和命中的实际几何；不要再从可能滞后的
+        // TextKit fragment 副本推导 AX frame。
+        if let attachment = inlineMath[item.range.location],
+           let formula = inlineMathViews.first(where: { $0.attachment === attachment }),
+           !formula.isHidden, formula.superview === self, !formula.frame.isEmpty,
+           visibleRect.intersects(formula.frame) {
+            return window.convertToScreen(formula.convert(formula.bounds, to: nil))
+        }
+        if let math = mathViews.first(where: { $0.item.identity == item.identity }),
+           !math.isHidden, math.superview === self, !math.frame.isEmpty,
+           visibleRect.intersects(math.frame) {
+            return window.convertToScreen(math.convert(math.bounds, to: nil))
+        }
+        guard let manager = textLayoutManager, let content = manager.textContentManager,
               let location = content.location(content.documentRange.location, offsetBy: item.range.location),
-              let fragment = manager.textLayoutFragment(for: location), fragment.state.rawValue >= NSTextLayoutFragment.State.layoutAvailable.rawValue else { return .zero }
+              let fragment = manager.textLayoutFragment(for: location),
+              fragment.state.rawValue >= NSTextLayoutFragment.State.layoutAvailable.rawValue else { return .zero }
         let fragmentRect = fragment.layoutFragmentFrame.offsetBy(dx: textContainerInset.width, dy: textContainerInset.height)
         guard visibleRect.intersects(fragmentRect) else { return .zero }
         var rect: CGRect
