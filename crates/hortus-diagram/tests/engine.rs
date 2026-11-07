@@ -33,6 +33,31 @@ fn assert_text_within_nodes(scene: &Scene) {
     }
 }
 
+fn graph_hit<'a>(scene: &'a GraphScene, id: &str) -> &'a HitRegion {
+    scene
+        .scene
+        .hit_regions
+        .iter()
+        .find(|hit| hit.node_id == id)
+        .unwrap_or_else(|| panic!("missing hit {id}"))
+}
+
+fn graph_path(scene: &GraphScene, edge_id: usize) -> &Vec<Point> {
+    scene
+        .scene
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::GraphPath {
+                edge_id: id,
+                points,
+                ..
+            } if *id == edge_id => Some(points),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing edge path {edge_id}"))
+}
+
 #[test]
 fn flow_shapes_chains_comments_and_utf8_ranges() {
     let source = "%% ignored\nflowchart TB; A[\"中文 --> ; %% 标签\"]:::key --> B(rounded) --> C((circle)); A --> D([stadium]); A --> E{{hexagon}}; A --> F[[subroutine]]; A --> G[(database)]; A --> H{decision}; A --> I>flag]; classDef key fill:#abc,stroke:#c33; %% trailing";
@@ -507,6 +532,159 @@ fn top_level_subgraphs_and_invisible_links_keep_layout_semantics() {
         .scene
         .to_svg()
     );
+}
+
+#[test]
+fn lr_subgraph_dag_keeps_forward_ranks_bands_and_sink_ports() {
+    let source = include_str!("../../../fixtures/mermaid/flowchart/subgraph-lr-dag.mmd");
+    let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
+        panic!("expected graph")
+    };
+    let scene = |width| {
+        layout_graph(
+            &graph,
+            &LayoutOptions {
+                width,
+                ..LayoutOptions::default()
+            },
+            &mut DeterministicMetrics,
+        )
+        .unwrap()
+    };
+    let narrow = scene(700.0);
+    let wide = scene(1100.0);
+    let edge = |from: &str, to: &str| {
+        graph
+            .edges
+            .iter()
+            .find(|edge| graph.nodes[edge.from].id == from && graph.nodes[edge.to].id == to)
+            .unwrap_or_else(|| panic!("missing edge {from} -> {to}"))
+    };
+    let center = |scene: &GraphScene, id: &str| {
+        let rect = graph_hit(scene, id).rect;
+        (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0)
+    };
+    let distinct_bands = |ids: &[&str]| {
+        let mut tops = ids
+            .iter()
+            .map(|id| graph_hit(&narrow, id).rect.y)
+            .collect::<Vec<_>>();
+        tops.sort_by(f64::total_cmp);
+        tops.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        tops
+    };
+
+    for id in ["C1", "C2", "C3", "C4", "C5"] {
+        assert!(
+            (graph_hit(&narrow, id).rect.y - graph_hit(&narrow, "C1").rect.y).abs() <= 0.5,
+            "{id}: {:?}",
+            ["C1", "C2", "C3", "C4", "C5"].map(|id| graph_hit(&narrow, id).rect)
+        );
+    }
+    for (from, to) in [("C1", "C2"), ("C2", "C3"), ("C3", "C4"), ("C4", "C5")] {
+        assert!(center(&narrow, from).0 < center(&narrow, to).0);
+        let points = graph_path(&narrow, edge(from, to).id);
+        assert!(
+            (points[0].x - (graph_hit(&narrow, from).rect.x + graph_hit(&narrow, from).rect.width))
+                .abs()
+                < 0.01
+        );
+        assert!((points.last().unwrap().x - graph_hit(&narrow, to).rect.x).abs() < 0.01);
+    }
+
+    for (sink, predecessors) in [("M", vec!["L", "R"]), ("S", vec!["T1", "T2", "T3"])] {
+        let centers = predecessors
+            .iter()
+            .map(|id| center(&narrow, id).1)
+            .collect::<Vec<_>>();
+        let expected = centers.iter().sum::<f64>() / centers.len() as f64;
+        assert!((center(&narrow, sink).1 - expected).abs() <= 0.5);
+        let mut ports = predecessors
+            .iter()
+            .map(|from| graph_path(&narrow, edge(from, sink).id).last().unwrap().y)
+            .collect::<Vec<_>>();
+        ports.sort_by(f64::total_cmp);
+        assert!(ports.windows(2).all(|pair| pair[1] - pair[0] >= 6.0));
+    }
+
+    let wrapped = ["W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8"];
+    assert_eq!(distinct_bands(&wrapped).len(), 2);
+    let mut wide_tops = wrapped
+        .iter()
+        .map(|id| graph_hit(&wide, id).rect.y)
+        .collect::<Vec<_>>();
+    wide_tops.sort_by(f64::total_cmp);
+    wide_tops.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    assert_eq!(wide_tops.len(), 1);
+    let widths = wrapped
+        .iter()
+        .map(|id| graph_hit(&narrow, id).rect.width)
+        .sum::<f64>()
+        + 28.0 * (wrapped.len() - 1) as f64;
+    assert!(widths > 616.0);
+    let wide_widths = wrapped
+        .iter()
+        .map(|id| graph_hit(&wide, id).rect.width)
+        .sum::<f64>()
+        + 28.0 * (wrapped.len() - 1) as f64;
+    assert!(wide_widths <= 1016.0);
+    for (result, expected_down_entries) in [(&narrow, 1), (&wide, 0)] {
+        assert_eq!(result.metrics.node_overlaps, 0);
+        assert!(!result.metrics.horizontal_overflow);
+        let mut down_entries = 0;
+        for edge in &graph.edges {
+            let points = graph_path(result, edge.id);
+            let source = graph_hit(result, &graph.nodes[edge.from].id).rect;
+            let target = graph_hit(result, &graph.nodes[edge.to].id).rect;
+            let last = points.last().unwrap();
+            let before = points[points.len() - 2];
+            let vertical_end = (last.x - before.x).abs() < 0.01;
+            if vertical_end {
+                down_entries += 1;
+                assert!((last.y - target.y).abs() < 0.01);
+                assert!(target.y > source.y + source.height);
+                assert!((points[0].y - (source.y + source.height)).abs() < 0.01);
+            } else {
+                assert!(
+                    center(result, &graph.nodes[edge.to].id).0
+                        > center(result, &graph.nodes[edge.from].id).0
+                );
+                assert!((points[0].x - (source.x + source.width)).abs() < 0.01);
+                assert!((last.x - target.x).abs() < 0.01);
+            }
+            assert!(points.windows(2).all(|pair| {
+                (pair[0].x - pair[1].x).abs() < 0.01 || (pair[0].y - pair[1].y).abs() < 0.01
+            }));
+            for (segment, pair) in points.windows(2).enumerate() {
+                for node in &graph.nodes {
+                    if node.id == graph.nodes[edge.from].id || node.id == graph.nodes[edge.to].id {
+                        continue;
+                    }
+                    if node.kind == GraphNodeKind::Container {
+                        continue;
+                    }
+                    let rect = graph_hit(result, &node.id).rect;
+                    let intersects = if (pair[0].x - pair[1].x).abs() < 0.01 {
+                        pair[0].x > rect.x + 0.01
+                            && pair[0].x < rect.x + rect.width - 0.01
+                            && pair[0].y.min(pair[1].y) < rect.y + rect.height - 0.01
+                            && pair[0].y.max(pair[1].y) > rect.y + 0.01
+                    } else {
+                        pair[0].y > rect.y + 0.01
+                            && pair[0].y < rect.y + rect.height - 0.01
+                            && pair[0].x.min(pair[1].x) < rect.x + rect.width - 0.01
+                            && pair[0].x.max(pair[1].x) > rect.x + 0.01
+                    };
+                    assert!(
+                        !intersects,
+                        "edge {} segment {segment} crosses {}",
+                        edge.id, node.id
+                    );
+                }
+            }
+        }
+        assert_eq!(down_entries, expected_down_entries);
+    }
 }
 
 #[test]

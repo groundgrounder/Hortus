@@ -1,0 +1,23 @@
+flowchart TD
+  subgraph chain[Five rank chain]
+    direction LR
+    C1[One] --> C2[Two] --> C3[Three] --> C4[Four] --> C5[Five]
+  end
+  subgraph merge[Fan out and merge]
+    direction LR
+    F[Fan source] --> L[Left branch]
+    F --> R[Right branch]
+    L --> M[Two-way merge]
+    R --> M
+  end
+  subgraph triple[Three predecessors]
+    direction LR
+    T1[First source] --> S[Three-way merge]
+    T2[Second source] --> S
+    T3[Third source] --> S
+    S --> Z[Done]
+  end
+  subgraph wraps[Wide and narrow chain]
+    direction LR
+    W1[WIDEALPHABETLABEL] --> W2[short] --> W3[short] --> W4[short] --> W5[short] --> W6[short] --> W7[short] --> W8[short]
+  end
