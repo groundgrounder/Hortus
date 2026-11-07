@@ -5,6 +5,17 @@ use std::collections::{BTreeMap, BinaryHeap};
 
 const CLEARANCE: f64 = 10.0;
 
+/// 无标签端口组在节点同侧占用的半幅比例（以边中点为原点）。
+pub(crate) const PORT_SPAN_RATIO: f64 = 0.22;
+/// 同侧相邻无标签端口的最小中心间距；0.25px 余量吸收浮点误差。
+pub(crate) const MIN_PORT_GAP: f64 = 6.0;
+const PORT_GAP_MARGIN: f64 = 0.25;
+
+/// 同侧 `ports` 个端口保持最小间距所需的最短节点边长。
+pub(crate) fn min_port_side(ports: usize) -> f64 {
+    ports.saturating_sub(1) as f64 * (MIN_PORT_GAP + PORT_GAP_MARGIN) / (2.0 * PORT_SPAN_RATIO)
+}
+
 #[derive(Clone, Copy)]
 struct ChannelOwner {
     first: usize,
@@ -609,8 +620,8 @@ fn route_grid(
         let unlabeled = incident
             .iter()
             .all(|index| graph.edges[*index].label.is_none());
-        let span = (if is_vertical { rect.width } else { rect.height }) * 0.22;
-        let spacing = if !unlabeled || count < 2 || span >= 6.0 * (count as f64 - 2.0) {
+        let span = (if is_vertical { rect.width } else { rect.height }) * PORT_SPAN_RATIO;
+        let spacing = if !unlabeled || count < 2 || span >= MIN_PORT_GAP * (count as f64 - 2.0) {
             12.0
         } else {
             (2.0 * span / (count - 1) as f64).min(12.0)
@@ -633,11 +644,16 @@ fn route_grid(
                     CLEARANCE
                 };
                 let fixed = if is_vertical {
-                    rect.x + rect.width / 2.0 + delta.clamp(-rect.width * 0.22, rect.width * 0.22)
+                    rect.x
+                        + rect.width / 2.0
+                        + delta.clamp(-rect.width * PORT_SPAN_RATIO, rect.width * PORT_SPAN_RATIO)
                 } else {
                     rect.y
                         + rect.height / 2.0
-                        + delta.clamp(-rect.height * 0.22, rect.height * 0.22)
+                        + delta.clamp(
+                            -rect.height * PORT_SPAN_RATIO,
+                            rect.height * PORT_SPAN_RATIO,
+                        )
                 };
                 let port = crate::shape::port(shape, rect, is_vertical, fixed, is_positive);
                 // 平行边的外侧短段不能跨过邻近节点；其余路径仍由网格分配独立通道。
@@ -722,6 +738,94 @@ fn route_grid(
                 port_delta(index, false, b_vertical, b_positive),
             ),
         ));
+    }
+    // 同一对节点在 LR 容器内的重复边按 band 方向单独编排通道：端口顺序与
+    // 通道顺序一致，路径彼此平行、不交叉，再由网格为其它边让路。带标签的
+    // 重复边仍走通用网格，标签需要独立落位。
+    let mut seeds = seeds.to_vec();
+    let mut placed = seeds.iter().flatten().cloned().collect::<Vec<_>>();
+    let mut parallel_groups = BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (index, edge) in graph.edges.iter().enumerate() {
+        if accepted[index] && lr_bands.is_some() && edge.from != edge.to && edge.label.is_none() {
+            parallel_groups
+                .entry((edge.from, edge.to))
+                .or_default()
+                .push(index);
+        }
+    }
+    for group in parallel_groups.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        let (a_vertical, _, b_vertical, _) = edge_sides[group[0]];
+        if group.iter().any(|index| {
+            let (a, _, b, _) = edge_sides[*index];
+            a != a_vertical || b != b_vertical
+        }) {
+            continue;
+        }
+        let count = group.len();
+        let margin = 4.0;
+        let vertical = a_vertical && b_vertical;
+        let horizontal = !a_vertical && !b_vertical;
+        if !vertical && !horizontal {
+            continue;
+        }
+        let (first_source, _) = ends[group[0]].0;
+        let (first_target, _) = ends[group[0]].1;
+        let span = if vertical {
+            first_target.y - first_source.y
+        } else {
+            first_target.x - first_source.x
+        };
+        if span - margin * 2.0 < (count - 1) as f64 * 2.0 {
+            continue;
+        }
+        let mut paths = Vec::with_capacity(count);
+        for (slot, index) in group.iter().enumerate() {
+            let (source, _) = ends[*index].0;
+            let (target, _) = ends[*index].1;
+            let step = slot as f64 / (count - 1) as f64;
+            let path = if vertical {
+                let y = source.y + margin + step * (target.y - source.y - margin * 2.0);
+                simplify(vec![
+                    source,
+                    Point { x: source.x, y },
+                    Point { x: target.x, y },
+                    target,
+                ])
+            } else {
+                // 上方的入口先折向更靠近目标的一侧，通道次序与端口次序相反。
+                let x = target.x - margin - step * (target.x - source.x - margin * 2.0);
+                simplify(vec![
+                    source,
+                    Point { x, y: source.y },
+                    Point { x, y: target.y },
+                    target,
+                ])
+            };
+            paths.push((*index, path));
+        }
+        let clear = paths.iter().all(|(_, path)| {
+            path.windows(2).all(|pair| {
+                nodes.iter().enumerate().all(|(node, (rect, _))| {
+                    node == graph.edges[group[0]].from
+                        || node == graph.edges[group[0]].to
+                        || !segment_intersects(pair[0], pair[1], *rect)
+                })
+            }) && placed.iter().all(|other| !orthogonal_cross(path, other))
+        }) && paths.iter().enumerate().all(|(index, (_, path))| {
+            paths[index + 1..]
+                .iter()
+                .all(|(_, other)| !orthogonal_cross(path, other))
+        });
+        if !clear {
+            continue;
+        }
+        placed.extend(paths.iter().map(|(_, path)| path.clone()));
+        for (index, path) in paths {
+            seeds[index] = Some(path);
+        }
     }
     let mut xs = vec![8.0, 18.0, width - 18.0, width - 8.0];
     let mut ys = vec![8.0, 18.0, height - 18.0, height - 8.0];
@@ -1414,6 +1518,28 @@ fn branch_routes(graph: &Graph, nodes: &[(Rect, Shape)], width: f64) -> Option<V
         result.push(simplify(points));
     }
     Some(result)
+}
+
+fn orthogonal_cross(first: &[Point], second: &[Point]) -> bool {
+    first.windows(2).any(|a| {
+        second.windows(2).any(|b| {
+            let (a0, a1) = (a[0], a[1]);
+            let (b0, b1) = (b[0], b[1]);
+            if (a0.y - a1.y).abs() < 0.001 && (b0.x - b1.x).abs() < 0.001 {
+                a0.y > b0.y.min(b1.y) + 0.001
+                    && a0.y < b0.y.max(b1.y) - 0.001
+                    && b0.x > a0.x.min(a1.x) + 0.001
+                    && b0.x < a0.x.max(a1.x) - 0.001
+            } else if (a0.x - a1.x).abs() < 0.001 && (b0.y - b1.y).abs() < 0.001 {
+                a0.x > b0.x.min(b1.x) + 0.001
+                    && a0.x < b0.x.max(b1.x) - 0.001
+                    && b0.y > a0.y.min(a1.y) + 0.001
+                    && b0.y < a0.y.max(a1.y) - 0.001
+            } else {
+                false
+            }
+        })
+    })
 }
 
 fn segment_intersects(a: Point, b: Point, r: Rect) -> bool {

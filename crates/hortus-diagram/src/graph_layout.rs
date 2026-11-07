@@ -1051,6 +1051,13 @@ fn layout_graph_with_order(
         }
         if container_members && graph.direction == Direction::LeftToRight && incoming >= 2 {
             boxed.rect.height = boxed.rect.height.max((incoming as f64 - 1.0) * 14.0 + 20.0);
+            // 顶/底入口只能占用宽度的 22%；按入口数量反推最小宽度，
+            // 使任意数量的同侧无标签入口在端口中点仍保持最小间距。
+            let widest = (visible_width - CONTAINER_PAD * 2.0).max(64.0);
+            boxed.rect.width = boxed
+                .rect
+                .width
+                .max(crate::graph_router::min_port_side(incoming).min(widest));
         }
     }
 
