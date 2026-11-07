@@ -402,6 +402,15 @@ struct InlineMathTests {
             let formula = try #require(f.view.inlineMathViews.min { $0.attachment.item.range.location < $1.attachment.item.range.location })
             let screen = f.view.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
             let textRect = f.view.convert(f.editing.window.convertFromScreen(screen), from: nil)
+            let manager = try #require(f.view.textLayoutManager)
+            let content = try #require(manager.textContentManager)
+            let firstLocation = try #require(content.location(content.documentRange.location, offsetBy: 0))
+            let firstFragment = try #require(manager.textLayoutFragment(for: firstLocation))
+            #expect(firstFragment is NoteLayoutFragment, "\(f.textFragmentDiagnostics(in: textRect))")
+            #expect(firstFragment.state.rawValue >= NSTextLayoutFragment.State.layoutAvailable.rawValue,
+                    "\(f.textFragmentDiagnostics(in: textRect))")
+            #expect(firstFragment.textLineFragments.contains { $0.characterRange.length > 0 },
+                    "\(f.textFragmentDiagnostics(in: textRect))")
             func inkBottom(in root: NSView, rect: CGRect, label: String, textFragment: Bool = false) throws -> Double {
                 let bitmap = if textFragment {
                     try #require(f.textFragmentBitmap(in: rect),
@@ -451,7 +460,6 @@ struct InlineMathTests {
                 #expect(abs(next.minX - attachment.minX - view.attachment.naturalSize.width) < 0.001)
                 #expect(abs(view.frame.height - view.attachment.bounds.height) < 0.001)
             }
-            let manager = try #require(f.view.textLayoutManager), content = try #require(manager.textContentManager)
             manager.ensureLayout(for: content.documentRange)
             var lines: [NSTextLineFragment] = []
             manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
