@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P1-42：顶层 subgraph、不可见连线及真实文档全 block 检查。"""
+"""P1-44：顶层 LR subgraph 方向、汇点、折回与真实文档全 block 检查。"""
 import argparse
 import hashlib
 import importlib.util
@@ -50,6 +50,7 @@ def scene_counts(scene, source, document):
     invisible_sources = [line for line in source.splitlines() if '~~~' in line]
     return {
         'hits': len(scene['hit_regions']),
+        'nodes': len(scene['hit_regions']) - len(containers),
         'containers': len(containers),
         'paths': len(paths),
         'invisible_relations': sum(line.count('~~~') for line in invisible_sources),
@@ -63,13 +64,115 @@ def scene_counts(scene, source, document):
     }
 
 
+def point_in_rect(point, rect, epsilon=0.51):
+    return (rect['x'] - epsilon <= point['x'] <= rect['x'] + rect['width'] + epsilon
+            and rect['y'] - epsilon <= point['y'] <= rect['y'] + rect['height'] + epsilon)
+
+
+def path_direction_metrics(scene):
+    containers = [primitive['rect'] for primitive in scene['primitives']
+                  if primitive['kind'] == 'graph_shape' and primitive['shape'] == 'container']
+    container_ids = {hit['node_id'] for hit in scene['hit_regions']
+                     if hit['rect'] in containers}
+    nodes = [hit for hit in scene['hit_regions'] if hit['node_id'] not in container_ids]
+
+    def owner(hit):
+        center = (hit['rect']['x'] + hit['rect']['width'] / 2,
+                  hit['rect']['y'] + hit['rect']['height'] / 2)
+        return next((index for index, rect in enumerate(containers)
+                     if point_in_rect({'x': center[0], 'y': center[1]}, rect, 0.0)), None)
+
+    def endpoint(point):
+        matches = [hit for hit in nodes if point_in_rect(point, hit['rect'])]
+        return min(matches, key=lambda hit: hit['rect']['width'] * hit['rect']['height'],
+                   default=None)
+
+    counts = {'internal_paths': 0, 'same_band_right_entries': 0,
+              'cross_band_down_entries': 0, 'reverse_edges': 0,
+              'invalid_entries': 0, 'container_overflow': 0}
+    sinks = {}
+    wrapped = set()
+    for hit in nodes:
+        container = owner(hit)
+        if container is not None:
+            rect, outer = hit['rect'], containers[container]
+            if not (outer['x'] <= rect['x'] and outer['y'] <= rect['y']
+                    and rect['x'] + rect['width'] <= outer['x'] + outer['width']
+                    and rect['y'] + rect['height'] <= outer['y'] + outer['height']):
+                counts['container_overflow'] += 1
+    for path in (primitive for primitive in scene['primitives']
+                 if primitive['kind'] == 'graph_path'):
+        points = path['points']
+        if len(points) < 2:
+            counts['invalid_entries'] += 1
+            continue
+        source = endpoint(points[0])
+        target = endpoint(points[-1])
+        if source is None or target is None:
+            continue
+        container = owner(source)
+        if container is None or container != owner(target):
+            continue
+        counts['internal_paths'] += 1
+        if not all(point_in_rect(point, containers[container]) for point in points):
+            counts['container_overflow'] += 1
+        source_center = (source['rect']['x'] + source['rect']['width'] / 2,
+                         source['rect']['y'] + source['rect']['height'] / 2)
+        target_center = (target['rect']['x'] + target['rect']['width'] / 2,
+                         target['rect']['y'] + target['rect']['height'] / 2)
+        before, after = points[-2], points[-1]
+        horizontal = abs(before['y'] - after['y']) < 0.51
+        vertical = abs(before['x'] - after['x']) < 0.51
+        target_left = abs(after['x'] - target['rect']['x']) < 0.51
+        target_top = abs(after['y'] - target['rect']['y']) < 0.51
+        source_right = abs(points[0]['x'] - source['rect']['x']
+                           - source['rect']['width']) < 0.51
+        source_bottom = abs(points[0]['y'] - source['rect']['y']
+                            - source['rect']['height']) < 0.51
+        if (horizontal and target_left and source_right
+                and target_center[0] > source_center[0] + 0.01):
+            counts['same_band_right_entries'] += 1
+        elif (vertical and target_top and source_bottom
+              and target_center[1] > source_center[1] + 0.01):
+            counts['cross_band_down_entries'] += 1
+            wrapped.add(container)
+        elif target_center[0] <= source_center[0] + 0.01:
+            counts['reverse_edges'] += 1
+        else:
+            counts['invalid_entries'] += 1
+        sinks.setdefault((container, target['node_id']), []).append(points[-1])
+
+    gaps = []
+    for ports in sinks.values():
+        if len(ports) < 2:
+            continue
+        for index, first in enumerate(ports):
+            for second in ports[index + 1:]:
+                gaps.append(((first['x'] - second['x']) ** 2
+                             + (first['y'] - second['y']) ** 2) ** 0.5)
+    return {**counts,
+            'wrapped_containers': len(wrapped),
+            'sink_port_groups': sum(len(ports) >= 2 for ports in sinks.values()),
+            'min_sink_port_gap_px': round(min(gaps), 3) if gaps else None}
+
+
+def public_lr_geometry(scene):
+    hits = {hit['node_id']: hit['rect'] for hit in scene['hit_regions']}
+    chain_y = [hits[f'C{index}']['y'] for index in range(1, 6)]
+    wrap_y = sorted({round(hits[f'W{index}']['y'], 3) for index in range(1, 9)})
+    return {'chain_rank_y_px': [round(value, 3) for value in chain_y],
+            'chain_max_y_spread_px': round(max(chain_y) - min(chain_y), 3),
+            'wrap_band_rows': len(wrap_y),
+            'wrap_rank_y_px': wrap_y}
+
+
 def public_structure(output, media):
     output.mkdir(parents=True, exist_ok=True)
     media.mkdir(parents=True, exist_ok=True)
     cases = []
     with tempfile.TemporaryDirectory(prefix='p142-public-') as directory:
         directory = Path(directory)
-        for name in ('subgraphs-top-level', 'invisible-links'):
+        for name in ('subgraphs-top-level', 'subgraph-lr-dag', 'invisible-links'):
             source = (FLOWCHART / f'{name}.mmd').read_text()
             markdown = directory / f'{name}.md'
             write_markdown(markdown, source)
@@ -83,19 +186,44 @@ def public_structure(output, media):
                     assert completed.returncode == 0, completed.stderr.decode(errors='replace')
                     scene = json.loads(scene_path.read_text())
                     counts = scene_counts(scene, source, markdown.read_text())
+                    geometry = path_direction_metrics(scene)
                     assert counts['overflow'] is False and counts['node_overlaps'] == 0, counts
                     assert counts['invisible_paths'] == 0, counts
+                    assert geometry['container_overflow'] == 0, geometry
                     row['renders'].append({'width': width, 'theme': theme,
                                            'svg_sha256': sha256(svg), 'scene_sha256': sha256(scene_path),
-                                           **counts})
+                                           **counts, **geometry})
             if name == 'subgraphs-top-level':
-                assert all(row['hits'] == 8 and row['containers'] == 2 and row['paths'] == 3
-                           and row['invisible_relations'] == 4 for row in row['renders']), row
+                assert all(row['hits'] == 8 and row['nodes'] == 6 and row['containers'] == 2
+                           and row['paths'] == 3 and row['invisible_relations'] == 4
+                           for row in row['renders']), row
                 assert all(row['styled_strokes'] >= 2 and row['dashed_segments'] > 0
                            for row in row['renders']), row
+            elif name == 'subgraph-lr-dag':
+                assert all(row['hits'] == 26 and row['nodes'] == 22 and row['containers'] == 4
+                           and row['paths'] == 19 and row['invisible_paths'] == 0
+                           for row in row['renders']), row
+                assert all(row['internal_paths'] == 19 and row['reverse_edges'] == 0
+                           and row['invalid_entries'] == 0
+                           and row['internal_paths'] == row['same_band_right_entries']
+                           + row['cross_band_down_entries']
+                           and row['min_sink_port_gap_px'] >= 6 for row in row['renders']), row
+                assert all(public_lr_geometry(scene)['chain_max_y_spread_px'] <= 0.5
+                           for scene in [json.loads((output / f'subgraph-lr-dag-{width}-{theme}.json').read_text())
+                                         for width in (700, 1100) for theme in ('light', 'dark')]), row
+                for render in row['renders']:
+                    scene = json.loads((output / f"subgraph-lr-dag-{render['width']}-{render['theme']}.json").read_text())
+                    lr = public_lr_geometry(scene)
+                    assert lr['wrap_band_rows'] == (2 if render['width'] == 700 else 1), lr
+                    if render['width'] == 700:
+                        assert render['cross_band_down_entries'] > 0, render
+                    else:
+                        assert render['same_band_right_entries'] == 19, render
+                        assert render['cross_band_down_entries'] == 0, render
             else:
-                assert all(row['hits'] == 3 and row['containers'] == 0 and row['paths'] == 1
-                           and row['invisible_relations'] == 3 for row in row['renders']), row
+                assert all(row['hits'] == 3 and row['nodes'] == 3 and row['containers'] == 0
+                           and row['paths'] == 1 and row['invisible_relations'] == 3
+                           for row in row['renders']), row
             cases.append(row)
     return cases
 
@@ -196,23 +324,8 @@ def real_structure(private_note, output, media):
     before = sha256(private_note)
     document = private_note.read_text()
     sources = mermaid_sources(document)
-    rows = []
+    blocks = []
     for index, source in enumerate(sources, 1):
-        scene_path = output / f'block-{index}-700-light.json'
-        svg = media / f'block-{index}-700-light.svg'
-        completed = render_cli(private_note, index, 700, 'light', svg, scene_path)
-        assert completed.returncode == 0, completed.stderr.decode(errors='replace')
-        scene = json.loads(scene_path.read_text())
-        counts = scene_counts(scene, source, document)
-        containers = container_map(document, scene)
-        document_bytes = document.encode()
-        container_ranges_exact = all(
-            document_bytes[hit['source_range']['start']:hit['source_range']['end']]
-            .decode().startswith('subgraph ') and
-            document_bytes[hit['source_range']['start']:hit['source_range']['end']]
-            .decode().rstrip().endswith('end')
-            for hit in containers.values()
-        )
         invisible_pairs = []
         for line in source.splitlines():
             if '~~~' not in line:
@@ -220,48 +333,69 @@ def real_structure(private_note, output, media):
             match = re.match(r'\s*([A-Za-z0-9_-]+)\s*~~~\s*([A-Za-z0-9_-]+)', line)
             if match:
                 invisible_pairs.append(match.groups())
-        external_td = all(containers[a]['rect']['y'] <= containers[b]['rect']['y']
-                          for a, b in invisible_pairs if a in containers and b in containers)
-        paths = [primitive for primitive in scene['primitives'] if primitive['kind'] == 'graph_path']
-        internal_paths = []
-        for path in paths:
-            start, end = path['points'][0], path['points'][-1]
-            for rect in (primitive['rect'] for primitive in scene['primitives']
-                         if primitive['kind'] == 'graph_shape' and primitive['shape'] == 'container'):
-                inside = lambda point: (rect['x'] <= point['x'] <= rect['x'] + rect['width']
-                                        and rect['y'] <= point['y'] <= rect['y'] + rect['height'])
-                if inside(start) and inside(end):
-                    internal_paths.append(start['x'] <= end['x'])
-                    break
-        row = {'block': index, 'declared_subgraphs': sum(bool(re.match(r'^\s*subgraph\s', line))
-                                                         for line in source.splitlines()),
-               'container_direction_lr': sum(bool(re.match(r'^\s*direction\s+LR\s*$', line))
-                                             for line in source.splitlines()),
-               'container_ranges_exact': container_ranges_exact,
-               **counts, 'external_td': external_td,
-               'internal_paths': len(internal_paths),
-               'internal_ltr_paths': sum(internal_paths), 'source_sha256': hashlib.sha256(source.encode()).hexdigest(),
-               'svg_sha256': sha256(svg), 'scene_sha256': sha256(scene_path)}
-        rows.append(row)
-        source_path = output / f'block-{index}-700-light-scene-semantic.json'
-        source_path.write_text(json.dumps(scene, ensure_ascii=True, separators=(',', ':')))
+        renders = []
+        for width in (700, 1100):
+            scene_path = output / f'block-{index}-{width}-light.json'
+            svg = media / f'block-{index}-{width}-light.svg'
+            completed = render_cli(private_note, index, width, 'light', svg, scene_path)
+            assert completed.returncode == 0, completed.stderr.decode(errors='replace')
+            scene = json.loads(scene_path.read_text())
+            counts = scene_counts(scene, source, document)
+            geometry = path_direction_metrics(scene)
+            containers = container_map(document, scene)
+            document_bytes = document.encode()
+            container_ranges_exact = all(
+                document_bytes[hit['source_range']['start']:hit['source_range']['end']]
+                .decode().startswith('subgraph ') and
+                document_bytes[hit['source_range']['start']:hit['source_range']['end']]
+                .decode().rstrip().endswith('end')
+                for hit in containers.values()
+            )
+            external_td = all(containers[a]['rect']['y'] <= containers[b]['rect']['y']
+                              for a, b in invisible_pairs if a in containers and b in containers)
+            renders.append({'width': width, 'theme': 'light',
+                            'container_ranges_exact': container_ranges_exact,
+                            **counts, 'external_td': external_td, **geometry,
+                            'svg_sha256': sha256(svg), 'scene_sha256': sha256(scene_path)})
+            (output / f'block-{index}-{width}-light-scene-semantic.json').write_text(
+                json.dumps(scene, ensure_ascii=True, separators=(',', ':')))
+        blocks.append({'block': index,
+                       'declared_subgraphs': sum(bool(re.match(r'^\s*subgraph\s', line))
+                                                 for line in source.splitlines()),
+                       'container_direction_lr': sum(bool(re.match(r'^\s*direction\s+LR\s*$', line))
+                                                     for line in source.splitlines()),
+                       'renders': renders})
     after = sha256(private_note)
     assert before == after
     expected = [
-        {'hits': 36, 'containers': 7, 'paths': 24, 'invisible_relations': 6},
-        {'hits': 7, 'containers': 0, 'paths': 4, 'invisible_relations': 0},
+        {'hits': 36, 'nodes': 29, 'containers': 7, 'paths': 24, 'invisible_relations': 6},
+        {'hits': 7, 'nodes': 7, 'containers': 0, 'paths': 4, 'invisible_relations': 0},
     ]
-    for row, values in zip(rows, expected):
-        for key, value in values.items():
-            assert row[key] == value, (row, key, value)
-    assert rows[0]['external_td'] and rows[0]['invisible_paths'] == 0
-    assert rows[0]['container_ranges_exact']
-    assert rows[0]['container_direction_lr'] == rows[0]['declared_subgraphs'] == 7
-    assert rows[1]['external_td'] and rows[1]['invisible_paths'] == 0
+    for block, values in zip(blocks, expected):
+        for render in block['renders']:
+            for key, value in values.items():
+                assert render[key] == value, (render, key, value)
+            assert render['external_td'] and render['invisible_paths'] == 0, render
+            assert render['container_ranges_exact'] and render['container_overflow'] == 0, render
+    first = blocks[0]
+    assert first['container_direction_lr'] == first['declared_subgraphs'] == 7
+    declared = [m.group(1) for m in re.finditer(
+        r'(?m)^\s*subgraph\s+([A-Za-z0-9_-]+)', sources[0])]
+    assert list(container_map(document, json.loads(
+        (output / 'block-1-1100-light.json').read_text()))) == declared, declared
+    for render in first['renders']:
+        assert render['reverse_edges'] == 0 and render['invalid_entries'] == 0, render
+        assert render['internal_paths'] == render['same_band_right_entries'] \
+            + render['cross_band_down_entries'], render
+        assert render['min_sink_port_gap_px'] >= 6, render
+        if render['width'] == 1100:
+            assert render['same_band_right_entries'] == 24, render
+            assert render['cross_band_down_entries'] == 0, render
+            assert render['wrapped_containers'] == 0, render
+        else:
+            assert render['cross_band_down_entries'] > 0, render
     return {'sha256_before': before, 'sha256_after': after, 'sha256_unchanged': before == after,
-            'blocks': rows,
-            'task_expected': {'block2_hits': 36, 'block2_paths': 35},
-            'task_expected_match': rows[1]['hits'] == 36 and rows[1]['paths'] == 35}
+            'blocks': blocks}
 
 
 def private_ui(private_note, output, media):
@@ -333,9 +467,12 @@ def main():
     print(json.dumps({'public_renders': len(public),
                       'real_blocks': len(real['blocks']),
                       'real_sha256_unchanged': real['sha256_unchanged'],
-                      'real_observed': [(row['hits'], row['containers'], row['paths'],
-                                         row['invisible_relations']) for row in real['blocks']],
-                      'task_expected_match': real['task_expected_match']}, indent=2))
+                      'real_observed': [[(render['nodes'], render['containers'], render['paths'],
+                                          render['invisible_relations'],
+                                          render['same_band_right_entries'],
+                                          render['cross_band_down_entries'])
+                                         for render in block['renders']]
+                                        for block in real['blocks']]}, indent=2))
 
 
 if __name__ == '__main__':

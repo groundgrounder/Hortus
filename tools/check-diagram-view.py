@@ -361,7 +361,7 @@ def scenarios(base, output):
         'directions-bt.mmd', 'fanout.mmd', 'forest.mmd', 'graph-syntax.mmd',
         'identity.mmd', 'merge-diamond.mmd', 'research.mmd',
         'dense-40.mmd', 'dense-dag.mmd', 'erikson.mmd',
-        'subgraphs-top-level.mmd', 'invisible-links.mmd',
+        'subgraphs-top-level.mmd', 'subgraph-lr-dag.mmd', 'invisible-links.mmd',
     ]
     flowchart_output = output / 'flowchart'
     for name in public_flowcharts:
