@@ -3,6 +3,27 @@ import HortusCore
 import Testing
 @testable import Hortus
 
+@MainActor
+private final class TextFragmentCaptureView: NSView {
+    let fragment: NSTextLayoutFragment
+    let point: CGPoint
+
+    init(fragment: NSTextLayoutFragment, point: CGPoint, size: CGSize) {
+        self.fragment = fragment
+        self.point = point
+        super.init(frame: CGRect(origin: .zero, size: size))
+    }
+
+    required init?(coder: NSCoder) { nil }
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        // 直接复用产品 NoteLayoutFragment 的绘制，避免测试依赖宿主缓存中的原生 TextKit surface。
+        fragment.draw(at: point, in: context)
+    }
+}
+
 @MainActor private func eventually(_ predicate: () -> Bool) async throws {
     for _ in 0..<500 {
         if predicate() { return }
@@ -202,22 +223,84 @@ struct ReadingTests {
             root.effectiveAppearance.performAsCurrentDrawingAppearance {
                 root.cacheDisplay(in: normalized, to: bitmap)
             }
-            var opaque = 0, dark = 0
+            let sample = pixelSample(bitmap)
+            var foreground: NSColor?
+            view.effectiveAppearance.performAsCurrentDrawingAppearance {
+                foreground = NSColor.textColor.usingColorSpace(.sRGB)
+            }
+            let foregroundState = foreground.map(colorDescription) ?? "nil"
+            let textColorState = view.textColor.map(colorDescription) ?? "nil"
+            let header = "view=\(type(of: root)),rect=\(NSStringFromRect(normalized)),"
+                + "frame=\(NSStringFromRect(root.frame)),bounds=\(NSStringFromRect(root.bounds)),"
+                + "window=\(root.window != nil),hidden=\(root.isHidden),"
+                + "appearance=\(root.effectiveAppearance.name.rawValue),foreground=\(foregroundState),"
+                + "text-color=\(textColorState),pixels=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh),"
+                + "\(sample),needs-layout=\(root.needsLayout),needs-display=\(root.needsDisplay),"
+            return header + "tree=\(viewTree(root))"
+        }
+        func pixelSample(_ bitmap: NSBitmapImageRep) -> String {
+            var transparent = 0, background = 0, dark = 0, mid = 0, light = 0
+            var minimumLuminance = 1.0, maximumLuminance = 0.0
             for y in 0..<bitmap.pixelsHigh {
                 for x in 0..<bitmap.pixelsWide {
-                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
-                          color.alphaComponent > 0.5 else { continue }
-                    opaque += 1
-                    if max(color.redComponent, color.greenComponent, color.blueComponent) < 0.5 { dark += 1 }
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                    if color.alphaComponent <= 0.5 { transparent += 1; continue }
+                    let luminance = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
+                    minimumLuminance = min(minimumLuminance, luminance)
+                    maximumLuminance = max(maximumLuminance, luminance)
+                    if luminance < 0.5 { dark += 1 }
+                    else if luminance < 0.95 { mid += 1 }
+                    else if max(color.redComponent, color.greenComponent, color.blueComponent) < 0.999 { light += 1 }
+                    else { background += 1 }
                 }
             }
             let total = bitmap.pixelsWide * bitmap.pixelsHigh
-            return "view=\(type(of: root)),rect=\(NSStringFromRect(normalized)),"
-                + "frame=\(NSStringFromRect(root.frame)),bounds=\(NSStringFromRect(root.bounds)),"
-                + "window=\(root.window != nil),hidden=\(root.isHidden),"
-                + "pixels=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh),opaque=\(opaque),transparent=\(total - opaque),"
-                + "dark=\(dark),needs-layout=\(root.needsLayout),needs-display=\(root.needsDisplay),"
-                + "tree=\(viewTree(root))"
+            return "opaque=\(total - transparent),transparent=\(transparent),dark=\(dark),mid=\(mid),light=\(light),background=\(background),min-lum=\(String(format: "%.3f", minimumLuminance)),max-lum=\(String(format: "%.3f", maximumLuminance))"
+        }
+        func colorDescription(_ color: NSColor) -> String {
+            let resolved = color.usingColorSpace(.sRGB) ?? color
+            return String(format: "#%02X%02X%02X/%.3f", Int(resolved.redComponent * 255),
+                          Int(resolved.greenComponent * 255), Int(resolved.blueComponent * 255), resolved.alphaComponent)
+        }
+        func textFragmentBitmap(in rect: CGRect) -> NSBitmapImageRep? {
+            let normalized = rect.standardized
+            guard !normalized.isEmpty, let manager = view.textLayoutManager,
+                  let content = manager.textContentManager,
+                  let location = content.location(content.documentRange.location, offsetBy: 0),
+                  let fragment = manager.textLayoutFragment(for: location),
+                  fragment.state.rawValue >= NSTextLayoutFragment.State.layoutAvailable.rawValue else { return nil }
+            let capture = TextFragmentCaptureView(fragment: fragment,
+                point: CGPoint(x: view.textContainerInset.width + fragment.layoutFragmentFrame.minX - normalized.minX,
+                               y: view.textContainerInset.height + fragment.layoutFragmentFrame.minY - normalized.minY),
+                size: normalized.size)
+            capture.appearance = view.effectiveAppearance
+            guard let bitmap = capture.bitmapImageRepForCachingDisplay(in: capture.bounds) else { return nil }
+            capture.effectiveAppearance.performAsCurrentDrawingAppearance {
+                capture.cacheDisplay(in: capture.bounds, to: bitmap)
+            }
+            return bitmap
+        }
+        func textFragmentDiagnostics(in rect: CGRect) -> String {
+            let normalized = rect.standardized
+            guard let manager = view.textLayoutManager, let content = manager.textContentManager,
+                  let location = content.location(content.documentRange.location, offsetBy: 0),
+                  let fragment = manager.textLayoutFragment(for: location) else { return "fragment=nil" }
+            let lines = fragment.textLineFragments
+            let glyphs = lines.reduce(0) { count, line in
+                let runs = CTLineGetGlyphRuns(CTLineCreateWithAttributedString(line.attributedString)) as! [CTRun]
+                return count + runs.reduce(0) { $0 + CTRunGetGlyphCount($1) }
+            }
+            let attributes = view.textStorage.flatMap { storage -> [NSAttributedString.Key: Any]? in
+                guard storage.length > 0 else { return nil }
+                return storage.attributes(at: 0, effectiveRange: nil)
+            }
+            let font = attributes?[.font] as? NSFont
+            let foreground = attributes?[.foregroundColor] as? NSColor
+            let bitmap = textFragmentBitmap(in: normalized)
+            return "fragment=\(type(of: fragment)),state=\(fragment.state.rawValue),lines=\(lines.count),glyphs=\(glyphs),"
+                + "font=\(font.map { "\($0.fontName)/\($0.pointSize)" } ?? "nil"),"
+                + "attributes-foreground=\(foreground.map(colorDescription) ?? "nil"),"
+                + "fragment-bitmap=\(bitmap.map(pixelSample) ?? "nil")"
         }
         private func viewTree(_ root: NSView) -> String {
             func describe(_ node: NSView) -> String {

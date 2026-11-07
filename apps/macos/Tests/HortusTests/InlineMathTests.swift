@@ -402,11 +402,18 @@ struct InlineMathTests {
             let formula = try #require(f.view.inlineMathViews.min { $0.attachment.item.range.location < $1.attachment.item.range.location })
             let screen = f.view.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
             let textRect = f.view.convert(f.editing.window.convertFromScreen(screen), from: nil)
-            func inkBottom(in root: NSView, rect: CGRect, label: String) throws -> Double {
-                let bitmap = try #require(root.bitmapImageRepForCachingDisplay(in: rect),
-                    "\(label), size=\(size): \(f.bitmapDiagnostics(in: root, rect: rect))")
-                root.effectiveAppearance.performAsCurrentDrawingAppearance {
-                    root.cacheDisplay(in: rect, to: bitmap)
+            func inkBottom(in root: NSView, rect: CGRect, label: String, textFragment: Bool = false) throws -> Double {
+                let bitmap = if textFragment {
+                    try #require(f.textFragmentBitmap(in: rect),
+                        "\(label), size=\(size): \(f.bitmapDiagnostics(in: root, rect: rect)); \(f.textFragmentDiagnostics(in: rect))")
+                } else {
+                    try #require(root.bitmapImageRepForCachingDisplay(in: rect),
+                        "\(label), size=\(size): \(f.bitmapDiagnostics(in: root, rect: rect))")
+                }
+                if !textFragment {
+                    root.effectiveAppearance.performAsCurrentDrawingAppearance {
+                        root.cacheDisplay(in: rect, to: bitmap)
+                    }
                 }
                 var last: Int?
                 for y in 0..<bitmap.pixelsHigh {
@@ -417,13 +424,26 @@ struct InlineMathTests {
                         }
                     }
                 }
+                if let directory = ProcessInfo.processInfo.environment["HORTUS_INK_EVIDENCE_DIR"] {
+                    let folder = URL(fileURLWithPath: directory, isDirectory: true)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    let data = try #require(bitmap.representation(using: .png, properties: [:]))
+                    try data.write(to: folder.appendingPathComponent("\(label)-\(Int(size)).png"))
+                }
+                if ProcessInfo.processInfo.environment["HORTUS_INK_DIAGNOSTICS"] == "1" {
+                    print("INK size=\(size) label=\(label) textkit=\(textFragment) canvas=\(f.bitmapDiagnostics(in: root, rect: rect)) fragment=\(textFragment ? f.textFragmentDiagnostics(in: rect) : "n/a")")
+                }
                 let diagnostic = f.bitmapDiagnostics(in: root, rect: rect)
+                    + (textFragment ? "; \(f.textFragmentDiagnostics(in: rect))" : "")
                 let index = try #require(last, "\(label), size=\(size): \(diagnostic)")
                 return rect.minY + Double(index + 1) * rect.height / Double(bitmap.pixelsHigh)
             }
-            let textBottom = try inkBottom(in: f.view, rect: textRect, label: "text")
+            let textBottom = try inkBottom(in: f.view, rect: textRect, label: "text", textFragment: true)
             let formulaBottom = formula.frame.minY
                 + (try inkBottom(in: formula, rect: formula.bounds, label: "formula"))
+            if ProcessInfo.processInfo.environment["HORTUS_INK_DIAGNOSTICS"] == "1" {
+                print("BASELINE size=\(size) text=\(textBottom) formula=\(formulaBottom) delta=\(abs(textBottom - formulaBottom))")
+            }
             #expect(abs(textBottom - formulaBottom) <= 0.5, "size=\(size), ink text=\(textBottom), math=\(formulaBottom)")
             for view in f.view.inlineMathViews {
                 let next = f.view.firstRect(forCharacterRange: NSRange(location: NSMaxRange(view.attachment.item.range), length: 1), actualRange: nil)
