@@ -1,0 +1,35 @@
+flowchart TD
+  subgraph five[Five inputs]
+    direction LR
+    A1[A] --> S5[S]
+    B1[B] --> S5
+    C1[C] --> S5
+    D1[D] --> S5
+    E1[E] --> S5
+  end
+  subgraph six[Six inputs]
+    direction LR
+    A2[A] --> T6[T]
+    B2[B] --> T6
+    C2[C] --> T6
+    D2[D] --> T6
+    E2[E] --> T6
+    F2[F] --> T6
+  end
+  subgraph pair2[Two duplicate edges]
+    direction LR
+    Q1[Q] --> Q2[R]
+    Q1 --> Q2
+  end
+  subgraph pair3[Three duplicate edges]
+    direction LR
+    R1[U] --> R2[V]
+    R1 --> R2
+    R1 --> R2
+  end
+  subgraph wrap[Duplicate edges across bands]
+    direction LR
+    W1[WIDEALPHABETLABEL] --> W2[short] --> W3[short] --> W4[short] --> W5[short] --> W6[short] --> W7[short] --> W8[short]
+    W3 --> W4
+    W3 --> W4
+  end

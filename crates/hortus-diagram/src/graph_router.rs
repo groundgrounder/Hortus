@@ -515,8 +515,10 @@ fn route_grid(
         // 重复边不合并成一条线。不同目标的同源前缀和同目的后缀允许共用端口。
         let peers = peer_counts[index];
         let slot = peer_slots[index];
-        if peers > 1 && slot > 0 {
-            // 平行边改走独立外侧通道，标签不能挤在相距数像素的共同前后缀上。
+        // LR 容器内的重复边由 band 决定方向，端口间距与网格通道负责分离；
+        // 其余图仍改走独立外侧通道，标签不挤在相距数像素的共同前后缀上。
+        let band_directed = lr_bands.is_some() && accepted[index];
+        if peers > 1 && slot > 0 && !band_directed {
             a_vertical = !vertical;
             b_vertical = !vertical;
             a_positive = slot % 2 == 1;
@@ -576,7 +578,18 @@ fn route_grid(
             && incident
                 .iter()
                 .all(|index| graph.edges[*index].label.is_none());
+        // LR 容器内同一对节点的重复边共用 band 方向，必须各自占用端口；
+        // 不同目标的同源前缀和同目的后缀仍允许共用。
+        let repeated = lr_bands.is_some()
+            && incident.iter().any(|index| {
+                incident.iter().any(|other| {
+                    other != index
+                        && graph.edges[*index].from == graph.edges[*other].from
+                        && graph.edges[*index].to == graph.edges[*other].to
+                })
+            });
         if !lr_container_sink
+            && !repeated
             && (nodes.len() > 48
                 || (incident.len() > 2
                     && incident
@@ -589,7 +602,20 @@ fn route_grid(
             .iter()
             .position(|index| *index == edge_index)
             .unwrap_or(0);
-        (position as f64 - (incident.len() - 1) as f64 / 2.0) * 12.0
+        let count = incident.len();
+        let rect = nodes[node_index].0;
+        // 固定 12px 间距经 ±22% 夹紧后不足 6px 时，按节点同侧可用范围均匀压缩。
+        // 布局已按入边数扩展汇点高度，因此任意数量的无标签入口仍保持至少 6px。
+        let unlabeled = incident
+            .iter()
+            .all(|index| graph.edges[*index].label.is_none());
+        let span = (if is_vertical { rect.width } else { rect.height }) * 0.22;
+        let spacing = if !unlabeled || count < 2 || span >= 6.0 * (count as f64 - 2.0) {
+            12.0
+        } else {
+            (2.0 * span / (count - 1) as f64).min(12.0)
+        };
+        (position as f64 - (count - 1) as f64 / 2.0) * spacing
     };
     for (index, edge) in graph.edges.iter().enumerate() {
         let (from, fs) = nodes[edge.from];
@@ -597,9 +623,11 @@ fn route_grid(
         let (a_vertical, a_positive, b_vertical, b_positive) = edge_sides[index];
         let peers = peer_counts[index];
         let slot = peer_slots[index];
+        // LR 容器内的重复边共用 band 方向，端口已经分离，外侧短段不能越过目标端口。
+        let band_directed = lr_bands.is_some() && accepted[index];
         let endpoint =
             |node_index: usize, rect: Rect, shape, is_vertical, is_positive, delta: f64| {
-                let clearance = if peers > 1 && slot > 0 {
+                let clearance = if peers > 1 && slot > 0 && !band_directed {
                     28.0 + slot as f64 * 4.0
                 } else {
                     CLEARANCE
