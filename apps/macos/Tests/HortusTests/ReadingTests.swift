@@ -31,16 +31,112 @@ struct ReadingTests {
             try await ready()
         }
         func ready() async throws {
+            var previousFormulaState = ""
+            var stableFormulaSamples = 0
             for _ in 0..<500 {
                 self.editing.layoutHost()
                 if self.editing.hostReady && !self.coordinator.pending
-                    && self.coordinator.model?.revision == self.document.revision {
+                    && self.coordinator.model?.revision == self.document.revision
+                    && self.formulaHostReady {
                     editing.layoutHost()
-                    return
+                    let state = formulaHostState()
+                    if state == previousFormulaState {
+                        stableFormulaSamples += 1
+                        if stableFormulaSamples == 2 { return }
+                    } else {
+                        previousFormulaState = state
+                        stableFormulaSamples = 0
+                    }
                 }
                 try await Task.sleep(for: .milliseconds(10))
             }
             Issue.record("阅读视图宿主未就绪: \(diagnostics(target: .zero))")
+        }
+        private var formulaHostReady: Bool {
+            guard let manager = view.textLayoutManager, let content = manager.textContentManager else { return false }
+            let items = view.inlineMath.values.map(\.item) + view.mathViews.map(\.item)
+            for item in items {
+                if let attachment = view.inlineMath[item.range.location],
+                   let formula = view.inlineMathViews.first(where: { $0.attachment === attachment }) {
+                    guard formula.superview === view, !formula.isHidden, !formula.frame.isEmpty,
+                          !needsDisplay(in: formula) else { return false }
+                    continue
+                }
+                if let formula = view.mathViews.first(where: { $0.item.identity == item.identity }) {
+                    guard formula.superview === view, !formula.isHidden, !formula.frame.isEmpty,
+                          !needsDisplay(in: formula) else { return false }
+                    continue
+                }
+                // 未挂载的公式只有确认位于视口外时才允许完成；若 fragment 尚未可用，
+                // 继续等待真实的布局状态，而不是把 state 当作已挂载公式的前置条件。
+                guard let location = content.location(content.documentRange.location, offsetBy: item.range.location),
+                      let fragment = manager.textLayoutFragment(for: location) else { return false }
+                guard fragment.state.rawValue >= NSTextLayoutFragment.State.layoutAvailable.rawValue else { return false }
+                let fragmentRect = fragment.layoutFragmentFrame.offsetBy(dx: view.textContainerInset.width,
+                                                                         dy: view.textContainerInset.height)
+                if view.visibleRect.intersects(fragmentRect) { return false }
+            }
+            return true
+        }
+        private func formulaHostState() -> String {
+            let viewport = view.textLayoutManager?.textViewportLayoutController.viewportRange.map {
+                let start = view.textLayoutManager?.offset(from: $0.location, to: $0.endLocation) ?? -1
+                return "\(start)"
+            } ?? "nil"
+            let inline = view.inlineMathViews.sorted { $0.attachment.item.range.location < $1.attachment.item.range.location }
+                .map { "\($0.attachment.item.range.location):\(NSStringFromRect($0.frame)):\($0.superview === view):\($0.isHidden):\(needsDisplay(in: $0))" }
+                .joined(separator: ",")
+            let block = view.mathViews.sorted { $0.item.range.location < $1.item.range.location }
+                .map { "\($0.item.range.location):\(NSStringFromRect($0.frame)):\($0.superview === view):\($0.isHidden):\(needsDisplay(in: $0))" }
+                .joined(separator: ",")
+            return "viewport=\(viewport)|inline=\(inline)|block=\(block)|renders=\(view.layoutRenderCount)|pending=\(coordinator.pending)"
+        }
+        private func needsDisplay(in root: NSView) -> Bool {
+            root.needsDisplay || root.subviews.contains(where: needsDisplay(in:))
+        }
+        func formulaDiagnostics() -> String {
+            let manager = view.textLayoutManager
+            let items = view.inlineMath.values.map(\.item) + view.mathViews.map(\.item)
+            let viewport = manager?.textViewportLayoutController.viewportRange.map { range in
+                let length = manager?.offset(from: range.location, to: range.endLocation) ?? -1
+                return "\(length)"
+            } ?? "nil"
+            let fragments = items.sorted { $0.range.location < $1.range.location }.map { item in
+                guard let manager, let content = manager.textContentManager,
+                      let location = content.location(content.documentRange.location, offsetBy: item.range.location),
+                      let fragment = manager.textLayoutFragment(for: location) else {
+                    return "\(item.range.location)/\(item.range.length):fragment=nil"
+                }
+                let rect = fragment.layoutFragmentFrame.offsetBy(dx: view.textContainerInset.width,
+                                                                 dy: view.textContainerInset.height)
+                return "\(item.range.location)/\(item.range.length):state=\(fragment.state.rawValue),fragment=\(NSStringFromRect(rect)),visible=\(view.visibleRect.intersects(rect)),math=\(item.prepared.math != nil),reason=\(item.prepared.reason != nil),ax=\(NSStringFromRect(view.formulaAccessibilityFrame(item)))"
+            }.joined(separator: ";")
+            let mounted = view.inlineMathViews.sorted { $0.attachment.item.range.location < $1.attachment.item.range.location }.map {
+                "inline:\($0.attachment.item.range.location)=\(NSStringFromRect($0.frame)):super:\($0.superview === view):hidden:\($0.isHidden):needs:\(needsDisplay(in: $0))"
+            } + view.mathViews.sorted { $0.item.range.location < $1.item.range.location }.map {
+                "block:\($0.item.range.location)=\(NSStringFromRect($0.frame)):super:\($0.superview === view):hidden:\($0.isHidden):needs:\(needsDisplay(in: $0))"
+            }
+            let visible = view.visibleRect.intersection(view.bounds)
+            let bitmapState: String
+            if visible.isNull || visible.isEmpty || !visible.width.isFinite || !visible.height.isFinite {
+                bitmapState = "unavailable"
+            } else if let bitmap = view.bitmapImageRepForCachingDisplay(in: visible) {
+                view.cacheDisplay(in: visible, to: bitmap)
+                var opaque = 0
+                var dark = 0
+                for y in 0..<bitmap.pixelsHigh {
+                    for x in 0..<bitmap.pixelsWide {
+                        guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                              color.alphaComponent > 0.5 else { continue }
+                        opaque += 1
+                        if max(color.redComponent, color.greenComponent, color.blueComponent) < 0.5 { dark += 1 }
+                    }
+                }
+                bitmapState = "\(bitmap.pixelsWide)x\(bitmap.pixelsHigh),opaque:\(opaque),dark:\(dark)"
+            } else {
+                bitmapState = "nil"
+            }
+            return "formulas=viewport:\(viewport),items:\(items.count),inline:view:\(view.inlineMathViews.count),media:\(view.mediaViews.count),block:\(view.mathViews.count),bitmap:\(bitmapState) @ \(fragments) mounted=\(mounted.joined(separator: ","))"
         }
         func revealAndWait(source: Int) async throws -> (display: Int, target: CGRect) {
             coordinator.reveal(source: source)
@@ -99,6 +195,7 @@ struct ReadingTests {
         func diagnostics(target: CGRect) -> String {
             editing.layoutDiagnostics(target: target)
                 + "reading=pending:\(coordinator.pending),model-revision:\(coordinator.model?.revision.description ?? "nil"),document-revision:\(document.revision),text-revision:\(document.textRevision)"
+                + "\n" + formulaDiagnostics()
         }
         func close() async {
             coordinator.detach(); view.readingCoordinator = nil

@@ -63,6 +63,12 @@ struct EditingTests {
         }
         /// 先完成窗口显示、TextKit 全文布局和滚动视图排版，再开始测试可见位置。
         func layoutHost() {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            if !window.isVisible || !window.isKeyWindow {
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+                window.makeKey()
+            }
             window.contentView?.layoutSubtreeIfNeeded()
             scroll.layoutSubtreeIfNeeded()
             if view.sourceUTF16Length < 65_536,
@@ -70,9 +76,16 @@ struct EditingTests {
                let content = manager.textContentManager {
                 manager.ensureLayout(for: content.documentRange)
             }
-            view.needsLayout = true
-            view.layoutSubtreeIfNeeded()
-            window.displayIfNeeded()
+            // TextKit 的全文排版和滚动区视口排版是两套状态；公式附件只有在前者
+            // 完成后再同步后者，才能在无交互的 CI 宿主中取得可命中的 frame。
+            for _ in 0..<2 {
+                view.textLayoutManager?.textViewportLayoutController.layoutViewport()
+                view.needsLayout = true
+                view.layoutSubtreeIfNeeded()
+            }
+            // displayIfNeeded 在不可见或未被系统标记的 CI 窗口中可能不会建立
+            // 位图缓存；测试宿主需要真实绘制，但不要求应用必须处于前台。
+            window.display()
         }
         func layoutDiagnostics(target: CGRect) -> String {
             let clip = scroll.contentView
