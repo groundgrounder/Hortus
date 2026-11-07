@@ -111,7 +111,12 @@ final class DiagramView: NSView {
     }
     func sourceRange(at point: CGPoint) -> NSRange? {
         guard prepared.acceptsInteraction else { return nil }
-        if let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) }) { return prepared.sourceRanges[hit.nodeId] }
+        let containerRects = prepared.scene.primitives.compactMap { primitive -> CGRect? in
+            guard case let .graphShape(rect, shape, _, _, _, _, _) = primitive, shape == "Container" else { return nil }
+            return rect.cgRect
+        }
+        let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) })
+        if let hit, !containerRects.contains(hit.rect.cgRect) { return prepared.sourceRanges[hit.nodeId] }
         for primitive in prepared.scene.primitives.reversed() {
             if case let .labelBackground(id, rect, _) = primitive, rect.cgRect.contains(point) { return prepared.edgeRanges[id] }
             if case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive {
@@ -123,7 +128,7 @@ final class DiagramView: NSView {
                 }
             }
         }
-        return nil
+        return hit.flatMap { prepared.sourceRanges[$0.nodeId] }
     }
     override func mouseDown(with event: NSEvent) {
         guard prepared.acceptsInteraction else { return }

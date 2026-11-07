@@ -349,13 +349,16 @@ fn visual_and_accessibility_directives_do_not_change_the_scene() {
 }
 
 #[test]
-fn subgraphs_are_reported_as_unsupported_and_unknown_syntax_keeps_byte_ranges() {
-    let error = parse("flowchart TB\nsubgraph Group\nA --> B\nend").unwrap_err();
-    assert!(matches!(
-        error,
-        DiagramError::Unsupported { diagram_type }
-            if diagram_type == "subgraph"
-    ));
+fn nested_subgraphs_remain_unsupported_and_unknown_syntax_keeps_byte_ranges() {
+    let source = include_str!("../../../fixtures/mermaid/flowchart/subgraphs.mmd");
+    let error = parse_diagram(source).unwrap_err();
+    let DiagramError::UnsupportedConstruct { range, kind } = error else {
+        panic!("nested subgraph must remain unsupported")
+    };
+    assert_eq!(kind, "subgraph");
+    assert_eq!(&source[range.clone()], "subgraph validation[校验]");
+    assert!(source.is_char_boundary(range.start));
+    assert!(source.is_char_boundary(range.end));
 
     let source = "flowchart TB\nA --> B\n未知 语法 extra";
     let error = parse(source).unwrap_err();
@@ -365,6 +368,214 @@ fn subgraphs_are_reported_as_unsupported_and_unknown_syntax_keeps_byte_ranges() 
     assert_eq!(&source[range.clone()], "语法 extra");
     assert!(source.is_char_boundary(range.start));
     assert!(source.is_char_boundary(range.end));
+}
+
+#[test]
+fn top_level_subgraphs_and_invisible_links_keep_layout_semantics() {
+    let source = include_str!("../../../fixtures/mermaid/flowchart/subgraphs-top-level.mmd");
+    let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
+        panic!("expected graph")
+    };
+    assert_eq!(graph.ordinary_node_count(), 6);
+    assert_eq!(graph.containers.len(), 2);
+    assert_eq!(graph.visible_edge_count(), 3);
+    assert_eq!(graph.invisible_edge_count(), 4);
+    assert_eq!(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.container == Some(0))
+            .count(),
+        1
+    );
+    assert_eq!(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.container == Some(1))
+            .count(),
+        1
+    );
+    assert_eq!(graph.containers[0].direction, Direction::LeftToRight);
+    assert_eq!(graph.containers[1].direction, Direction::LeftToRight);
+    assert_eq!(
+        graph.nodes[graph.containers[0].node_index].kind,
+        GraphNodeKind::Container
+    );
+    for edge in graph.edges.iter().filter(|edge| !edge.visible) {
+        assert!(source[edge.source_range.clone()].contains("~~~"));
+        assert!(source.is_char_boundary(edge.source_range.start));
+        assert!(source.is_char_boundary(edge.source_range.end));
+    }
+
+    let result = layout_graph(
+        &graph,
+        &LayoutOptions {
+            width: 700.0,
+            ..LayoutOptions::default()
+        },
+        &mut DeterministicMetrics,
+    )
+    .unwrap();
+    assert_eq!(
+        (result.metrics.edge_count, result.metrics.invisible_edges),
+        (3, 4)
+    );
+    assert_eq!(result.metrics.containers, 2);
+    assert_eq!(result.metrics.node_overlaps, 0);
+    assert!(!result.metrics.horizontal_overflow);
+    assert_eq!(result.scene.hit_regions.len(), 8);
+    let paths = result
+        .scene
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::GraphPath { source_range, .. } => Some(source_range),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 3);
+    assert!(
+        paths
+            .iter()
+            .all(|range| !source[(*range).clone()].contains("~~~"))
+    );
+    assert!(
+        !result
+            .scene
+            .primitives
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::LabelBackground { .. }))
+    );
+    let hit = |id: &str| {
+        result
+            .scene
+            .hit_regions
+            .iter()
+            .find(|hit| hit.node_id == id)
+            .unwrap_or_else(|| panic!("missing hit {id}"))
+    };
+    assert!(hit("alpha").rect.y < hit("beta").rect.y);
+    assert!(hit("A1").rect.x < hit("A2").rect.x);
+    assert!(hit("B1").rect.x < hit("B2").rect.x);
+    assert!(hit("A1").rect.y > hit("alpha").rect.y);
+    assert!(hit("B2").rect.y < hit("beta").rect.y + hit("beta").rect.height);
+    let alpha_source = &source[hit("alpha").source_range.clone()];
+    assert!(alpha_source.starts_with("subgraph alpha"));
+    assert!(alpha_source.trim_end().ends_with("end"));
+    let alpha_container = &graph.containers[0];
+    assert_eq!(&source[alpha_container.id_range.clone()], "alpha");
+    assert_eq!(&source[alpha_container.title_range.clone()], "\"Alpha 😀\"");
+    let alpha = hit("alpha").rect;
+    let dashed = hit("A2").rect;
+    assert!(result.scene.primitives.iter().any(|primitive| matches!(
+        primitive,
+        Primitive::GraphShape { rect, shape: Shape::Container, .. } if *rect == alpha
+    )));
+    assert!(result.scene.primitives.iter().any(|primitive| matches!(
+        primitive,
+        Primitive::GraphShape { rect, stroke_width, .. }
+            if *rect == dashed && (*stroke_width - 2.0).abs() < 0.001
+    )));
+    assert!(result.scene.primitives.iter().any(|primitive| matches!(
+        primitive,
+        Primitive::Line { width, color, .. }
+            if (*width - 2.0).abs() < 0.001
+                && *color == Color::parse_css("#c33").unwrap()
+    )));
+    assert!(result.scene.primitives.iter().any(|primitive| matches!(
+        primitive,
+        Primitive::GraphShape { rect, fill, stroke_width, .. }
+            if *rect == alpha && fill.a > 0.0 && (*stroke_width - 2.0).abs() < 0.001
+    )));
+    assert!(result.scene.primitives.iter().any(|primitive| matches!(
+        primitive,
+        Primitive::Text(span) if span.text.starts_with("Two")
+            && span.color == Color::parse_css("#112233").unwrap()
+    )));
+    assert_eq!(
+        result.scene.to_svg(),
+        layout_graph(
+            &graph,
+            &LayoutOptions {
+                width: 700.0,
+                ..LayoutOptions::default()
+            },
+            &mut DeterministicMetrics
+        )
+        .unwrap()
+        .scene
+        .to_svg()
+    );
+}
+
+#[test]
+fn bare_subgraph_uses_its_id_as_the_title() {
+    let source = "flowchart TB\nsubgraph plain\nA --> B\nend";
+    let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
+        panic!("graph")
+    };
+    assert_eq!(graph.containers.len(), 1);
+    let node = &graph.nodes[graph.containers[0].node_index];
+    assert_eq!(node.id, "plain");
+    assert_eq!(node.label, "plain");
+    assert_eq!(node.kind, GraphNodeKind::Container);
+    assert_eq!(&source[graph.containers[0].id_range.clone()], "plain");
+    assert_eq!(&source[graph.containers[0].title_range.clone()], "plain");
+    assert_eq!(graph.ordinary_node_count(), 2);
+    let error = parse_diagram("flowchart TB\nA[Ordinary]\nsubgraph A\nB --> C\nend").unwrap_err();
+    assert!(matches!(
+        error,
+        DiagramError::Syntax { kind, .. } if kind == "subgraph_duplicate_id"
+    ));
+}
+
+#[test]
+fn ordinary_invisible_links_order_without_routing_cycles() {
+    let source = include_str!("../../../fixtures/mermaid/flowchart/invisible-links.mmd");
+    let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
+        panic!("expected graph")
+    };
+    let result =
+        layout_graph(&graph, &LayoutOptions::default(), &mut DeterministicMetrics).unwrap();
+    assert_eq!(result.metrics.edge_count, 1);
+    assert_eq!(result.metrics.invisible_edges, 3);
+    assert_eq!(
+        result
+            .scene
+            .primitives
+            .iter()
+            .filter(|primitive| matches!(primitive, Primitive::GraphPath { .. }))
+            .count(),
+        1
+    );
+    let y = |id: &str| {
+        result
+            .scene
+            .hit_regions
+            .iter()
+            .find(|hit| hit.node_id == id)
+            .unwrap()
+            .rect
+            .y
+    };
+    assert!(y("A") < y("B") && y("B") < y("C"));
+
+    let graph = match parse_diagram("flowchart TB\nA ~~~ B\nB ~~~ A").unwrap() {
+        Diagram::Graph(graph) => graph,
+        _ => panic!("graph"),
+    };
+    let result =
+        layout_graph(&graph, &LayoutOptions::default(), &mut DeterministicMetrics).unwrap();
+    assert_eq!(result.metrics.edge_count, 0);
+    assert_eq!(result.metrics.invisible_edges, 2);
+    assert!(
+        !result
+            .scene
+            .primitives
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::GraphPath { .. }))
+    );
 }
 
 #[test]
@@ -1038,26 +1249,25 @@ fn tree_dispatch_preserves_legacy_styles_before_graph_validation() {
 
 #[test]
 fn unsupported_graph_constructs_keep_utf8_ranges_and_class_fallback_is_diagnostic() {
-    for (statement, expected) in [
-        ("subgraph 分支😀", "subgraph 分支😀"),
-        ("linkStyle 0 stroke:#f00", "linkStyle 0 stroke:#f00"),
-        ("style A fill:rgba(0,0,0,1)", "fill:rgba(0,0,0,1)"),
-    ] {
-        let source = format!("flowchart TB\nA[甲] --> C\nB --> C\n{statement}\n");
-        let DiagramError::UnsupportedConstruct { range, .. } =
-            parse_diagram_at(&source, 17).unwrap_err()
-        else {
-            panic!("unsupported, not syntax")
-        };
-        assert_eq!(&source[range.start - 17..range.end - 17], expected);
-    }
-    let source = "flowchart TB\nA[甲]:::state --> C\nB --> C\nclassDef state fill:#ff0000,stroke-width:2px,stroke:#112233";
+    let source = "flowchart TB\nA[甲] --> C\nB --> C\nlinkStyle 0 stroke:#f00\n";
+    let DiagramError::UnsupportedConstruct { range, .. } =
+        parse_diagram_at(source, 17).unwrap_err()
+    else {
+        panic!("unsupported, not syntax")
+    };
+    assert_eq!(
+        &source[range.start - 17..range.end - 17],
+        "linkStyle 0 stroke:#f00"
+    );
+    let source = "flowchart TB\nA[甲]:::state --> C\nB --> C\nclassDef state fill:#ff0000,stroke-width:2px,stroke:#112233,font-size:18px";
     let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
         panic!("graph")
     };
     assert_eq!(graph.edges.len(), 2);
     assert_eq!(graph.class_defs["state"].fill.as_deref(), Some("#ff0000"));
     assert_eq!(graph.class_defs["state"].stroke.as_deref(), Some("#112233"));
+    assert_eq!(graph.class_defs["state"].stroke_width, Some(2.0));
     assert_eq!(graph.warnings.len(), 1);
-    assert_eq!(&source[graph.warnings[0].0.clone()], "stroke-width:2px");
+    assert_eq!(&source[graph.warnings[0].0.clone()], "font-size:18px");
+    assert_eq!(graph.warnings[0].1, "ignored_style_property:font-size");
 }

@@ -125,6 +125,8 @@ pub struct DiagramGraphMetrics {
     pub ranks: u32,
     pub roots: u32,
     pub edges: u32,
+    pub invisible_edges: u32,
+    pub containers: u32,
     pub node_overlaps: u32,
     pub edge_crossings: u32,
     pub horizontal_overflow: bool,
@@ -203,6 +205,8 @@ impl From<hortus_diagram::GraphMetrics> for DiagramGraphMetrics {
             ranks: value.ranks as u32,
             roots: value.roots as u32,
             edges: value.edge_count as u32,
+            invisible_edges: value.invisible_edges as u32,
+            containers: value.containers as u32,
             node_overlaps: value.node_overlaps as u32,
             edge_crossings: value.edge_crossings as u32,
             horizontal_overflow: value.horizontal_overflow,
@@ -457,7 +461,7 @@ impl SceneData {
                     .sum::<u64>();
         }
         if let Some(value) = &metrics {
-            self.wire_bytes += 29 + value.stability_reason.len() as u64;
+            self.wire_bytes += 37 + value.stability_reason.len() as u64;
         }
         self.identity = identity;
         self.previous = previous;

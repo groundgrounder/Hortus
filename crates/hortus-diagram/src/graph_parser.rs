@@ -1,4 +1,8 @@
-use crate::graph::{Connector, Direction, Edge, EdgeLine, Graph, GraphNode, Marker, Shape, Style};
+use crate::Color;
+use crate::graph::{
+    Connector, Direction, Edge, EdgeLine, Graph, GraphContainer, GraphNode, GraphNodeKind, Marker,
+    Shape, Style,
+};
 use crate::parser::{DiagramError, syntax, unsupported};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -40,8 +44,42 @@ fn parse_mode(source: &str, tree_probe: bool) -> Result<Graph, DiagramError> {
         tree_probe,
         ..Builder::default()
     };
+    let mut open_container = None;
     for (at, statement) in statements.into_iter().skip(1) {
-        parse_statement(statement, at, &mut builder)?;
+        if starts_word(statement, "subgraph") {
+            builder.owner = None;
+            if open_container.is_some() {
+                return Err(unsupported(at..at + statement.len(), "subgraph"));
+            }
+            open_container = Some(parse_subgraph(statement, at, &mut builder)?);
+        } else if statement == "end" {
+            let Some(container) = open_container.take() else {
+                return Err(unsupported(at..at + statement.len(), "subgraph"));
+            };
+            finish_subgraph(container, at + statement.len(), &mut builder);
+        } else if starts_word(statement, "direction") {
+            let Some(container) = open_container else {
+                return Err(syntax(
+                    at..at + statement.len(),
+                    "direction_outside_subgraph",
+                ));
+            };
+            let value = word_tail(statement, "direction").unwrap_or("");
+            builder.containers[container].direction = match value.trim() {
+                "TB" | "TD" => Direction::TopToBottom,
+                "BT" => Direction::BottomToTop,
+                "LR" => Direction::LeftToRight,
+                "RL" => Direction::RightToLeft,
+                _ => return Err(syntax(at..at + statement.len(), "invalid_direction")),
+            };
+        } else {
+            builder.owner = open_container;
+            parse_statement(statement, at, open_container, &mut builder)?;
+        }
+    }
+    if let Some(container) = open_container {
+        let range = builder.containers[container].source_range.clone();
+        return Err(unsupported(range, "subgraph"));
     }
     Ok(builder.finish())
 }
@@ -57,6 +95,8 @@ struct Builder {
     edges: Vec<Edge>,
     class_defs: HashMap<String, Style>,
     inline_styles: HashMap<String, Style>,
+    containers: Vec<GraphContainer>,
+    owner: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -71,6 +111,7 @@ struct ParsedConnector {
     label: Option<String>,
     label_range: Option<Range<usize>>,
     reverse: bool,
+    visible: bool,
 }
 
 type ParsedLabel = Option<(String, Range<usize>)>;
@@ -99,10 +140,28 @@ impl Builder {
                 source_range: id_range.clone(),
                 shape: Shape::Rectangle,
                 class: None,
+                kind: GraphNodeKind::Node,
+                owner: self.owner,
+                preferred_size: None,
             });
             index
         };
         let node = &mut self.nodes[index];
+        if node.kind == GraphNodeKind::Container {
+            if class.is_some() {
+                node.class = class;
+            }
+            return index;
+        }
+        if node.owner.is_none() {
+            node.owner = self.owner;
+        }
+        if let Some(owner) = node.owner
+            && let Some(container) = self.containers.get_mut(owner)
+            && !container.members.contains(&index)
+        {
+            container.members.push(index);
+        }
         if let Some((label, range)) = label {
             node.label = label;
             node.label_range = range;
@@ -160,10 +219,14 @@ impl Builder {
         // 身份由端点、语义和同类边序号决定，插入无关边不改变已有边的身份。
         let mut occurrences = HashMap::new();
         for edge in &mut self.edges {
-            let key = format!(
+            let mut key = format!(
                 "{}\0{}\0{:?}\0{:?}",
                 self.nodes[edge.from].id, self.nodes[edge.to].id, edge.connector, edge.label
             );
+            // 已有可见边维持原身份；隐藏边单独命名，避免与同端点的实线冲突。
+            if !edge.visible {
+                key.push_str("\0invisible");
+            }
             let occurrence = occurrences.entry(key.clone()).or_insert(0usize);
             let mut hash = 0xcbf29ce484222325u64;
             for byte in key.bytes().chain(occurrence.to_le_bytes()) {
@@ -182,14 +245,94 @@ impl Builder {
             forest: roots > 1
                 && seen.iter().all(|seen| *seen)
                 && parents.iter().all(|parents| parents.len() <= 1),
+            containers: self.containers,
         }
     }
 }
 
-fn parse_statement(text: &str, at: usize, builder: &mut Builder) -> Result<(), DiagramError> {
-    if starts_word(text, "subgraph") || text == "end" {
-        return Err(unsupported(at..at + text.len(), "subgraph"));
+fn parse_subgraph(text: &str, at: usize, builder: &mut Builder) -> Result<usize, DiagramError> {
+    let rest = word_tail(text, "subgraph")
+        .ok_or_else(|| syntax(at..at + text.len(), "subgraph_missing_id"))?;
+    let rest_at = at + text.len() - rest.len();
+    let mut cursor = 0;
+    while let Some(ch) = rest[cursor..].chars().next() {
+        if !is_id_char(ch) {
+            break;
+        }
+        cursor += ch.len_utf8();
     }
+    if cursor == 0 {
+        return Err(syntax(at..at + text.len(), "subgraph_missing_id"));
+    }
+    let id = &rest[..cursor];
+    let id_range = rest_at..rest_at + cursor;
+    skip_space(rest, &mut cursor);
+    let (title, title_range) = if cursor < rest.len() {
+        let (shape, label) = parse_shape(rest, &mut cursor, rest_at)?;
+        if shape != Shape::Rectangle {
+            return Err(syntax(
+                rest_at + cursor..rest_at + rest.len(),
+                "subgraph_title_shape",
+            ));
+        }
+        label.map_or_else(
+            || (id.to_string(), id_range.clone()),
+            |(title, range)| (title, rest_at + range.start..rest_at + range.end),
+        )
+    } else {
+        (id.to_string(), id_range.clone())
+    };
+    let class = parse_inline_class(rest, &mut cursor);
+    if !rest[cursor..].trim().is_empty() {
+        return Err(syntax(
+            rest_at + cursor..rest_at + rest.len(),
+            "subgraph_trailing_tokens",
+        ));
+    }
+    let existing = builder.ids.get(id).copied();
+    let index = builder.node(
+        id,
+        id_range.clone(),
+        Shape::Rectangle,
+        Some((title.clone(), title_range.clone())),
+        class,
+        at..at + text.len(),
+    );
+    if builder.nodes[index].kind == GraphNodeKind::Container
+        || existing
+            .is_some_and(|index| builder.defined[index] || builder.nodes[index].owner.is_some())
+    {
+        return Err(syntax(id_range.clone(), "subgraph_duplicate_id"));
+    }
+    builder.nodes[index].kind = GraphNodeKind::Container;
+    builder.nodes[index].owner = None;
+    builder.nodes[index].source_range = at..at + text.len();
+    builder.defined[index] = true;
+    let container = builder.containers.len();
+    builder.containers.push(GraphContainer {
+        node_index: index,
+        direction: builder.direction,
+        members: Vec::new(),
+        id_range,
+        title_range,
+        source_range: at..at + text.len(),
+    });
+    Ok(container)
+}
+
+fn finish_subgraph(container: usize, end: usize, builder: &mut Builder) {
+    let value = &mut builder.containers[container];
+    value.source_range.end = end;
+    let node = &mut builder.nodes[value.node_index];
+    node.source_range.end = end;
+}
+
+fn parse_statement(
+    text: &str,
+    at: usize,
+    container: Option<usize>,
+    builder: &mut Builder,
+) -> Result<(), DiagramError> {
     if builder.tree_probe
         && ["classDef", "style", "linkStyle"]
             .iter()
@@ -225,7 +368,11 @@ fn parse_statement(text: &str, at: usize, builder: &mut Builder) -> Result<(), D
         let Some((id, properties)) = rest.split_once(char::is_whitespace) else {
             return Err(syntax(at..at + text.len(), "style_missing_properties"));
         };
-        let style = parse_style(properties, at + text.len() - properties.len(), None)?;
+        let style = parse_style(
+            properties,
+            at + text.len() - properties.len(),
+            Some(&mut builder.warnings),
+        )?;
         let id_at = at + text.len() - rest.len();
         builder.node(
             id,
@@ -301,6 +448,16 @@ fn parse_statement(text: &str, at: usize, builder: &mut Builder) -> Result<(), D
                     label: parsed.label.clone(),
                     label_range: parsed.label_range.clone(),
                     connector: edge_connector,
+                    visible: parsed.visible,
+                    container: match container {
+                        Some(container)
+                            if builder.nodes[from_index].owner == Some(container)
+                                && builder.nodes[to_index].owner == Some(container) =>
+                        {
+                            Some(container)
+                        }
+                        _ => None,
+                    },
                 });
             }
         }
@@ -504,6 +661,21 @@ fn parse_connector(
             label,
             label_range,
             reverse: false,
+            visible: true,
+        });
+    }
+    if text[start..].starts_with("~~~") {
+        *cursor += 3;
+        return Ok(ParsedConnector {
+            connector: Connector {
+                line: EdgeLine::Solid,
+                start: Marker::None,
+                end: Marker::None,
+            },
+            label: None,
+            label_range: None,
+            reverse: false,
+            visible: false,
         });
     }
     let mut start_marker = Marker::None;
@@ -602,6 +774,7 @@ fn parse_connector(
         label,
         label_range,
         reverse: start_marker == Marker::Arrow && end_marker == Marker::None,
+        visible: true,
     })
 }
 
@@ -610,6 +783,7 @@ fn connector_start(text: &str) -> bool {
         || text.starts_with("-.")
         || text.starts_with("==")
         || text.starts_with("<--")
+        || text.starts_with("~~~")
 }
 
 fn parse_inline_class(text: &str, cursor: &mut usize) -> Option<String> {
@@ -653,30 +827,54 @@ fn parse_style(
             return Err(syntax(at..at + text.len(), "style_invalid_property"));
         };
         let value = value.trim();
-        if !matches!(key.trim(), "fill" | "stroke") || !valid_hex(value) {
+        let key = key.trim();
+        let parsed = match key {
+            "fill" | "stroke" | "color" => Color::parse_css(value).is_some(),
+            "stroke-width" => parse_px(value).is_some_and(|width| width >= 0.0),
+            "stroke-dasharray" => parse_dasharray(value).is_some(),
+            _ => false,
+        };
+        if !parsed {
             let offset = item.as_ptr() as usize - text.as_ptr() as usize;
             let range = at + offset..at + offset + item.len();
+            // 范围外属性只作可诊断降级，保留已支持属性和原图结构。
             if let Some(warnings) = warnings.as_deref_mut() {
-                // classDef 的范围外属性只作可诊断降级，保留基本颜色和原结构。
-                warnings.push((range, format!("ignored_class_property:{}", key.trim())));
-                continue;
+                warnings.push((range, format!("ignored_style_property:{key}")));
             }
-            return Err(unsupported(range, "style_property"));
+            continue;
         }
-        match key.trim() {
+        match key {
             "fill" => style.fill = Some(value.into()),
             "stroke" => style.stroke = Some(value.into()),
+            "color" => style.color = Some(value.into()),
+            "stroke-width" => style.stroke_width = parse_px(value),
+            "stroke-dasharray" => style.stroke_dasharray = parse_dasharray(value),
             _ => unreachable!(),
         }
     }
     Ok(style)
 }
 
-fn valid_hex(value: &str) -> bool {
-    let Some(hex) = value.strip_prefix('#') else {
-        return false;
-    };
-    matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+fn parse_px(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .strip_suffix("px")
+        .unwrap_or(value.trim())
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+fn parse_dasharray(value: &str) -> Option<Vec<f64>> {
+    let values = value
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(parse_px)
+        .collect::<Option<Vec<_>>>()?;
+    (!values.is_empty()
+        && values.iter().all(|value| *value >= 0.0)
+        && values.iter().any(|value| *value > 0.0))
+    .then_some(values)
 }
 
 fn starts_word(text: &str, word: &str) -> bool {

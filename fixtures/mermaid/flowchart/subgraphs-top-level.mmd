@@ -1,0 +1,16 @@
+flowchart TD
+  A[Start] ~~~ B[Queue]
+  subgraph alpha["Alpha 😀"]
+    direction LR
+    A1[One] --> A2[Two]:::hot
+  end
+  subgraph beta[贝塔]
+    direction LR
+    B1[Three] --> B2[Four]
+  end
+  A ~~~ alpha
+  alpha ~~~ beta
+  B ~~~ beta
+  alpha --> B
+  classDef hot fill:#fde9d9,stroke:#c33,color:#112233,stroke-width:2px,stroke-dasharray:4 2
+  style alpha fill:#f5f7fa,stroke:#6688aa,stroke-width:2px

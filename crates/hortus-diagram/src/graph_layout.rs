@@ -3,7 +3,7 @@ use crate::{
     Color, FontInfo, FontMetrics, HitRegion, LayoutError, LayoutOptions, Metrics, Point, Primitive,
     Rect, Scene, TextSpan, Theme,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
 const NODE_GAP: f64 = 28.0;
@@ -29,6 +29,8 @@ pub struct GraphMetrics {
     pub ranks: usize,
     pub roots: usize,
     pub edge_count: usize,
+    pub invisible_edges: usize,
+    pub containers: usize,
     pub node_overlaps: usize,
     pub edge_crossings: usize,
     pub horizontal_overflow: bool,
@@ -49,6 +51,9 @@ struct BoxedNode {
     shape: Shape,
     fill: Color,
     stroke: Color,
+    text_color: Color,
+    stroke_width: f64,
+    stroke_dasharray: Vec<f64>,
     label_lines: Vec<(String, f64, f64, f64)>,
 }
 
@@ -57,6 +62,9 @@ pub fn layout_graph(
     options: &LayoutOptions,
     fonts: &mut dyn FontMetrics,
 ) -> Result<GraphScene, LayoutError> {
+    if !graph.containers.is_empty() {
+        return layout_container_graph(graph, options, fonts);
+    }
     let initial = layout_graph_with_order(graph, options, fonts, None)?;
     if graph.nodes.len() > 16 || initial.metrics.edge_crossings == 0 {
         return Ok(initial);
@@ -82,6 +90,772 @@ pub fn layout_graph(
         }
     }
     Ok(best)
+}
+
+const CONTAINER_PAD: f64 = 12.0;
+const CONTAINER_TITLE_GAP: f64 = 18.0;
+
+struct ContainerContent {
+    scene: Scene,
+    bounds: Option<Rect>,
+}
+
+fn style_for_node(graph: &Graph, node: &crate::GraphNode) -> crate::Style {
+    let mut style = node
+        .class
+        .as_ref()
+        .and_then(|class| graph.class_defs.get(class))
+        .cloned()
+        .unwrap_or_default();
+    if let Some(inline) = graph.inline_styles.get(&node.id) {
+        if inline.fill.is_some() {
+            style.fill = inline.fill.clone();
+        }
+        if inline.stroke.is_some() {
+            style.stroke = inline.stroke.clone();
+        }
+        if inline.color.is_some() {
+            style.color = inline.color.clone();
+        }
+        if inline.stroke_width.is_some() {
+            style.stroke_width = inline.stroke_width;
+        }
+        if inline.stroke_dasharray.is_some() {
+            style.stroke_dasharray = inline.stroke_dasharray.clone();
+        }
+    }
+    style
+}
+
+fn layout_container_graph(
+    graph: &Graph,
+    options: &LayoutOptions,
+    fonts: &mut dyn FontMetrics,
+) -> Result<GraphScene, LayoutError> {
+    if !options.width.is_finite() || options.width < 120.0 {
+        return Err(LayoutError(
+            "Width must be a finite value of at least 120px".into(),
+        ));
+    }
+    let available = options.width - OUTER * 2.0;
+    let inner_width = (available - CONTAINER_PAD * 2.0).max(120.0);
+    let mut contents = Vec::with_capacity(graph.containers.len());
+    let mut sizes = HashMap::<usize, (f64, f64)>::new();
+    for (container_index, container) in graph.containers.iter().enumerate() {
+        let members = container
+            .members
+            .iter()
+            .copied()
+            .filter(|node| {
+                graph.nodes[*node].kind == crate::GraphNodeKind::Node
+                    && graph.nodes[*node].owner == Some(container_index)
+            })
+            .collect::<Vec<_>>();
+        let mut index = HashMap::new();
+        for (local, global) in members.iter().enumerate() {
+            index.insert(*global, local);
+        }
+        let nodes = members
+            .iter()
+            .map(|node| {
+                let mut node = graph.nodes[*node].clone();
+                node.owner = None;
+                node.preferred_size = None;
+                node
+            })
+            .collect::<Vec<_>>();
+        let edges = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.container == Some(container_index))
+            .filter_map(|edge| {
+                let mut edge = edge.clone();
+                edge.from = *index.get(&edge.from)?;
+                edge.to = *index.get(&edge.to)?;
+                edge.container = None;
+                Some(edge)
+            })
+            .collect();
+        let inner_graph = Graph {
+            direction: container.direction,
+            warnings: graph.warnings.clone(),
+            nodes,
+            edges,
+            class_defs: graph.class_defs.clone(),
+            inline_styles: graph.inline_styles.clone(),
+            forest: graph.forest,
+            containers: Vec::new(),
+        };
+        let inner = if inner_graph.nodes.is_empty() {
+            ContainerContent {
+                scene: Scene {
+                    width: inner_width,
+                    height: CONTAINER_TITLE_GAP + CONTAINER_PAD * 2.0,
+                    primitives: Vec::new(),
+                    hit_regions: Vec::new(),
+                    metrics: Metrics {
+                        columns: 1,
+                        diagram_height: CONTAINER_TITLE_GAP + CONTAINER_PAD * 2.0,
+                        min_font_px: 15.0,
+                        horizontal_overflow: false,
+                        node_overlaps: 0,
+                        fonts: Vec::new(),
+                        layout_ms: 0.0,
+                        root_hue: None,
+                        branch_hues: Vec::new(),
+                    },
+                },
+                bounds: None,
+            }
+        } else {
+            let result = layout_graph(
+                &inner_graph,
+                &LayoutOptions {
+                    width: inner_width,
+                    theme: options.theme,
+                    ..LayoutOptions::default()
+                },
+                fonts,
+            )?;
+            ContainerContent {
+                bounds: scene_content_bounds(&result.scene),
+                scene: result.scene,
+            }
+        };
+        let title = &graph.nodes[container.node_index].label;
+        let title_width = fonts
+            .measure(title, EDGE_LABEL_SIZE, 600)
+            .width
+            .min(available - CONTAINER_PAD * 2.0);
+        let content_width = inner.bounds.map_or(0.0, |bounds| bounds.width);
+        let content_height = inner.bounds.map_or(0.0, |bounds| bounds.height);
+        let width = (title_width + CONTAINER_PAD * 2.0 + 16.0)
+            .max(content_width + CONTAINER_PAD * 2.0)
+            .max(180.0)
+            .min(available);
+        let title_height = container_title_height(&container_title_lines(
+            title,
+            width - CONTAINER_PAD * 2.0,
+            fonts,
+        ));
+        let height = if inner.bounds.is_some() {
+            title_height + CONTAINER_PAD + content_height + CONTAINER_PAD
+        } else {
+            title_height + CONTAINER_PAD
+        };
+        sizes.insert(container.node_index, (width, height));
+        contents.push(inner);
+    }
+
+    let outer_indices = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == crate::GraphNodeKind::Container || node.owner.is_none())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let outer_index = outer_indices
+        .iter()
+        .enumerate()
+        .map(|(outer, global)| (*global, outer))
+        .collect::<HashMap<_, _>>();
+    let outer_nodes = outer_indices
+        .iter()
+        .map(|index| {
+            let mut node = graph.nodes[*index].clone();
+            if node.kind == crate::GraphNodeKind::Container {
+                node.label.clear();
+                node.preferred_size = sizes.get(index).copied();
+            }
+            node
+        })
+        .collect::<Vec<_>>();
+    if graph
+        .edges
+        .iter()
+        .filter(|edge| edge.container.is_none())
+        .any(|edge| !outer_index.contains_key(&edge.from) || !outer_index.contains_key(&edge.to))
+    {
+        return Err(LayoutError(
+            "Edges crossing a subgraph boundary are not supported".into(),
+        ));
+    }
+    let outer_edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.container.is_none())
+        .filter_map(|edge| {
+            let mut edge = edge.clone();
+            edge.from = *outer_index.get(&edge.from)?;
+            edge.to = *outer_index.get(&edge.to)?;
+            Some(edge)
+        })
+        .collect();
+    let outer_graph = Graph {
+        direction: graph.direction,
+        warnings: graph.warnings.clone(),
+        nodes: outer_nodes,
+        edges: outer_edges,
+        class_defs: graph.class_defs.clone(),
+        inline_styles: graph.inline_styles.clone(),
+        forest: graph.forest,
+        containers: Vec::new(),
+    };
+    let outer = layout_graph(
+        &outer_graph,
+        &LayoutOptions {
+            width: options.width,
+            theme: options.theme,
+            previous: options.previous.clone(),
+            ..LayoutOptions::default()
+        },
+        fonts,
+    )?;
+    let outer_rects = outer
+        .scene
+        .hit_regions
+        .iter()
+        .map(|hit| (hit.node_id.clone(), hit.rect))
+        .collect::<HashMap<_, _>>();
+    let container_ids = graph
+        .containers
+        .iter()
+        .map(|container| graph.nodes[container.node_index].id.clone())
+        .collect::<Vec<_>>();
+    let container_rects = container_ids
+        .iter()
+        .filter_map(|id| outer_rects.get(id).copied())
+        .collect::<Vec<_>>();
+    let text_color = Color::oklch(
+        if options.theme == Theme::Dark {
+            0.91
+        } else {
+            0.25
+        },
+        0.01,
+        260.0,
+    );
+    let default_stroke = Color::oklch(
+        if options.theme == Theme::Dark {
+            0.66
+        } else {
+            0.43
+        },
+        0.055,
+        250.0,
+    );
+    let mut primitives = outer
+        .scene
+        .primitives
+        .iter()
+        .filter(|primitive| {
+            !matches!(
+                primitive,
+                Primitive::GraphShape { rect, .. } if container_rects.contains(rect)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut hits = outer
+        .scene
+        .hit_regions
+        .iter()
+        .filter(|hit| !container_ids.contains(&hit.node_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut previous_nodes = outer
+        .previous
+        .nodes
+        .iter()
+        .filter(|node| !container_ids.contains(&node.node_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut container_primitives = Vec::new();
+    let mut container_hits = Vec::new();
+    let mut min_font = outer.scene.metrics.min_font_px;
+    for (container_index, container) in graph.containers.iter().enumerate() {
+        let node = &graph.nodes[container.node_index];
+        let rect = outer_rects[&node.id];
+        let style = style_for_node(graph, node);
+        let fill = style
+            .fill
+            .as_deref()
+            .and_then(Color::parse_css)
+            .unwrap_or_else(|| Color {
+                a: if options.theme == Theme::Dark {
+                    0.2
+                } else {
+                    0.32
+                },
+                ..default_stroke
+            });
+        let stroke = style
+            .stroke
+            .as_deref()
+            .and_then(Color::parse_css)
+            .unwrap_or(default_stroke);
+        let dash = style.stroke_dasharray.clone().unwrap_or_default();
+        let stroke_width = style.stroke_width.unwrap_or(1.4);
+        container_primitives.push(Primitive::GraphShape {
+            rect,
+            shape: Shape::Container,
+            outline: crate::shape::outline(Shape::Container, rect),
+            details: Vec::new(),
+            fill,
+            stroke: if dash.is_empty() { stroke } else { fill },
+            stroke_width,
+        });
+        push_dashed_outline(
+            &mut container_primitives,
+            Shape::Container,
+            rect,
+            stroke,
+            stroke_width,
+            &dash,
+        );
+        let title_color = style
+            .color
+            .as_deref()
+            .and_then(Color::parse_css)
+            .unwrap_or_else(|| contrast_text_color(fill, text_color));
+        let title = &node.label;
+        let lines = container_title_lines(title, rect.width - CONTAINER_PAD * 2.0, fonts);
+        let title_height = container_title_height(&lines);
+        let mut baseline = rect.y + 15.0;
+        for (_line, measured) in lines {
+            let mut x = rect.x + CONTAINER_PAD;
+            for run in measured.runs {
+                container_primitives.push(Primitive::Text(TextSpan {
+                    text: run.text,
+                    baseline: Point { x, y: baseline },
+                    width: run.width,
+                    font_size: EDGE_LABEL_SIZE,
+                    font_weight: 600,
+                    font_family: run.font_family,
+                    color: title_color,
+                }));
+                x += run.width;
+            }
+            baseline += 18.0;
+        }
+        container_hits.push(HitRegion {
+            label: node.label.clone(),
+            prefix: None,
+            node_id: node.id.clone(),
+            rect,
+            can_collapse: false,
+            collapsed: false,
+            source_range: container.source_range.clone(),
+        });
+        let anchor = outer
+            .previous
+            .nodes
+            .iter()
+            .find(|anchor| anchor.node_id == node.id)
+            .cloned();
+        if let Some(anchor) = anchor {
+            previous_nodes.push(anchor);
+        }
+        let content = &contents[container_index];
+        if let Some(bounds) = content.bounds {
+            let dx = rect.x + CONTAINER_PAD - bounds.x;
+            let dy = rect.y + title_height + CONTAINER_PAD - bounds.y;
+            for primitive in &content.scene.primitives {
+                if matches!(primitive, Primitive::RoundedRect { .. }) {
+                    continue;
+                }
+                primitives.push(translated_primitive(primitive, dx, dy));
+            }
+            for hit in &content.scene.hit_regions {
+                let mut hit = hit.clone();
+                hit.rect.x += dx;
+                hit.rect.y += dy;
+                hits.push(hit.clone());
+                previous_nodes.push(crate::GraphAnchor {
+                    node_id: hit.node_id,
+                    rect: hit.rect,
+                    rank: 0,
+                    group: container_index + 1,
+                });
+            }
+            min_font = min_font.min(content.scene.metrics.min_font_px);
+        }
+    }
+    // 容器标题和边界在普通连接线之下，成员内容再覆盖其背景。
+    primitives.splice(1..1, container_primitives);
+    hits.extend(container_hits);
+    let edges = primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::GraphPath {
+                edge_id, points, ..
+            } => Some(crate::EdgeAnchor {
+                edge_id: *edge_id,
+                points: points.clone(),
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let horizontal_overflow = primitives.iter().any(|primitive| match primitive {
+        Primitive::Text(span) => {
+            span.baseline.x < 0.0 || span.baseline.x + span.width > options.width
+        }
+        Primitive::GraphShape { rect, .. } | Primitive::LabelBackground { rect, .. } => {
+            rect.x < 0.0 || rect.x + rect.width > options.width
+        }
+        Primitive::GraphPath { points, width, .. } => points
+            .iter()
+            .any(|point| point.x - width / 2.0 < 0.0 || point.x + width / 2.0 > options.width),
+        Primitive::RoundedRect { .. } | Primitive::Line { .. } => false,
+    });
+    let node_overlaps = outer.metrics.node_overlaps
+        + contents
+            .iter()
+            .map(|content| content.scene.metrics.node_overlaps)
+            .sum::<usize>();
+    let edge_crossings = outer.metrics.edge_crossings
+        + contents
+            .iter()
+            .map(|content| count_edge_crossings(&scene_paths(&content.scene)))
+            .sum::<usize>();
+    let ranks = outer.metrics.ranks.max(
+        contents
+            .iter()
+            .map(|content| content.scene.metrics.columns)
+            .max()
+            .unwrap_or(1),
+    );
+    let retained_nodes = previous_nodes.len();
+    let scene = Scene {
+        width: options.width,
+        height: outer.scene.height,
+        primitives,
+        hit_regions: hits,
+        metrics: Metrics {
+            columns: ranks,
+            diagram_height: outer.scene.height,
+            min_font_px: min_font.min(EDGE_LABEL_SIZE),
+            horizontal_overflow,
+            node_overlaps,
+            fonts: fonts.used_fonts(),
+            layout_ms: outer.scene.metrics.layout_ms,
+            root_hue: None,
+            branch_hues: Vec::new(),
+        },
+    };
+    Ok(GraphScene {
+        scene,
+        metrics: GraphMetrics {
+            ranks,
+            roots: outer.metrics.roots,
+            edge_count: graph.visible_edge_count(),
+            invisible_edges: graph.invisible_edge_count(),
+            containers: graph.containers.len(),
+            node_overlaps,
+            edge_crossings,
+            horizontal_overflow,
+            retained_nodes,
+            stability_reason: format!("container_graph;{}", outer.metrics.stability_reason),
+        },
+        previous: crate::PreviousGraph {
+            direction: graph.direction,
+            width: options.width,
+            nodes: previous_nodes,
+            edges,
+        },
+    })
+}
+
+fn scene_content_bounds(scene: &Scene) -> Option<Rect> {
+    let mut bounds = None::<Rect>;
+    let mut include = |rect: Rect| {
+        bounds = Some(match bounds {
+            None => rect,
+            Some(current) => {
+                let x = current.x.min(rect.x);
+                let y = current.y.min(rect.y);
+                let right = (current.x + current.width).max(rect.x + rect.width);
+                let bottom = (current.y + current.height).max(rect.y + rect.height);
+                Rect {
+                    x,
+                    y,
+                    width: right - x,
+                    height: bottom - y,
+                }
+            }
+        });
+    };
+    for hit in &scene.hit_regions {
+        include(hit.rect);
+    }
+    for primitive in &scene.primitives {
+        match primitive {
+            Primitive::RoundedRect { .. } => {}
+            Primitive::GraphShape { rect, .. } | Primitive::LabelBackground { rect, .. } => {
+                include(*rect)
+            }
+            Primitive::GraphPath { points, .. } => {
+                for point in points {
+                    include(Rect {
+                        x: point.x,
+                        y: point.y,
+                        width: 0.0,
+                        height: 0.0,
+                    });
+                }
+            }
+            Primitive::Text(span) => include(Rect {
+                x: span.baseline.x,
+                y: span.baseline.y - span.font_size,
+                width: span.width,
+                height: span.font_size,
+            }),
+            Primitive::Line { from, to, .. } => include(Rect {
+                x: from.x.min(to.x),
+                y: from.y.min(to.y),
+                width: (from.x - to.x).abs(),
+                height: (from.y - to.y).abs(),
+            }),
+        }
+    }
+    bounds
+}
+
+fn container_title_lines(
+    title: &str,
+    width: f64,
+    fonts: &mut dyn FontMetrics,
+) -> Vec<(String, crate::Measurement)> {
+    wrap_label(title, width, EDGE_LABEL_SIZE, 600, fonts)
+        .into_iter()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            (!line.is_empty())
+                .then(|| (line.to_string(), fonts.measure(line, EDGE_LABEL_SIZE, 600)))
+        })
+        .collect()
+}
+
+fn container_title_height(lines: &[(String, crate::Measurement)]) -> f64 {
+    (lines.len().max(1) as f64 * 18.0 + 6.0).max(CONTAINER_TITLE_GAP)
+}
+
+fn push_dashed_outline(
+    primitives: &mut Vec<Primitive>,
+    shape: Shape,
+    rect: Rect,
+    color: Color,
+    width: f64,
+    pattern: &[f64],
+) {
+    if pattern.is_empty() || pattern.iter().sum::<f64>() <= 0.001 {
+        return;
+    }
+    let mut pattern = pattern.to_vec();
+    if pattern.len() % 2 == 1 {
+        pattern.extend_from_within(..);
+    }
+    let points = crate::shape::outline(shape, rect);
+    if points.len() < 2 {
+        return;
+    }
+    let mut pattern_index = 0usize;
+    let mut remaining = pattern[0];
+    let mut visible = true;
+    for (a, b) in points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .take(points.len())
+    {
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let length = dx.hypot(dy);
+        if length < 0.001 {
+            continue;
+        }
+        let mut offset = 0.0;
+        while offset < length - 0.001 {
+            let step = remaining.min(length - offset);
+            if visible && step > 0.001 {
+                let start = offset / length;
+                let end = (offset + step) / length;
+                primitives.push(Primitive::Line {
+                    from: Point {
+                        x: a.x + dx * start,
+                        y: a.y + dy * start,
+                    },
+                    to: Point {
+                        x: a.x + dx * end,
+                        y: a.y + dy * end,
+                    },
+                    width,
+                    color,
+                });
+            }
+            offset += step;
+            remaining -= step;
+            if remaining <= 0.001 {
+                pattern_index = (pattern_index + 1) % pattern.len();
+                remaining = pattern[pattern_index];
+                visible = !visible;
+            }
+        }
+    }
+}
+
+fn contrast_text_color(background: Color, fallback: Color) -> Color {
+    if background.a < 0.15 {
+        return fallback;
+    }
+    let linear = |value: f64| {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(background.r)
+        + 0.7152 * linear(background.g)
+        + 0.0722 * linear(background.b);
+    if luminance > 0.42 {
+        Color::oklch(0.22, 0.01, 260.0)
+    } else {
+        Color::oklch(0.95, 0.01, 260.0)
+    }
+}
+
+fn scene_paths(scene: &Scene) -> Vec<Vec<Point>> {
+    scene
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::GraphPath { points, .. } => Some(points.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn translated_primitive(primitive: &Primitive, dx: f64, dy: f64) -> Primitive {
+    match primitive {
+        Primitive::RoundedRect {
+            rect,
+            radius,
+            color,
+        } => Primitive::RoundedRect {
+            rect: translated_rect(*rect, dx, dy),
+            radius: *radius,
+            color: *color,
+        },
+        Primitive::Line {
+            from,
+            to,
+            width,
+            color,
+        } => Primitive::Line {
+            from: Point {
+                x: from.x + dx,
+                y: from.y + dy,
+            },
+            to: Point {
+                x: to.x + dx,
+                y: to.y + dy,
+            },
+            width: *width,
+            color: *color,
+        },
+        Primitive::GraphPath {
+            edge_id,
+            corner_radius,
+            points,
+            source_range,
+            label_range,
+            line,
+            start,
+            end,
+            color,
+            width,
+        } => Primitive::GraphPath {
+            edge_id: *edge_id,
+            corner_radius: *corner_radius,
+            points: points
+                .iter()
+                .map(|point| Point {
+                    x: point.x + dx,
+                    y: point.y + dy,
+                })
+                .collect(),
+            source_range: source_range.clone(),
+            label_range: label_range.clone(),
+            line: *line,
+            start: *start,
+            end: *end,
+            color: *color,
+            width: *width,
+        },
+        Primitive::GraphShape {
+            rect,
+            shape,
+            outline,
+            details,
+            fill,
+            stroke,
+            stroke_width,
+        } => Primitive::GraphShape {
+            rect: translated_rect(*rect, dx, dy),
+            shape: *shape,
+            outline: outline
+                .iter()
+                .map(|point| Point {
+                    x: point.x + dx,
+                    y: point.y + dy,
+                })
+                .collect(),
+            details: details
+                .iter()
+                .map(|detail| {
+                    detail
+                        .iter()
+                        .map(|point| Point {
+                            x: point.x + dx,
+                            y: point.y + dy,
+                        })
+                        .collect()
+                })
+                .collect(),
+            fill: *fill,
+            stroke: *stroke,
+            stroke_width: *stroke_width,
+        },
+        Primitive::LabelBackground {
+            edge_id,
+            rect,
+            color,
+        } => Primitive::LabelBackground {
+            edge_id: *edge_id,
+            rect: translated_rect(*rect, dx, dy),
+            color: *color,
+        },
+        Primitive::Text(span) => Primitive::Text(TextSpan {
+            text: span.text.clone(),
+            baseline: Point {
+                x: span.baseline.x + dx,
+                y: span.baseline.y + dy,
+            },
+            width: span.width,
+            font_size: span.font_size,
+            font_weight: span.font_weight,
+            font_family: span.font_family.clone(),
+            color: span.color,
+        }),
+    }
+}
+
+fn translated_rect(rect: Rect, dx: f64, dy: f64) -> Rect {
+    Rect {
+        x: rect.x + dx,
+        y: rect.y + dy,
+        ..rect
+    }
 }
 
 fn permutations_of(values: &mut [usize], start: usize, output: &mut Vec<Vec<usize>>) {
@@ -178,19 +952,43 @@ fn layout_graph_with_order(
         ) {
             width += 20.0;
         }
-        let (width, height) = if matches!(node.shape, Shape::Circle | Shape::DoubleCircle) {
+        let (mut width, mut height) = if matches!(node.shape, Shape::Circle | Shape::DoubleCircle) {
             let diameter = width.max(height);
             (diameter, diameter)
         } else {
             (width, height)
         };
-        let style = node
+        let class_style = node
             .class
             .as_ref()
             .and_then(|class| graph.class_defs.get(class))
             .cloned()
             .unwrap_or_default();
-        let style = graph.inline_styles.get(&node.id).unwrap_or(&style);
+        let mut style = class_style;
+        if let Some(inline) = graph.inline_styles.get(&node.id) {
+            if inline.fill.is_some() {
+                style.fill = inline.fill.clone();
+            }
+            if inline.stroke.is_some() {
+                style.stroke = inline.stroke.clone();
+            }
+            if inline.color.is_some() {
+                style.color = inline.color.clone();
+            }
+            if inline.stroke_width.is_some() {
+                style.stroke_width = inline.stroke_width;
+            }
+            if inline.stroke_dasharray.is_some() {
+                style.stroke_dasharray = inline.stroke_dasharray.clone();
+            }
+        }
+        let preferred_size = node
+            .preferred_size
+            .map(|(width, height)| (width.clamp(64.0, visible_width.max(64.0)), height.max(40.0)));
+        if let Some((preferred_width, preferred_height)) = preferred_size {
+            width = preferred_width;
+            height = preferred_height;
+        }
         boxes.push(BoxedNode {
             rect: Rect {
                 x: 0.0,
@@ -209,6 +1007,13 @@ fn layout_graph_with_order(
                 .as_deref()
                 .and_then(Color::parse_css)
                 .unwrap_or(shape_stroke),
+            text_color: style
+                .color
+                .as_deref()
+                .and_then(Color::parse_css)
+                .unwrap_or(text_color),
+            stroke_width: style.stroke_width.unwrap_or(1.4),
+            stroke_dasharray: style.stroke_dasharray.unwrap_or_default(),
             label_lines,
         });
     }
@@ -324,6 +1129,9 @@ fn layout_graph_with_order(
     };
     let edge_paths = routed.paths;
     for (edge, points) in graph.edges.iter().zip(&edge_paths) {
+        if !edge.visible {
+            continue;
+        }
         primitives.push(Primitive::GraphPath {
             edge_id: edge.id,
             corner_radius: 6.0,
@@ -373,15 +1181,24 @@ fn layout_graph_with_order(
 
     let mut hits = Vec::with_capacity(graph.nodes.len());
     for (node, boxed) in graph.nodes.iter().zip(&boxes) {
+        let dashed = !boxed.stroke_dasharray.is_empty();
         primitives.push(Primitive::GraphShape {
             rect: boxed.rect,
             shape: boxed.shape,
             outline: crate::shape::outline(boxed.shape, boxed.rect),
             details: crate::shape::details(boxed.shape, boxed.rect),
             fill: boxed.fill,
-            stroke: boxed.stroke,
-            stroke_width: 1.4,
+            stroke: if dashed { boxed.fill } else { boxed.stroke },
+            stroke_width: boxed.stroke_width,
         });
+        push_dashed_outline(
+            &mut primitives,
+            boxed.shape,
+            boxed.rect,
+            boxed.stroke,
+            boxed.stroke_width,
+            &boxed.stroke_dasharray,
+        );
         let line_height = boxed
             .label_lines
             .iter()
@@ -400,7 +1217,7 @@ fn layout_graph_with_order(
                     font_size: *size,
                     font_weight: weight,
                     font_family: run.font_family,
-                    color: text_color,
+                    color: boxed.text_color,
                 }));
                 x += run.width;
             }
@@ -418,7 +1235,13 @@ fn layout_graph_with_order(
     }
 
     let node_overlaps = count_node_overlaps(&boxes);
-    let edge_crossings = count_edge_crossings(&edge_paths);
+    let visible_paths = graph
+        .edges
+        .iter()
+        .zip(&edge_paths)
+        .filter_map(|(edge, points)| edge.visible.then_some(points.clone()))
+        .collect::<Vec<_>>();
+    let edge_crossings = count_edge_crossings(&visible_paths);
     let horizontal_overflow = primitives.iter().any(|primitive| match primitive {
         Primitive::Text(span) => {
             span.baseline.x < 0.0 || span.baseline.x + span.width > options.width
@@ -477,6 +1300,7 @@ fn layout_graph_with_order(
                 .edges
                 .iter()
                 .zip(&edge_paths)
+                .filter(|(edge, _)| edge.visible)
                 .map(|(edge, points)| crate::EdgeAnchor {
                     edge_id: edge.id,
                     points: points.clone(),
@@ -498,7 +1322,9 @@ fn layout_graph_with_order(
         metrics: GraphMetrics {
             ranks: rank_count,
             roots,
-            edge_count: graph.edges.len(),
+            edge_count: graph.visible_edge_count(),
+            invisible_edges: graph.invisible_edge_count(),
+            containers: graph.containers.len(),
             node_overlaps,
             edge_crossings,
             horizontal_overflow,

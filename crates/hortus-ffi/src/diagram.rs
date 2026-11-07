@@ -360,6 +360,39 @@ mod tests {
         let scene = render("flowchart TB\nA --> B", vec!["A".into()]).unwrap();
         assert_eq!(scene.hit_regions.len(), 1);
     }
+
+    #[test]
+    fn top_level_containers_and_invisible_links_survive_the_ffi_scene() {
+        let source = include_str!("../../../fixtures/mermaid/flowchart/subgraphs-top-level.mmd");
+        let engine = DiagramEngine::new().unwrap();
+        let scene = engine
+            .render(source.into(), true, 1, 700.0, false, vec![])
+            .unwrap();
+        assert_eq!(scene.hit_regions.len(), 8);
+        let metrics = scene.graph_metrics.as_ref().unwrap();
+        assert_eq!(metrics.edges, 3);
+        assert_eq!(metrics.invisible_edges, 4);
+        assert_eq!(metrics.containers, 2);
+        assert_eq!(
+            scene
+                .primitives
+                .iter()
+                .filter(|primitive| matches!(primitive, crate::ScenePrimitive::GraphPath { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            scene
+                .primitives
+                .iter()
+                .filter(|primitive| matches!(
+                    primitive,
+                    crate::ScenePrimitive::GraphShape { shape, .. } if shape == "Container"
+                ))
+                .count(),
+            2
+        );
+    }
 }
 
 #[cfg(test)]

@@ -474,6 +474,9 @@ fn stability(name: &str, graph: &Graph, width: f64, fonts: &mut dyn FontMetrics)
         source_range: 0..0,
         shape: Shape::Rectangle,
         class: None,
+        kind: hortus_diagram::GraphNodeKind::Node,
+        owner: None,
+        preferred_size: None,
     });
     added.edges.push(Edge {
         connector_range: 0..0,
@@ -488,6 +491,8 @@ fn stability(name: &str, graph: &Graph, width: f64, fonts: &mut dyn FontMetrics)
         label: None,
         label_range: None,
         source_range: 0..0,
+        visible: true,
+        container: None,
     });
     edits.push(("add_leaf", added, Some(id), None));
     let mut seen = vec![false; graph.nodes.len()];

@@ -18,7 +18,8 @@ pub use font::{
     DeterministicMetrics, FontInfo, FontMetrics, MeasuredRun, Measurement, SystemFonts,
 };
 pub use graph::{
-    Connector, Diagram, Direction, Edge, EdgeLine, Graph, GraphNode, Marker, Shape, Style,
+    Connector, Diagram, Direction, Edge, EdgeLine, Graph, GraphContainer, GraphNode, GraphNodeKind,
+    Marker, Shape, Style,
 };
 pub use graph_layout::{GraphMetrics, GraphScene, layout_graph};
 pub use graph_state::{EdgeAnchor, GraphAnchor, GraphViewport, PreviousGraph, ViewportAnchor};

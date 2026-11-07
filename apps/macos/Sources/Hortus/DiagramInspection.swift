@@ -373,6 +373,7 @@ enum DiagramInspection {
         } else { sourcePreserved = view.string == originalSource }
         let graphMetrics = diagrams.compactMap { $0.prepared.scene.graphMetrics }.map {
             ["roots": Int($0.roots), "edges": Int($0.edges), "node_overlaps": Int($0.nodeOverlaps),
+             "invisible_edges": Int($0.invisibleEdges), "containers": Int($0.containers),
              "edge_crossings": Int($0.edgeCrossings), "horizontal_overflow": $0.horizontalOverflow ? 1 : 0]
         }
         let graphGeometry = diagrams.compactMap { diagram in
@@ -490,6 +491,10 @@ enum DiagramInspection {
     private static func graphGeometry(_ diagram: DiagramView) -> [String: Any] {
         let scene = diagram.prepared.scene
         let hits = scene.hitRegions.map(\.rect.cgRect)
+        let containerRects = scene.primitives.compactMap { primitive -> CGRect? in
+            guard case let .graphShape(rect, shape, _, _, _, _, _) = primitive, shape == "Container" else { return nil }
+            return rect.cgRect
+        }
         let paths = scene.primitives.compactMap { primitive -> (UInt64, [ScenePoint])? in
             guard case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive else { return nil }
             return (id, points)
@@ -503,7 +508,8 @@ enum DiagramInspection {
             for other in hits.index(after: index)..<hits.endIndex {
                 let a = hits[index], b = hits[other]
                 if a.minX < b.maxX - 0.01 && a.maxX > b.minX + 0.01
-                    && a.minY < b.maxY - 0.01 && a.maxY > b.minY + 0.01 {
+                    && a.minY < b.maxY - 0.01 && a.maxY > b.minY + 0.01
+                    && !a.contains(b) && !b.contains(a) {
                     nodeOverlaps += 1
                 }
             }
@@ -514,6 +520,7 @@ enum DiagramInspection {
                 let a = pair.0.cgPoint, b = pair.1.cgPoint
                 if abs(a.x - b.x) > 0.001 && abs(a.y - b.y) > 0.001 { nonorthogonal += 1 }
                 for rect in hits {
+                    if containerRects.contains(rect) { continue }
                     let endpoint = (index == 0 && rect.contains(a)) || (index == points.count - 2 && rect.contains(b))
                     if !endpoint && segmentIntersects(a, b, rect) { edgeNode += 1 }
                 }
@@ -611,8 +618,12 @@ enum DiagramInspection {
             let prepared = diagram.prepared
             for hit in prepared.scene.hitRegions {
                 nodes += 1
-                let point = CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY)
-                if let range = prepared.sourceRanges[hit.nodeId], diagram.sourceRange(at: point) == range,
+                let rect = hit.rect.cgRect
+                let candidates = [CGPoint(x: rect.midX, y: rect.midY),
+                                  CGPoint(x: rect.minX + 4, y: rect.minY + 4),
+                                  CGPoint(x: rect.midX, y: rect.minY + 8)]
+                if let range = prepared.sourceRanges[hit.nodeId],
+                   candidates.contains(where: { diagram.sourceRange(at: $0) == range }),
                    DiagramService.byteRange(range, in: source) == (Int(hit.sourceStart)..<Int(hit.sourceEnd)) {
                     nodeMatches += 1
                 }
