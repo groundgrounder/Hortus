@@ -790,37 +790,36 @@ fn lr_subgraph_edge_cases_separate_sink_ports_and_duplicate_channels() {
             assert_eq!(ports.len(), count, "{from}->{to} 端口未分离");
         }
         let wrapped = paths_between(result, "W3", "W4");
-        assert_eq!(wrapped.len(), 3);
-        assert_eq!(
-            wrapped
-                .iter()
-                .map(|path| {
-                    let port = path[0];
-                    if cross_band {
-                        (port.x * 1000.0) as i64
-                    } else {
-                        (port.y * 1000.0) as i64
-                    }
-                })
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            3
-        );
+        assert_eq!(wrapped.len(), 6);
         for (index, path) in wrapped.iter().enumerate() {
             for other in &wrapped[index + 1..] {
                 assert_ne!(path, other);
                 assert!(!shared_segment(path, other));
             }
         }
+        let mut sources = wrapped.iter().map(|path| path[0]).collect::<Vec<_>>();
         let mut targets = wrapped
             .iter()
             .map(|path| *path.last().unwrap())
             .collect::<Vec<_>>();
-        targets.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-        targets.dedup_by(|a, b| (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01);
-        assert_eq!(targets.len(), 3, "W3->W4 目标端口未分离");
+        let distinct = |points: &mut Vec<Point>| {
+            points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+            points.dedup_by(|a, b| (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01);
+        };
+        distinct(&mut sources);
+        distinct(&mut targets);
+        assert_eq!(sources.len(), 6, "W3->W4 源端口未分离");
+        assert_eq!(targets.len(), 6, "W3->W4 目标端口未分离");
         let source = graph_hit(result, "W3").rect;
         let target = graph_hit(result, "W4").rect;
+        if cross_band {
+            // 六条入口全部跨 band，顶部汇点端口仍须满足 6px 间距。
+            assert!(target.width > 64.0, "W4 宽度未按入口数量补偿：{target:?}");
+            assert!(
+                targets.windows(2).all(|pair| pair[1].x - pair[0].x >= 6.0),
+                "W4 顶部相邻入口中心间距不足：{targets:?}"
+            );
+        }
         for path in &wrapped {
             if cross_band {
                 assert!((path[0].y - (source.y + source.height)).abs() < 0.01);
@@ -860,6 +859,42 @@ fn lr_subgraph_edge_cases_separate_sink_ports_and_duplicate_channels() {
                         "edge {} segment {segment} crosses {}",
                         edge.id, node.id
                     );
+                }
+            }
+        }
+        let paths = graph
+            .edges
+            .iter()
+            .map(|edge| (edge.id, graph_path(result, edge.id)))
+            .collect::<Vec<_>>();
+        for (index, (first_id, first)) in paths.iter().enumerate() {
+            for (second_id, second) in &paths[index + 1..] {
+                for a in first.windows(2) {
+                    for b in second.windows(2) {
+                        let horizontal =
+                            (a[0].y - a[1].y).abs() < 0.01 && (b[0].x - b[1].x).abs() < 0.01;
+                        let vertical =
+                            (a[0].x - a[1].x).abs() < 0.01 && (b[0].y - b[1].y).abs() < 0.01;
+                        let crossing = if horizontal {
+                            a[0].y > b[0].y.min(b[1].y) + 0.01
+                                && a[0].y < b[0].y.max(b[1].y) - 0.01
+                                && b[0].x > a[0].x.min(a[1].x) + 0.01
+                                && b[0].x < a[0].x.max(a[1].x) - 0.01
+                        } else if vertical {
+                            a[0].x > b[0].x.min(b[1].x) + 0.01
+                                && a[0].x < b[0].x.max(b[1].x) - 0.01
+                                && b[0].y > a[0].y.min(a[1].y) + 0.01
+                                && b[0].y < a[0].y.max(a[1].y) - 0.01
+                        } else {
+                            false
+                        };
+                        assert!(
+                            !crossing,
+                            "edge {first_id} crosses edge {second_id}: \
+                             {:?}-{:?} / {:?}-{:?}",
+                            a[0], a[1], b[0], b[1]
+                        );
+                    }
                 }
             }
         }

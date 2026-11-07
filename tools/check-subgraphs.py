@@ -222,34 +222,34 @@ def public_structure(output, media):
                         assert render['cross_band_down_entries'] == 0, render
             elif name == 'subgraph-lr-edge-cases':
                 assert all(row['hits'] == 30 and row['nodes'] == 25 and row['containers'] == 5
-                           and row['paths'] == 25 and row['invisible_paths'] == 0
+                           and row['paths'] == 28 and row['invisible_paths'] == 0
                            for row in row['renders']), row
-                assert all(row['internal_paths'] == 25 and row['reverse_edges'] == 0
+                assert all(row['internal_paths'] == 28 and row['reverse_edges'] == 0
                            and row['invalid_entries'] == 0
                            and row['min_sink_port_gap_px'] >= 6
                            for row in row['renders']), row
                 for render in row['renders']:
                     scene = json.loads((output / f"subgraph-lr-edge-cases-{render['width']}-{render['theme']}.json").read_text())
                     metrics = CHECK.lr_edge_metrics(scene)
-                    assert metrics['paths'] == 25, metrics
+                    assert metrics['paths'] == 28, metrics
                     assert metrics['min_sink_port_gap_px'] >= 6, metrics
                     assert metrics['reverse_edges'] == 0 and metrics['invalid_entries'] == 0, metrics
                     assert metrics['container_overflow'] == 0, metrics
                     groups = {(group['from'], group['to']): group
                               for group in metrics['duplicate_groups']}
                     assert {key: group['paths'] for key, group in groups.items()} == {
-                        ('Q1', 'Q2'): 2, ('R1', 'R2'): 3, ('W3', 'W4'): 3}, groups
+                        ('Q1', 'Q2'): 2, ('R1', 'R2'): 3, ('W3', 'W4'): 6}, groups
                     assert all(group['consistent'] and group['distinct']
                                and group['distinct_ports'] and group['shared_segments'] == 0
                                for group in groups.values()), groups
                     if render['width'] == 700:
                         assert metrics['same_band_right_entries'] == 22, metrics
-                        assert metrics['cross_band_down_entries'] == 3, metrics
-                        assert groups[('W3', 'W4')]['entries'] == ['top', 'top', 'top'], groups
+                        assert metrics['cross_band_down_entries'] == 6, metrics
+                        assert groups[('W3', 'W4')]['entries'] == ['top'] * 6, groups
                     else:
-                        assert metrics['same_band_right_entries'] == 25, metrics
+                        assert metrics['same_band_right_entries'] == 28, metrics
                         assert metrics['cross_band_down_entries'] == 0, metrics
-                        assert groups[('W3', 'W4')]['entries'] == ['left', 'left', 'left'], groups
+                        assert groups[('W3', 'W4')]['entries'] == ['left'] * 6, groups
             else:
                 assert all(row['hits'] == 3 and row['nodes'] == 3 and row['containers'] == 0
                            and row['paths'] == 1 and row['invisible_relations'] == 3

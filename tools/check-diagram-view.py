@@ -447,23 +447,23 @@ def lr_edge_metrics(scene):
 def assert_lr_edge_cases_geometry(data, width):
     scene = json.loads(data['initial_semantic_scenes'][0])
     metrics = lr_edge_metrics(scene)
-    assert metrics['paths'] == 25, metrics
+    assert metrics['paths'] == 28, metrics
     assert metrics['min_sink_port_gap_px'] >= 6, metrics
     assert metrics['reverse_edges'] == 0 and metrics['invalid_entries'] == 0, metrics
     assert metrics['container_overflow'] == 0, metrics
     groups = {(group['from'], group['to']): group for group in metrics['duplicate_groups']}
     assert {key: group['paths'] for key, group in groups.items()} == {
-        ('Q1', 'Q2'): 2, ('R1', 'R2'): 3, ('W3', 'W4'): 3}, groups
+        ('Q1', 'Q2'): 2, ('R1', 'R2'): 3, ('W3', 'W4'): 6}, groups
     assert all(group['consistent'] and group['distinct'] and group['distinct_ports']
                and group['shared_segments'] == 0 for group in groups.values()), groups
     if width == 700:
         assert metrics['same_band_right_entries'] == 22, metrics
-        assert metrics['cross_band_down_entries'] == 3, metrics
-        assert groups[('W3', 'W4')]['entries'] == ['top', 'top', 'top'], groups
+        assert metrics['cross_band_down_entries'] == 6, metrics
+        assert groups[('W3', 'W4')]['entries'] == ['top'] * 6, groups
     else:
-        assert metrics['same_band_right_entries'] == 25, metrics
+        assert metrics['same_band_right_entries'] == 28, metrics
         assert metrics['cross_band_down_entries'] == 0, metrics
-        assert groups[('W3', 'W4')]['entries'] == ['left', 'left', 'left'], groups
+        assert groups[('W3', 'W4')]['entries'] == ['left'] * 6, groups
     return metrics
 
 
