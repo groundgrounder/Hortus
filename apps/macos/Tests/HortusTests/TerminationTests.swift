@@ -28,18 +28,20 @@ struct TerminationTests {
         gate.documentTimeout = 1
         var outcome: TerminationGate.Outcome?
         var cleaned = false
+        var finishDocuments: (@Sendable ([String]) -> Void)?
         gate.begin(documentTitles: ["note.md"], documents: { done in
-            // 模拟文档持久化晚于 3 秒（测试中按比例缩短）。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { done([]) }
+            finishDocuments = done
         }, cleanup: { done in
             cleaned = true
             done()
         }) { outcome = $0 }
 
-        try await Task.sleep(for: .milliseconds(100))
+        let completeDocuments = try #require(finishDocuments)
+        // done 由测试持有，等待短超时不会与文档完成形成先后竞态。
+        try await Task.sleep(for: .seconds(gate.shortTimeout * 2))
         #expect(outcome == nil)
         #expect(!cleaned)
-        try await Task.sleep(for: .milliseconds(300))
+        completeDocuments([])
         for _ in 0..<200 where outcome == nil { try await Task.sleep(for: .milliseconds(10)) }
         #expect(outcome == .allowed)
         #expect(cleaned)
