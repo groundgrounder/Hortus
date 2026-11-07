@@ -63,9 +63,11 @@ struct ReadingTests {
                     continue
                 }
                 if let formula = view.mathViews.first(where: { $0.item.identity == item.identity }) {
-                    guard formula.superview === view, !formula.isHidden, !formula.frame.isEmpty,
-                          !needsDisplay(in: formula) else { return false }
-                    continue
+                    if !formula.isHidden {
+                        guard formula.superview === view, !formula.frame.isEmpty,
+                              !needsDisplay(in: formula) else { return false }
+                        continue
+                    }
                 }
                 // 未挂载的公式只有确认位于视口外时才允许完成；若 fragment 尚未可用，
                 // 继续等待真实的布局状态，而不是把 state 当作已挂载公式的前置条件。
