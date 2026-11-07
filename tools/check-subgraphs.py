@@ -402,8 +402,11 @@ def private_ui(private_note, output, media):
     CHECK.MEDIA_ROOT = media
     CHECK.PRIVATE_ROOT = media
     states = []
-    with tempfile.TemporaryDirectory(prefix='p142-real-ui-') as directory:
+    scene_checks = {}
+    with tempfile.TemporaryDirectory(prefix='p142-real-ui-') as directory, \
+            tempfile.TemporaryDirectory(prefix='p142-real-scene-') as scene_directory:
         directory = Path(directory)
+        scene_directory = Path(scene_directory)
         for width in (700, 1100):
             for theme in ('light', 'dark'):
                 for mode in ('editing', 'reading'):
@@ -416,6 +419,18 @@ def private_ui(private_note, output, media):
                         extra.append('--diagram-reading')
                     data, _ = CHECK.inspect(directory / name, output / 'ui', name,
                                             private_note.parent, private_note.name, extra, True)
+                    key = (width, theme)
+                    if key not in scene_checks:
+                        equal = []
+                        for block_index, semantic in enumerate(data['initial_semantic_scenes'], 1):
+                            scene_path = scene_directory / f'{width}-{theme}-block-{block_index}.json'
+                            svg = scene_directory / f'{width}-{theme}-block-{block_index}.svg'
+                            completed = render_cli(private_note, block_index, width, theme, svg, scene_path)
+                            assert completed.returncode == 0, completed.stderr.decode(errors='replace')
+                            equal.append(canonical(json.loads(semantic))
+                                         == canonical(json.loads(scene_path.read_text())))
+                        scene_checks[key] = {'blocks': len(equal), 'strict_equal': all(equal)}
+                    assert scene_checks[key]['strict_equal'], scene_checks[key]
                     assert data['diagrams'] == 2 and data['blocks'] == 2, data
                     assert data['visible_nodes'] == 43 and data['accessibility_nodes'] == 43, data
                     assert data['accessibility_edges'] == 28, data
@@ -434,6 +449,7 @@ def private_ui(private_note, output, media):
                     states.append({'width': width, 'theme': theme, 'mode': mode,
                                    'scene_signatures': data['scene_signatures'],
                                    'cli_signatures': data['initial_scene_signatures'],
+                                   'scene_cli_equal': scene_checks[key]['strict_equal'],
                                    'source_hits': data['source_hits'],
                                    'graph_metrics': metrics,
                                    'presses': len(data['accessibility_presses'])})
