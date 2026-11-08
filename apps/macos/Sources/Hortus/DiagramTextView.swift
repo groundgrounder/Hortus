@@ -704,6 +704,7 @@ final class DiagramTextView: NSTextView {
     var diagramStorage: DiagramContentStorage?
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil { findBarMonitor?.cancel(); findBarMonitor = nil }
         NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
         if let window {
@@ -789,6 +790,7 @@ final class DiagramTextView: NSTextView {
     private var installedExpanded: Set<UInt32> = []
     private var settingMarked = false
     var compositionActive: Bool { settingMarked || hasMarkedText() }
+    var findBarMonitor: Task<Void, Never>?
     private var placing = false
     var maximumMainWorkMilliseconds = 0.0
     var installMilliseconds = 0.0
@@ -803,6 +805,9 @@ final class DiagramTextView: NSTextView {
         onCompositionState?(true)
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
         settingMarked = false
+        // 空字符串收尾不会经过 insertText/unmarkText；原生组合已结束时同步文档状态，
+        // 否则 marked 会一直阻止自动保存、⌘S 与视图切换。
+        if !hasMarkedText() { onCompositionState?(false); onCommit?() }
         UndoMenuState.scheduleRefresh()
     }
     override func insertText(_ string: Any, replacementRange: NSRange) {

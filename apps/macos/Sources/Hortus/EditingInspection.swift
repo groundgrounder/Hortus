@@ -10,6 +10,7 @@ enum EditingInspection {
         guard let document = workspace.current?.document, let path = workspace.selected else { throw CocoaError(.coderValueNotFound) }
         let mode = arguments.first(where: { $0.hasPrefix("--edit-mode=") }).map { String($0.dropFirst("--edit-mode=".count)) } ?? "lifecycle"
         // 真实编辑检查只走 SCIM ITABC 的纯 keycode 事件；每个阶段等待外部读盘 ack。
+        if mode == "empty-composition" { return try await emptyComposition(workspace: workspace) }
         if mode == "composition-focus-loss" { return try await compositionFocusLoss(workspace: workspace, arguments: arguments) }
         if mode == "composition-tab-switch" { return try await compositionDocumentSwitch(workspace: workspace, arguments: arguments, route: .tab) }
         if mode == "composition-search-switch" { return try await compositionDocumentSwitch(workspace: workspace, arguments: arguments, route: .search) }
@@ -660,6 +661,41 @@ enum EditingInspection {
     }
     /// 真实点击编辑器建立焦点，由 SCIM ITABC 建立组合，再真实点击底部终端让焦点离开。
     /// 每个阶段都由外部驱动读盘并 ack；本函数不读取磁盘，也不替外部结论作判定。
+    /// 确定性空 setMarkedText 收尾：先制造一次保存失败，再验证组合结束恢复保存与重试。
+    private static func emptyComposition(workspace: Workspace) async throws -> [String: Any] {
+        guard let document = workspace.current?.document else { throw CocoaError(.coderValueNotFound) }
+        if document.reading { await workspace.toggleCurrentView() }
+        var view: DiagramTextView?
+        for _ in 0..<500 {
+            if let candidate = DiagramInspection.current(document: document), !candidate.isReading,
+               candidate.isEditable { view = candidate; break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let view else { throw CocoaError(.coderValueNotFound) }
+        view.window?.makeFirstResponder(view)
+        view.insertText("待保存", replacementRange: NSRange(location: 0, length: 0))
+        let noteURL = document.io.url
+        let original = ((try? FileManager.default.attributesOfItem(atPath: noteURL.path))?[.posixPermissions] as? NSNumber)?.intValue ?? 0o644
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: noteURL.path)
+        await document.saveNow()
+        let failed = document.issue == .saveFailed
+        try FileManager.default.setAttributes([.posixPermissions: original], ofItemAtPath: noteURL.path)
+        let dirty = document.dirty
+        view.setSelectedRange(NSRange(location: 0, length: 0))
+        view.setMarkedText("中文", selectedRange: NSRange(location: 2, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        let markedDuring = document.marked && view.hasMarkedText()
+        view.setMarkedText("", selectedRange: NSRange(location: 0, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        let cleared = !view.hasMarkedText() && !document.marked
+        await document.saveNow()
+        let retried = document.issue == .none && !document.dirty
+        let disk = (try? diskMatches(document, view)) ?? false
+        return ["save_failed_first": failed, "dirty_before_composition": dirty,
+                "marked_during_composition": markedDuring, "empty_composition_cleared": cleared,
+                "save_retry_succeeded": retried, "disk_matches": disk]
+    }
+
     private static func compositionFocusLoss(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         let bridge = try PhaseBridge(arguments: arguments)
         defer { bridge.close() }
@@ -1298,5 +1334,110 @@ enum EditingInspection {
             try await Task.sleep(for: .milliseconds(10))
         }
         throw CocoaError(.coderValueNotFound)
+    }
+}
+
+/// 编辑器命令检查的辅助观测：只在显式 `--editor-command-inspection=路径` 下持续写状态，
+/// 结论仍由外部 Accessibility 读值与读盘作出。
+@MainActor
+enum EditorCommandInspection {
+    private static var timer: Timer?
+    static weak var application: ApplicationWorkspace?
+
+    static func start(arguments: [String]) {
+        guard let argument = arguments.first(where: { $0.hasPrefix("--editor-command-inspection=") }) else { return }
+        let url = URL(fileURLWithPath: String(argument.dropFirst("--editor-command-inspection=".count)))
+        timer?.invalidate()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                guard let value = try? JSONSerialization.data(withJSONObject: snapshot(application: application),
+                                                               options: [.sortedKeys]) else { return }
+                try? value.write(to: url, options: .atomic)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    static func snapshot(application: ApplicationWorkspace?) -> [String: Any] {
+        var value: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime]
+        value["application_active"] = NSApp.isActive
+        let window = NSApp.keyWindow ?? NSApp.mainWindow
+        if let window {
+            value["window"] = ["title": window.title, "number": window.windowNumber,
+                               "key": window.isKeyWindow, "first_responder_chain": chain(window.firstResponder)]
+            value["first_responder_input_source"] =
+                (window.firstResponder as? NSTextView)?.inputContext?.selectedKeyboardInputSource ?? ""
+            if let field = window.contentView.flatMap({ first(NativeSearchField.self, in: $0) }) {
+                let editor = field.currentEditor() as? NSTextView
+                value["search_field"] = [
+                    "editor": editor != nil, "marked": editor?.hasMarkedText() ?? false,
+                    "text": field.stringValue,
+                    "input_source": editor?.inputContext?.selectedKeyboardInputSource ?? "",
+                ]
+            }
+        }
+        var documents: [[String: Any]] = []
+        for record in application?.records ?? [] {
+            let workspace = record.workspace
+            for tab in workspace.tabs {
+                guard let document = tab.document else { continue }
+                var row: [String: Any] = [
+                    "path": tab.path, "selected": workspace.selected == tab.path,
+                    "reading": document.reading, "marked": document.marked, "dirty": document.dirty,
+                    "issue": String(describing: document.issue), "revision": document.revision,
+                ]
+                if let view = DiagramInspection.current(document: document) {
+                    let selection = view.selectedRange()
+                    row["view"] = [
+                        "reading": view.isReading, "marked_text": view.hasMarkedText(),
+                        "composition": view.compositionActive, "length": view.textStorage?.length ?? -1,
+                        "selection": [selection.location, selection.length],
+                        "first_responder": view.window?.firstResponder === view,
+                        "find_bar_visible": view.enclosingScrollView?.isFindBarVisible ?? false,
+                        "find_bar_fields": fields(in: view.enclosingScrollView?.findBarView),
+                        "input_context_source": view.inputContext?.selectedKeyboardInputSource ?? "",
+                    ]
+                }
+                documents.append(row)
+            }
+            if workspace.selected != nil || !workspace.tabs.isEmpty {
+                value["search"] = [
+                    "query": workspace.searchQuery, "results": workspace.searchResults.count,
+                    "scanning": workspace.scanning,
+                ]
+            }
+        }
+        value["documents"] = documents
+        return value
+    }
+
+    private static func fields(in view: NSView?) -> [String] {
+        guard let view else { return [] }
+        var names: [String] = []
+        func walk(_ value: NSView) {
+            if let field = value as? NSTextField { names.append(field.placeholderString ?? "") }
+            value.subviews.forEach(walk)
+        }
+        walk(view)
+        return names
+    }
+
+    private static func chain(_ responder: NSResponder?) -> [String] {
+        var names: [String] = []
+        var current = responder
+        while let value = current, names.count < 24 {
+            names.append(String(describing: type(of: value)))
+            current = value.nextResponder
+        }
+        return names
+    }
+
+    private static func first<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+        if let found = view as? T { return found }
+        for child in view.subviews {
+            if let found = first(type, in: child) { return found }
+        }
+        return nil
     }
 }

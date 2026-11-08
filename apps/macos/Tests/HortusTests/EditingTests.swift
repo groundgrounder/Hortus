@@ -375,6 +375,29 @@ struct EditingTests {
         await fixture.close()
     }
 
+    @Test func emptyMarkedTextCompletionRestoresSaving() async throws {
+        let fixture = try Fixture(Self.source)
+        try await fixture.ready()
+        fixture.view.insertText("待保存", replacementRange: NSRange(location: 0, length: 0))
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: fixture.document.io.url.path)
+        await fixture.document.saveNow()
+        #expect(fixture.document.issue == .saveFailed)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.document.io.url.path)
+        fixture.view.setSelectedRange(NSRange(location: 0, length: 0))
+        fixture.view.setMarkedText("中文", selectedRange: NSRange(location: 2, length: 0),
+                                   replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(fixture.document.marked)
+        fixture.view.setMarkedText("", selectedRange: NSRange(location: 0, length: 0),
+                                   replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(!fixture.view.hasMarkedText())
+        #expect(!fixture.document.marked)
+        await fixture.document.saveNow()
+        #expect(fixture.document.issue == .none)
+        #expect(!fixture.document.dirty)
+        #expect(try String(contentsOf: fixture.document.io.url, encoding: .utf8) == fixture.view.string)
+        await fixture.close()
+    }
+
     @Test func nativeSaveRetainsAllEncodingCombinationsAndCurrentPermissions() async throws {
         for bom in [false, true] {
             for crlf in [false, true] {
