@@ -277,3 +277,109 @@ fn readonly_acl_is_detected_even_when_mode_bits_allow_writing() {
     );
     assert!(detected);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn replacement_accepts_transformed_provenance_and_still_copies_other_xattrs_exactly() {
+    use std::process::Command;
+    fn xattr(path: &std::path::Path, name: &str) -> Vec<u8> {
+        let output = Command::new("xattr")
+            .args(["-px", name])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect()
+    }
+    fn set_xattr(path: &std::path::Path, name: &str, value: &[u8]) {
+        let hex: String = value.iter().map(|byte| format!("{byte:02x}")).collect();
+        let output = Command::new("xattr")
+            .args(["-wx", name, &hex])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // launchd 作业没有终端来源，可以原样写入 provenance；测试进程则会把它改写。
+    fn set_provenance(path: &std::path::Path, value: &[u8]) -> bool {
+        let hex: String = value.iter().map(|byte| format!("{byte:02x}")).collect();
+        let label = format!("hortus-p1-47-test-{}", std::process::id());
+        let submitted = Command::new("launchctl")
+            .args([
+                "submit",
+                "-l",
+                &label,
+                "--",
+                "/usr/bin/xattr",
+                "-wx",
+                "com.apple.provenance",
+                &hex,
+            ])
+            .arg(path)
+            .status()
+            .is_ok_and(|status| status.success());
+        for _ in 0..250 {
+            if xattr(path, "com.apple.provenance") == value {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = Command::new("launchctl").args(["remove", &label]).status();
+        submitted && xattr(path, "com.apple.provenance") == value
+    }
+    let base = tempdir().unwrap();
+    let vault = base.path().join("vault");
+    let temporary = base.path().join("replacement");
+    fs::create_dir(&vault).unwrap();
+    fs::create_dir(&temporary).unwrap();
+    let path = vault.join("note.md");
+    fs::write(&path, "old").unwrap();
+    set_xattr(
+        &path,
+        "com.apple.metadata:kMDItemFinderComment",
+        b"hortus provenance regression",
+    );
+    set_xattr(
+        &path,
+        "user.hortus-provenance",
+        &[0x00, 0x01, 0x02, 0xff, 0xab, 0xcd, 0xef],
+    );
+    // 合成字节只用于触发系统转换，不来自任何用户文件。放在其他属性之后：
+    // 终端上下文写普通 xattr 时也可能重写 provenance。
+    let requested = [0x01, 0x02, 0x00, 0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03];
+    if !set_provenance(&path, &requested) {
+        eprintln!("跳过：本机无法通过 launchd 写入非默认 provenance");
+        return;
+    }
+    let provenance_before = xattr(&path, "com.apple.provenance");
+    let comment_before = xattr(&path, "com.apple.metadata:kMDItemFinderComment");
+    let user_before = xattr(&path, "user.hortus-provenance");
+    let baseline = read(&path).unwrap().unwrap();
+    atomic_replace(&path, b"new", Some(&baseline), &temporary, &vault, None).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"new");
+    // 普通用户属性和 Finder 元数据仍逐字保留。
+    assert_eq!(
+        xattr(&path, "com.apple.metadata:kMDItemFinderComment"),
+        comment_before
+    );
+    assert_eq!(xattr(&path, "user.hortus-provenance"), user_before);
+    // provenance 由系统管理；只要求仍在，不要求与来源逐字相等。
+    let provenance_after = xattr(&path, "com.apple.provenance");
+    assert!(!provenance_after.is_empty());
+    if provenance_after == provenance_before {
+        eprintln!("注意：本机未转换 provenance，系统转换分支未被实际覆盖");
+    }
+    assert_eq!(fs::read_dir(&temporary).unwrap().count(), 0);
+}

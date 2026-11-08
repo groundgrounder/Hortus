@@ -115,6 +115,12 @@ fn read_attribute(mut read: impl FnMut(*mut c_void, usize) -> isize) -> io::Resu
     Ok(data)
 }
 
+fn requires_exact_copy(name: &[u8]) -> bool {
+    // com.apple.provenance 由系统管理，写入时可能被转换为新值。保存正文不能因
+    // 来源值变化而失败，也不能手工反复写回；只豁免这一项，其他属性仍逐字核验。
+    name != b"com.apple.provenance"
+}
+
 fn verify_xattrs(source: &File, staged: &File) -> io::Result<()> {
     // copyfile 会对部分扩展属性采用尽力而为策略；逐项核验并补齐，不能静默丢掉用户数据。
     let names = read_attribute(|buffer, size| unsafe {
@@ -125,6 +131,9 @@ fn verify_xattrs(source: &File, staged: &File) -> io::Result<()> {
         .filter(|name| !name.is_empty())
     {
         let name = CString::new(name)?;
+        if !requires_exact_copy(name.as_bytes()) {
+            continue;
+        }
         // 名字带 NUL 结尾，缓冲区在每次同步调用中有效；flags=0 包含所有可见扩展属性。
         let get = |file: &File| {
             read_attribute(|buffer, size| unsafe {
@@ -242,4 +251,30 @@ pub(super) fn volume_root_replacement(temporary: &Path, vault: &Path) -> bool {
             .is_some_and(|name| name.starts_with("NSIRD_"))
         && fs::metadata(temporary)
             .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_exact_copy;
+
+    #[test]
+    fn only_system_provenance_skips_exact_xattr_verification() {
+        assert!(!requires_exact_copy(b"com.apple.provenance"));
+        let ordinary: &[&[u8]] = &[
+            b"com.apple.provenance.extra",
+            b"com.apple.metadata:kMDItemFinderComment",
+            b"com.apple.metadata:_kMDItemUserTags",
+            b"com.apple.lastuseddate#PS",
+            b"com.apple.ResourceFork",
+            b"com.apple.quarantine",
+            b"user.hortus-test",
+        ];
+        for name in ordinary {
+            assert!(
+                requires_exact_copy(name),
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
 }
