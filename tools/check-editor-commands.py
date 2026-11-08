@@ -218,6 +218,10 @@ def frame_of(snapshot, title=None):
             'width': size.get('width'), 'height': size.get('height')}
 
 
+def valid_frame(frame):
+    return bool(frame) and frame.get('x') is not None and frame.get('width') is not None
+
+
 def view_state(run, name='note.md'):
     documents = run.state().get('documents', [])
     document = next((row for row in documents if row.get('path') == name and row.get('selected')), None)
@@ -586,7 +590,9 @@ def replace_all(run, entry, screenshot):
     opened['window_after'] = after_frame
     opened['find_action_delta'] = after_actions - before_actions
     opened['hotkey_callback_delta'] = after_callbacks - before_callbacks
-    if before_frame != after_frame:
+    if not valid_frame(before_frame) or not valid_frame(after_frame):
+        errors.append(f'{entry} window frame unavailable: {before_frame} -> {after_frame}')
+    elif before_frame != after_frame:
         errors.append(f'{entry} changed the window frame: {before_frame} -> {after_frame}')
     if after_actions - before_actions != 1:
         errors.append(f'{entry} find action ran {after_actions - before_actions} times, expected once')
@@ -819,7 +825,9 @@ def scenario_v2a2_immediate(base, probe, app, terminal_visible):
             raise RuntimeError('editor did not take focus')
         run.ensure_input(ABC)
         run.probe.key(3, 'cmd')
-        wait_until(lambda: view_state(run).get('find_bar_visible'), timeout=3)
+        opened = wait_until(lambda: view_state(run).get('find_bar_visible'), timeout=3)
+        if not opened or not ax_fields(run):
+            raise RuntimeError('find bar did not open before the immediate Escape+Q sequence')
         run.probe.type('Alpha')
         run.probe.key(36)
         time.sleep(0.3)
@@ -895,15 +903,19 @@ def scenario_v2a2_cancel(base, probe, app):
             if delay is None or delay > 50:
                 errors.append(f'cancelled monitor exit took {delay} ms, expected <= 50 ms')
         first_iterations = cancelled.get('iterations') if cancelled else None
+        current_before_wait = key_monitor(run).get('current') or {}
         time.sleep(0.5)
         later = key_monitor(run).get('last_cancelled') or {}
+        current_after_wait = key_monitor(run).get('current') or {}
         if cancelled is not None and (later.get('serial') != before or later.get('iterations') != first_iterations):
             errors.append(f'monitor iterations kept increasing after cancellation: {first_iterations} -> {later.get("iterations")}')
-        # The cancelled monitor must not keep the editor alive: close its window and watch the weak registry.
-        run.probe.key(53)
-        time.sleep(0.2)
+        if current_before_wait.get('serial') != current_after_wait.get('serial'):
+            errors.append('monitor was repeatedly restarted during the 500 ms observation window')
+        # 关闭窗口时保持查找栏可见、监视仍挂起；释放断言覆盖活监视，而不是已退出任务。
+        live_view, close_title = key_view_state(run)
+        if not live_view.get('find_bar_visible') or not (live_view.get('find_monitor') or {}).get('current'):
+            errors.append('no live suspended monitor before closing the window')
         live_before = run.state().get('live_editor_views', 0)
-        _, close_title = key_view_state(run)
         probe.close_window(run.pid, close_title)
         live_after = wait_until(lambda: (lambda count: count if count < live_before else None)(run.state().get('live_editor_views', 0)),
                                 timeout=3)
@@ -917,6 +929,9 @@ def scenario_v2a2_cancel(base, probe, app):
             errors.append('no window left after closing the find bar window')
         result['runs'].append({'monitor_serial': before, 'cancelled': cancelled,
                                'iterations_after_500ms': later.get('iterations'),
+                               'current_serial_before_500ms': current_before_wait.get('serial'),
+                               'current_serial_after_500ms': current_after_wait.get('serial'),
+                               'live_monitor_before_close': (live_view.get('find_monitor') or {}).get('current'),
                                'live_views_before': live_before, 'live_views_after': live_after,
                                'closed_window': close_title, 'remaining_windows': len(remaining),
                                'errors': errors, 'passed': not errors})
@@ -976,7 +991,9 @@ def scenario_v2a3(base, probe, app):
         observations['shortcut'] = {'window_before': before_frame, 'window_after': after_frame,
                                     'action_delta': first_actions - before_actions,
                                     'callback_delta': first_callbacks - before_callbacks}
-        if before_frame != after_frame:
+        if not valid_frame(before_frame) or not valid_frame(after_frame):
+            errors.append(f'⌥⌘F window frame unavailable: {before_frame} -> {after_frame}')
+        elif before_frame != after_frame:
             errors.append(f'⌥⌘F changed the window frame: {before_frame} -> {after_frame}')
         if first_actions - before_actions != 1:
             errors.append(f'⌥⌘F find action delta {first_actions - before_actions}, expected once')
@@ -1027,7 +1044,9 @@ def scenario_v2a3(base, probe, app):
         time.sleep(0.7)
         textedit_after = frame_of(probe.ax(textedit_pid))
         observations['textedit_while_inactive'] = {'before': textedit_before, 'after': textedit_after}
-        if textedit_before == textedit_after:
+        if not valid_frame(textedit_before) or not valid_frame(textedit_after):
+            errors.append('TextEdit window frame unavailable while Hortus was inactive')
+        elif textedit_before == textedit_after:
             errors.append('TextEdit no longer received the system window action while Hortus was inactive')
 
         probe.activate(run.pid)
@@ -1078,7 +1097,9 @@ def scenario_v2a3(base, probe, app):
         time.sleep(0.7)
         quit_after = frame_of(probe.ax(textedit_pid))
         observations['textedit_after_quit'] = {'before': quit_before, 'after': quit_after}
-        if quit_before == quit_after:
+        if not valid_frame(quit_before) or not valid_frame(quit_after):
+            errors.append('TextEdit window frame unavailable after Hortus quit')
+        elif quit_before == quit_after:
             errors.append('exclusive hotkey registration survived application quit')
         result['runs'].append({'observations': observations, 'errors': errors, 'passed': not errors})
     finally:
