@@ -730,11 +730,11 @@ def main():
     parser.add_argument('--screenshots', type=Path)
     args = parser.parse_args()
     global MEDIA, OUTPUT
-    OUTPUT = output
-    MEDIA = args.screenshots.resolve() if args.screenshots else None
     if args.runs < 1:
         parser.error('--runs must be positive')
     output = args.output.resolve()
+    OUTPUT = output
+    MEDIA = args.screenshots.resolve() if args.screenshots else None
     output.mkdir(parents=True, exist_ok=True)
     helper_dir = Path(tempfile.mkdtemp(prefix='hortus-editor-commands-'))
     probe_path = helper_dir / 'editor-command-probe'
