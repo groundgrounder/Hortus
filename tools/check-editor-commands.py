@@ -134,6 +134,12 @@ class Probe:
     def press_menu(self, pid, menu, item):
         return self.run('press-menu', pid, menu, item)
 
+    def close_window(self, pid, title=None):
+        arguments = ['close-window', pid]
+        if title is not None:
+            arguments.append(title)
+        return self.run(*arguments)
+
     def activate(self, pid):
         return self.run('activate', pid)
 
@@ -193,6 +199,67 @@ def editor_focused(value):
     focused = value.get('focused')
     role = focused_role(value) if isinstance(focused, dict) else (focused or '')
     return role.startswith('AXTextArea')
+
+
+def frame_of(snapshot, title=None):
+    """External AX frame of the key (or named) window, compared value by value."""
+    windows = snapshot.get('windows', [])
+    chosen = None
+    if title is not None:
+        chosen = next((window for window in windows if window.get('title') == title), None)
+    if chosen is None:
+        focused_title = (snapshot.get('focused_window') or {}).get('title')
+        chosen = next((window for window in windows if window.get('title') == focused_title),
+                      windows[0] if windows else None)
+    if not chosen:
+        return {}
+    position, size = chosen.get('position') or {}, chosen.get('size') or {}
+    return {'title': chosen.get('title'), 'x': position.get('x'), 'y': position.get('y'),
+            'width': size.get('width'), 'height': size.get('height')}
+
+
+def view_state(run, name='note.md'):
+    documents = run.state().get('documents', [])
+    document = next((row for row in documents if row.get('path') == name and row.get('selected')), None)
+    if document is None:
+        document = next((row for row in documents if row.get('path') == name), {})
+    return document.get('view') or {}
+
+
+def key_view_state(run):
+    """View state for the document in the current key window."""
+    title = (run.snapshot().get('focused_window') or {}).get('title', '')
+    documents = run.state().get('documents', [])
+    document = next((row for row in documents if row.get('path') == title), None)
+    if document is None:
+        document = next((row for row in documents if row.get('selected')), {})
+    return (document.get('view') or {}), title
+
+
+def monitor_of(run, name='note.md'):
+    return view_state(run, name).get('find_monitor') or {}
+
+
+def key_monitor(run):
+    view, _ = key_view_state(run)
+    return view.get('find_monitor') or {}
+
+
+def hotkey_state(run):
+    return run.state().get('find_shortcut') or {}
+
+
+def ax_fields(run):
+    tree = run.probe.tree(run.pid)
+    return sorted((element for element in tree.get('elements', [])
+                   if element.get('role') == 'AXTextField' and element.get('position')),
+                  key=lambda element: element['position'].get('y', 0))
+
+
+def terminal_group(run):
+    tree = run.probe.tree(run.pid)
+    return next((element for element in tree.get('elements', [])
+                 if element.get('role') == 'AXGroup' and element.get('description') == '终端'), None)
 
 
 def prepare(base, notes, view='editing', windows=1):
@@ -502,6 +569,9 @@ def scenario_a2(base, probe, app, terminal_visible):
 def replace_all(run, entry, screenshot):
     """Open replace through a real entry, replace Alpha with Gamma, save, undo, save."""
     errors = []
+    before_frame = frame_of(run.snapshot())
+    before_actions = monitor_of(run).get('find_panel_actions', 0)
+    before_callbacks = hotkey_state(run).get('callbacks', 0)
     if entry == 'shortcut':
         run.probe.key(3, 'cmd', 'opt')
     else:
@@ -509,6 +579,19 @@ def replace_all(run, entry, screenshot):
     time.sleep(0.9)
     run.ensure_input(ABC)
     opened = observe(run, f'replace_open_{entry}', 'note.md')
+    after_frame = frame_of(run.snapshot())
+    after_actions = monitor_of(run).get('find_panel_actions', 0)
+    after_callbacks = hotkey_state(run).get('callbacks', 0)
+    opened['window_before'] = before_frame
+    opened['window_after'] = after_frame
+    opened['find_action_delta'] = after_actions - before_actions
+    opened['hotkey_callback_delta'] = after_callbacks - before_callbacks
+    if before_frame != after_frame:
+        errors.append(f'{entry} changed the window frame: {before_frame} -> {after_frame}')
+    if after_actions - before_actions != 1:
+        errors.append(f'{entry} find action ran {after_actions - before_actions} times, expected once')
+    if entry == 'shortcut' and after_callbacks - before_callbacks != 1:
+        errors.append(f'{entry} hotkey callback delta {after_callbacks - before_callbacks}, expected once')
     tree = run.probe.tree(run.pid)
     ax_fields = [element for element in tree.get('elements', [])
                  if element.get('role') == 'AXTextField' and element.get('position')]
@@ -699,6 +782,313 @@ def scenario_a5(base, probe, app):
     return result
 
 
+def scenario_v2a1(base, probe, app):
+    """Real ⌥⌘F: replace UI opens, window frame is unchanged, full replace/undo round trip."""
+    notes = {'note.md': '# Note\n\nAlpha and Alpha here.\n\nTail.\n'}
+    run = Run('v2a1', base, probe, app, notes)
+    result = {'scenario': 'V2A1', 'runs': []}
+    try:
+        run.start()
+        if not run.focus_editor():
+            raise RuntimeError('editor did not take focus')
+        run.ensure_input(ABC)
+        errors, observations = replace_all(run, 'shortcut', base / 'v2a1.png')
+        result['runs'].append({'observations': observations, 'errors': errors, 'passed': not errors})
+    finally:
+        run.stop()
+    result['passed'] = all(item['passed'] for item in result['runs'])
+    return result
+
+
+def scenario_v2a2_immediate(base, probe, app, terminal_visible):
+    """Escape followed immediately by Q in one HID sequence; no settling wait in between."""
+    notes = {'note.md': '# Note\n\nAlpha and Alpha here.\n\nTail.\n'}
+    run = Run('v2a2i', base, probe, app, notes)
+    label = 'visible' if terminal_visible else 'hidden'
+    result = {'scenario': f'V2A2-immediate-{label}', 'runs': []}
+    try:
+        run.start()
+        if terminal_visible:
+            if not run.click_terminal():
+                raise RuntimeError('terminal group not found')
+            time.sleep(1.0)
+        else:
+            run.probe.key(38, 'cmd')  # ⌘J hides the bottom panel.
+            time.sleep(0.5)
+        if not run.focus_editor():
+            raise RuntimeError('editor did not take focus')
+        run.ensure_input(ABC)
+        run.probe.key(3, 'cmd')
+        wait_until(lambda: view_state(run).get('find_bar_visible'), timeout=3)
+        run.probe.type('Alpha')
+        run.probe.key(36)
+        time.sleep(0.3)
+        terminal_before = terminal_group(run)
+        run.screenshot(base / f'v2a2-{label}-before.png')
+        # One probe process posts Escape and Q back to back; no sleep or slower event rate.
+        run.probe.run('press-then-type', 53, 'Q')
+        text = wait_until(lambda: (lambda value: value if value.count('Q') == 1 else None)(run.disk('note.md')['text']),
+                          timeout=3)
+        if text is None:
+            text = run.disk('note.md')['text']
+        time.sleep(0.2)
+        snapshot = run.snapshot()
+        terminal_after = terminal_group(run)
+        run.screenshot(base / f'v2a2-{label}-after.png')
+        errors = []
+        if text.count('Q') != 1:
+            errors.append(f'Q did not reach the note exactly once: {text.count("Q")}')
+        if not editor_focused(snapshot):
+            errors.append(f'focus after Escape+Q is not the note editor: {focused_role(snapshot)}')
+        if terminal_after and terminal_after.get('focused'):
+            errors.append('terminal took focus after Escape')
+        if terminal_visible and not terminal_before:
+            errors.append('terminal was not visible before the find bar closed')
+        result['runs'].append({'disk': text, 'focused': focused_role(snapshot),
+                               'terminal_before': terminal_before, 'terminal_after': terminal_after,
+                               'errors': errors, 'passed': not errors})
+    finally:
+        run.stop()
+    result['passed'] = all(item['passed'] for item in result['runs'])
+    return result
+
+
+def scenario_v2a2_cancel(base, probe, app):
+    """⌘G replaces the live monitor: prompt exit, no further iterations, releasable editor."""
+    notes_a = {'a.md': '# A\n\nAlpha and Alpha here.\n'}
+    notes_b = {'b.md': '# B\n\nBeta.\n'}
+    run = Run('v2a2c', base, probe, app, (notes_a, notes_b), windows=2)
+    result = {'scenario': 'V2A2-cancel', 'runs': []}
+    try:
+        run.start()
+        if not run.focus_editor():
+            raise RuntimeError('editor did not take focus')
+        run.ensure_input(ABC)
+        run.probe.key(3, 'cmd')
+        wait_until(lambda: key_monitor(run).get('current') is not None, timeout=3)
+        run.probe.type('Alpha')
+        run.probe.key(36)
+        time.sleep(0.3)
+        # Click the note body while the find bar stays visible, then reissue a find command.
+        if not run.focus_editor():
+            raise RuntimeError('editor did not take focus with the find bar visible')
+        view, key_title = key_view_state(run)
+        if not view.get('find_bar_visible'):
+            raise RuntimeError('find bar did not stay visible after clicking the note')
+        before = (key_monitor(run).get('current') or {}).get('serial')
+        if before is None:
+            raise RuntimeError('no live find bar monitor before ⌘G')
+        run.probe.key(5, 'cmd')
+        cancelled = None
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            candidate = key_monitor(run).get('last_cancelled') or {}
+            if candidate.get('serial') == before and candidate.get('exited_ms') is not None:
+                cancelled = candidate
+                break
+            time.sleep(0.01)
+        errors = []
+        if cancelled is None:
+            errors.append(f'cancelled monitor {before} did not report an exit')
+        else:
+            delay = cancelled.get('cancel_to_exit_ms')
+            if delay is None or delay > 50:
+                errors.append(f'cancelled monitor exit took {delay} ms, expected <= 50 ms')
+        first_iterations = cancelled.get('iterations') if cancelled else None
+        time.sleep(0.5)
+        later = key_monitor(run).get('last_cancelled') or {}
+        if cancelled is not None and (later.get('serial') != before or later.get('iterations') != first_iterations):
+            errors.append(f'monitor iterations kept increasing after cancellation: {first_iterations} -> {later.get("iterations")}')
+        # The cancelled monitor must not keep the editor alive: close its window and watch the weak registry.
+        run.probe.key(53)
+        time.sleep(0.2)
+        live_before = run.state().get('live_editor_views', 0)
+        _, close_title = key_view_state(run)
+        probe.close_window(run.pid, close_title)
+        live_after = wait_until(lambda: (lambda count: count if count < live_before else None)(run.state().get('live_editor_views', 0)),
+                                timeout=3)
+        if live_after is None:
+            live_after = run.state().get('live_editor_views', 0)
+            errors.append(f'editor view count did not drop after closing its window: {live_before} -> {live_after}')
+        if run.process.poll() is not None:
+            errors.append('application quit after closing one of two windows')
+        remaining = run.snapshot().get('windows', [])
+        if not remaining:
+            errors.append('no window left after closing the find bar window')
+        result['runs'].append({'monitor_serial': before, 'cancelled': cancelled,
+                               'iterations_after_500ms': later.get('iterations'),
+                               'live_views_before': live_before, 'live_views_after': live_after,
+                               'closed_window': close_title, 'remaining_windows': len(remaining),
+                               'errors': errors, 'passed': not errors})
+    finally:
+        run.stop()
+    result['passed'] = all(item['passed'] for item in result['runs'])
+    return result
+
+
+def start_textedit():
+    subprocess.run(['open', '-a', 'TextEdit'], check=True, capture_output=True)
+    time.sleep(1.5)
+    pid = int(subprocess.run(['pgrep', '-x', 'TextEdit'], capture_output=True, text=True).stdout.strip().split('\n')[-1])
+    subprocess.run(['osascript', '-e', 'tell application "TextEdit" to make new document'], capture_output=True)
+    time.sleep(0.8)
+    subprocess.run(['osascript', '-e', 'tell application "TextEdit" to activate'], capture_output=True)
+    time.sleep(0.4)
+    set_textedit_bounds()
+    return pid
+
+
+def set_textedit_bounds():
+    subprocess.run(['osascript', '-e',
+                    'tell application "TextEdit" to set bounds of front window to {300, 200, 900, 600}'],
+                   capture_output=True)
+    time.sleep(0.4)
+
+
+def close_textedit_document():
+    subprocess.run(['osascript', '-e', 'tell application "TextEdit" to close front window saving no'],
+                   capture_output=True)
+
+
+def scenario_v2a3(base, probe, app):
+    """Shortcut/menu identity, activation lifecycle, WindowGroup-only menus, no residue after quit."""
+    notes_a = {'a.md': '# A\n\nAlpha.\n'}
+    notes_b = {'b.md': '# B\n\nBeta.\n'}
+    run = Run('v2a3', base, probe, app, (notes_a, notes_b), windows=2)
+    result = {'scenario': 'V2A3', 'runs': []}
+    errors = []
+    observations = {}
+    textedit_pid = None
+    try:
+        run.start()
+        if not run.focus_editor():
+            raise RuntimeError('editor did not take focus')
+        run.ensure_input(ABC)
+        before_frame = frame_of(run.snapshot())
+        before_actions = key_monitor(run).get('find_panel_actions', 0)
+        before_callbacks = hotkey_state(run).get('callbacks', 0)
+        run.probe.key(3, 'cmd', 'opt')
+        wait_until(lambda: len(ax_fields(run)) >= 2, timeout=3)
+        after_frame = frame_of(run.snapshot())
+        first_actions = key_monitor(run).get('find_panel_actions', 0)
+        first_callbacks = hotkey_state(run).get('callbacks', 0)
+        first_hotkey_actions = hotkey_state(run).get('actions', 0)
+        observations['shortcut'] = {'window_before': before_frame, 'window_after': after_frame,
+                                    'action_delta': first_actions - before_actions,
+                                    'callback_delta': first_callbacks - before_callbacks}
+        if before_frame != after_frame:
+            errors.append(f'⌥⌘F changed the window frame: {before_frame} -> {after_frame}')
+        if first_actions - before_actions != 1:
+            errors.append(f'⌥⌘F find action delta {first_actions - before_actions}, expected once')
+        if first_callbacks - before_callbacks != 1:
+            errors.append(f'⌥⌘F hotkey callback delta {first_callbacks - before_callbacks}, expected once')
+        run.probe.key(3, 'cmd', 'opt')
+        time.sleep(0.4)
+        repeat_actions = key_monitor(run).get('find_panel_actions', 0)
+        repeat_callbacks = hotkey_state(run).get('callbacks', 0)
+        repeat_hotkey_actions = hotkey_state(run).get('actions', 0)
+        observations['repeat'] = {'find_action_delta': repeat_actions - first_actions,
+                                  'callback_delta': repeat_callbacks - first_callbacks,
+                                  'hotkey_action_delta': repeat_hotkey_actions - first_hotkey_actions}
+        # 第二次按键时焦点已在查找栏字段，正文计数可以不变；热键回调与 action 仍必须各一次。
+        if repeat_callbacks - first_callbacks != 1 or repeat_hotkey_actions - first_hotkey_actions != 1:
+            errors.append('repeated ⌥⌘F did not execute exactly one hotkey action per key press')
+        if repeat_actions - first_actions > 1:
+            errors.append('repeated ⌥⌘F executed the find action more than once')
+        run.probe.key(53)
+        time.sleep(0.2)
+        menu_callbacks = hotkey_state(run).get('callbacks', 0)
+        menu_before = key_monitor(run).get('find_panel_actions', 0)
+        run.probe.press_menu(run.pid, '编辑', '查找并替换…')
+        wait_until(lambda: len(ax_fields(run)) >= 2, timeout=3)
+        menu_after = key_monitor(run).get('find_panel_actions', 0)
+        observations['menu'] = {'action_delta': menu_after - menu_before,
+                                'callback_delta': hotkey_state(run).get('callbacks', 0) - menu_callbacks}
+        if menu_after - menu_before != 1:
+            errors.append('menu entry did not invoke the shared find action exactly once')
+        if hotkey_state(run).get('callbacks', 0) != menu_callbacks:
+            errors.append('menu entry unexpectedly went through the Carbon hotkey')
+        run.probe.key(53)
+        time.sleep(0.2)
+
+        registrations = hotkey_state(run).get('registrations', 0)
+        unregistrations = hotkey_state(run).get('unregistrations', 0)
+        textedit_pid = start_textedit()
+        wait_until(lambda: frontmost() == 'TextEdit', timeout=5)
+        wait_until(lambda: not run.state().get('application_active', True), timeout=3)
+        inactive = hotkey_state(run)
+        observations['deactivated'] = inactive
+        if inactive.get('registered'):
+            errors.append('hotkey stayed registered while Hortus was inactive')
+        if inactive.get('unregistrations') != unregistrations + 1:
+            errors.append('hotkey was not unregistered exactly once on deactivation')
+        textedit_before = frame_of(probe.ax(textedit_pid))
+        probe.key(3, 'cmd', 'opt')
+        time.sleep(0.7)
+        textedit_after = frame_of(probe.ax(textedit_pid))
+        observations['textedit_while_inactive'] = {'before': textedit_before, 'after': textedit_after}
+        if textedit_before == textedit_after:
+            errors.append('TextEdit no longer received the system window action while Hortus was inactive')
+
+        probe.activate(run.pid)
+        wait_until(lambda: frontmost() == 'Hortus', timeout=5)
+        wait_until(lambda: hotkey_state(run).get('registered'), timeout=3)
+        reactivated = hotkey_state(run)
+        observations['reactivated'] = reactivated
+        if reactivated.get('registrations') != registrations + 1:
+            errors.append(f'hotkey registrations did not increase exactly once: {registrations} -> {reactivated.get("registrations")}')
+        run.probe.key(3, 'cmd', 'opt')
+        wait_until(lambda: len(ax_fields(run)) >= 2, timeout=3)
+        run.probe.key(53)
+        time.sleep(0.2)
+
+        probe.close_window(run.pid, 'a.md')
+        wait_until(lambda: len(run.snapshot().get('windows', [])) == 1, timeout=3)
+        remaining = run.snapshot().get('windows', [])
+        names = menu_names(run.pid)
+        edit = menu_items(run.pid, '编辑')
+        observations['windowgroup_only'] = {'windows': remaining, 'menus': names, 'edit_items': edit}
+        if len(remaining) != 1 or remaining[0].get('title') != 'b.md':
+            errors.append(f'initial Window was not the only window closed: {remaining}')
+        if names.count('视图') != 1 or names.count('面板') != 1:
+            errors.append(f'View/Panels menus changed after closing the initial Window: {names}')
+        for title in ['对齐表格源码', '查找…', '查找下一个', '查找上一个', '查找并替换…', '快速打开', '搜索笔记']:
+            if edit.count(title) != 1:
+                errors.append(f'edit menu item {title!r} count {edit.count(title)} with only WindowGroup left')
+        if not run.focus_editor():
+            raise RuntimeError('remaining WindowGroup editor did not take focus')
+        before_areas = [area.get('description', '') for area in (run.snapshot().get('focused_window') or {}).get('text_areas', [])]
+        run.probe.key(14, 'cmd')
+        time.sleep(0.7)
+        after_areas = [area.get('description', '') for area in (run.snapshot().get('focused_window') or {}).get('text_areas', [])]
+        observations['windowgroup_command_e'] = {'before': before_areas, 'after': after_areas}
+        if before_areas == after_areas:
+            errors.append(f'⌘E did not act on the remaining WindowGroup window: {before_areas}')
+
+        run.probe.key(12, 'cmd')
+        try:
+            run.process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            errors.append('application did not quit on ⌘Q')
+        probe.activate(textedit_pid)
+        wait_until(lambda: frontmost() == 'TextEdit', timeout=5)
+        set_textedit_bounds()
+        quit_before = frame_of(probe.ax(textedit_pid))
+        probe.key(3, 'cmd', 'opt')
+        time.sleep(0.7)
+        quit_after = frame_of(probe.ax(textedit_pid))
+        observations['textedit_after_quit'] = {'before': quit_before, 'after': quit_after}
+        if quit_before == quit_after:
+            errors.append('exclusive hotkey registration survived application quit')
+        result['runs'].append({'observations': observations, 'errors': errors, 'passed': not errors})
+    finally:
+        run.stop()
+        if textedit_pid is not None:
+            close_textedit_document()
+    result['passed'] = all(item['passed'] for item in result['runs'])
+    return result
+
+
 SCENARIOS = {
     'A1': scenario_a1,
     'A1-empty': scenario_a1_deterministic,
@@ -706,6 +1096,11 @@ SCENARIOS = {
     'A3': scenario_a3,
     'A4': scenario_a4,
     'A5': scenario_a5,
+    'V2A1': scenario_v2a1,
+    'V2A2-cancel': scenario_v2a2_cancel,
+    'V2A2-visible': scenario_v2a2_immediate,
+    'V2A2-hidden': scenario_v2a2_immediate,
+    'V2A3': scenario_v2a3,
 }
 
 
@@ -714,6 +1109,8 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/editor-commands')
     parser.add_argument('--app', type=Path, default=APP)
     parser.add_argument('--runs', type=int, default=3)
+    parser.add_argument('--immediate-runs', type=int, default=0,
+                        help='V2A2 terminal-visible immediate repetitions; 0 = 10 for --runs>=3, else --runs')
     parser.add_argument('--scenario', choices=['all', *SCENARIOS], default='all')
     parser.add_argument('--skip-empty', action='store_true')
     parser.add_argument('--screenshots', type=Path)
@@ -721,6 +1118,9 @@ def main():
     global MEDIA, OUTPUT
     if args.runs < 1:
         parser.error('--runs must be positive')
+    if args.immediate_runs < 0:
+        parser.error('--immediate-runs must not be negative')
+    immediate_runs = args.immediate_runs or (10 if args.runs >= 3 else args.runs)
     output = args.output.resolve()
     OUTPUT = output
     MEDIA = args.screenshots.resolve() if args.screenshots else None
@@ -737,7 +1137,14 @@ def main():
         if args.skip_empty and name == 'A1-empty':
             continue
         runs = []
-        count = 1 if name == 'A1-empty' else (args.runs * 2 if name == 'A2' else args.runs)
+        if name == 'A1-empty':
+            count = 1
+        elif name == 'V2A2-visible':
+            count = immediate_runs
+        elif name == 'A2':
+            count = args.runs * 2
+        else:
+            count = args.runs
         for index in range(1, count + 1):
             base = output / name / f'run-{index}'
             if base.exists():
@@ -745,6 +1152,10 @@ def main():
             base.mkdir(parents=True)
             if name == 'A2':
                 value = scenario_a2(base, probe, app, terminal_visible=index % 2 == 1)
+            elif name == 'V2A2-visible':
+                value = scenario_v2a2_immediate(base, probe, app, terminal_visible=True)
+            elif name == 'V2A2-hidden':
+                value = scenario_v2a2_immediate(base, probe, app, terminal_visible=False)
             elif name == 'A1-empty':
                 value = scenario_a1_deterministic(base, probe, app)
             else:

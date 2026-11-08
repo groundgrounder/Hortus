@@ -302,6 +302,16 @@ struct EditorCommandProbe {
                     .reduce(CGEventFlags()) { $0.union(flag(named: $1)) }
                 press(code, flags: flags)
                 try write(["command": "key", "keycode": Int(code), "flags": Int(flags.rawValue)], to: output)
+            case "press-then-type":
+                guard arguments.count >= 2 else { fputs("press-then-type requires keycode and text\n", stderr); exit(2) }
+                let code = CGKeyCode(UInt16(arguments[0]) ?? 0)
+                let text = arguments[1]
+                let flags = arguments.dropFirst(2).filter { !$0.hasPrefix("--") && $0 != output }
+                    .reduce(CGEventFlags()) { $0.union(flag(named: $1)) }
+                press(code, flags: flags)
+                type(text)
+                try write(["command": "press-then-type", "keycode": Int(code), "text": text,
+                           "flags": Int(flags.rawValue)], to: output)
             case "type":
                 type(arguments[0])
                 try write(["command": "type", "text": arguments[0]], to: output)
@@ -328,6 +338,17 @@ struct EditorCommandProbe {
                 }
                 for window in windowList { walk(window, depth: 0) }
                 try write(["pid": Int(pid(from: arguments[0])), "elements": rows], to: output)
+            case "close-window":
+                let app = application(pid(from: arguments[0]))
+                let title = arguments.count > 1 && !arguments[1].hasPrefix("--") ? arguments[1] : nil
+                let candidates = windows(app)
+                guard let window = candidates.first(where: { title == nil || string($0, kAXTitleAttribute as String) == title }),
+                      let raw = axValue(window, kAXCloseButtonAttribute as String) else {
+                    throw NSError(domain: "close-window", code: 1)
+                }
+                let status = AXUIElementPerformAction(raw as! AXUIElement, kAXPressAction as CFString)
+                try write(["command": "close-window", "status": Int(status.rawValue),
+                           "title": string(window, kAXTitleAttribute as String)], to: output)
             case "input-source":
                 if arguments[0] == "get" {
                     try write(["input_source": currentInputSource()], to: output)
