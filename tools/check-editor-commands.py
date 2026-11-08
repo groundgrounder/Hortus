@@ -248,7 +248,10 @@ class Run:
         self.notes = notes
         self.vaults, self.config, self.cache = prepare(base, notes, view=view, windows=windows)
         self.vault = self.vaults[0]
-        self.media = (MEDIA / base.parent.name / base.name) if MEDIA else base
+        if MEDIA and OUTPUT:
+            self.media = MEDIA / base.relative_to(OUTPUT)
+        else:
+            self.media = base
         if MEDIA:
             self.media.mkdir(parents=True, exist_ok=True)
         self.inspection = base / 'inspection.json' if inspection else None
@@ -726,7 +729,8 @@ def main():
     parser.add_argument('--skip-empty', action='store_true')
     parser.add_argument('--screenshots', type=Path)
     args = parser.parse_args()
-    global MEDIA
+    global MEDIA, OUTPUT
+    OUTPUT = output
     MEDIA = args.screenshots.resolve() if args.screenshots else None
     if args.runs < 1:
         parser.error('--runs must be positive')
