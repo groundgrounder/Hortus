@@ -31,15 +31,30 @@ enum UndoCommandRouter {
     }
 }
 
-/// ⌥⌘F 先被系统窗口管理消费，菜单 key equivalent 收不到；Carbon 热键
-/// 能在应用激活期间收到同一组合，并转交给正文的查找命令。
+/// ⌥⌘F 被系统窗口填充热键占用，菜单 key equivalent 不会送达；Carbon 热键能在
+/// 应用激活期间收到同一组合。独占注册让系统窗口填充不再同时触发，应用失活即注销，
+/// 因此其他 App 激活时仍保留系统行为。菜单与热键仍调用同一个查找 action。
 @MainActor
 enum FindShortcut {
     private static var hotKey: EventHotKeyRef?
     private static var handler: EventHandlerRef?
     private static let callback: EventHandlerUPP = { _, _, _ in
-        MainActor.assumeIsolated { perform() }
+        MainActor.assumeIsolated {
+            callbackCount += 1
+            perform()
+        }
         return noErr
+    }
+    private(set) static var registrationCount = 0
+    private(set) static var unregistrationCount = 0
+    private(set) static var callbackCount = 0
+    private(set) static var actionCount = 0
+    private(set) static var lastStatus: OSStatus = 0
+    static var isRegistered: Bool { hotKey != nil }
+    static var inspection: [String: Any] {
+        ["registered": isRegistered, "registrations": registrationCount,
+         "unregistrations": unregistrationCount, "callbacks": callbackCount,
+         "actions": actionCount, "last_status": Int(lastStatus)]
     }
 
     static func setEnabled(_ enabled: Bool) {
@@ -55,12 +70,17 @@ enum FindShortcut {
         let id = EventHotKeyID(signature: OSType(0x484F5254), id: 1)
         var reference: EventHotKeyRef?
         let status = RegisterEventHotKey(UInt32(kVK_ANSI_F), UInt32(cmdKey | optionKey), id,
-                                         GetApplicationEventTarget(), 0, &reference)
+                                         GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &reference)
+        lastStatus = status
         hotKey = status == noErr ? reference : nil
+        if hotKey != nil { registrationCount += 1 }
     }
 
     private static func unregister() {
-        if let hotKey { UnregisterEventHotKey(hotKey); self.hotKey = nil }
+        guard let hotKey else { return }
+        UnregisterEventHotKey(hotKey)
+        self.hotKey = nil
+        unregistrationCount += 1
     }
 
     private static func perform() {
@@ -68,6 +88,7 @@ enum FindShortcut {
               let text = window.firstResponder as? NSTextView else { return }
         // 只在正文或查找栏字段上响应；终端等其他响应者保持原行为。
         guard text is DiagramTextView || String(describing: type(of: text)).contains("FindPatternField") else { return }
+        actionCount += 1
         EditorFind.perform(.showReplaceInterface)
     }
 }

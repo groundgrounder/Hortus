@@ -4,6 +4,16 @@ import HortusCore
 
 /// 阅读与编辑共享的滚动容器：legacy 滚动条始终预留同一宽度，文档宽度不随其显隐变化。
 final class DiagramScrollView: NSScrollView {
+    /// NSTextFinder 通过容器属性显隐查找栏；把真实变化交给正文，替代轮询。
+    override var isFindBarVisible: Bool {
+        get { super.isFindBarVisible }
+        set {
+            let wasVisible = super.isFindBarVisible
+            super.isFindBarVisible = newValue
+            guard wasVisible != newValue else { return }
+            (documentView as? DiagramTextView)?.findBarVisibilityChanged(newValue)
+        }
+    }
     var stableContentWidth: CGFloat {
         let reserved = scrollerStyle == .legacy && hasVerticalScroller
             ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
@@ -704,7 +714,7 @@ final class DiagramTextView: NSTextView {
     var diagramStorage: DiagramContentStorage?
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { findBarMonitor?.cancel(); findBarMonitor = nil }
+        if window == nil { cancelFindBarMonitor() }
         NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
         if let window {
@@ -752,6 +762,7 @@ final class DiagramTextView: NSTextView {
         usesAdaptiveColorMappingForDarkAppearance = true
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(contrastChanged), name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(contrastChanged), name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
+        EditorCommandInspection.track(self)
     }
     // 显式自检参数仅模拟正文的高对比度颜色，不改系统辅助功能设置。
     var contrastForInspection = ProcessInfo.processInfo.arguments.contains("--simulate-high-contrast") {
@@ -790,7 +801,11 @@ final class DiagramTextView: NSTextView {
     private var installedExpanded: Set<UInt32> = []
     private var settingMarked = false
     var compositionActive: Bool { settingMarked || hasMarkedText() }
-    var findBarMonitor: Task<Void, Never>?
+    var findPanelActionCount = 0
+    var findBarMonitor: FindBarMonitor?
+    var lastCancelledFindBarMonitor: FindBarMonitor?
+    var lastFinishedFindBarMonitor: FindBarMonitor?
+    var findBarMonitorSerial = 0
     private var placing = false
     var maximumMainWorkMilliseconds = 0.0
     var installMilliseconds = 0.0

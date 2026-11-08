@@ -1337,12 +1337,24 @@ enum EditingInspection {
     }
 }
 
+private final class WeakEditorView {
+    weak var view: DiagramTextView?
+    init(_ view: DiagramTextView) { self.view = view }
+}
+
 /// 编辑器命令检查的辅助观测：只在显式 `--editor-command-inspection=路径` 下持续写状态，
 /// 结论仍由外部 Accessibility 读值与读盘作出。
 @MainActor
 enum EditorCommandInspection {
     private static var timer: Timer?
     static weak var application: ApplicationWorkspace?
+    private static var trackedViews: [WeakEditorView] = []
+
+    /// 只记录弱引用，供释放断言使用；未显式开启检查时完全不跟踪。
+    static func track(_ view: DiagramTextView) {
+        guard timer != nil else { return }
+        trackedViews.append(WeakEditorView(view))
+    }
 
     static func start(arguments: [String]) {
         guard let argument = arguments.first(where: { $0.hasPrefix("--editor-command-inspection=") }) else { return }
@@ -1362,6 +1374,9 @@ enum EditorCommandInspection {
     static func snapshot(application: ApplicationWorkspace?) -> [String: Any] {
         var value: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime]
         value["application_active"] = NSApp.isActive
+        value["find_shortcut"] = FindShortcut.inspection
+        trackedViews.removeAll { $0.view == nil }
+        value["live_editor_views"] = trackedViews.count
         let window = NSApp.keyWindow ?? NSApp.mainWindow
         if let window {
             value["window"] = ["title": window.title, "number": window.windowNumber,
@@ -1389,6 +1404,10 @@ enum EditorCommandInspection {
                 ]
                 if let view = DiagramInspection.current(document: document) {
                     let selection = view.selectedRange()
+                    var monitor: [String: Any] = ["find_panel_actions": view.findPanelActionCount]
+                    if let current = view.findBarMonitor { monitor["current"] = current.inspection }
+                    if let cancelled = view.lastCancelledFindBarMonitor { monitor["last_cancelled"] = cancelled.inspection }
+                    if let finished = view.lastFinishedFindBarMonitor { monitor["last_finished"] = finished.inspection }
                     row["view"] = [
                         "reading": view.isReading, "marked_text": view.hasMarkedText(),
                         "composition": view.compositionActive, "length": view.textStorage?.length ?? -1,
@@ -1397,6 +1416,7 @@ enum EditorCommandInspection {
                         "find_bar_visible": view.enclosingScrollView?.isFindBarVisible ?? false,
                         "find_bar_fields": fields(in: view.enclosingScrollView?.findBarView),
                         "input_context_source": view.inputContext?.selectedKeyboardInputSource ?? "",
+                        "find_monitor": monitor,
                     ]
                 }
                 documents.append(row)

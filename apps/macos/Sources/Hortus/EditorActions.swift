@@ -98,6 +98,38 @@ final class EditorActions {
     }
 }
 
+/// 查找栏监视只等待真实显隐事件：没有轮询，任务也不强引用正文。
+/// 记录只服务于显式检查观测，不参与焦点或查找决策。
+@MainActor
+final class FindBarMonitor {
+    let serial: Int
+    let startedAt = ProcessInfo.processInfo.systemUptime
+    var cancelledAt: Double?
+    var exitedAt: Double?
+    var iterations = 0
+    var task: Task<Void, Never>?
+    var continuation: AsyncStream<Void>.Continuation?
+    init(serial: Int) { self.serial = serial }
+    func cancel() {
+        guard exitedAt == nil else { return }
+        if cancelledAt == nil { cancelledAt = ProcessInfo.processInfo.systemUptime }
+        continuation?.finish()
+        task?.cancel()
+    }
+    func finish() {
+        continuation?.yield()
+        continuation?.finish()
+    }
+    var inspection: [String: Any] {
+        var row: [String: Any] = ["serial": serial, "started_ms": startedAt * 1000,
+                                  "iterations": iterations, "active": exitedAt == nil]
+        if let cancelledAt { row["cancelled_ms"] = cancelledAt * 1000 }
+        if let exitedAt { row["exited_ms"] = exitedAt * 1000 }
+        if let cancelledAt, let exitedAt { row["cancel_to_exit_ms"] = (exitedAt - cancelledAt) * 1000 }
+        return row
+    }
+}
+
 extension DiagramTextView {
     @objc func alignTableSource(_ sender: Any?) { editingCoordinator?.alignTable() }
     override func insertNewline(_ sender: Any?) {
@@ -118,23 +150,71 @@ extension DiagramTextView {
            event.charactersIgnoringModifiers == "\r", editorActions.toggleTask(in: self) { return true }
         return super.performKeyEquivalent(with: event)
     }
-    /// 查找栏关闭后宿主的回退焦点可能落到终端；监视真实查找栏的显隐，
-    /// 关闭时把焦点交还发起查找的正文。只在查找栏可见期间以 30 ms 检查。
+    /// 每次查找命令都重启监视：旧任务必须立刻退出，不能残留轮询或强引用正文。
     override func performFindPanelAction(_ sender: Any?) {
+        findPanelActionCount += 1
+        let wasVisible = enclosingScrollView?.isFindBarVisible ?? false
         super.performFindPanelAction(sender)
-        startFindBarMonitor()
+        let isVisible = enclosingScrollView?.isFindBarVisible ?? false
+        if isVisible {
+            // 显隐刚变化时容器回调已经建立监视；⌘G 这类原栏内命令才需要替换旧任务。
+            if wasVisible == isVisible { startFindBarMonitor() }
+        } else {
+            cancelFindBarMonitor()
+        }
     }
+
+    /// 滚动容器报告真实显隐变化；系统隐藏查找栏时可能先把焦点交给终端，
+    /// 因此隐藏事件里同步归还焦点，再结束事件监视。
+    func findBarVisibilityChanged(_ visible: Bool) {
+        if visible {
+            if findBarMonitor == nil { startFindBarMonitor() }
+        } else {
+            restoreFindBarFocus()
+            finishFindBarMonitor()
+        }
+    }
+
+    func restoreFindBarFocus() {
+        guard !compositionActive, let window, window.isKeyWindow, window.firstResponder !== self else { return }
+        window.makeFirstResponder(self)
+    }
+
     private func startFindBarMonitor() {
         guard let scroll = enclosingScrollView, scroll.isFindBarVisible else { return }
-        findBarMonitor?.cancel()
-        findBarMonitor = Task { @MainActor [weak self] in
-            while let self, self.enclosingScrollView?.isFindBarVisible == true {
-                try? await Task.sleep(for: .milliseconds(30))
-            }
-            guard let self, !self.compositionActive, let window = self.window,
-                  window.isKeyWindow, window.firstResponder !== self else { return }
-            window.makeFirstResponder(self)
+        if let previous = findBarMonitor {
+            lastCancelledFindBarMonitor = previous
+            previous.cancel()
         }
+        findBarMonitorSerial += 1
+        let monitor = FindBarMonitor(serial: findBarMonitorSerial)
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        monitor.continuation = continuation
+        monitor.task = Task { @MainActor [weak self] in
+            defer { monitor.exitedAt = ProcessInfo.processInfo.systemUptime }
+            for await _ in stream {
+                monitor.iterations += 1
+                guard !Task.isCancelled, let self else { break }
+                // 同步路径已归还焦点；若宿主随后又移动 responder，这里兜底一次。
+                self.restoreFindBarFocus()
+                break
+            }
+        }
+        findBarMonitor = monitor
+    }
+
+    private func finishFindBarMonitor() {
+        guard let monitor = findBarMonitor else { return }
+        monitor.finish()
+        lastFinishedFindBarMonitor = monitor
+        findBarMonitor = nil
+    }
+
+    func cancelFindBarMonitor() {
+        guard let monitor = findBarMonitor else { return }
+        lastCancelledFindBarMonitor = monitor
+        monitor.cancel()
+        findBarMonitor = nil
     }
     override func mouseDown(with event: NSEvent) {
         if isReading, readingCoordinator?.clickTask(event) == true { return }
