@@ -300,9 +300,6 @@ class Run:
     def disk(self, name):
         return disk(self.vault, name)
 
-    def click_note(self, x=700, y=400):
-        self.probe.click(x, y)
-
     def click_terminal(self):
         tree = self.probe.tree(self.pid)
         for element in tree.get('elements', []):
@@ -340,14 +337,6 @@ class Run:
                     return True
             time.sleep(0.2)
         return False
-
-    def note_text(self):
-        area = note_area(self.snapshot())
-        return (area or {}).get('value_prefix', '')
-
-    def note_length(self):
-        area = note_area(self.snapshot())
-        return (area or {}).get('value_length', -1)
 
     def screenshot(self, path):
         target = self.media / Path(path).name
