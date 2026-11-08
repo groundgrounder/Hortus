@@ -6,6 +6,7 @@ struct SearchInput: NSViewRepresentable {
     let placeholder: String
     let text: String
     var focusOnAppear = false
+    var focusRequest = 0
     let onChange: (String, Bool) -> Void
     let onMove: (Int) -> Void
     let onSubmit: () -> Void
@@ -20,6 +21,7 @@ struct SearchInput: NSViewRepresentable {
         field.drawsBackground = false
         field.font = .systemFont(ofSize: 15)
         field.focusOnAppear = focusOnAppear
+        field.focusRequest = focusRequest
         field.delegate = context.coordinator
         field.onMove = onMove
         field.onSubmit = onSubmit
@@ -28,9 +30,12 @@ struct SearchInput: NSViewRepresentable {
     }
 
     func updateNSView(_ field: NativeSearchField, context: Context) {
-        if field.stringValue != text { field.stringValue = text }
+        // 组合期间 field editor 持有 marked text；写回控件字符串会取消候选。
+        let marked = (field.currentEditor() as? NSTextView)?.hasMarkedText() ?? false
+        if !marked, field.stringValue != text { field.stringValue = text }
         field.placeholderString = L10n.string(placeholder)
         field.focusOnAppear = focusOnAppear
+        field.focusRequest = focusRequest
         field.onMove = onMove
         field.onSubmit = onSubmit
         field.onDismiss = onDismiss
@@ -72,19 +77,32 @@ struct SearchInput: NSViewRepresentable {
 
 final class NativeSearchField: NSTextField {
     var focusOnAppear = false
+    var focusRequest = 0 {
+        didSet {
+            guard focusRequest != oldValue else { return }
+            pendingFocus = true
+            requestFocus()
+        }
+    }
+    private var pendingFocus = false
     var onMove: (Int) -> Void = { _ in }
     var onSubmit: () -> Void = {}
     var onDismiss: () -> Void = {}
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard focusOnAppear else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.window != nil else { return }
-            self.window?.makeFirstResponder(self)
-        }
+        if focusOnAppear { pendingFocus = true }
+        requestFocus()
     }
 
+    private func requestFocus() {
+        guard pendingFocus, window != nil else { return }
+        pendingFocus = false
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            window.makeFirstResponder(self)
+        }
+    }
 }
 
 struct SearchPanel: View {
@@ -94,7 +112,8 @@ struct SearchPanel: View {
         VStack(spacing: 0) {
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                SearchInput(placeholder: "Search notes", text: workspace.searchQuery) { query, marked in
+                SearchInput(placeholder: "Search notes", text: workspace.searchQuery,
+                            focusRequest: workspace.searchFocusRequest) { query, marked in
                     workspace.updateSearch(query: query, marked: marked)
                 } onMove: { _ in } onSubmit: {} onDismiss: {}
             }

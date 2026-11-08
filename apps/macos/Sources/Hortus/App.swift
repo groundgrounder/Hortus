@@ -1,5 +1,6 @@
 import SwiftUI
 import Darwin
+import Carbon
 import ScreenCaptureKit
 import CoreGraphics
 
@@ -27,6 +28,47 @@ enum UndoCommandRouter {
     static func redo(in window: NSWindow? = NSApp.keyWindow) {
         guard let manager = target(in: window)?.undoManager, manager.canRedo else { return }
         manager.redo()
+    }
+}
+
+/// ⌥⌘F 先被系统窗口管理消费，菜单 key equivalent 收不到；Carbon 热键
+/// 能在应用激活期间收到同一组合，并转交给正文的查找命令。
+@MainActor
+enum FindShortcut {
+    private static var hotKey: EventHotKeyRef?
+    private static var handler: EventHandlerRef?
+    private static let callback: EventHandlerUPP = { _, _, _ in
+        MainActor.assumeIsolated { perform() }
+        return noErr
+    }
+
+    static func setEnabled(_ enabled: Bool) {
+        if enabled { register() } else { unregister() }
+    }
+
+    private static func register() {
+        guard hotKey == nil else { return }
+        if handler == nil {
+            var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+            InstallEventHandler(GetApplicationEventTarget(), callback, 1, &spec, nil, &handler)
+        }
+        let id = EventHotKeyID(signature: OSType(0x484F5254), id: 1)
+        var reference: EventHotKeyRef?
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_F), UInt32(cmdKey | optionKey), id,
+                                         GetApplicationEventTarget(), 0, &reference)
+        hotKey = status == noErr ? reference : nil
+    }
+
+    private static func unregister() {
+        if let hotKey { UnregisterEventHotKey(hotKey); self.hotKey = nil }
+    }
+
+    private static func perform() {
+        guard NSApp.isActive, let window = NSApp.keyWindow,
+              let text = window.firstResponder as? NSTextView else { return }
+        // 只在正文或查找栏字段上响应；终端等其他响应者保持原行为。
+        guard text is DiagramTextView || String(describing: type(of: text)).contains("FindPatternField") else { return }
+        EditorFind.perform(.showReplaceInterface)
     }
 }
 
@@ -90,7 +132,6 @@ struct HortusApp: App {
         .restorationBehavior(.disabled)
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified(showsTitle: false))
-        .commands { HortusCommands(application: application, delegate: delegate) }
     }
 }
 
@@ -136,10 +177,10 @@ private struct HortusCommands: Commands {
             Button("Align Table Source") { NSApp.sendAction(#selector(DiagramTextView.alignTableSource(_:)), to: nil, from: nil) }
                 .keyboardShortcut("t", modifiers: [.option, .command])
                 .disabled(workspace.current?.document?.reading != false)
-            Button("Find…") { find(.showFindInterface) }.keyboardShortcut("f", modifiers: .command)
-            Button("Find Next") { find(.nextMatch) }.keyboardShortcut("g", modifiers: .command)
-            Button("Find Previous") { find(.previousMatch) }.keyboardShortcut("g", modifiers: [.shift, .command])
-            Button("Find and Replace…") { find(.showReplaceInterface) }.keyboardShortcut("f", modifiers: [.option, .command])
+            Button("Find…") { EditorFind.perform(.showFindInterface) }.keyboardShortcut("f", modifiers: .command)
+            Button("Find Next") { EditorFind.perform(.nextMatch) }.keyboardShortcut("g", modifiers: .command)
+            Button("Find Previous") { EditorFind.perform(.previousMatch) }.keyboardShortcut("g", modifiers: [.shift, .command])
+            Button("Find and Replace…") { EditorFind.perform(.showReplaceInterface) }.keyboardShortcut("f", modifiers: [.option, .command])
             Divider()
             Button(L10n.string("Quick Open")) { workspace.presentQuickOpen() }
                 .keyboardShortcut("p", modifiers: .command)
@@ -171,10 +212,6 @@ private struct HortusCommands: Commands {
         }
     }
 
-    private func find(_ action: NSTextFinder.Action) {
-        let item = NSMenuItem(); item.tag = action.rawValue
-        NSApp.sendAction(#selector(NSTextView.performFindPanelAction(_:)), to: nil, from: item)
-    }
     private func shown(_ region: Region) -> Binding<Bool> {
         Binding(get: { layout.visible[region] ?? true }, set: { layout.visible[region] = $0 })
     }
@@ -242,8 +279,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if args.contains("--light") { NSApp.appearance = NSAppearance(named: .aqua) }
         if args.contains("--simulate-high-contrast") { NSApp.appearance = NSAppearance(named: .aqua) }
         DiagramInspection.startScrollStabilityRecorder(arguments: args)
+        EditorCommandInspection.start(arguments: args)
         presentInitialWindow?()
         NSApp.activate()
+        FindShortcut.setEnabled(NSApp.isActive)
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                                               object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { FindShortcut.setEnabled(true) }
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.willResignActiveNotification,
+                                               object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { FindShortcut.setEnabled(false) }
+        }
+
         UndoMenuState.scheduleRefresh()
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
                      NSWindow.didUpdateNotification, NSText.didChangeNotification,
@@ -330,6 +378,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationWillTerminate(_ notification: Notification) { FindShortcut.setEnabled(false) }
 
     func inspectWhenReady() {
         guard inspectionDeadline != nil, !inspectionStarted, let workspace else { return }
@@ -556,6 +606,7 @@ private struct VaultWindowRoot: View {
                 let first = record === application.initial
                 if first {
                     await application.start()
+                    EditorCommandInspection.application = application
                     let workspace = record.workspace
                     let layout = record.layout
                     let args = ProcessInfo.processInfo.arguments

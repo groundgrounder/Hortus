@@ -85,6 +85,7 @@ final class Workspace {
     var quickOpenResults: [QuickOpenHit] = []
     var quickOpenSelection = 0
     var searchQuery = ""
+    var searchFocusRequest = 0
     var searchResults: [SearchResult] = []
     var searchLoading = false
     @ObservationIgnored private var core: WorkspaceCore?
@@ -250,6 +251,7 @@ final class Workspace {
     func showSearchPanel() {
         guard root != nil else { return }
         layout?.moveToRegion(.search, .left)
+        searchFocusRequest += 1
         searchTask?.cancel()
         searchCancellation?.cancel()
         searchQuery = ""
@@ -539,6 +541,20 @@ final class Workspace {
             guard !document.dirty, document.issue != .saveFailed, document.issue != .conflict else { return }
         }
         document.reading.toggle(); scheduleSessionSave()
+        if !document.reading { focusEditor(document) }
+    }
+    /// 视图切换后编辑表面在下一轮渲染才出现；只在窗口仍为 key 时把焦点交给当前正文。
+    private func focusEditor(_ document: NoteDocument) {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        Task { @MainActor [weak document] in
+            guard let document else { return }
+            for _ in 0..<80 {
+                guard !document.reading, NSApp.keyWindow === window else { return }
+                if let view = DiagramInspection.current(document: document), !view.isReading,
+                   view.window === window, view.isEditable, window.makeFirstResponder(view) { return }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
     }
     func saveCurrent() { if let document = current?.document { Task { await document.saveNow() } } }
     func saveAllDocuments() async {

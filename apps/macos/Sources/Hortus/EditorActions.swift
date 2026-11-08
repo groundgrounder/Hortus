@@ -1,5 +1,15 @@
 import AppKit
 
+/// 查找命令的唯一入口：菜单、快捷键和 AppKit 分发都交给第一响应者。
+@MainActor
+enum EditorFind {
+    static func perform(_ action: NSTextFinder.Action) {
+        let item = NSMenuItem()
+        item.tag = action.rawValue
+        NSApp.sendAction(#selector(NSTextView.performFindPanelAction(_:)), to: nil, from: item)
+    }
+}
+
 /// 编辑辅助只生成一次原生文本替换，撤销、选择和输入法仍由 NSTextView 管理。
 @MainActor
 final class EditorActions {
@@ -107,6 +117,24 @@ extension DiagramTextView {
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            event.charactersIgnoringModifiers == "\r", editorActions.toggleTask(in: self) { return true }
         return super.performKeyEquivalent(with: event)
+    }
+    /// 查找栏关闭后宿主的回退焦点可能落到终端；监视真实查找栏的显隐，
+    /// 关闭时把焦点交还发起查找的正文。只在查找栏可见期间以 30 ms 检查。
+    override func performFindPanelAction(_ sender: Any?) {
+        super.performFindPanelAction(sender)
+        startFindBarMonitor()
+    }
+    private func startFindBarMonitor() {
+        guard let scroll = enclosingScrollView, scroll.isFindBarVisible else { return }
+        findBarMonitor?.cancel()
+        findBarMonitor = Task { @MainActor [weak self] in
+            while let self, self.enclosingScrollView?.isFindBarVisible == true {
+                try? await Task.sleep(for: .milliseconds(30))
+            }
+            guard let self, !self.compositionActive, let window = self.window,
+                  window.isKeyWindow, window.firstResponder !== self else { return }
+            window.makeFirstResponder(self)
+        }
     }
     override func mouseDown(with event: NSEvent) {
         if isReading, readingCoordinator?.clickTask(event) == true { return }
