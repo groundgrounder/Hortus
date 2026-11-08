@@ -14,7 +14,7 @@ Hortus is a native Markdown knowledge viewer that keeps large Mermaid trees read
 - **Read first, write with an agent.** Read your knowledge vault while an agent works on its Markdown files in a terminal. External changes refresh in place; press ⌘E when you want to edit a note yourself.
 - **Your notes are ordinary files.** Open a Markdown folder directly, including an existing Obsidian vault. Wiki links, embeds, tasks, callouts and frontmatter are supported; application state stays outside the note folder. LaTeX math, inline $…$ and display $$…$$, renders natively in the reading view.
 
-Try the original [CC0 demo vault](fixtures/demo-vault/README.md). On an Apple M3 MacBook Air (macOS 27.2), Hortus 0.1.4 takes 14.1 MiB on disk, shows the note about 0.5 s after launch, and uses about 160 MiB of memory with the demo diagram open, as one process. Each figure is the median of five runs; see `tools/compare-obsidian.py` for the method.
+Try the original [CC0 demo vault](fixtures/demo-vault/README.md). On an Apple M3 MacBook Air (macOS 27.2), Hortus 0.1.4 takes 15.3 MiB on disk, shows the note about 0.5 s after launch, and uses about 150 MiB of memory with the demo diagram open, as one process. Each figure is the median of five runs; see `tools/compare-obsidian.py` for the method.
 
 ## Install
 
