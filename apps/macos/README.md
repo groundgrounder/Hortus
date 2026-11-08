@@ -75,6 +75,14 @@ python3 -B tools/check-real-edit.py --output target/reports/real-edit
 
 默认独立启动三次组合焦点、标签切换和搜索结果切换场景，独立启动三次撤销场景，再运行一次编辑、阅读、终端与搜索框的撤销矩阵。两个文档切换场景都从预开 A/B 双标签的 pristine 会话开始：标签场景真实点击工具栏标签，搜索场景先通过 ⇧⌘F 和真实查询显示 B 结果，再点击 B 结果；随后核对 A/B 的 marked、修订号、视图与磁盘正文，以及 A 的自动保存、切回后的 ⌘S 和 ⌘E。组合场景按真实操作逐步构造完整期望正文，并核对光标、组合范围、输入法上下文和阶段 ACK；`summary.json` 给出总判定，各场景的 `phases.jsonl`、`observations.jsonl`、应用日志和 `verdict.json` 分别记录阶段状态、外部磁盘观察与失败原因。
 
+编辑器命令路由回归覆盖 ⌘E 后立即输入、查找栏关闭后的焦点归属、⌥⌘F 与菜单等价、⇧⌘F 搜索框焦点与中文组合，以及菜单唯一性。键盘和鼠标由独立进程以纯 keycode 的 HID 事件发送，焦点和菜单经 Accessibility 读取，笔记正文由脚本从磁盘读取；应用侧只有显式 `--editor-command-inspection=路径` 才写辅助状态：
+
+```sh
+python3 -B tools/check-editor-commands.py --output target/reports/editor-commands
+```
+
+每个真实场景独立启动三次，A2 交替覆盖终端可见与隐藏；A1 另运行一次确定性的空 `setMarkedText` 收尾与保存失败重试。需要简体拼音输入法 `com.apple.inputmethod.SCIM.ITABC` 和辅助功能授权。
+
 P1-05 的样式和性能验收：
 
 ```sh
