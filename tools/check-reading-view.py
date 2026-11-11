@@ -29,6 +29,54 @@ def run(base, output, name, vault, note, mode='visual', editing=False, extra=())
     return result
 
 
+def toggle_spacing(snapshot):
+    diagrams = sorted(snapshot['diagrams'], key=lambda row: row['ordinal'])
+    assert [row['ordinal'] for row in diagrams] == [1, 2], snapshot
+    assert diagrams[1]['frame_min_y'] >= diagrams[0]['frame_max_y'], snapshot
+    return diagrams[1]['frame_min_y'] - diagrams[0]['frame_max_y'], diagrams
+
+
+def check_toggle_spacing(data):
+    assert data['mode'] == 'diagram-toggle-spacing', data
+    assert data['real_keyboard'] and data['keyboard_access'] and data['activated'], data
+    assert data['event_tap'] == 'cghidEventTap' and len(data['key_events']) == 2, data
+    assert data['first_view'] != data['final_view'], data
+    assert data['source_preserved'] and data['disk_matches_source'], data
+    initial, diagrams = toggle_spacing(data['initial_second'])
+    reference = sorted(data['reference'], key=lambda row: row['ordinal'])
+    assert len(reference) == 2, data['reference']
+    for current, canonical in zip(diagrams, reference):
+        assert abs(current['scene_width'] - canonical['width']) <= .5, (current, canonical)
+        assert abs(current['scene_height'] - canonical['height']) <= .5, (current, canonical)
+        assert current['scene_signature'] == canonical['signature'], (current, canonical)
+    assert data['initial_top']['diagrams'][0]['visible'] is True, data['initial_top']
+    assert data['initial_top']['diagrams'][1]['visible'] is False, data['initial_top']
+    assert data['initial_second']['diagrams'][1]['visible'] is True, data['initial_second']
+    assert data['final_top_visible']['diagrams'][0]['visible'] is True, data['final_top_visible']
+    assert data['final_second']['diagrams'][1]['visible'] is True, data['final_second']
+    for phase in ['initial_return', 'final_second', 'final_top_visible', 'scroll_return',
+                  'scroll_return_again', 'restored']:
+        snapshot = data[phase]
+        spacing, current = toggle_spacing(snapshot)
+        assert abs(spacing - initial) <= 1, (phase, spacing, initial, snapshot)
+        assert abs(snapshot['document_height'] - data['initial_second']['document_height']) <= 1, (phase, snapshot)
+        assert current[1]['frame_max_y'] <= snapshot['document_height'] + .5, (phase, current[1], snapshot)
+        assert all(abs(row['scene_width'] - snapshot['content_width']) <= .5 for row in current), (phase, snapshot)
+        for before, after in zip(diagrams, current):
+            assert before['scene_signature'] == after['scene_signature'], (phase, before, after)
+            assert abs(before['scene_width'] - after['scene_width']) <= .5, (phase, before, after)
+            assert abs(before['scene_height'] - after['scene_height']) <= .5, (phase, before, after)
+            assert after['expanded'] is False, (phase, after)
+    resized = data['resized']
+    assert resized['content_width'] > data['final_second']['content_width'] + 100, resized
+    _, resized_diagrams = toggle_spacing(resized)
+    assert resized_diagrams[1]['frame_max_y'] <= resized['document_height'] + .5, resized
+    return {'initial_spacing': initial, 'final_spacing': toggle_spacing(data['final_second'])[0],
+            'restored_spacing': toggle_spacing(data['restored'])[0],
+            'document_height': data['initial_second']['document_height'],
+            'scene_heights': [row['scene_height'] for row in diagrams]}
+
+
 def check_inline_table(data):
     cells = data['table_cells']
     assert [cell['text'] for cell in cells] == [
@@ -53,7 +101,8 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/reading-view')
     parser.add_argument('--cpu-only', action='store_true')
     parser.add_argument('--screenshots-only', action='store_true')
-    parser.add_argument('--checks', choices=['all', 'switching', 'performance', 'external'], default='all')
+    parser.add_argument('--checks', choices=['all', 'switching', 'toggle-spacing', 'performance', 'external'],
+                        default='all')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -96,6 +145,20 @@ def main():
             assert switched['correct_blocks'] == switched['visible_blocks'] == 200, switched
             assert switched['retained_old_resources'] == 0, switched
         if args.checks == 'switching':
+            return
+        if args.checks in ['all', 'toggle-spacing']:
+            rounds = []
+            for index in range(3):
+                name = f'toggle-spacing-{index + 1}'
+                data = run(base / name, output, name, sample, '参考/双图间距.md', 'diagram-toggle-spacing')
+                summary = check_toggle_spacing(data)
+                summary['name'] = name
+                rounds.append(summary)
+            report = {'launches': len(rounds), 'rounds': rounds}
+            (output / 'toggle-spacing.json').write_text(json.dumps(report, indent=2) + '\n')
+            print('toggle-spacing', json.dumps(report), flush=True)
+            assert len(rounds) == 3
+        if args.checks == 'toggle-spacing':
             return
         large = ''.join(f'Paragraph {i}: text **bold** and Unicode 中文😀.\n\n' for i in range(22000))
         assert len(large.encode()) >= 1024 * 1024

@@ -1,10 +1,19 @@
 import AppKit
+import ApplicationServices
 import Darwin
+import HortusCore
 import Quartz
 
 /// 真实窗口计量只由显式验收参数启动，日常运行不增加轮询。
 @MainActor
 enum ReadingInspection {
+    private struct ReferenceScene: Sendable {
+        let ordinal: Int
+        let width: Double
+        let height: Double
+        let signature: String
+    }
+
     @MainActor
     private final class WeakView {
         weak var value: DiagramTextView?
@@ -55,6 +64,9 @@ enum ReadingInspection {
         var view = try await settled(document.reading, document: document)
         let openedAt = view.isReading ? view.readingCoordinator?.displayedAt ?? 0 : view.sourceStyling?.openDisplayedAt ?? 0
         let source = try await document.io.perform { try $0.snapshot().text }
+        if mode == "diagram-toggle-spacing" {
+            return try await diagramToggleSpacing(document: document, view: view, source: source, path: path)
+        }
         var result: [String: Any] = ["reading": view.isReading, "textkit2": view.textLayoutManager != nil,
             "utf8_bytes": source.utf8.count, "open_ms": (openedAt - workspace.noteOpenStartedAt) * 1000,
             "resident_bytes": try residentBytes(), "display_utf16": view.sourceUTF16Length,
@@ -266,6 +278,273 @@ enum ReadingInspection {
         }
         return result
     }
+
+    /// 真实 ⌘E 往返后的双图间距回归：只通过 CGEvent 键盘事件切换，直接比较图 frame。
+    private static func diagramToggleSpacing(document: NoteDocument, view: DiagramTextView, source: String,
+                                             path: String) async throws -> [String: Any] {
+        guard document.reading, view.isReading else { throw CocoaError(.coderValueNotFound) }
+        guard view.blocks.count == 2 else { throw CocoaError(.coderValueNotFound) }
+        let width = view.layoutContentWidth
+        guard width > 180 else { throw CocoaError(.coderValueNotFound) }
+        let reference = try await referenceScenes(view, source: source, path: path, width: width)
+        let access = CGPreflightPostEventAccess()
+        guard access else {
+            throw NSError(domain: "ReadingInspection", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "真实 ⌘E 检查需要 Accessibility 键盘事件权限"])
+        }
+        let activated = await activateInspectionWindow(view.window)
+        guard activated else {
+            throw NSError(domain: "ReadingInspection", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "窗口未取得键盘焦点，无法发送真实 ⌘E"])
+        }
+        let firstView = String(describing: ObjectIdentifier(view))
+        let initialTop = spacingSnapshot(view, document: document, phase: "initial_top")
+        try await revealDiagram(view, ordinal: 2)
+        let initialSecond = spacingSnapshot(view, document: document, phase: "initial_second")
+        try await scrollToTop(view)
+        let initialReturn = spacingSnapshot(view, document: document, phase: "initial_return")
+        let initialRevision = document.revision
+
+        let enterKey = try await pressCommandE()
+        let editing = try await settled(false, document: document)
+        guard !editing.isReading, !document.reading else { throw CocoaError(.coderValueNotFound) }
+        let editingState = diagramState(editing, phase: "editing")
+        let leaveKey = try await pressCommandE()
+        var reading = try await settled(true, document: document)
+        guard reading.isReading, document.reading else { throw CocoaError(.coderValueNotFound) }
+        let finalTop = spacingSnapshot(reading, document: document, phase: "final_top")
+        try await scrollToTop(reading)
+        let finalTopVisible = spacingSnapshot(reading, document: document, phase: "final_top_visible")
+        try await revealDiagram(reading, ordinal: 2)
+        let finalSecond = spacingSnapshot(reading, document: document, phase: "final_second")
+        try await scrollToTop(reading)
+        try await revealDiagram(reading, ordinal: 2)
+        let scrollReturn = spacingSnapshot(reading, document: document, phase: "scroll_return")
+        try await scrollToTop(reading)
+        try await revealDiagram(reading, ordinal: 2)
+        let scrollReturnAgain = spacingSnapshot(reading, document: document, phase: "scroll_return_again")
+
+        var resized: [String: Any] = [:]
+        var restored: [String: Any] = [:]
+        if let window = reading.window {
+            let original = window.frame
+            var wider = original
+            wider.size.width += 180
+            window.setFrame(wider, display: true)
+            try await Task.sleep(for: .milliseconds(120))
+            reading = try await settled(true, document: document)
+            try await revealDiagram(reading, ordinal: 2)
+            resized = spacingSnapshot(reading, document: document, phase: "resized")
+            window.setFrame(original, display: true)
+            try await Task.sleep(for: .milliseconds(120))
+            reading = try await settled(true, document: document)
+            try await revealDiagram(reading, ordinal: 2)
+            restored = spacingSnapshot(reading, document: document, phase: "restored")
+        }
+
+        let disk = try await document.io.perform { try $0.snapshot().text }
+        let sourcePreserved = disk == source && document.text == source && document.revision == initialRevision
+        return [
+            "mode": "diagram-toggle-spacing",
+            "keyboard_access": access,
+            "activated": activated,
+            "event_tap": "cghidEventTap",
+            "key_events": [enterKey, leaveKey],
+            "real_keyboard": true,
+            "first_view": firstView,
+            "final_view": String(describing: ObjectIdentifier(reading)),
+            "revision": initialRevision,
+            "source_preserved": sourcePreserved,
+            "disk_matches_source": disk == source,
+            "reference": reference,
+            "editing": editingState,
+            "initial_top": initialTop,
+            "initial_second": initialSecond,
+            "initial_return": initialReturn,
+            "final_top": finalTop,
+            "final_top_visible": finalTopVisible,
+            "final_second": finalSecond,
+            "scroll_return": scrollReturn,
+            "scroll_return_again": scrollReturnAgain,
+            "resized": resized,
+            "restored": restored,
+        ]
+    }
+
+    private static func referenceScenes(_ view: DiagramTextView, source: String, path: String,
+                                        width: Double) async throws -> [[String: Any]] {
+        let blocks = view.blocks.sorted { $0.ordinal < $1.ordinal }
+        let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let mmd = path.lowercased().hasSuffix(".mmd")
+        let scenes = try await Task.detached {
+            let engine = try DiagramEngine()
+            return try blocks.map { block -> ReferenceScene in
+                let identity = DiagramIdentity(document: block.documentIdentity, block: block.ordinal,
+                                               revision: block.revision, dark: dark, fontGeneration: 0,
+                                               requestGeneration: 0)
+                let wire = try engine.renderRequestInspection(source: source, mmd: mmd, width: width,
+                                                              collapsed: Array(block.collapsed), identity: identity,
+                                                              previous: nil, viewport: [])
+                let scene = try DiagramScene(wire)
+                return ReferenceScene(ordinal: Int(block.ordinal), width: Double(scene.width),
+                                      height: Double(scene.height), signature: sceneSignature(scene))
+            }
+        }.value
+        return scenes.map { ["ordinal": $0.ordinal, "width": $0.width,
+                             "height": $0.height, "signature": $0.signature] }
+    }
+
+    /// 与 DiagramInspection 相同的场景指纹；引用渲染在后台完成，不能调用主线程方法。
+    private nonisolated static func sceneSignature(_ scene: DiagramScene) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        func mix(_ value: String) {
+            for byte in value.utf8 {
+                hash ^= UInt64(byte)
+                hash &*= 0x0000_0100_0000_01b3
+            }
+        }
+        mix(String(scene.width)); mix(String(scene.height))
+        for primitive in scene.primitives { mix(String(reflecting: primitive)) }
+        for hit in scene.hitRegions { mix(String(reflecting: hit)) }
+        return String(format: "%016llx", hash)
+    }
+
+    private static func diagramState(_ view: DiagramTextView, phase: String) -> [String: Any] {
+        [
+            "phase": phase,
+            "reading": view.isReading,
+            "content_width": Double(view.layoutContentWidth),
+            "window_width": Double(view.window?.frame.width ?? 0),
+            "document_height": Double(view.frame.height),
+            "blocks": view.blocks.sorted { $0.ordinal < $1.ordinal }.map { block in
+                [
+                    "ordinal": Int(block.ordinal),
+                    "source_start": Int(block.sourceStart),
+                    "range": [block.range.location, block.range.length],
+                    "tail_start": block.tailStart,
+                    "collapsed": block.collapsed.count,
+                    "scene_width": block.prepared.map { Double($0.scene.width) } ?? NSNull(),
+                    "scene_height": block.prepared.map { Double($0.scene.height) } ?? NSNull(),
+                ] as [String: Any]
+            },
+        ]
+    }
+
+    private static func activateInspectionWindow(_ window: NSWindow?) async -> Bool {
+        guard let window else { return false }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        for _ in 0..<160 {
+            if NSApp.isActive && window.isKeyWindow { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return NSApp.isActive && window.isKeyWindow
+    }
+
+    /// 与既有编辑器真实按键检查相同：HID 事件走菜单快捷键，不调用 toggleView。
+    private static func pressCommandE() async throws -> [String: Any] {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for down in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: 14, keyDown: down) else {
+                throw CocoaError(.coderInvalidValue)
+            }
+            event.flags = .maskCommand
+            event.post(tap: .cghidEventTap)
+            try await Task.sleep(for: .milliseconds(down ? 18 : 55))
+        }
+        return ["keycode": 14, "modifiers": ["command"], "tap": "cghidEventTap"]
+    }
+
+    private static func revealDiagram(_ view: DiagramTextView, ordinal: UInt32) async throws {
+        guard let block = view.blocks.first(where: { $0.ordinal == ordinal }) else { throw CocoaError(.coderValueNotFound) }
+        view.readingCoordinator?.reveal(source: Int(block.sourceStart))
+        view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(20))
+        view.layoutSubtreeIfNeeded()
+    }
+
+    private static func scrollToTop(_ view: DiagramTextView) async throws {
+        guard let scroll = view.enclosingScrollView else { throw CocoaError(.coderValueNotFound) }
+        scroll.contentView.scroll(to: CGPoint(x: 0, y: 0))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(20))
+        view.layoutSubtreeIfNeeded()
+    }
+
+    /// 间距只由图 frame 计算；截图的可见性只作补充。
+    private static func spacingSnapshot(_ view: DiagramTextView, document: NoteDocument, phase: String) -> [String: Any] {
+        view.layoutSubtreeIfNeeded()
+        let rows = view.blocks.sorted { $0.ordinal < $1.ordinal }.compactMap { block -> [String: Any]? in
+            guard let diagram = view.diagramViews[block.ordinal] else { return nil }
+            let frame = diagram.frame
+            let visible = view.visibleRect.intersection(frame)
+            let scene = diagram.prepared.scene
+            return [
+                "ordinal": Int(block.ordinal),
+                "source_start": Int(block.sourceStart),
+                "range": [block.range.location, block.range.length],
+                "tail_start": block.tailStart,
+                "revision": block.revision,
+                "frame": ["x": Double(frame.minX), "y": Double(frame.minY),
+                          "width": Double(frame.width), "height": Double(frame.height)],
+                "frame_min_y": Double(frame.minY),
+                "frame_max_y": Double(frame.maxY),
+                "hidden": diagram.isHidden,
+                "visible": !diagram.isHidden && !visible.isNull && visible.height > 0.5,
+                "visible_height": visible.isNull ? 0 : Double(visible.height),
+                "scene_width": Double(scene.width),
+                "scene_height": Double(scene.height),
+                "scene_signature": DiagramInspection.sceneSignature(scene),
+                "expanded": view.expanded.contains(block.ordinal),
+            ]
+        }
+        var spacing: Any = NSNull()
+        if rows.count >= 2,
+           let first = rows[0]["frame_max_y"] as? Double,
+           let second = rows[1]["frame_min_y"] as? Double {
+            spacing = second - first
+        }
+        var fragments: [[String: Any]] = []
+        if let manager = view.textLayoutManager, let content = manager.textContentManager {
+            let range = manager.textViewportLayoutController.viewportRange
+            let start = range?.location ?? content.documentRange.location
+            let end = range?.endLocation ?? content.documentRange.endLocation
+            manager.enumerateTextLayoutFragments(from: start, options: [.ensuresLayout]) { fragment in
+                if fragment.rangeInElement.location.compare(end) != .orderedAscending { return false }
+                let offset = content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location)
+                var row: [String: Any] = ["offset": offset,
+                                          "min_y": Double(fragment.layoutFragmentFrame.minY),
+                                          "height": Double(fragment.layoutFragmentFrame.height)]
+                if let note = fragment as? NoteLayoutFragment {
+                    row["preview_height"] = Double(note.previewHeight)
+                    if let replacement = note.replacement {
+                        row["replacement"] = ["width": Double(replacement.width), "height": Double(replacement.height)]
+                    }
+                }
+                fragments.append(row)
+                return fragments.count < 200
+            }
+        }
+        return [
+            "phase": phase,
+            "reading": view.isReading,
+            "view_identity": String(describing: ObjectIdentifier(view)),
+            "document_height": Double(view.frame.height),
+            "bounds_height": Double(view.bounds.height),
+            "usage_height": Double(view.textLayoutManager?.usageBoundsForTextContainer.maxY ?? 0),
+            "visible_rect": ["x": Double(view.visibleRect.minX), "y": Double(view.visibleRect.minY),
+                             "width": Double(view.visibleRect.width), "height": Double(view.visibleRect.height)],
+            "content_width": Double(view.layoutContentWidth),
+            "window_width": Double(view.window?.frame.width ?? 0),
+            "diagrams": rows,
+            "spacing": spacing,
+            "source_utf16": document.text.utf16.count,
+            "revision": document.revision,
+            "fragments": fragments,
+        ]
+    }
+
     private static func residentBytes() throws -> UInt64 {
         var info = proc_taskinfo()
         let size = Int32(MemoryLayout.size(ofValue: info))
