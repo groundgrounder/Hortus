@@ -323,6 +323,8 @@ struct ReadingText: NSViewRepresentable {
         func refresh(force: Bool = false) {
             guard let input, let view else { return }
             let width = view.layoutContentWidth
+            // 新表面挂载时滚动视图尚未排布，120 是临时下限；此时排图会把窄宽度场景留给下一次复用。
+            guard width > 180 else { return }
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             if force { forcedGeneration &+= 1 }
             let key = RefreshKey(revision: input.document.revision, width: width, dark: dark,

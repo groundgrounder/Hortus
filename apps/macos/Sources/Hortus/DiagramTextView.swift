@@ -353,6 +353,8 @@ struct NoteText: NSViewRepresentable {
         func schedule(force: Bool = false, debounce: Bool = false) {
             guard let input, let view, !loading, !view.compositionActive else { return }
             let width = view.layoutContentWidth
+            // 新表面挂载时滚动视图尚未排布，120 是临时下限；等真实宽度到达再排图。
+            guard width > 180 else { return }
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             guard force || abs(width - lastWidth) > 0.25 || dark != lastDark else { return }
             view.layoutRefreshCount += 1
