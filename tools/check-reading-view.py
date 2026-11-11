@@ -36,6 +36,12 @@ def toggle_spacing(snapshot):
     return diagrams[1]['frame_min_y'] - diagrams[0]['frame_max_y'], diagrams
 
 
+def apparent_spacing(snapshot, reference):
+    """第二张图实际起点减去第一张图按同宽参考场景应占的底部。"""
+    diagrams = sorted(snapshot['diagrams'], key=lambda row: row['ordinal'])
+    return diagrams[1]['frame_min_y'] - (diagrams[0]['frame_min_y'] + reference[0]['height'])
+
+
 def check_toggle_spacing(data):
     assert data['mode'] == 'diagram-toggle-spacing', data
     assert data['real_keyboard'] and data['keyboard_access'] and data['activated'], data
@@ -49,6 +55,8 @@ def check_toggle_spacing(data):
         assert abs(current['scene_width'] - canonical['width']) <= .5, (current, canonical)
         assert abs(current['scene_height'] - canonical['height']) <= .5, (current, canonical)
         assert current['scene_signature'] == canonical['signature'], (current, canonical)
+    initial_apparent = apparent_spacing(data['initial_second'], reference)
+    assert abs(initial_apparent - initial) <= 1, (initial_apparent, initial)
     assert data['initial_top']['diagrams'][0]['visible'] is True, data['initial_top']
     assert data['initial_top']['diagrams'][1]['visible'] is False, data['initial_top']
     assert data['initial_second']['diagrams'][1]['visible'] is True, data['initial_second']
@@ -59,6 +67,7 @@ def check_toggle_spacing(data):
         snapshot = data[phase]
         spacing, current = toggle_spacing(snapshot)
         assert abs(spacing - initial) <= 1, (phase, spacing, initial, snapshot)
+        assert abs(apparent_spacing(snapshot, reference) - initial_apparent) <= 1, (phase, snapshot)
         assert abs(snapshot['document_height'] - data['initial_second']['document_height']) <= 1, (phase, snapshot)
         assert current[1]['frame_max_y'] <= snapshot['document_height'] + .5, (phase, current[1], snapshot)
         assert all(abs(row['scene_width'] - snapshot['content_width']) <= .5 for row in current), (phase, snapshot)
@@ -72,6 +81,8 @@ def check_toggle_spacing(data):
     _, resized_diagrams = toggle_spacing(resized)
     assert resized_diagrams[1]['frame_max_y'] <= resized['document_height'] + .5, resized
     return {'initial_spacing': initial, 'final_spacing': toggle_spacing(data['final_second'])[0],
+            'initial_apparent_spacing': initial_apparent,
+            'final_apparent_spacing': apparent_spacing(data['final_second'], reference),
             'restored_spacing': toggle_spacing(data['restored'])[0],
             'document_height': data['initial_second']['document_height'],
             'scene_heights': [row['scene_height'] for row in diagrams]}
