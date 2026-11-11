@@ -88,6 +88,48 @@ def check_toggle_spacing(data):
             'scene_heights': [row['scene_height'] for row in diagrams]}
 
 
+def check_narrow(data, target):
+    assert data['mode'] == 'diagram-narrow', data
+    assert data['target_width'] == target, data
+    assert data['real_keyboard'] and data['keyboard_access'] and data['activated'], data
+    assert data['event_tap'] == 'cghidEventTap' and len(data['key_events']) == 2, data
+    assert data['source_preserved'] and data['disk_matches_source'], data
+    assert data['view_rebuilt'], data
+    phases = {phase['phase']: phase for phase in data['phases']}
+    assert set(phases) == {'first_open', 'toggle_editing', 'toggle_return', 'scroll_reveal', 'widened', 'restored'}, phases
+    first = phases['first_open']
+    assert abs(first['content_width'] - target) <= .5, (first, target)
+    for name in ['first_open', 'toggle_editing', 'toggle_return', 'scroll_reveal', 'restored']:
+        phase = phases[name]
+        assert not phase['pending'], (name, phase)
+        assert phase['text_utf16'] > 0, (name, phase)
+        assert phase['blocks'] == 2 and phase['diagrams'] == 2, (name, phase)
+        assert len(phase['rows']) == 2, (name, phase)
+        for row in phase['rows']:
+            assert row['prepared'], (name, row)
+            assert row['scene_width'] > 0 and row['scene_height'] > 0, (name, row)
+            assert row['nodes'] > 0 and row['primitives'] > 0, (name, row)
+            assert abs(row['scene_width'] - phase['content_width']) <= .5, (name, row, phase)
+        for row in phase['rows'][:1]:
+            assert abs(row['scene_width'] - target) <= .5, (name, row, target)
+        if name in ['first_open', 'toggle_return', 'scroll_reveal', 'restored']:
+            assert abs(phase['content_width'] - target) <= .5, (name, phase)
+            assert phase['reading'] is True, (name, phase)
+    assert phases['toggle_editing']['reading'] is False, phases['toggle_editing']
+    assert phases['scroll_reveal']['rows'][1]['visible'] is True, phases['scroll_reveal']
+    widened = phases['widened']
+    assert widened['content_width'] > target + 100, widened
+    assert widened['blocks'] == 2 and widened['diagrams'] == 2 and not widened['pending'], widened
+    assert all(abs(row['scene_width'] - widened['content_width']) <= .5 for row in widened['rows']), widened
+    return {'target': target, 'content_width': first['content_width'],
+            'scroll_width': first['scroll_width'], 'diagrams': first['diagrams'],
+            'scene_widths': [row['scene_width'] for row in first['rows']],
+            'nodes': [row['nodes'] for row in first['rows']],
+            'toggle_return_content_width': phases['toggle_return']['content_width'],
+            'widened_content_width': widened['content_width'],
+            'document_height': first['document_height']}
+
+
 def check_inline_table(data):
     cells = data['table_cells']
     assert [cell['text'] for cell in cells] == [
@@ -112,7 +154,7 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/reading-view')
     parser.add_argument('--cpu-only', action='store_true')
     parser.add_argument('--screenshots-only', action='store_true')
-    parser.add_argument('--checks', choices=['all', 'switching', 'toggle-spacing', 'performance', 'external'],
+    parser.add_argument('--checks', choices=['all', 'switching', 'toggle-spacing', 'narrow', 'performance', 'external'],
                         default='all')
     args = parser.parse_args()
     output = args.output.resolve()
@@ -156,6 +198,21 @@ def main():
             assert switched['correct_blocks'] == switched['visible_blocks'] == 200, switched
             assert switched['retained_old_resources'] == 0, switched
         if args.checks == 'switching':
+            return
+        if args.checks in ['all', 'narrow']:
+            rounds = []
+            for target in [120, 150]:
+                name = f'narrow-{target}'
+                data = run(base / name, output, name, sample, '参考/双图间距.md', 'diagram-narrow',
+                           extra=[f'--narrow-width={target}'])
+                rounds.append({'target': target, 'data': data})
+            report = {'targets': [round_['target'] for round_ in rounds],
+                      'rounds': [round_['data'] for round_ in rounds]}
+            (output / 'narrow.json').write_text(json.dumps(report, indent=2) + '\n')
+            report['rounds'] = [check_narrow(round_['data'], round_['target']) for round_ in rounds]
+            (output / 'narrow-summary.json').write_text(json.dumps(report, indent=2) + '\n')
+            print('narrow', json.dumps(report), flush=True)
+        if args.checks == 'narrow':
             return
         if args.checks in ['all', 'toggle-spacing']:
             rounds = []

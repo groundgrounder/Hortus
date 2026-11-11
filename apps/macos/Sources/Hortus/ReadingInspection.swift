@@ -55,7 +55,7 @@ enum ReadingInspection {
                 || (reference?.editingCoordinator?.document != nil)
         }.count
     }
-    static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
+    static func run(workspace: Workspace, layout: Layout?, arguments: [String]) async throws -> [String: Any] {
         guard let document = workspace.current?.document, let path = workspace.selected else { throw CocoaError(.coderValueNotFound) }
         let mode = arguments.first { $0.hasPrefix("--reading-check=") }.map { String($0.dropFirst("--reading-check=".count)) } ?? "visual"
         if mode == "math-memory" {
@@ -66,6 +66,10 @@ enum ReadingInspection {
         let source = try await document.io.perform { try $0.snapshot().text }
         if mode == "diagram-toggle-spacing" {
             return try await diagramToggleSpacing(document: document, view: view, source: source, path: path)
+        }
+        if mode == "diagram-narrow" {
+            return try await diagramNarrow(workspace: workspace, layout: layout, document: document, view: view,
+                                           source: source, path: path, arguments: arguments)
         }
         var result: [String: Any] = ["reading": view.isReading, "textkit2": view.textLayoutManager != nil,
             "utf8_bytes": source.utf8.count, "open_ms": (openedAt - workspace.noteOpenStartedAt) * 1000,
@@ -368,6 +372,184 @@ enum ReadingInspection {
             "scroll_return_again": scrollReturnAgain,
             "resized": resized,
             "restored": restored,
+        ]
+    }
+
+    /// 真实窄宽度回归：用真实面板宽度把正文压到指定的 layoutContentWidth，
+    /// 重新打开笔记后检查首次渲染、⌘E 往返、滚动和窗口改宽。失败时返回测量值，不提前抛错。
+    private static func diagramNarrow(workspace: Workspace, layout: Layout?, document: NoteDocument,
+                                      view: DiagramTextView, source: String, path: String,
+                                      arguments: [String]) async throws -> [String: Any] {
+        guard document.reading, view.isReading, let window = view.window else { throw CocoaError(.coderValueNotFound) }
+        guard let layout else { throw CocoaError(.coderValueNotFound) }
+        guard let targetArgument = arguments.first(where: { $0.hasPrefix("--narrow-width=") }),
+              let target = Double(targetArgument.dropFirst("--narrow-width=".count)),
+              [120.0, 150.0].contains(target) else { throw CocoaError(.coderInvalidValue) }
+        let access = CGPreflightPostEventAccess()
+        guard access else {
+            throw NSError(domain: "ReadingInspection", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "真实窄宽度检查需要 Accessibility 键盘事件权限"])
+        }
+        let activated = await activateInspectionWindow(window)
+        guard activated else {
+            throw NSError(domain: "ReadingInspection", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "窗口未取得键盘焦点，无法发送真实 ⌘E"])
+        }
+        let originalLeft = layout.size[.left]
+        let originalRightVisible = layout.visible[.right]
+        let originalFrame = window.frame
+        defer {
+            layout.size[.left] = originalLeft
+            layout.visible[.right] = originalRightVisible
+            window.setFrame(originalFrame, display: true)
+        }
+        let layoutState = try await applyNarrowLayout(layout: layout, document: document, target: target)
+        let alt = arguments.first { $0.hasPrefix("--narrow-alt=") }
+            .map { String($0.dropFirst("--narrow-alt=".count)) } ?? "欢迎.md"
+
+        // 先在窄布局下离开笔记再回来，得到真正首次挂载在该宽度上的阅读表面。
+        workspace.openNote(alt)
+        for _ in 0..<400 {
+            if workspace.selected == alt, workspace.current?.document != nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        workspace.openNote(path)
+        let firstOpen = await waitForNarrow(document: document, reading: true, templates: 2, timeout: 5)
+        guard let firstView = firstOpen else { throw CocoaError(.coderValueNotFound) }
+        let first = narrowSnapshot(firstView, document: document, phase: "first_open", target: target,
+                                   widthState: layoutState)
+
+        let enterKey = try await pressCommandE()
+        let editing = await waitForNarrow(document: document, reading: false, templates: nil, timeout: 5)
+        guard let editingView = editing else { throw CocoaError(.coderValueNotFound) }
+        let editingState = narrowSnapshot(editingView, document: document, phase: "toggle_editing", target: target,
+                                          widthState: layoutState)
+        let leaveKey = try await pressCommandE()
+        let returned = await waitForNarrow(document: document, reading: true, templates: 2, timeout: 5)
+        guard let returnView = returned else { throw CocoaError(.coderValueNotFound) }
+        let returnedState = narrowSnapshot(returnView, document: document, phase: "toggle_return", target: target,
+                                           widthState: layoutState)
+
+        if returnView.blocks.contains(where: { $0.ordinal == 2 }) {
+            try await revealDiagram(returnView, ordinal: 2)
+        }
+        let revealed = narrowSnapshot(returnView, document: document, phase: "scroll_reveal", target: target,
+                                      widthState: layoutState)
+        try await scrollToTop(returnView)
+
+        window.setFrame(NSRect(x: originalFrame.minX, y: originalFrame.minY,
+                               width: originalFrame.width + 180, height: originalFrame.height), display: true)
+        let widened = await waitForNarrow(document: document, reading: true, templates: 2, timeout: 5)
+        guard let widenedView = widened else { throw CocoaError(.coderValueNotFound) }
+        let widenedState = narrowSnapshot(widenedView, document: document, phase: "widened", target: target,
+                                          widthState: layoutState)
+        window.setFrame(originalFrame, display: true)
+        let restored = await waitForNarrow(document: document, reading: true, templates: 2, timeout: 5)
+        guard let restoredView = restored else { throw CocoaError(.coderValueNotFound) }
+        let restoredState = narrowSnapshot(restoredView, document: document, phase: "restored", target: target,
+                                           widthState: layoutState)
+
+        let disk = try await document.io.perform { try $0.snapshot().text }
+        let firstViewID = String(describing: ObjectIdentifier(firstView))
+        return [
+            "mode": "diagram-narrow",
+            "target_width": target,
+            "keyboard_access": access,
+            "activated": activated,
+            "event_tap": "cghidEventTap",
+            "key_events": [enterKey, leaveKey],
+            "real_keyboard": true,
+            "layout": layoutState,
+            "first_view": firstViewID,
+            "final_view": String(describing: ObjectIdentifier(restoredView)),
+            "view_rebuilt": firstViewID != String(describing: ObjectIdentifier(restoredView)),
+            "source_preserved": disk == source && document.text == source,
+            "disk_matches_source": disk == source,
+            "phases": [first, editingState, returnedState, revealed, widenedState, restoredState],
+        ]
+    }
+
+    private static func applyNarrowLayout(layout: Layout, document: NoteDocument,
+                                          target: Double) async throws -> [String: Any] {
+        guard let window = DiagramInspection.current(document: document)?.window else { throw CocoaError(.coderValueNotFound) }
+        layout.visible[.left] = true
+        layout.visible[.right] = true
+        let contentWidth = window.contentView?.bounds.width ?? window.frame.width
+        let desiredScroll = CGFloat(target < 135 ? 140 : target + 60)
+        let right = layout.size[.right] ?? 250
+        layout.size[.left] = max(0, contentWidth - right - 32 - desiredScroll)
+        var measured = 0.0
+        var scrollWidth = 0.0
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(50))
+            guard let view = DiagramInspection.current(document: document) else { continue }
+            measured = Double(view.layoutContentWidth)
+            let currentScroll = view.enclosingScrollView?.bounds.width ?? 0
+            scrollWidth = Double(currentScroll)
+            if abs(measured - target) <= 0.5 { break }
+            // layoutContentWidth 与面板宽度反向同步；滚动条占位变化由下一步实测修正。
+            layout.size[.left] = max(0, (layout.size[.left] ?? 0) + CGFloat(measured - target))
+        }
+        return ["target": target, "measured": measured, "scroll_width": scrollWidth,
+                "left": Double(layout.size[.left] ?? 0), "right": Double(right),
+                "window_content_width": Double(contentWidth)]
+    }
+
+    /// 有界等待：基线被门控拦住时返回最后的视图，由快照记录未渲染状态。
+    private static func waitForNarrow(document: NoteDocument, reading: Bool, templates: Int?,
+                                      timeout: Double) async -> DiagramTextView? {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        var last: DiagramTextView?
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if let view = DiagramInspection.current(document: document), view.isReading == reading {
+                last = view
+                let rendered = view.blocks.filter { $0.prepared != nil }
+                let complete = !view.diagramPending && view.readingCoordinator?.pending == false
+                    && view.readingCoordinator?.model?.revision == document.revision
+                    && (templates.map { view.blocks.count == $0 && rendered.count == $0 } ?? true)
+                    && view.diagramViews.count >= rendered.count
+                if complete { return view }
+            }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return last
+    }
+
+    private static func narrowSnapshot(_ view: DiagramTextView, document: NoteDocument, phase: String,
+                                       target: Double, widthState: [String: Any]) -> [String: Any] {
+        view.layoutSubtreeIfNeeded()
+        let rows = view.blocks.sorted { $0.ordinal < $1.ordinal }.map { block -> [String: Any] in
+            let diagram = view.diagramViews[block.ordinal]
+            let frame = diagram?.frame ?? .zero
+            let visible = view.visibleRect.intersection(frame)
+            return [
+                "ordinal": Int(block.ordinal),
+                "prepared": block.prepared != nil,
+                "scene_width": block.prepared.map { Double($0.scene.width) } ?? 0,
+                "scene_height": block.prepared.map { Double($0.scene.height) } ?? 0,
+                "nodes": block.prepared?.scene.hitRegions.count ?? 0,
+                "primitives": block.prepared?.scene.primitives.count ?? 0,
+                "frame": ["x": Double(frame.minX), "y": Double(frame.minY),
+                          "width": Double(frame.width), "height": Double(frame.height)],
+                "visible": !(diagram?.isHidden ?? true) && !visible.isNull && visible.height > 0.5,
+            ]
+        }
+        return [
+            "phase": phase,
+            "target_width": target,
+            "content_width": Double(view.layoutContentWidth),
+            "scroll_width": Double(view.enclosingScrollView?.bounds.width ?? 0),
+            "window_width": Double(view.window?.frame.width ?? 0),
+            "document_height": Double(view.frame.height),
+            "text_utf16": view.textStorage?.length ?? 0,
+            "model_revision": (view.readingCoordinator?.model).map { Double($0.revision) } ?? -1,
+            "document_revision": Double(document.revision),
+            "pending": view.diagramPending || view.readingCoordinator?.pending == true,
+            "reading": view.isReading,
+            "blocks": view.blocks.count,
+            "diagrams": view.diagramViews.count,
+            "rows": rows,
+            "layout": widthState,
         ]
     }
 

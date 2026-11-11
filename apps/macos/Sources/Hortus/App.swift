@@ -458,7 +458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             if let arg = args.first(where: { $0.hasPrefix("--reading-inspection=") }) {
-                let result = try await ReadingInspection.run(workspace: workspace, arguments: args)
+                let result = try await ReadingInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
                 let path = String(arg.dropFirst("--reading-inspection=".count))
                 try await Task.detached { try data.write(to: URL(fileURLWithPath: path)) }.value
