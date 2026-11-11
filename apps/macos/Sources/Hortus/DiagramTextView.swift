@@ -19,6 +19,8 @@ final class DiagramScrollView: NSScrollView {
             ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
         return max(120, bounds.width - reserved)
     }
+    /// 未排布时 bounds 为零；120 只是稳定下限，不能当作布局就绪信号。
+    var hasSettledWidth: Bool { bounds.width > 0.5 }
 
     override func tile() {
         super.tile()
@@ -353,8 +355,7 @@ struct NoteText: NSViewRepresentable {
         func schedule(force: Bool = false, debounce: Bool = false) {
             guard let input, let view, !loading, !view.compositionActive else { return }
             let width = view.layoutContentWidth
-            // 新表面挂载时滚动视图尚未排布，120 是临时下限；等真实宽度到达再排图。
-            guard width > 180 else { return }
+            guard view.hasSettledContentWidth else { return }
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             guard force || abs(width - lastWidth) > 0.25 || dark != lastDark else { return }
             view.layoutRefreshCount += 1
@@ -697,6 +698,11 @@ final class DiagramTextView: NSTextView {
     var layoutContentWidth: CGFloat {
         let available = (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? bounds.width
         return max(120, available - textContainerInset.width * 2)
+    }
+    /// 滚动容器和正文都完成排布后才排图；真实窄宽度同样满足，不会永久等待。
+    var hasSettledContentWidth: Bool {
+        guard bounds.width > 0.5 else { return false }
+        return (enclosingScrollView as? DiagramScrollView)?.hasSettledWidth ?? true
     }
     var formulaTooltips: [NSView.ToolTipTag: String] = [:]
     var mathViews: [MathBlockView] = [] { didSet { mathParagraphs.removeAll(keepingCapacity: true) } }

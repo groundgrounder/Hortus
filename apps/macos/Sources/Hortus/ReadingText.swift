@@ -296,7 +296,7 @@ struct ReadingText: NSViewRepresentable {
                 input.remember(ordinal, rendered[index].collapsed.sorted()); refresh(force: true)
             }
             if (changed || model?.revision != input.document.revision || size != input.fontSize),
-               view.window != nil, view.bounds.width > 180 { refresh() }
+               view.window != nil, view.hasSettledContentWidth { refresh() }
         }
         func detach() {
             generation += 1; task?.cancel(); task = nil
@@ -323,8 +323,7 @@ struct ReadingText: NSViewRepresentable {
         func refresh(force: Bool = false) {
             guard let input, let view else { return }
             let width = view.layoutContentWidth
-            // 新表面挂载时滚动视图尚未排布，120 是临时下限；此时排图会把窄宽度场景留给下一次复用。
-            guard width > 180 else { return }
+            guard view.hasSettledContentWidth else { return }
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             if force { forcedGeneration &+= 1 }
             let key = RefreshKey(revision: input.document.revision, width: width, dark: dark,
@@ -689,7 +688,7 @@ struct ReadingText: NSViewRepresentable {
         }
         func didMoveToWindow() {
             guard let view, view.window != nil else { return }
-            if model == nil, view.bounds.width > 180 {
+            if model == nil, view.hasSettledContentWidth {
                 refresh()
                 return
             }
