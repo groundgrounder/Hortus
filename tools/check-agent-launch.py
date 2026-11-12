@@ -476,13 +476,36 @@ def main():
             })
         lockout['unwritable'] = '3/3'
 
-        # 源条目不可读、特殊文件、复制期间源变化。
-        def prepare_unreadable(vault):
-            (vault / 'locked.md').write_text('x')
-            (vault / 'locked.md').chmod(0)
+        # 源文件不可读：默认 clonefile 与强制完整复制都必须整体失败。
+        for path_name, env_extra in [('clonefile', None), ('copy', {'HORTUS_HISTORY_COPY': 'copy'})]:
+            for round_index in range(args.rounds):
+                case = base / f'lock-unreadable-{path_name}-{round_index}'
+                vault = case / 'vault'
+                vault.mkdir(parents=True)
+                (vault / 'note.md').write_text('# Note\n')
+                locked = vault / 'locked.md'
+                locked.write_text('secret\n')
+                locked.chmod(0)
+                write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=30'])
+                try:
+                    data, _ = run_app(case, vault, 'fail', env_extra=env_extra)
+                finally:
+                    locked.chmod(0o600)
+                assert data.get('failure'), (path_name, data)
+                assert 'cannot be read' in data['failure'], (path_name, data)
+                assert not any((case / 'scratch').rglob('*')), (path_name, list((case / 'scratch').rglob('*')))
+                assert data['shell_alive'], path_name
+                assert data['sessions'] and data['sessions'][0]['state'] == 'failed', (path_name, data)
+                details.setdefault('lockout', {}).setdefault(f'unreadable-{path_name}', []).append({
+                    'failure': data.get('failure', ''),
+                    'sessions': data['sessions'],
+                    'scratch_empty': not any((case / 'scratch').rglob('*')),
+                    'shell_alive': data['shell_alive'],
+                })
+            lockout[f'unreadable-{path_name}'] = '3/3'
 
+        # 特殊文件、复制期间源变化。
         for name, prepare, writer in [
-            ('unreadable', prepare_unreadable, None),
             ('special', lambda vault: subprocess.run(['mkfifo', str(vault / 'pipe')], check=True), None),
             ('source-change', lambda vault: (vault / 'growing.md').write_text('start\n'),
              lambda vault: schedule_writer(vault / 'growing.md')),
@@ -499,8 +522,7 @@ def main():
                 prepare(vault)
                 write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=30'])
                 background = writer(vault) if writer else None
-                # 读取失败与源变化需要逐字节复制；clonefile 不读内容，不会暴露读取错误。
-                extra = {'HORTUS_HISTORY_COPY': 'copy'} if name in ('unreadable', 'source-change') else None
+                extra = {'HORTUS_HISTORY_COPY': 'copy'} if name == 'source-change' else None
                 try:
                     data, _ = run_app(case, vault, 'fail', env_extra=extra)
                 finally:
@@ -510,8 +532,6 @@ def main():
                 assert data.get('failure'), (name, data)
                 assert not any((case / 'scratch').rglob('*')), (name, list((case / 'scratch').rglob('*')))
                 assert data['shell_alive'], name
-                if name == 'unreadable':
-                    (vault / 'locked.md').chmod(0o600)
                 details.setdefault('lockout', {}).setdefault(name, []).append({
                     'failure': data.get('failure', ''),
                     'sessions': data['sessions'],

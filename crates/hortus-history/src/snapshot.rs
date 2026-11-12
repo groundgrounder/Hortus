@@ -114,6 +114,19 @@ fn modified_ms(seconds: i64, nanos: i64) -> Option<i64> {
 pub(crate) static TEST_AFTER_ENTRY: std::sync::Mutex<Option<fn(&Path)>> =
     std::sync::Mutex::new(None);
 
+fn ensure_readable(path: &Path) -> io::Result<()> {
+    match fs::File::open(path) {
+        Ok(file) => {
+            drop(file);
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            Err(io::Error::other("history.source_unreadable"))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn check_cancel(cancel: Option<&AtomicBool>) -> io::Result<()> {
     match cancel {
         Some(flag) if flag.load(Ordering::Acquire) => Err(io::Error::new(
@@ -158,6 +171,9 @@ pub fn create(
         match entry.kind {
             Kind::Directory => platform::create_directory(&destination_path)?,
             Kind::File => {
+                // clonefile 只复制元数据与数据块，不读取内容；先显式验证源文件可读，
+                // 让 clone 与完整复制在“源条目读取失败”时行为一致。
+                ensure_readable(&source_path)?;
                 let (mut cloned, mut copied) = (0, 0);
                 platform::copy_file(
                     &source_path,

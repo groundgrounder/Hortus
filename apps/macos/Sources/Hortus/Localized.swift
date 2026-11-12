@@ -96,6 +96,8 @@ enum L10n {
             return string("Unable to read agent-guide.md")
         case "history.source_changed", "history.unsupported_entry":
             return string("The snapshot could not be completed because the folder changed")
+        case "history.source_unreadable":
+            return string("The folder contains a file that cannot be read")
         case "history.destination_exists":
             return string("The snapshot destination already exists")
         case "history.invalid_metadata", "history.invalid_session", "history.invalid_state":

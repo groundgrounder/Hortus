@@ -143,10 +143,7 @@ impl HistoryStore {
     /// 迟到的完成结果不会变成可启动会话。
     pub fn begin(&self, vault: &Path, cancel: Option<&AtomicBool>) -> io::Result<SessionRecord> {
         fs::create_dir_all(self.sessions_directory())?;
-        fs::set_permissions(
-            self.sessions_directory(),
-            fs::Permissions::from_mode(0o700),
-        )?;
+        fs::set_permissions(self.sessions_directory(), fs::Permissions::from_mode(0o700))?;
         let vault = fs::canonicalize(vault)?;
         let id = new_session_id()?;
         let directory = self.session_directory(&id)?;

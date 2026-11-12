@@ -282,3 +282,20 @@ fn custom_metadata_survives_the_copy() {
     assert_eq!(source_birth, destination.st_birthtime());
     assert!(SystemTime::now() > UNIX_EPOCH + Duration::from_secs(source.mtime() as u64));
 }
+
+#[test]
+fn unreadable_source_fails_the_snapshot_on_the_default_path() {
+    let root = fixture();
+    let vault = root.path().join("vault");
+    let locked = vault.join("locked.md");
+    fs::write(&locked, "secret\n").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let store = HistoryStore::new(root.path().join("data"));
+    let error = store.begin(&vault, None).unwrap_err();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(error.to_string(), "history.source_unreadable");
+    let sessions = store.list(None).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].state, SessionState::Failed);
+    assert!(!sessions[0].state.usable());
+}

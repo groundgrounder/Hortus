@@ -171,7 +171,8 @@
     "The snapshot destination already exists" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "The snapshot destination already exists"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "快照目标已存在"}}}},
     "The snapshot could not be written" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "The snapshot could not be written"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "无法写入快照"}}}},
     "The session metadata is invalid" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "The session metadata is invalid"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "会话元数据无效"}}}},
-    "Unable to complete the snapshot" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Unable to complete the snapshot"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "无法完成快照"}}}}
+    "Unable to complete the snapshot" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Unable to complete the snapshot"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "无法完成快照"}}}},
+    "The folder contains a file that cannot be read" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "The folder contains a file that cannot be read"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "库中有无法读取的文件，快照未完成"}}}}
   },
   "version" : "1.0"
 }
