@@ -34,6 +34,8 @@ struct WindowState: Codable, Equatable, Sendable {
     var views: [String: String]
     var frame: WindowFrame?
     var visible: [String: Bool]? = nil
+    /// 每窗口工具布局；终端只以占位符记录位置，UUID 不落盘。
+    var layout: LayoutState? = nil
 }
 
 struct SessionState: Codable, Sendable {

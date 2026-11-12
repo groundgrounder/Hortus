@@ -18,7 +18,7 @@ enum AgentPhase: Equatable {
 
 @Observable @MainActor
 final class TerminalTab: Identifiable {
-    let id = UUID()
+    let id: UUID
     let kind: TerminalTabKind
     let session: TerminalSession
     var title: String
@@ -27,62 +27,71 @@ final class TerminalTab: Identifiable {
     /// 每次启动递增；迟到的快照回调据此失效。
     var generation = 0
 
-    init(kind: TerminalTabKind, title: String) {
+    init(id: UUID = UUID(), kind: TerminalTabKind, title: String) {
+        self.id = id
         self.kind = kind
         self.title = title
         session = TerminalSession(kind: kind == .agent ? .agent : .shell)
     }
 }
 
-/// 每个窗口唯一的终端标签控制器：拥有有序标签、选中项和全部会话的生命周期。
+/// 每个窗口唯一的终端会话控制器：只按稳定 UUID 持有会话和进程。
+/// 工具标签的顺序与选中状态在 `Layout`，这里不再保存第二份标签真相。
 @Observable @MainActor
 final class TerminalController {
-    private(set) var tabs: [TerminalTab] = []
-    var selectedID: UUID?
+    private(set) var tabs: [UUID: TerminalTab] = [:]
+    private(set) var creationOrder: [UUID] = []
     weak var workspace: Workspace?
     private(set) var root: String?
     private var fontSize = 15.0
     private var shuttingDown = false
+    private var shellCount = 0
+    private var agentCount = 0
     #if DEBUG
     @ObservationIgnored var gateDelayForInspection = 0.0
     #endif
 
+    func tab(_ id: UUID) -> TerminalTab? { tabs[id] }
+
+    /// 当前终端由布局的选中状态决定；静态工具选中时回落到最后使用的终端。
     var current: TerminalTab? {
-        tabs.first { $0.id == selectedID } ?? tabs.last
+        guard let id = workspace?.layout?.currentTerminalID else { return nil }
+        return tabs[id]
     }
 
     var currentSession: TerminalSession? { current?.session }
 
-    var shellTabs: [TerminalTab] { tabs.filter { $0.kind == .shell } }
+    var allTabs: [TerminalTab] { creationOrder.compactMap { tabs[$0] } }
 
-    // MARK: 库与窗口生命周期
+    var shellTabs: [TerminalTab] { allTabs.filter { $0.kind == .shell } }
 
-    /// 换库或关闭库：覆盖该窗口全部标签，其它窗口不受影响。
+    // MARK: 库与窗口的建立和关闭
+
+    /// 换库或关闭库：覆盖该窗口全部会话，其它窗口不受影响。
+    /// 终端工具本身由 `Workspace` 在根目录确定后重建。
     func setRootAndWait(_ newRoot: String?) async {
         if root == newRoot, !tabs.isEmpty { return }
         await stopAll()
         root = newRoot
-        tabs.removeAll()
-        selectedID = nil
-        if let newRoot { addShellTab(root: newRoot) }
+        shellCount = 0
+        agentCount = 0
     }
 
-    /// 新窗口在第一次关闭可能插入前建立唯一的普通 shell 标签。
+    /// 新窗口在第一次关闭可能插入前建立根目录；会话在布局工具就位后创建。
     func setInitialRoot(_ newRoot: String) {
         guard root == nil else { return }
         root = newRoot
-        if tabs.isEmpty { addShellTab(root: newRoot) }
     }
 
     func update(fontSize: Double) {
         self.fontSize = fontSize
-        for tab in tabs { tab.session.update(fontSize: fontSize) }
+        for tab in tabs.values { tab.session.update(fontSize: fontSize) }
     }
 
     /// 退出流程不等待快照；只回收已有进程组。
     func stopForShutdown(completion: @escaping @Sendable () -> Void) {
         shuttingDown = true
-        for tab in tabs {
+        for tab in tabs.values {
             tab.generation += 1
             // 快照完成但还没 exec 的会话在退出时立即作废；不让迟到的回调启动 Agent。
             if tab.kind == .agent, neverStarted(tab) {
@@ -90,7 +99,7 @@ final class TerminalController {
             }
         }
         let group = DispatchGroup()
-        for tab in tabs {
+        for tab in tabs.values {
             group.enter()
             tab.session.stopForShutdown { group.leave() }
         }
@@ -99,9 +108,9 @@ final class TerminalController {
     }
 
     private func stopAll() async {
-        let previous = tabs
+        let previous = allTabs
         tabs.removeAll()
-        selectedID = nil
+        creationOrder.removeAll()
         for tab in previous {
             tab.generation += 1
             if tab.kind == .agent, neverStarted(tab) {
@@ -111,78 +120,109 @@ final class TerminalController {
         }
     }
 
-    // MARK: 标签操作
+    // MARK: 会话创建与关闭
 
     @discardableResult
-    func newShellTab() -> TerminalTab? {
+    func createShell() -> TerminalTab? {
         guard let root else { return nil }
-        let tab = addShellTab(root: root)
-        selectedID = tab.id
-        focusCurrentSoon()
+        let tab = makeTab(kind: .shell, title: nextTitle(for: .shell))
+        tab.session.setInitialRoot(root)
         return tab
     }
 
     @discardableResult
-    private func addShellTab(root: String) -> TerminalTab {
-        let tab = TerminalTab(kind: .shell, title: nextTitle(for: .shell))
+    func createAgent() -> TerminalTab? {
+        guard let root else { return nil }
+        let tab = makeTab(kind: .agent, title: nextTitle(for: .agent))
+        tab.session.setInitialRoot(root)
+        return tab
+    }
+
+    /// 恢复或迁移时按布局里的 UUID 建立普通 Shell，不新造标签。
+    @discardableResult
+    func adopt(id: UUID, kind: TerminalTabKind = .shell, root: String) -> TerminalTab? {
+        guard self.root == root else { return nil }
+        if let existing = tabs[id] { return existing }
+        let tab = TerminalTab(id: id, kind: kind, title: nextTitle(for: kind))
         configure(tab)
         tab.session.setInitialRoot(root)
-        tabs.append(tab)
-        if selectedID == nil { selectedID = tab.id }
+        tabs[id] = tab
+        creationOrder.append(id)
         return tab
+    }
+
+    private func makeTab(kind: TerminalTabKind, title: String) -> TerminalTab {
+        let tab = TerminalTab(kind: kind, title: title)
+        configure(tab)
+        tabs[tab.id] = tab
+        creationOrder.append(tab.id)
+        return tab
+    }
+
+    /// 停掉布局里已经不存在的会话；由窗口在布局变化后调用。
+    func trim(to keep: Set<UUID>) async {
+        for id in creationOrder where !keep.contains(id) {
+            await stopAndRemove(id)
+        }
+    }
+
+    // MARK: 命令
+
+    @discardableResult
+    func newShellTab() -> TerminalTab? {
+        guard let workspace else { return nil }
+        return workspace.addShell(to: workspace.layout?.defaultTerminalGroupID)
     }
 
     @discardableResult
     func newAgentTab() -> TerminalTab? {
-        guard let root else { return nil }
-        let tab = TerminalTab(kind: .agent, title: nextTitle(for: .agent))
-        configure(tab)
-        tab.session.setInitialRoot(root)
-        tabs.append(tab)
-        selectedID = tab.id
-        launchAgent(tab)
-        focusCurrentSoon()
-        return tab
+        guard let workspace else { return nil }
+        return workspace.addAgent(to: workspace.layout?.defaultTerminalGroupID)
     }
 
     func select(_ tab: TerminalTab) {
-        guard tabs.contains(where: { $0 === tab }) else { return }
-        selectedID = tab.id
-        focusCurrentSoon()
+        guard tabs[tab.id] === tab else { return }
+        workspace?.layout?.reveal(.terminal(tab.id))
+        focusSoon()
     }
 
     func close(_ tab: TerminalTab) async {
-        guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        guard tabs[tab.id] === tab else { return }
+        if let workspace {
+            await workspace.closeTerminal(tab.id)
+        } else {
+            await stopAndRemove(tab.id)
+        }
+    }
+
+    /// 只终止指定实例的进程组；布局项由调用方移除。
+    func stopAndRemove(_ id: UUID) async {
+        guard let tab = tabs[id] else { return }
         tab.generation += 1
         if tab.kind == .agent, neverStarted(tab) {
             mark(tab.agentSessionID, "cancelled", nil)
         }
-        tabs.remove(at: index)
-        if selectedID == tab.id {
-            selectedID = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].id
-        }
+        tabs.removeValue(forKey: id)
+        creationOrder.removeAll { $0 == id }
         await tab.session.stopAndWait()
-        focusCurrentSoon()
     }
 
     /// Agent 重新启动总是新会话 ID 与新快照，不复用旧基线。
     func restart(_ tab: TerminalTab) {
-        guard tab.kind == .agent, tabs.contains(where: { $0 === tab }) else { return }
+        guard tab.kind == .agent, tabs[tab.id] === tab else { return }
         tab.generation += 1
         tab.agentPhase = .preparing
         tab.agentSessionID = nil
         Task { [weak self, weak tab] in
             guard let tab else { return }
             await tab.session.stopAndWait()
-            guard let self, self.tabs.contains(where: { $0 === tab }), !self.shuttingDown else { return }
+            guard let self, self.tabs[tab.id] === tab, !self.shuttingDown else { return }
             self.launchAgent(tab)
         }
     }
 
     func focus() {
-        guard let view = currentSession?.inspectionView, let window = view.window else {
-            return
-        }
+        guard let view = currentSession?.inspectionView, let window = view.window else { return }
         window.makeFirstResponder(view)
         UndoMenuState.scheduleRefresh()
     }
@@ -191,7 +231,18 @@ final class TerminalController {
         currentSession?.clearScreen()
     }
 
+    func focusSoon() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(20))
+            self?.focus()
+        }
+    }
+
     // MARK: Agent 启动闸门
+
+    func start(_ tab: TerminalTab) {
+        launchAgent(tab)
+    }
 
     /// 固定顺序：模板与可执行文件 → 后台完整快照并发布元数据 → 复核标签/库根/代次 → exec。
     private func launchAgent(_ tab: TerminalTab) {
@@ -251,7 +302,7 @@ final class TerminalController {
 
     private func valid(_ tab: TerminalTab, _ generation: Int, root: String) -> Bool {
         !shuttingDown
-            && tabs.contains(where: { $0 === tab })
+            && tabs[tab.id] === tab
             && tab.generation == generation
             && workspace?.root == root
     }
@@ -283,17 +334,15 @@ final class TerminalController {
         }
     }
 
-    private func focusCurrentSoon() {
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(20))
-            self?.focus()
-        }
-    }
-
     private func nextTitle(for kind: TerminalTabKind) -> String {
-        let count = tabs.filter { $0.kind == kind }.count
-        let base = kind == .shell ? L10n.string("Shell") : L10n.string("Agent")
-        return count == 0 ? base : "\(base) \(count + 1)"
+        switch kind {
+        case .shell:
+            shellCount += 1
+            return shellCount == 1 ? L10n.string("Shell") : "\(L10n.string("Shell")) \(shellCount)"
+        case .agent:
+            agentCount += 1
+            return agentCount == 1 ? L10n.string("Agent") : "\(L10n.string("Agent")) \(agentCount)"
+        }
     }
 }
 
@@ -301,12 +350,23 @@ final class TerminalController {
 extension TerminalController {
     /// 自检读取真实标签状态；生产可执行文件不包含这些字段。
     func inspectionTabStates() -> [[String: Any]] {
-        tabs.enumerated().map { index, tab in
+        var ordered: [TerminalTab] = []
+        if let layout = workspace?.layout {
+            for id in layout.terminalIDs {
+                if let tab = tabs[id] { ordered.append(tab) }
+            }
+        }
+        for tab in allTabs where !ordered.contains(where: { $0.id == tab.id }) { ordered.append(tab) }
+        return ordered.enumerated().map { index, tab in
+            let selected = workspace?.layout?.groups.values.flatMap { $0 }.contains {
+                $0.selected == .terminal(tab.id)
+            } ?? false
             var state: [String: Any] = [
                 "index": index,
+                "id": tab.id.uuidString,
                 "kind": tab.kind == .shell ? "shell" : "agent",
                 "title": tab.title,
-                "selected": tab.id == selectedID,
+                "selected": selected,
                 "pid": Int(tab.session.inspectionShellPid),
                 "session_state": String(describing: tab.session.state),
                 "generation": tab.generation,

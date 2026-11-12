@@ -2,10 +2,29 @@ import SwiftUI
 
 struct PanelContent: View {
     @Environment(Workspace.self) private var workspace
-    let kind: ViewKind
+    let tool: ToolID
 
     var body: some View {
-        if kind == .files {
+        switch tool {
+        case .tool(.files):
+            files
+        case .tool(.search):
+            SearchPanel()
+        case .tool(.outline):
+            OutlinePanel()
+        case .terminal(let id):
+            if let tab = workspace.terminals.tab(id) {
+                TerminalPanel(tab: tab, fontSize: workspace.fontSize)
+            } else {
+                terminalEmptyState
+            }
+        case .legacy:
+            EmptyView()
+        }
+    }
+
+    private var files: some View {
+        Group {
             if workspace.root != nil {
                 VStack(spacing: 0) {
                     HStack {
@@ -27,19 +46,17 @@ struct PanelContent: View {
                     Button("Open Knowledge Base…") { workspace.chooseFolder() }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        } else if kind == .search {
-            SearchPanel()
-        } else if kind == .outline {
-            OutlinePanel()
-        } else if kind == .terminal {
-            TerminalPanel(controller: workspace.terminals, fontSize: workspace.fontSize)
-        } else {
-            VStack(spacing: 8) {
-                Image(systemName: kind.symbol).font(.title2).foregroundStyle(.tertiary)
-                Text("Not available yet").font(.callout).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityLabel(L10n.string("%@, not available yet", kind.title))
         }
+    }
+
+    private var terminalEmptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "terminal").font(.title2).foregroundStyle(.tertiary)
+            Text(L10n.string("Open a knowledge base to use the terminal"))
+                .font(.callout).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(L10n.string("Open a knowledge base to use the terminal"))
     }
 }

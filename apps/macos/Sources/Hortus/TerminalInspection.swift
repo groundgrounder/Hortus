@@ -44,15 +44,14 @@ enum TerminalInspection {
 
     /// 打开终端，等当前 shell 标签起来。
     @discardableResult
-    private static func showTerminal(workspace: Workspace, layout: Layout) async throws -> TerminalSession {
-        layout.setTerminalVisible(true)
-        if workspace.terminals.currentSession == nil { workspace.terminals.newShellTab() }
-        guard let session = workspace.terminals.currentSession else { throw CocoaError(.coderValueNotFound) }
+    private static func showTerminal(workspace: Workspace) async throws -> TerminalSession {
+        workspace.showTerminal()
+        guard let session = workspace.currentTerminalSession else { throw CocoaError(.coderValueNotFound) }
         try await wait(seconds: 20, until: "终端视图挂载并启动 shell") { session.state == .running && session.inspectionShellPid > 0 && session.inspectionViewAttached }
         return session
     }
 
-    static func run(workspace: Workspace, layout: Layout, arguments: [String]) async throws -> [String: Any] {
+    static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         guard let scratch = argument("terminal-scratch", in: arguments).map({ URL(fileURLWithPath: $0) }),
               let secondPath = argument("terminal-second-vault", in: arguments),
               let noteName = argument("terminal-new-note", in: arguments),
@@ -63,7 +62,7 @@ enum TerminalInspection {
         guard let resolved = realpath(secondPath, nil) else { throw POSIXError(.ENOENT) }
         let second = String(cString: resolved)
         free(resolved)
-        let session = try await showTerminal(workspace: workspace, layout: layout)
+        let session = try await showTerminal(workspace: workspace)
         let shell = session.inspectionShellPid
         var result: [String: Any] = [:]
         session.focus()
@@ -133,7 +132,7 @@ enum TerminalInspection {
         started = ProcessInfo.processInfo.systemUptime
         await workspace.openFolder(second)
         guard let destination = application.records.first(where: { $0.workspace.root == second }) else { throw CocoaError(.coderValueNotFound) }
-        let secondSession = try await showTerminal(workspace: destination.workspace, layout: destination.layout)
+        let secondSession = try await showTerminal(workspace: destination.workspace)
         let shell2 = secondSession.inspectionShellPid
         result["new_window_ms"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
         result["old_shell_preserved"] = alive(restarted) && alive(job1) && session.inspectionShellPid == restarted && workspace.root == root
@@ -174,13 +173,13 @@ enum TerminalInspection {
     /// 空闲 CPU 的三种状态：hidden（终端在后台）、unfocused（窗口失去焦点，由脚本切到别的应用）、focused
     static func idle(workspace: Workspace, layout: Layout, arguments: [String]) async throws -> [String: Any] {
         let mode = argument("terminal-idle-mode", in: arguments) ?? "focused"
-        let session = try await showTerminal(workspace: workspace, layout: layout)
+        let session = try await showTerminal(workspace: workspace)
         let shell = session.inspectionShellPid
         workspace.terminals.focus()
         if mode == "hidden" {
             layout.setTerminalVisible(false)
             try await Task.sleep(for: .milliseconds(300))
-            guard workspace.terminals.currentSession?.state == .running, alive(shell) else { throw CocoaError(.coderValueNotFound) }
+            guard workspace.currentTerminalSession?.state == .running, alive(shell) else { throw CocoaError(.coderValueNotFound) }
         }
         return ["app_pid": Int(getpid()), "shell_pid": Int(shell), "mode": mode,
                 "terminal_visible": layout.terminalVisible]

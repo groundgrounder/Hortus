@@ -213,21 +213,16 @@ private struct HortusCommands: Commands {
                 .keyboardShortcut("e", modifiers: .command).disabled(workspace.current?.document == nil)
         }
         CommandMenu("View") {
-            Toggle(L10n.string("Show Terminal"), isOn: Binding(
-                get: { layout.terminalVisible },
-                set: { shown in
-                    layout.setTerminalVisible(shown)
-                    if shown { DispatchQueue.main.async { workspace.terminals.focus() } }
-                }))
+            Button(L10n.string("Show Terminal")) { workspace.showTerminal() }
                 .keyboardShortcut("`", modifiers: .control)
-            Button(L10n.string("Clear Terminal")) { workspace.terminals.clearScreen() }
+            Button(L10n.string("Clear Terminal")) { workspace.clearTerminal() }
                 .keyboardShortcut("k", modifiers: .command)
-                .disabled(workspace.terminals.currentSession?.state != .running)
+                .disabled(workspace.currentTerminalSession?.state != .running)
             Divider()
-            Button(L10n.string("New Shell Tab")) { workspace.terminals.newShellTab() }
+            Button(L10n.string("New Shell")) { workspace.addShell(to: layout.defaultTerminalGroupID) }
                 .keyboardShortcut("t", modifiers: .command)
                 .disabled(workspace.root == nil)
-            Button(L10n.string("New Agent Tab")) { workspace.terminals.newAgentTab() }
+            Button(L10n.string("New Agent")) { workspace.addAgent(to: layout.defaultTerminalGroupID) }
                 .keyboardShortcut("t", modifiers: [.command, .option])
                 .disabled(workspace.root == nil)
         }
@@ -236,12 +231,14 @@ private struct HortusCommands: Commands {
             Toggle("Right Sidebar", isOn: shown(.right)).keyboardShortcut("i", modifiers: [.option, .command])
             Toggle("Bottom Panel", isOn: shown(.bottom)).keyboardShortcut("j", modifiers: .command)
             Divider()
-            Button("Reset Layout") { layout.reset() }
+            Button("Reset Layout") { workspace.resetLayout() }
         }
     }
 
     private func shown(_ region: Region) -> Binding<Bool> {
-        Binding(get: { layout.visible[region] ?? true }, set: { layout.visible[region] = $0 })
+        Binding(get: { layout.isShown(region) }, set: { shown in
+            if shown != layout.isShown(region) { workspace.toggleRegion(region) }
+        })
     }
 }
 
@@ -264,6 +261,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var agentInspectionRequested: Bool {
         #if DEBUG
         return ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--agent-") }
+        #else
+        return false
+        #endif
+    }
+
+    private var toolTabsInspectionRequested: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--tool-tabs-inspection=") }
         #else
         return false
         #endif
@@ -358,7 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
         #endif
-        guard terminalFontInspection || agentInspectionRequested || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
+        guard terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
         // 自检只设置两次一次性唤醒，其余等待由界面状态变更触发。
         let deadline = DispatchWorkItem { fputs("Hortus 自检超时\n", stderr); exit(2) }
         inspectionDeadline = deadline
@@ -422,7 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
         #endif
-        let visualInspection = terminalFontInspection || agentInspectionRequested || ProcessInfo.processInfo.arguments.contains {
+        let visualInspection = terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || ProcessInfo.processInfo.arguments.contains {
             $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--quick-open-query=") || $0.hasPrefix("--search-query=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || $0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top"
         }
         let settled = withObservationTracking {
@@ -486,14 +491,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if args.contains("--inspect-hold-open") { return }
             }
             #if DEBUG
+            if let arg = args.first(where: { $0.hasPrefix("--tool-tabs-inspection=") }), let layout {
+                let result = try await ToolTabsInspection.run(workspace: workspace, layout: layout, arguments: args)
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--tool-tabs-inspection=".count))))
+                if args.contains("--inspect-hold-open") { return }
+                NSApp.terminate(nil)
+                return
+            }
             if let arg = args.first(where: { $0.hasPrefix("--agent-launch-inspection=") }), let layout {
                 let result = try await AgentInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--agent-launch-inspection=".count))))
             }
             #endif
-            if let arg = args.first(where: { $0.hasPrefix("--terminal-inspection=") }), let layout {
-                let result = try await TerminalInspection.run(workspace: workspace, layout: layout, arguments: args)
+            if let arg = args.first(where: { $0.hasPrefix("--terminal-inspection=") }) {
+                let result = try await TerminalInspection.run(workspace: workspace, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--terminal-inspection=".count))))
             }
@@ -604,6 +617,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if args.contains("--inspect-hold-open") { return }
             NSApp.terminate(nil)
         } catch { fputs("Hortus 自检失败：\(error)\n", stderr); exit(1) }
+    }
+
+    /// 捕获窗口与 + 菜单的弹出窗口，合成到白底上；不包含桌面或其它应用。
+    static func snapshotDisplay(to path: String, around window: NSWindow? = nil) async throws {
+        guard let window else { throw CocoaError(.fileWriteUnknown) }
+        let content = try await SCShareableContent.currentProcess
+        guard let base = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let menuWindows = Set(NSApp.windows.filter {
+            String(describing: type(of: $0)).contains("Menu")
+        }.map { CGWindowID($0.windowNumber) })
+        let extras = content.windows.filter {
+            $0.windowID != base.windowID && menuWindows.contains($0.windowID)
+        }
+        let scale = NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: base.frame.midX, y: base.frame.midY)) })?
+            .backingScaleFactor ?? 2
+        let width = Int(base.frame.width * scale), height = Int(base.frame.height * scale)
+        func capture(_ source: SCWindow) async throws -> CGImage {
+            let filter = SCContentFilter(desktopIndependentWindow: source)
+            let configuration = SCStreamConfiguration()
+            configuration.width = Int(source.frame.width * scale)
+            configuration.height = Int(source.frame.height * scale)
+            configuration.showsCursor = false
+            return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+        }
+        let baseImage = try await capture(base)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0,
+                                         bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        NSImage(cgImage: baseImage, size: NSSize(width: width, height: height))
+            .draw(in: NSRect(x: 0, y: 0, width: width, height: height))
+        for extra in extras {
+            let image = try await capture(extra)
+            let extraWidth = Int(extra.frame.width * scale), extraHeight = Int(extra.frame.height * scale)
+            let x = (extra.frame.minX - base.frame.minX) * scale
+            let y = CGFloat(height) - (extra.frame.minY - base.frame.minY + extra.frame.height) * scale
+            NSImage(cgImage: image, size: NSSize(width: extraWidth, height: extraHeight))
+                .draw(in: NSRect(x: x, y: y, width: CGFloat(extraWidth), height: CGFloat(extraHeight)))
+        }
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = rep.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
+        try await Task.detached { try data.write(to: URL(fileURLWithPath: path)) }.value
+    }
+
+    /// 把多个窗口并排合成到白底上，不包含桌面或其它应用。
+    static func snapshotWindows(to path: String, windows: [NSWindow]) async throws {
+        guard !windows.isEmpty else { throw CocoaError(.fileWriteUnknown) }
+        let content = try await SCShareableContent.currentProcess
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let byID = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
+        let ordered = windows.compactMap { byID[CGWindowID($0.windowNumber)] }
+        guard ordered.count == windows.count else { throw CocoaError(.fileWriteUnknown) }
+        let gap: CGFloat = 24, padding: CGFloat = 24
+        let widths = ordered.map { $0.frame.width * scale }
+        let heights = ordered.map { $0.frame.height * scale }
+        let width = Int(widths.reduce(0, +) + gap * CGFloat(max(0, ordered.count - 1)) + padding * 2)
+        let height = Int((heights.max() ?? 0) + padding * 2)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0,
+                                         bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        var x = padding
+        for source in ordered {
+            let filter = SCContentFilter(desktopIndependentWindow: source)
+            let configuration = SCStreamConfiguration()
+            configuration.width = Int(source.frame.width * scale)
+            configuration.height = Int(source.frame.height * scale)
+            configuration.showsCursor = false
+            let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+            let size = NSSize(width: source.frame.width * scale, height: source.frame.height * scale)
+            NSImage(cgImage: image, size: size).draw(in: NSRect(x: x, y: padding, width: size.width, height: size.height))
+            x += size.width + gap
+        }
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = rep.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
+        try await Task.detached { try data.write(to: URL(fileURLWithPath: path)) }.value
     }
 
     static func snapshot(to path: String, window: NSWindow? = nil) async throws {

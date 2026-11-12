@@ -493,6 +493,7 @@ fn legacy_session_migrates_once_and_full_snapshot_preserves_diagrams() {
             height: 840.0,
             screen: Some("2".into()),
         }),
+        layout: None,
     });
     session.default_visible = BTreeMap::from([("left".into(), false)]);
     session.recent[0].visible = Some(session.default_visible.clone());

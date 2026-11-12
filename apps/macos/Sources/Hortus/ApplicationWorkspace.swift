@@ -25,12 +25,13 @@ final class WindowRecord: @MainActor Identifiable {
 /// 应用唯一的库注册表、布局排布与完整会话写入者。
 @Observable @MainActor
 final class ApplicationWorkspace {
-    let arrangement = PanelArrangement()
     var records: [WindowRecord] = []
     var contexts: [String: VaultContext] = [:]
     var recent: [VaultState] = []
     var activeID: String?
     var restorationDiagnostics: [String] = []
+    /// 最新默认模板：只有静态工具、尺寸和终端占位；新窗口从这里实例化。
+    private(set) var layoutTemplate: LayoutState?
     @ObservationIgnored private var activation: UInt64 = 0
     @ObservationIgnored var tabDrags: [UUID: (TabDragPayload, NoteDocument)] = [:]
     #if DEBUG
@@ -54,10 +55,9 @@ final class ApplicationWorkspace {
     @ObservationIgnored private var inspectionLaunch = false
 
     init() {
-        records = [WindowRecord(layout: Layout(arrangement: arrangement))]
+        records = [WindowRecord(layout: Layout())]
         activeID = records[0].id
         bootstrapID = records[0].id
-        arrangement.onChange = { [weak self] in self?.scheduleLayoutSave() }
     }
 
     var initial: WindowRecord { records[0] }
@@ -88,11 +88,17 @@ final class ApplicationWorkspace {
             let session = try JSONDecoder().decode(SessionState.self, from: Data(values.1.utf8))
             recent = session.recent
             if let json = values.0 {
-                initial.layout.restore(try JSONDecoder().decode(LayoutState.self, from: Data(json.utf8)))
+                let saved = try JSONDecoder().decode(LayoutState.self, from: Data(json.utf8))
+                initial.layout.restore(saved)
                 latestSize = initial.layout.size
                 defaultVisible = Dictionary(uniqueKeysWithValues: initial.layout.visible.map { ($0.key.rawValue, $0.value) })
             }
             if let saved = session.default_visible, !saved.isEmpty { defaultVisible = saved }
+            // 读到的旧 layout 先在初始窗口里迁移，再把规范化结果作为新窗口模板。
+            layoutTemplate = initial.layout.persistedState
+            for region in Region.allCases {
+                initial.layout.visible[region] = defaultVisible[region.rawValue] ?? (region != .bottom)
+            }
             configure(initial)
             inspectionLaunch = !Self.shouldPersistSession(arguments: args, cacheOverride: ProcessInfo.processInfo.environment["HORTUS_CACHE_DIR"] != nil)
             if let arg = args.first(where: { $0.hasPrefix("--vault=") }) {
@@ -112,8 +118,6 @@ final class ApplicationWorkspace {
 
     func configure(_ record: WindowRecord) {
         guard let core else { return }
-        record.layout.size = latestSize
-        for region in Region.allCases { record.layout.visible[region] = defaultVisible[region.rawValue] ?? (region != .bottom) }
         record.lastVisible = visibility(record)
         record.workspace.configure(application: self, core: core, layout: record.layout)
         record.layout.onSizeChange = { [weak self, weak record] in
@@ -124,6 +128,21 @@ final class ApplicationWorkspace {
             guard let self, let record else { return }
             self.layoutChanged(record.workspace)
         }
+    }
+
+    /// 新窗口从最新模板开始；恢复窗口优先自己的布局，旧会话使用迁移后的模板。
+    func makeLayout(saved: LayoutState? = nil) -> Layout {
+        let layout = Layout()
+        if let saved {
+            layout.restore(saved)
+        } else {
+            if let layoutTemplate { layout.restore(layoutTemplate) }
+            layout.size = latestSize
+            for region in Region.allCases {
+                layout.visible[region] = defaultVisible[region.rawValue] ?? (region != .bottom)
+            }
+        }
+        return layout
     }
 
     /// 显式检查启动不能覆盖真实会话；隔离缓存内仍允许检查保存与恢复。
@@ -173,23 +192,31 @@ final class ApplicationWorkspace {
             }
             if state == nil, let existing = mostRecentWindow(root: context.root) { activate(existing); return }
             let record: WindowRecord
+            let reused: Bool
             if let source, source.root == nil, let empty = records.first(where: { $0.workspace === source }) {
                 record = empty
+                reused = true
             } else {
-                record = WindowRecord(id: state?.id ?? UUID().uuidString, layout: Layout(arrangement: arrangement))
+                record = WindowRecord(id: state?.id ?? UUID().uuidString, layout: makeLayout(saved: state?.layout))
                 configure(record)
                 records.append(record)
+                reused = false
             }
             record.restoredFrame = state?.frame
             if let state {
                 if record.id == bootstrapID { bootstrapID = state.id }
                 record.id = state.id
+                // 复用空窗口时套用会话布局；新记录的布局已在 makeLayout 里。
+                if reused, let savedLayout = state.layout { record.layout.restore(savedLayout) }
             }
             let old = recent.first { $0.path == context.root }
             let saved = state.map { VaultState(path: context.root, tabs: $0.tabs, selected: $0.selected,
                                                views: $0.views, visible: $0.visible ?? old?.visible) } ?? old
-            for region in Region.allCases {
-                record.layout.visible[region] = saved?.visible?[region.rawValue] ?? defaultVisible[region.rawValue] ?? (region != .bottom)
+            if let visible = saved?.visible {
+                for region in Region.allCases {
+                    record.layout.visible[region] = visible[region.rawValue]
+                        ?? defaultVisible[region.rawValue] ?? (region != .bottom)
+                }
             }
             record.lastVisible = visibility(record)
             await record.workspace.attach(context, state: saved)
@@ -203,7 +230,7 @@ final class ApplicationWorkspace {
         } catch {
             // 每个失败库有自己的可见错误，后续有效窗口仍可恢复。
             let target = source.flatMap { source in records.first { $0.workspace === source } } ?? {
-                let record = WindowRecord(layout: Layout(arrangement: arrangement))
+                let record = WindowRecord(layout: makeLayout())
                 configure(record); records.append(record); showWindow?(record.id)
                 return record
             }()
@@ -269,6 +296,13 @@ final class ApplicationWorkspace {
         let visible = visibility(record)
         let changed = visible != record.lastVisible
         record.lastVisible = visible
+        guard !restoring else { return }
+        // 最近改动的窗口成为新窗口的默认模板；尺寸仍取应用最新的窗口尺寸。
+        var template = record.layout.persistedState
+        for region in Region.allCases {
+            template.regions[region.rawValue]?.size = Double(latestSize[region] ?? record.layout.size[region] ?? 250)
+        }
+        layoutTemplate = template
         remember(record, visibleWrite: changed)
         scheduleLayoutSave()
         scheduleSessionSave()
@@ -292,7 +326,8 @@ final class ApplicationWorkspace {
             guard let root = record.workspace.root else { return nil }
             return WindowState(id: record.id, path: root, tabs: record.workspace.tabs.map(\.path),
                                selected: record.workspace.selected, views: record.workspace.sessionViews(),
-                               frame: record.window.map { WindowFrame(window: $0) }, visible: visibility(record))
+                               frame: record.window.map { WindowFrame(window: $0) }, visible: visibility(record),
+                               layout: record.layout.state)
         }
         return SessionState(last_vault: active?.workspace.root ?? recent.first?.path, recent: recent,
                             windows: windows, default_visible: defaultVisible)
@@ -320,19 +355,12 @@ final class ApplicationWorkspace {
         layoutTask?.cancel()
         layoutTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-            guard let self, let core = self.core else { return }
+            guard let self, let core = self.core, let state = self.layoutTemplate else { return }
             do {
-                let state = self.layoutState()
                 let json = String(decoding: try JSONEncoder().encode(state), as: UTF8.self)
                 try await self.save { try core.saveLayout(json: json) }
             } catch { self.active?.workspace.error = L10n.error(error) }
         }
-    }
-
-    private func layoutState() -> LayoutState {
-        let layout = Layout(arrangement: arrangement)
-        layout.size = latestSize
-        return layout.persistedState
     }
 
     private func save<T: Sendable>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
@@ -394,7 +422,7 @@ final class ApplicationWorkspace {
         tabDrags = [:]
         let core = core
         let session = inspectionLaunch ? nil : try? JSONEncoder().encode(snapshot())
-        let layout = try? JSONEncoder().encode(layoutState())
+        let layout = try? JSONEncoder().encode(layoutTemplate ?? initial.layout.persistedState)
         let group = DispatchGroup()
         for record in records { group.enter(); record.workspace.beginShutdownCleanup { group.leave() } }
         for context in contexts.values { group.enter(); context.close { group.leave() } }

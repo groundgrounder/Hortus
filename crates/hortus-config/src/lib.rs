@@ -224,7 +224,7 @@ impl LayoutState {
                 }
             }
         }
-        if self.regions.len() != 3 || seen.len() != views.len() {
+        if self.regions.len() != 3 {
             return Err(io::Error::other("config.layout_incomplete"));
         }
         Ok(())
@@ -263,6 +263,9 @@ pub struct WindowState {
     pub frame: Option<WindowFrame>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible: Option<BTreeMap<String, bool>>,
+    /// 每窗口工具布局；终端只用 "terminal" 占位，不写实例 UUID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutState>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -474,6 +477,7 @@ impl Store {
                                 views: saved.map(|v| v.views.clone()).unwrap_or_default(),
                                 frame: None,
                                 visible: saved.and_then(|v| v.visible.clone()),
+                                layout: None,
                             }
                         })
                         .into_iter()

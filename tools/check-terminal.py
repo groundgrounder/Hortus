@@ -32,6 +32,8 @@ def environment(base):
            if key != 'LANG' and not key.startswith('LC_')}
     zdot = base / 'zdotdir'
     zdot.mkdir(parents=True, exist_ok=True)
+    (zdot / '.zshrc').write_text("PS1='❯ '\nRPROMPT=''\n")
+    (zdot / '.zprofile').write_text("PS1='❯ '\nRPROMPT=''\n")
     env.update(SHELL='/bin/zsh', ZDOTDIR=str(zdot), HISTFILE=str(zdot / 'history'))
     (base / 'config').mkdir(parents=True, exist_ok=True)
     (base / 'config/config.toml').write_text('font_size = 15.0\ndefault_view = "reading"\n')

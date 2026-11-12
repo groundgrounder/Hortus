@@ -92,10 +92,9 @@ enum TerminalFontInspection {
         guard let fixture = argument("terminal-font-fixture", arguments),
               let marker = argument("terminal-font-marker", arguments),
               let shot = argument("terminal-font-snapshot", arguments) else { throw CocoaError(.coderValueNotFound) }
-        layout.setTerminalVisible(true)
+        workspace.showTerminal()
         layout.size[.bottom] = 520
-        if workspace.terminals.currentSession == nil { workspace.terminals.newShellTab() }
-        guard let session = workspace.terminals.currentSession else { throw CocoaError(.coderValueNotFound) }
+        guard let tab = workspace.currentTerminalTab, let session = workspace.currentTerminalSession else { throw CocoaError(.coderValueNotFound) }
         try await wait { session.state == .running && session.inspectionViewAttached }
         guard let view = session.inspectionView, let catalog = session.nerdFonts,
               let window = view.window else { throw CocoaError(.coderValueNotFound) }
@@ -109,9 +108,9 @@ enum TerminalFontInspection {
         workspace.fontSize = size + 2
         try await Task.sleep(for: .milliseconds(100))
         workspace.fontSize = size
-        layout.moveToRegion(.terminal, .right)
+        layout.moveToRegion(.terminal(tab.id), .right)
         try await Task.sleep(for: .milliseconds(150))
-        layout.moveToRegion(.terminal, .bottom)
+        layout.moveToRegion(.terminal(tab.id), .bottom)
         layout.size[.bottom] = 520
         try await Task.sleep(for: .milliseconds(150))
         try await wait { view.terminalDimensions.cols >= 92 && view.terminalDimensions.rows >= 21 }

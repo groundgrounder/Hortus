@@ -49,10 +49,13 @@ extension ApplicationWorkspace {
               source.workspace.tabs.contains(where: { $0.path == payload.path && $0.document === pending.1 }),
               !NSApp.windows.contains(where: { $0.isVisible && !$0.isMiniaturized && $0.frame.contains(point) }),
               let tab = source.workspace.takeTab(payload.path) else { return nil }
-        let target = WindowRecord(layout: Layout(arrangement: arrangement))
+        let target = WindowRecord(layout: makeLayout())
         configure(target)
-        let visible = recent.first { $0.path == context.root }?.visible ?? defaultVisible
-        for region in Region.allCases { target.layout.visible[region] = visible[region.rawValue] ?? (region != .bottom) }
+        if let visible = recent.first(where: { $0.path == context.root })?.visible {
+            for region in Region.allCases {
+                target.layout.visible[region] = visible[region.rawValue] ?? (region != .bottom)
+            }
+        }
         target.lastVisible = Dictionary(uniqueKeysWithValues: target.layout.visible.map { ($0.key.rawValue, $0.value) })
         // 附着、转移与注册同步完成；异步 shell 初始化前已经只有一个所有者。
         target.workspace.context = context
@@ -64,6 +67,7 @@ extension ApplicationWorkspace {
         tabDragTrace.append("commit \(payload.token) to \(target.id)")
         #endif
         target.workspace.terminals.setInitialRoot(context.root)
+        Task { await target.workspace.ensureTerminalTools() }
         becameActive(target)
         showWindow?(target.id)
         scheduleSessionSave()

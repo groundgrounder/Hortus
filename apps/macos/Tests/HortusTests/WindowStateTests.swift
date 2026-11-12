@@ -32,7 +32,7 @@ struct WindowStateTests {
         let application = ApplicationWorkspace()
         application.core = fixture.core
         let first = application.initial
-        let second = WindowRecord(layout: Layout(arrangement: application.arrangement))
+        let second = WindowRecord(layout: Layout())
         application.records.append(second)
         let context = VaultContext(handle: try fixture.core.openVault(path: fixture.vault.path))
         application.contexts[context.root] = context
@@ -127,7 +127,7 @@ struct WindowStateTests {
         defer { fixture.cleanup() }
         let application = ApplicationWorkspace()
         let first = application.initial
-        let second = WindowRecord(layout: Layout(arrangement: application.arrangement))
+        let second = WindowRecord(layout: Layout())
         application.records.append(second)
         let context = VaultContext(handle: try fixture.core.openVault(path: fixture.vault.path))
         for record in [first, second] {
@@ -202,24 +202,47 @@ struct WindowStateTests {
         }
     }
 
-    @Test func groupsAreSharedButSizesAndVisibilityBelongToEachWindow() throws {
-        let arrangement = PanelArrangement()
-        let a = Layout(arrangement: arrangement), b = Layout(arrangement: arrangement)
-        a.split(.search, to: .right)
-        #expect(a.state.regions.mapValues(\.groups) == b.state.regions.mapValues(\.groups))
-        let group = try #require(a.groups(in: .right).last)
-        b.select(.search, in: group.id)
-        #expect(a.groups(in: .right).last?.selected == .search)
+    @Test func windowLayoutsAreIndependentButTemplatesAreReusable() throws {
+        let a = Layout(), b = Layout()
+        a.split(.tool(.search), to: .right)
+        #expect(a.region(containing: .tool(.search)) == .right)
+        #expect(b.region(containing: .tool(.search)) == .left)
+        let group = try #require(a.availableGroups(in: .right).last)
+        b.select(.tool(.search), in: try #require(b.availableGroups(in: .left).first).id)
+        #expect(a.availableGroups(in: .right).last?.selected == .tool(.search))
         a.visible[.left] = false
         a.size[.left] = 350
         #expect(b.visible[.left] == true)
         #expect(b.size[.left] == 260)
-        let c = Layout(arrangement: arrangement)
-        c.size = a.size
+        let c = Layout()
+        c.restore(a.persistedState)
         #expect(c.size[.left] == 350)
-        #expect(c.state.regions.mapValues(\.groups) == a.state.regions.mapValues(\.groups))
+        #expect(Set(c.staticTools) == Set(a.staticTools))
+        #expect(c.terminalIDs.count == 1)
         let json = String(decoding: try JSONEncoder().encode(a.persistedState), as: UTF8.self)
         #expect(!json.contains("visible"))
+        #expect(group.tabs == [.tool(.search)])
+    }
+
+    @Test func windowSessionRoundTripRetainsPerWindowToolLayout() throws {
+        let layout = Layout()
+        layout.size[.left] = 333
+        layout.visible[.right] = false
+        layout.add(.terminal(UUID()), to: layout.availableGroups(in: .left).first?.id)
+        let window = WindowState(id: "layout", path: "/v", tabs: [], selected: nil, views: [:],
+                                 frame: nil, visible: ["left": true, "right": false],
+                                 layout: layout.state)
+        let restored = try JSONDecoder().decode(WindowState.self, from: JSONEncoder().encode(window))
+        #expect(restored == window)
+        let restoredLayout = Layout()
+        restoredLayout.restore(try #require(restored.layout))
+        #expect(restoredLayout.size[.left] == 333)
+        #expect(restoredLayout.visible[.right] == false)
+        #expect(restoredLayout.terminalIDs.count == 1)
+        #expect(Set(restoredLayout.staticTools) == Set(StaticTool.allCases))
+        // 动态终端 UUID 不进入序列化数据。
+        let json = String(decoding: try JSONEncoder().encode(restored), as: UTF8.self)
+        #expect(!json.lowercased().contains("terminal:"))
     }
 
     @Test func sessionRoundTripRetainsOrderIdentityViewsAndVaultVisibility() throws {
@@ -243,7 +266,7 @@ struct WindowStateTests {
         defer { a.cleanup(); b.cleanup() }
         let application = ApplicationWorkspace()
         let first = application.initial
-        let second = WindowRecord(layout: Layout(arrangement: application.arrangement))
+        let second = WindowRecord(layout: Layout())
         application.records.append(second)
         first.workspace.tabs = [NoteTab(path: "note.md", document: a.document, loading: false)]
         second.workspace.tabs = [NoteTab(path: "note.md", document: b.document, loading: false)]

@@ -57,8 +57,10 @@ final class Workspace {
     weak var application: ApplicationWorkspace?
     var context: VaultContext?
     var root: String? { context?.root }
-    /// 自检读取当前标签的 shell PID；普通代码走标签控制器。
+    /// 自检读取当前标签的 shell PID；普通代码走布局选中的终端。
     var terminalPid: pid_t { terminals.currentSession?.inspectionShellPid ?? 0 }
+    var currentTerminalTab: TerminalTab? { terminals.current }
+    var currentTerminalSession: TerminalSession? { terminals.currentSession }
     private var fixtureEntries: [String: TreeEntry] = [:]
     var entries: [String: TreeEntry] {
         get { context?.entries ?? fixtureEntries }
@@ -97,7 +99,7 @@ final class Workspace {
     @ObservationIgnored private var loadTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var releasing = false
     @ObservationIgnored private var openedAt = ContinuousClock.now
-    @ObservationIgnored private var layout: Layout?
+    private(set) var layout: Layout?
     @ObservationIgnored private let saves = DispatchQueue(label: "app.hortus.state")
     @ObservationIgnored private var quickOpenTask: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
@@ -128,12 +130,125 @@ final class Workspace {
         restoredViews = state?.views ?? [:]
         context.attach(self)
         await terminals.setRootAndWait(context.root)
+        await ensureTerminalTools()
         for path in state?.tabs ?? [] {
             if application?.owner(of: path, from: self) != nil {
                 application?.recordDuplicate(path, window: self)
             } else { openNote(path) }
         }
         if let selected = state?.selected, tabs.contains(where: { $0.path == selected }) { self.selected = selected }
+    }
+
+    // MARK: 统一工具标签
+
+    /// 每个窗口一个普通 Shell；布局里的终端占位 UUID 就位后按它建立会话。
+    func ensureTerminalTools() async {
+        guard let layout else { return }
+        guard let root else {
+            layout.removeAllTerminalTools()
+            await terminals.trim(to: [])
+            return
+        }
+        if let first = layout.terminalIDs.first {
+            layout.keepOnlyTerminal(first)
+            terminals.adopt(id: first, kind: .shell, root: root)
+            await terminals.trim(to: [first])
+        } else if let tab = terminals.createShell() {
+            layout.insertTerminal(tab.id)
+            await terminals.trim(to: [tab.id])
+        }
+    }
+
+    @discardableResult
+    func addShell(to groupID: UUID? = nil) -> TerminalTab? {
+        guard root != nil, let layout, let tab = terminals.createShell() else { return nil }
+        layout.add(.terminal(tab.id), to: groupID ?? layout.defaultTerminalGroupID)
+        layout.reveal(.terminal(tab.id))
+        terminals.focusSoon()
+        scheduleSessionSave()
+        return tab
+    }
+
+    @discardableResult
+    func addAgent(to groupID: UUID? = nil) -> TerminalTab? {
+        guard root != nil, let layout, let tab = terminals.createAgent() else { return nil }
+        layout.add(.terminal(tab.id), to: groupID ?? layout.defaultTerminalGroupID)
+        layout.reveal(.terminal(tab.id))
+        terminals.start(tab)
+        terminals.focusSoon()
+        scheduleSessionSave()
+        return tab
+    }
+
+    func addStaticTool(_ tool: StaticTool, to groupID: UUID?) {
+        layout?.add(.tool(tool), to: groupID)
+    }
+
+    func showStaticTool(_ tool: StaticTool, in region: Region = .left) {
+        guard let layout else { return }
+        if layout.reveal(.tool(tool)) { return }
+        if layout.availableGroups(in: region).isEmpty {
+            layout.add(.tool(tool), in: region)
+        } else {
+            layout.add(.tool(tool), to: layout.availableGroups(in: region).last?.id)
+        }
+    }
+
+    /// 关闭工具标签。终端只终止自己的进程组，其它工具与会话不变。
+    func closeTool(_ tool: ToolID) {
+        if let id = tool.terminalID {
+            Task { await closeTerminal(id) }
+        } else {
+            layout?.remove(tool)
+            scheduleSessionSave()
+        }
+    }
+
+    func closeTerminal(_ id: UUID) async {
+        layout?.remove(.terminal(id))
+        await terminals.stopAndRemove(id)
+        scheduleSessionSave()
+    }
+
+    /// ⌃`：显示并聚焦最近使用的终端；没有终端时创建一个默认 Shell。
+    func showTerminal(focus: Bool = true) {
+        guard let layout else { return }
+        if let id = layout.currentTerminalID ?? layout.terminalIDs.first {
+            if terminals.tab(id) == nil, let root { terminals.adopt(id: id, kind: .shell, root: root) }
+            layout.reveal(.terminal(id))
+        } else {
+            _ = addShell(to: nil)
+        }
+        if focus { terminals.focusSoon() }
+    }
+
+    func clearTerminal() { terminals.clearScreen() }
+
+    /// 工具栏显示区域；空区域补一个默认工具，+ 始终可达。
+    func toggleRegion(_ region: Region) {
+        guard let layout else { return }
+        if layout.isShown(region) {
+            layout.visible[region] = false
+            return
+        }
+        if layout.availableGroups(in: region).isEmpty {
+            if region == .bottom {
+                if let tab = addShell(to: nil) {
+                    layout.reveal(.terminal(tab.id))
+                } else {
+                    _ = layout.ensureGroup(in: .bottom)
+                }
+            } else if let added = layout.ensureGroup(in: region), let id = added.terminalID, let root {
+                terminals.adopt(id: id, kind: .shell, root: root)
+            }
+        }
+        layout.visible[region] = true
+    }
+
+    func resetLayout() {
+        guard let layout else { return }
+        layout.reset()
+        Task { await ensureTerminalTools() }
     }
 
     func chooseFolder() {
@@ -256,7 +371,7 @@ final class Workspace {
 
     func showSearchPanel() {
         guard root != nil else { return }
-        layout?.moveToRegion(.search, .left)
+        showStaticTool(.search, in: .left)
         searchFocusRequest += 1
         searchTask?.cancel()
         searchCancellation?.cancel()

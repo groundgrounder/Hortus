@@ -119,6 +119,7 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/multi-window')
     parser.add_argument('--app', type=Path, default=ROOT / 'apps/macos/.build/debug/Hortus')
     parser.add_argument('--screenshots', type=Path)
+    parser.add_argument('--language')
     args = parser.parse_args()
     ensure_event_posting_host()
     output = args.output.resolve()
@@ -130,21 +131,29 @@ def main():
         for name in ['a', 'b', 'c']:
             (base / name).mkdir()
             (base / name / 'same.md').write_text(f'# Vault {name}\n\nPublic window fixture.\n')
-        env = dict(os.environ, HORTUS_CONFIG_DIR=str(base / 'config'), HORTUS_CACHE_DIR=str(base / 'cache'))
+        zdot = base / 'zdotdir'
+        zdot.mkdir(parents=True, exist_ok=True)
+        (zdot / '.zshrc').write_text("PS1='❯ '\nRPROMPT=''\n")
+        (zdot / '.zprofile').write_text("PS1='❯ '\nRPROMPT=''\n")
+        env = dict(os.environ, ZDOTDIR=str(zdot), HISTFILE=str(zdot / 'history'),
+                   HORTUS_CONFIG_DIR=str(base / 'config'), HORTUS_CACHE_DIR=str(base / 'cache'))
         result = output / 'windows.json'
         result.unlink(missing_ok=True)
-        command = [str(args.app.resolve()), f'--vault={base / "a"}', '--note=same.md',
-                   f'--multi-window-second={base / "b"}', f'--multi-window-inspection={result}', f'--multi-window-media={media}']
+        command = [str(args.app.resolve())]
+        if args.language:
+            command += ['-AppleLanguages', f'({args.language})']
+        command += [f'--vault={base / "a"}', '--note=same.md',
+                    f'--multi-window-second={base / "b"}', f'--multi-window-inspection={result}', f'--multi-window-media={media}']
         completed = subprocess.run(command, env=env, capture_output=True, timeout=60)
         (output / 'application.log').write_bytes(completed.stdout + completed.stderr)
         assert completed.returncode == 0, (completed.returncode, completed.stderr.decode(errors='replace'))
         data = json.loads(result.read_text())
         assert data['visible_windows'] == 2 and data['actual_vault_windows'] == 2 and data['original_preserved'], data
-        for field in ['documents_isolated', 'existing_activated', 'canonical_deduplicated', 'groups_shared',
+        for field in ['documents_isolated', 'existing_activated', 'canonical_deduplicated', 'groups_isolated',
                       'size_existing_unchanged', 'visible_isolated', 'quick_open_isolated',
                       'key_window_command', 'background_terminal_preserved', 'external_isolated',
                       'close_cancel', 'close_retry', 'close_discard', 'quit_cancel_all_windows', 'latest_size_preserved',
-                      'real_drag_shared', 'search_ui_isolated']:
+                      'real_drag_isolated', 'search_ui_isolated', 'dynamic_tabs_isolated']:
             assert data[field], (field, data)
         assert data['new_size'] == 340, data
         assert data['external_update_ms'] < 1000 and data['external_rename_delete_ms'] < 1000, data
@@ -165,9 +174,12 @@ def main():
         restored = output / 'restored.json'
         restore_media = media / 'restored'
         restore_media.mkdir(exist_ok=True)
-        completed = subprocess.run([str(args.app.resolve()), '--multi-window-restore',
-                                    f'--multi-window-inspection={restored}', f'--multi-window-media={restore_media}'],
-                                   env=env, capture_output=True, timeout=60)
+        restore_command = [str(args.app.resolve())]
+        if args.language:
+            restore_command += ['-AppleLanguages', f'({args.language})']
+        restore_command += ['--multi-window-restore',
+                            f'--multi-window-inspection={restored}', f'--multi-window-media={restore_media}']
+        completed = subprocess.run(restore_command, env=env, capture_output=True, timeout=60)
         (output / 'restored-application.log').write_bytes(completed.stdout + completed.stderr)
         assert completed.returncode == 0, (completed.returncode, completed.stderr.decode(errors='replace'))
         restore = json.loads(restored.read_text())
@@ -176,6 +188,9 @@ def main():
         assert [w['tabs'] for w in restore['windows']] == [w['tabs'] for w in data['windows']], restore
         assert [w['views'] for w in restore['windows']] == [w['views'] for w in data['windows']], restore
         assert [w['left_visible'] for w in restore['windows']] == [w['left_visible'] for w in data['windows']], restore
+        assert [w['terminal_count'] for w in restore['windows']] == [1, 1], restore
+        assert all(w['agent_count'] == 0 for w in restore['windows']), restore
+        assert 'terminal:' not in saved.lower(), saved
         assert [w['frame'] for w in restore['session']['windows']] == [w['frame'] for w in data['session']['windows']], restore
         for window in restore['windows']:
             try:

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 一个停靠区域：若干组视图，侧栏里上下排，底部面板里左右排
+/// 一个停靠区域：若干组工具，侧栏里上下排，底部面板里左右排
 struct RegionView: View {
     @Environment(Layout.self) private var layout
     let region: Region
@@ -30,8 +30,9 @@ struct GroupView: View {
                 .modifier(DropZone(enabled: layout.canMerge(layout.dragging, into: group), shape: .capsule) {
                     layout.move($0, into: group.id)
                 })
-            PanelContent(kind: group.selected)
+            PanelContent(tool: group.selected)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(ContentFrameProbe(name: "group-content-" + group.id.uuidString))
                 // 拖到内容区：在这一组后面新开一组。高亮只盖住新组会出现的那一半
                 .modifier(DropZone(enabled: layout.canSplit(layout.dragging, after: group), shape: .rect(cornerRadius: 12),
                                    preview: region == .bottom ? .trailing : .bottom) {
@@ -49,10 +50,10 @@ struct DropZone<S: Shape>: ViewModifier {
     let idleVisible: Bool
     let shape: S
     var preview: Edge?
-    let action: (ViewKind) -> Void
+    let action: (ToolID) -> Void
     @State private var targeted = false
 
-    init(enabled: Bool, idleVisible: Bool = false, shape: S, preview: Edge? = nil, action: @escaping (ViewKind) -> Void) {
+    init(enabled: Bool, idleVisible: Bool = false, shape: S, preview: Edge? = nil, action: @escaping (ToolID) -> Void) {
         self.enabled = enabled
         self.idleVisible = idleVisible
         self.shape = shape
@@ -80,8 +81,8 @@ struct DropZone<S: Shape>: ViewModifier {
                 }
             }
             .dropDestination(for: String.self, isEnabled: enabled) { items, _ in
-                guard let raw = items.first, let view = ViewKind(rawValue: raw), view.isAvailable else { return }
-                withAnimation(.snappy) { action(view) }
+                guard let raw = items.first, let tool = ToolID(dragPayload: raw), layout.locateTool(tool) != nil else { return }
+                withAnimation(.snappy) { action(tool) }
                 layout.dragging = nil
             }
             .onDropSessionUpdated { session in
@@ -96,49 +97,113 @@ struct DropZone<S: Shape>: ViewModifier {
 
 struct TabStrip: View {
     @Environment(Layout.self) private var layout
+    @Environment(Workspace.self) private var workspace
     let group: PanelGroup
 
     var body: some View {
         HStack(spacing: 2) {
-            ForEach(group.tabs) { kind in
-                let selected = kind == group.selected
-                Label(kind.title, systemImage: kind.symbol)
-                    .labelStyle(.titleAndIcon)
-                    .font(.callout.weight(selected ? .semibold : .regular))
-                    .foregroundStyle(selected ? .primary : .secondary)
-                    .padding(.horizontal, 9).padding(.vertical, 5)
-                    .background(selected ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .capsule)
-                    .contentShape(.capsule)
-                    .onTapGesture { layout.select(kind, in: group.id) }
-                    .draggable(kind.rawValue)
-                    // 拖动开始时亮出所有落点，结束（放下或取消）时收起
-                    .onDragSessionUpdated { session in
-                        switch session.phase {
-                        case .initial, .active: layout.dragging = kind
-                        default: layout.dragging = nil
-                        }
-                    }
-                    .contextMenu { menu(for: kind) }
-                    .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-                    .accessibilityAction { layout.select(kind, in: group.id) }
-                    .background(ContentFrameProbe(name: "panel-tab-" + kind.rawValue))
+            ForEach(group.tabs) { tool in
+                tab(tool, selected: tool == group.selected)
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 2)
+            addMenu
         }
         .lineLimit(1)
+        .background(ContentFrameProbe(name: "group-tabs-" + group.id.uuidString))
     }
 
-    /// 不拖动也能移动视图
-    @ViewBuilder private func menu(for kind: ViewKind) -> some View {
-        Menu("Move to") {
-            ForEach(Region.allCases) { r in
-                Button(r.title) { withAnimation(.snappy) { layout.moveToRegion(kind, r) } }
+    private func tab(_ tool: ToolID, selected: Bool) -> some View {
+        HStack(spacing: 4) {
+            Label(title(tool), systemImage: symbol(tool))
+                .labelStyle(.titleAndIcon)
+                .font(.callout.weight(selected ? .semibold : .regular))
+                .foregroundStyle(selected ? .primary : .secondary)
+            if selected {
+                Button {
+                    workspace.closeTool(tool)
+                } label: {
+                    Image(systemName: "xmark").font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .help(L10n.string("Close %@", title(tool)))
+                .accessibilityLabel(L10n.string("Close %@", title(tool)))
             }
         }
-        Menu("Split into a new group") {
-            ForEach(Region.allCases) { r in
-                Button(r.title) { withAnimation(.snappy) { layout.split(kind, to: r) } }
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(selected ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .capsule)
+        .contentShape(.capsule)
+        .onTapGesture { layout.select(tool, in: group.id) }
+        .draggable(tool.token)
+        // 拖动开始时亮出所有落点，结束（放下或取消）时收起
+        .onDragSessionUpdated { session in
+            switch session.phase {
+            case .initial, .active: layout.dragging = tool
+            default: layout.dragging = nil
             }
         }
+        .contextMenu { menu(for: tool) }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title(tool))
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { layout.select(tool, in: group.id) }
+        .accessibilityAction(named: L10n.string("Close %@", title(tool))) { workspace.closeTool(tool) }
+        .help(title(tool))
+        .background(ContentFrameProbe(name: tool.probeName))
+    }
+
+    private var addMenu: some View {
+        Menu {
+            ForEach(StaticTool.allCases) { tool in
+                Button(tool.title) { workspace.addStaticTool(tool, to: group.id) }
+            }
+            Divider()
+            Button(L10n.string("New Shell")) { workspace.addShell(to: group.id) }
+                .disabled(workspace.root == nil)
+            Button(L10n.string("New Agent")) { workspace.addAgent(to: group.id) }
+                .disabled(workspace.root == nil)
+        } label: {
+            Image(systemName: "plus")
+                .font(.callout)
+                .frame(width: 22, height: 22)
+                .contentShape(.rect)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .help(L10n.string("Add Tool"))
+        .accessibilityLabel(L10n.string("Add Tool"))
+        .background(ContentFrameProbe(name: "group-add-" + group.id.uuidString))
+    }
+
+    private func title(_ tool: ToolID) -> String {
+        if let staticTool = tool.staticTool { return staticTool.title }
+        if let id = tool.terminalID {
+            return workspace.terminals.tab(id)?.title ?? L10n.string("Terminal")
+        }
+        return ""
+    }
+
+    private func symbol(_ tool: ToolID) -> String {
+        if let staticTool = tool.staticTool { return staticTool.symbol }
+        if let id = tool.terminalID {
+            return workspace.terminals.tab(id)?.kind == .agent ? "sparkles" : "terminal"
+        }
+        return "questionmark"
+    }
+
+    /// 不拖动也能移动或关闭工具
+    @ViewBuilder private func menu(for tool: ToolID) -> some View {
+        Menu(L10n.string("Move to")) {
+            ForEach(Region.allCases) { region in
+                Button(region.title) { withAnimation(.snappy) { layout.moveToRegion(tool, region) } }
+            }
+        }
+        Menu(L10n.string("Split into a new group")) {
+            ForEach(Region.allCases) { region in
+                Button(region.title) { withAnimation(.snappy) { layout.split(tool, to: region) } }
+            }
+        }
+        Divider()
+        Button(L10n.string("Close %@", title(tool))) { workspace.closeTool(tool) }
     }
 }

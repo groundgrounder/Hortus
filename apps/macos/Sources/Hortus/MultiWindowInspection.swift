@@ -65,14 +65,15 @@ enum MultiWindowInspection {
                 result["canonical_deduplicated"] = application.records.count == count && application.contexts.count == count && application.active === first
                 result["before_layout"] = application.records.map(describe)
                 stage = "real panel drag"
-                let (shared, dragDiagnostics) = try await dragPanel(application, first: first, second: second)
-                result["real_drag_shared"] = shared
+                let (isolatedDrag, dragDiagnostics) = try await dragPanel(application, first: first, second: second)
+                result["real_drag_isolated"] = isolatedDrag
                 result["real_drag_diagnostics"] = dragDiagnostics
                 let oldBSize = second.layout.size[.left]
-                first.layout.moveToRegion(.outline, .left)
+                let secondGroups = second.layout.state.regions.mapValues(\.groups)
+                first.layout.moveToRegion(.tool(.outline), .left)
                 first.layout.visible[.left] = false
                 first.layout.size[.left] = 340
-                result["groups_shared"] = first.layout.state.regions.mapValues(\.groups) == second.layout.state.regions.mapValues(\.groups)
+                result["groups_isolated"] = first.layout.state.regions.mapValues(\.groups) != secondGroups
                 result["size_existing_unchanged"] = second.layout.size[.left] == oldBSize
                 result["visible_isolated"] = second.layout.visible[.left] == true
                 let thirdPath = URL(fileURLWithPath: secondPath).deletingLastPathComponent().appendingPathComponent("c").path
@@ -85,11 +86,20 @@ enum MultiWindowInspection {
                 third.window?.performClose(nil)
                 try await wait { application.records.count == 2 && application.contexts.count == 2 }
                 stage = "start terminals"
-                for record in [first, second] { record.layout.setTerminalVisible(true) }
+                for record in [first, second] { record.workspace.showTerminal() }
                 try await wait { first.workspace.terminalPid > 0 && second.workspace.terminalPid > 0 }
                 let aPID = first.workspace.terminalPid, bPID = second.workspace.terminalPid
                 result["terminal_pids"] = [aPID, bPID]
                 result["terminal_roots"] = [first.workspace.root ?? "", second.workspace.root ?? ""]
+                // 两窗口各自不同的动态标签；新增第二个窗口的 Shell 不影响第一个窗口。
+                let firstCount = first.layout.terminalIDs.count
+                _ = second.workspace.addShell(to: second.layout.defaultTerminalGroupID)
+                try await wait { second.workspace.terminalPid > 0 && second.workspace.terminalPid != bPID }
+                let added = second.workspace.terminalPid
+                result["dynamic_tabs_isolated"] = added != aPID && added != bPID
+                    && first.layout.terminalIDs.count == firstCount
+                    && second.layout.terminalIDs.count == firstCount + 1
+                    && Set([first.workspace.terminalPid, bPID, added]).count == 3
                 first.workspace.presentQuickOpen()
                 first.workspace.updateQuickOpen(query: "same", marked: false)
                 result["quick_open_isolated"] = first.workspace.quickOpenVisible && !second.workspace.quickOpenVisible
@@ -106,7 +116,10 @@ enum MultiWindowInspection {
                 try await wait { secondDocument.reading != oldView }
                 result["key_window_command"] = performed && firstDocument.reading && !secondDocument.reading
                 application.activate(first)
-                result["background_terminal_preserved"] = aPID == first.workspace.terminalPid && bPID == second.workspace.terminalPid
+                result["background_terminal_preserved"] = aPID == first.workspace.terminalPid
+                    && second.layout.terminalIDs.count == 2
+                    && second.workspace.terminals.shellTabs.contains { $0.session.inspectionShellPid == bPID }
+                    && second.workspace.terminals.shellTabs.contains { $0.session.inspectionShellPid == added }
                 // 外部批次覆盖同名路径、创建、改名与删除；每库独立刷新。
                 let aURL = URL(fileURLWithPath: root!)
                 stage = "external refresh"
@@ -267,24 +280,16 @@ enum MultiWindowInspection {
          "selected": record.workspace.selected ?? "", "views": record.workspace.sessionViews(),
          "documents": record.workspace.tabs.compactMap { $0.document.map { String(describing: ObjectIdentifier($0)) } },
          "terminal_pid": record.workspace.terminalPid,
+         "terminal_count": record.layout.terminalIDs.count,
+         "agent_count": record.workspace.terminals.allTabs.filter { $0.kind == .agent }.count,
          "terminal_root": record.workspace.root ?? "",
          "left_size": record.layout.size[.left] ?? 0,
          "left_visible": record.layout.visible[.left] ?? true,
          "frame": record.window.map { NSStringFromRect($0.frame) } ?? ""]
     }
 
-    private static func snapshotWindows(_ records: [WindowRecord], to url: URL) async throws {
-        let content = try await SCShareableContent.currentProcess
-        let ids = Set(records.compactMap { $0.window.map { CGWindowID($0.windowNumber) } })
-        guard let display = content.displays.first else { throw CocoaError(.fileWriteUnknown) }
-        let filter = SCContentFilter(display: display, including: content.windows.filter { ids.contains($0.windowID) })
-        let configuration = SCStreamConfiguration()
-        configuration.width = display.width
-        configuration.height = display.height
-        configuration.showsCursor = false
-        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-        guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
-        try data.write(to: url)
+    static func snapshotWindows(_ records: [WindowRecord], to url: URL) async throws {
+        try await AppDelegate.snapshotWindows(to: url.path, windows: records.compactMap(\.window))
     }
 
     private static func require<T>(_ value: T?) throws -> T {
@@ -370,7 +375,8 @@ enum MultiWindowInspection {
         diagnostics["target_rect"] = NSStringFromRect(targetRect)
         diagnostics["from"] = ["x": from.x, "y": from.y]
         diagnostics["to"] = ["x": to.x, "y": to.y]
-        diagnostics["region_before"] = first.layout.region(containing: .outline).map(String.init(describing:)) ?? "nil"
+        let secondBefore = second.layout.state
+        diagnostics["region_before"] = first.layout.region(containing: .tool(.outline)).map(String.init(describing:)) ?? "nil"
         let tracker = Task { @MainActor in
             for _ in 0..<200 {
                 if first.layout.dragging != nil { return true }
@@ -384,22 +390,22 @@ enum MultiWindowInspection {
         }
         diagnostics["drag_session_seen"] = await tracker.value
         diagnostics["mouse_after"] = ["x": NSEvent.mouseLocation.x, "y": NSEvent.mouseLocation.y]
-        diagnostics["region_after_drag"] = first.layout.region(containing: .outline).map(String.init(describing:)) ?? "nil"
+        diagnostics["region_after_drag"] = first.layout.region(containing: .tool(.outline)).map(String.init(describing:)) ?? "nil"
         var changed = false
         for _ in 0..<300 {
-            if first.layout.region(containing: .outline) == .bottom { changed = true; break }
+            if first.layout.region(containing: .tool(.outline)) == .bottom { changed = true; break }
             try await Task.sleep(for: .milliseconds(10))
         }
-        diagnostics["region_after"] = first.layout.region(containing: .outline).map(String.init(describing:)) ?? "nil"
+        diagnostics["region_after"] = first.layout.region(containing: .tool(.outline)).map(String.init(describing:)) ?? "nil"
         diagnostics["region_changed"] = changed
-        let shared = second.layout.region(containing: .outline) == .bottom
-            && first.layout.groups(in: .bottom).map(\.tabs) == second.layout.groups(in: .bottom).map(\.tabs)
-        diagnostics["groups_shared"] = shared
-        diagnostics["second_region"] = second.layout.region(containing: .outline).map(String.init(describing:)) ?? "nil"
+        let isolated = second.layout.region(containing: .tool(.outline)) != .bottom
+            && second.layout.state == secondBefore
+        diagnostics["groups_isolated"] = isolated
+        diagnostics["second_region"] = second.layout.region(containing: .tool(.outline)).map(String.init(describing:)) ?? "nil"
         if !changed {
-            fputs("multi-window drag result first=\(String(describing: first.layout.region(containing: .outline))) second=\(String(describing: second.layout.region(containing: .outline)))\n", stderr)
+            fputs("multi-window drag result first=\(String(describing: first.layout.region(containing: .tool(.outline)))) second=\(String(describing: second.layout.region(containing: .tool(.outline))))\n", stderr)
         }
-        return (changed && shared, diagnostics)
+        return (changed && isolated, diagnostics)
     }
 
     nonisolated private static func sendDrag(from: CGPoint, to: CGPoint, completion: @escaping @Sendable () -> Void) {

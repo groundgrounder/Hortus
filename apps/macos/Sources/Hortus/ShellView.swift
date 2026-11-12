@@ -131,15 +131,15 @@ struct ShellView: View {
 
     private func toggle(_ region: Region, symbol: String, help: String) -> some View {
         Button {
-            withAnimation(.snappy) { layout.visible[region] = !(layout.visible[region] ?? true) }
+            withAnimation(.snappy) { workspace.toggleRegion(region) }
         } label: {
             Label(region.title, systemImage: symbol)
         }
         .help(L10n.string(help))
         // 也是放置目标：把标签拖到按钮上，就移到这个区域
         .dropDestination(for: String.self) { items, _ in
-            guard let raw = items.first, let view = ViewKind(rawValue: raw), view.isAvailable else { return }
-            withAnimation(.snappy) { layout.split(view, to: region) }
+            guard let raw = items.first, let tool = ToolID(dragPayload: raw), layout.locateTool(tool) != nil else { return }
+            withAnimation(.snappy) { layout.split(tool, to: region) }
             layout.dragging = nil
         }
     }

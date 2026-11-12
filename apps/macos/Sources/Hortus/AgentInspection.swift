@@ -36,6 +36,23 @@ enum AgentInspection {
         return view.visibleRowsText(0..<view.terminalDimensions.rows).joined(separator: "\n")
     }
 
+    /// 跨区后终端宽度变化会重排尾随空格；比较实际文字而不是列宽。
+    private static func normalizedText(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.replacingOccurrences(of: " +$", with: "", options: .regularExpression) }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedScreen(_ tab: TerminalTab) -> String { normalizedText(screen(tab)) }
+
+    /// 去掉所有空白后比较：跨区重排只改变折行，不改变终端里已有的文字。
+    private static func collapsedText(_ text: String) -> String {
+        text.filter { !$0.isWhitespace }
+    }
+
+    private static func collapsedScreen(_ tab: TerminalTab) -> String { collapsedText(screen(tab)) }
+
     private static func waitShell(_ tab: TerminalTab, seconds: Double = 20) async throws {
         try await wait(seconds: seconds, until: "shell \(tab.title) 启动") {
             tab.session.state == .running && tab.session.inspectionShellPid > 0 && tab.session.inspectionViewAttached
@@ -50,6 +67,15 @@ enum AgentInspection {
             String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
         }
     }
+
+    #if DEBUG
+    private static func dragTerminal(_ tab: TerminalTab, to region: Region, layout: Layout, window: NSWindow) async throws -> Bool {
+        guard let group = layout.availableGroups(in: region).first else { return false }
+        return try await ToolDragInspection.drag(
+            from: "panel-tab-terminal-\(tab.id.uuidString)",
+            to: "group-tabs-\(group.id.uuidString)", window: window)
+    }
+    #endif
 
     private static func alive(_ pid: pid_t) -> Bool { pid > 0 && kill(pid, 0) == 0 }
 
@@ -160,7 +186,7 @@ enum AgentInspection {
         let mode = argument("agent-mode", in: arguments) ?? "launch"
         let scratchDirectory = argument("agent-scratch", in: arguments)
         let controller = workspace.terminals
-        layout.setTerminalVisible(true)
+        workspace.showTerminal()
         var result: [String: Any] = ["mode": mode, "root": workspace.root ?? ""]
         if let delay = argument("agent-gate-delay", in: arguments).flatMap(Double.init) {
             controller.inspectionSetGateDelay(delay)
@@ -226,6 +252,16 @@ enum AgentInspection {
             if case .exited(let code) = tab.agentPhase { result["exit_code"] = code.map { Int($0) } ?? -1 }
             if mode == "preparing" {
                 result["snapshot_ready_before_exec"] = tab.agentSessionID != nil
+                if let window = workspace.application?.records.first(where: { $0.workspace === workspace })?.window {
+                    let generation = tab.generation, session = tab.agentSessionID
+                    let moved = try await dragTerminal(tab, to: .right, layout: layout, window: window)
+                    let right = layout.region(containing: .terminal(tab.id)) == .right
+                        && tab.generation == generation && tab.agentSessionID == session
+                        && tab.agentPhase == .preparing
+                    _ = try await dragTerminal(tab, to: .bottom, layout: layout, window: window)
+                    result["preparing_drag_valid"] = moved && right && tab.generation == generation
+                        && tab.agentSessionID == session && tab.agentPhase == .preparing
+                }
             }
 
         case "tabs":
@@ -260,6 +296,80 @@ enum AgentInspection {
             gap.stop()
             result["max_main_gap_ms"] = gap.maxGapMilliseconds
 
+            #if DEBUG
+            // 真实拖动：Agent 和 Shell 跨区后 PID、cwd、scrollback 与 Agent 会话不变。
+            if let window = workspace.application?.records.first(where: { $0.workspace === workspace })?.window {
+                let agentPidBefore = agentTab.session.inspectionShellPid
+                let agentSessionBefore = agentTab.agentSessionID
+                let agentCwdBefore = currentDirectory(agentPidBefore) ?? ""
+                let agentBufferBefore = collapsedScreen(agentTab)
+                let agentViewBefore = agentTab.session.inspectionView
+                let agentToRight = try await dragTerminal(agentTab, to: .right, layout: layout, window: window)
+                try await wait(seconds: 3, until: "Agent 拖到右侧") {
+                    layout.region(containing: .terminal(agentTab.id)) == .right
+                }
+                let agentRegionRight = layout.region(containing: .terminal(agentTab.id)) == .right
+                let agentPidRight = agentTab.session.inspectionShellPid == agentPidBefore
+                let agentSessionRight = agentTab.agentSessionID == agentSessionBefore
+                let agentCwdRight = (currentDirectory(agentPidBefore) ?? "") == agentCwdBefore
+                let agentBufferRight = collapsedScreen(agentTab) == agentBufferBefore
+                let agentRightOK = agentRegionRight && controller.tab(agentTab.id) === agentTab
+                    && agentPidRight && agentSessionRight && agentCwdRight && agentBufferRight
+                    && agentTab.session.inspectionView === agentViewBefore
+                let agentToBottom = try await dragTerminal(agentTab, to: .bottom, layout: layout, window: window)
+                try await wait(seconds: 3, until: "Agent 拖回底部") {
+                    layout.region(containing: .terminal(agentTab.id)) == .bottom
+                }
+                let agentRegionBottom = layout.region(containing: .terminal(agentTab.id)) == .bottom
+                let agentPidBottom = agentTab.session.inspectionShellPid == agentPidBefore
+                let agentSessionBottom = agentTab.agentSessionID == agentSessionBefore
+                let agentBufferBottom = collapsedScreen(agentTab) == agentBufferBefore
+                let agentBottomOK = agentRegionBottom && agentPidBottom && agentSessionBottom && agentBufferBottom
+                let shellCwdBefore = currentDirectory(firstPid) ?? ""
+                let shellViewBefore = first.session.inspectionView
+                let shellToLeft = try await dragTerminal(first, to: .left, layout: layout, window: window)
+                let shellLeftOK = layout.region(containing: .terminal(first.id)) == .left
+                    && first.session.inspectionShellPid == firstPid
+                    && (currentDirectory(firstPid) ?? "") == shellCwdBefore
+                    && screen(first).contains("HORTUS_TAB_ONE")
+                    && first.session.inspectionView === shellViewBefore
+                let shellToBottom = try await dragTerminal(first, to: .bottom, layout: layout, window: window)
+                let shellBottomOK = layout.region(containing: .terminal(first.id)) == .bottom
+                    && first.session.inspectionShellPid == firstPid
+                    && screen(first).contains("HORTUS_TAB_ONE")
+                let cancelled = try await ToolDragInspection.cancel(
+                    from: "panel-tab-terminal-\(first.id.uuidString)", window: window)
+                let cancelOK = layout.region(containing: .terminal(first.id)) == .bottom
+                    && layout.dragging == nil
+                    && first.session.inspectionShellPid == firstPid
+                result["real_drag"] = [
+                    "agent_to_right": agentToRight && agentRightOK,
+                    "agent_to_bottom": agentToBottom && agentBottomOK,
+                    "shell_to_left": shellToLeft && shellLeftOK,
+                    "shell_to_bottom": shellToBottom && shellBottomOK,
+                    "cancel": cancelled && cancelOK,
+                ]
+                result["real_drag_detail"] = [
+                    "agent_event": agentToRight,
+                    "agent_region_right": agentRegionRight,
+                    "agent_pid_right": agentPidRight,
+                    "agent_session_right": agentSessionRight,
+                    "agent_cwd_right": agentCwdRight,
+                    "agent_buffer_right": agentBufferRight,
+                    "agent_bottom": agentBottomOK,
+                    "agent_region_bottom": agentRegionBottom,
+                    "agent_pid_bottom": agentPidBottom,
+                    "agent_session_bottom": agentSessionBottom,
+                    "agent_buffer_bottom": agentBufferBottom,
+                    "shell_left_event": shellToLeft,
+                    "shell_left_ok": shellLeftOK,
+                    "cancel_event": cancelled,
+                    "cancel_dragging": layout.dragging == nil,
+                    "cancel_pid_same": first.session.inspectionShellPid == firstPid,
+                ]
+            }
+            #endif
+
             // 切换标签不重启进程、不清空 scrollback。
             controller.select(first)
             try await Task.sleep(for: .milliseconds(150))
@@ -275,9 +385,9 @@ enum AgentInspection {
                 && screen(second).count >= secondBuffer.count * 8 / 10
 
             // 停靠移动只复用视图，不重启进程。
-            layout.moveToRegion(.terminal, .right)
+            layout.moveToRegion(.terminal(first.id), .right)
             try await Task.sleep(for: .milliseconds(300))
-            layout.moveToRegion(.terminal, .bottom)
+            layout.moveToRegion(.terminal(first.id), .bottom)
             try await Task.sleep(for: .milliseconds(300))
             result["dock_pids"] = [Int(first.session.inspectionShellPid), Int(second.session.inspectionShellPid),
                                    Int(agentTab.session.inspectionShellPid)]
@@ -288,22 +398,38 @@ enum AgentInspection {
 
             // 焦点与清屏只作用于当前标签。
             controller.select(first)
-            try await Task.sleep(for: .milliseconds(250))
+            try await wait(seconds: 3, until: "当前终端切到第一个 Shell") { controller.current === first }
             controller.focus()
-            try await Task.sleep(for: .milliseconds(100))
+            try await wait(seconds: 3, until: "第一个 Shell 获得焦点") {
+                first.session.inspectionView?.window?.firstResponder === first.session.inspectionView
+            }
             let focusFirst = first.session.inspectionView?.window?.firstResponder === first.session.inspectionView
             controller.select(second)
-            try await Task.sleep(for: .milliseconds(250))
+            try await wait(seconds: 3, until: "当前终端切到第二个 Shell") { controller.current === second }
             controller.focus()
-            try await Task.sleep(for: .milliseconds(100))
+            try await wait(seconds: 3, until: "第二个 Shell 获得焦点") {
+                second.session.inspectionView?.window?.firstResponder === second.session.inspectionView
+            }
             let focusSecond = second.session.inspectionView?.window?.firstResponder === second.session.inspectionView
             result["focus"] = [focusFirst, focusSecond,
                                first.session.inspectionView?.window != nil,
                                second.session.inspectionView?.window != nil]
             controller.clearScreen()
-            try await Task.sleep(for: .milliseconds(200))
+            try await wait(seconds: 3, until: "清屏移除第二个 Shell 的标记") {
+                !screen(second).contains("HORTUS_TAB_TWO")
+            }
             result["focus_isolated"] = focusFirst && focusSecond
-            result["clear_isolated"] = !screen(second).contains("HORTUS_TAB_TWO") && screen(first) == firstBuffer
+            result["focus_detail"] = [
+                "first_view_attached": first.session.inspectionView?.window != nil,
+                "second_view_attached": second.session.inspectionView?.window != nil,
+                "current_is_first": controller.current === first,
+                "first_is_first_responder": first.session.inspectionView?.window?.firstResponder === first.session.inspectionView,
+                "second_is_first_responder": second.session.inspectionView?.window?.firstResponder === second.session.inspectionView,
+            ]
+            result["clear_isolated"] = !screen(second).contains("HORTUS_TAB_TWO")
+                && screen(first).contains("HORTUS_SESSION_ENV=unset")
+                && screen(first).contains("HORTUS_TAB_ONE")
+                && first.session.inspectionShellPid == firstPid
 
             // 关闭一个标签只终止它自己的进程组。
             let agentPid = agentTab.session.inspectionShellPid
@@ -358,7 +484,7 @@ enum AgentInspection {
             guard let secondRecord = application.records.first(where: { $0.workspace !== workspace && $0.workspace.root != nil })
             else { throw CocoaError(.coderValueNotFound) }
             let secondWorkspace = secondRecord.workspace
-            secondRecord.layout.setTerminalVisible(true)
+            secondWorkspace.showTerminal()
             application.activate(secondRecord)
             try await Task.sleep(for: .milliseconds(300))
             let secondFirst = try await ensureShell(secondWorkspace.terminals)

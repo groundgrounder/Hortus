@@ -12,14 +12,64 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+
+TRUSTED_HOST_ENV = 'HORTUS_AGENT_CHECK_ACCESSIBILITY_HOST'
+
+
+def ensure_event_posting_host():
+    """Re-run under Terminal when the host lacks Accessibility event posting."""
+    if os.environ.get(TRUSTED_HOST_ENV) == '1' or sys.platform != 'darwin':
+        return
+    try:
+        import ctypes
+        library = ctypes.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+        library.CGPreflightPostEventAccess.restype = ctypes.c_bool
+        if library.CGPreflightPostEventAccess():
+            return
+    except OSError:
+        return
+    base = Path(tempfile.mkdtemp(prefix='hortus-agent-host-'))
+    out, err, status, command = base / 'stdout', base / 'stderr', base / 'status', base / 'run.command'
+    invocation = ' '.join(shlex.quote(part) for part in
+                          [sys.executable, '-B', str(Path(__file__).resolve()), *sys.argv[1:]])
+    command.write_text(f'''#!/bin/zsh
+cd {shlex.quote(str(ROOT))}
+export {TRUSTED_HOST_ENV}=1
+{invocation} > {shlex.quote(str(out))} 2> {shlex.quote(str(err))}
+print -r -- $? > {shlex.quote(str(status))}
+''')
+    command.chmod(0o700)
+    print('Accessibility event posting is not granted to this host; re-running under Terminal.', file=sys.stderr)
+    try:
+        try:
+            subprocess.run(['open', '-a', 'Terminal', str(command)], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise SystemExit(f'Cannot start Terminal for the Accessibility check: {error}') from error
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline and not status.exists():
+            time.sleep(0.5)
+        if not status.exists():
+            raise SystemExit('Timed out waiting for the Terminal-hosted check')
+        sys.stdout.write(out.read_text() if out.exists() else '')
+        sys.stderr.write(err.read_text() if err.exists() else '')
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise SystemExit(int(status.read_text().strip() or '1'))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 import importlib.util
 SPEC = importlib.util.spec_from_file_location('helpers', ROOT / 'tools/check-tabs-in-toolbar.py')
 HELPERS = importlib.util.module_from_spec(SPEC)
@@ -37,6 +87,8 @@ def environment(base, extra_path=None, extra=None):
            if key not in ('LANG', 'LC_ALL', 'LC_CTYPE') and not key.startswith('FAKE_AGENT')}
     zdot = base / 'zdotdir'
     zdot.mkdir(parents=True, exist_ok=True)
+    (zdot / '.zshrc').write_text("PS1='❯ '\nRPROMPT=''\n")
+    (zdot / '.zprofile').write_text("PS1='❯ '\nRPROMPT=''\n")
     env.update(SHELL='/bin/zsh', ZDOTDIR=str(zdot), HISTFILE=str(zdot / 'history'),
                HORTUS_CONFIG_DIR=str(base / 'config'),
                HORTUS_CACHE_DIR=str(base / 'cache'),
@@ -98,7 +150,11 @@ def run_app(base, vault, mode, extra=(), env_extra=None, output=None, timeout=12
     process = subprocess.Popen(command, env=environment(base, extra=env_extra), cwd=cwd,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        HELPERS.wait_for(result_path, process, seconds=timeout)
+        try:
+            HELPERS.wait_for(result_path, process, seconds=timeout)
+        except AssertionError:
+            _, stderr = process.communicate(timeout=20)
+            raise AssertionError(f'{mode}: {stderr.decode(errors="replace")}')
         data = json.loads(result_path.read_text())
         # 截图运行保持窗口；其余由应用在检查结束后自行退出。
         if screenshot:
@@ -111,7 +167,7 @@ def run_app(base, vault, mode, extra=(), env_extra=None, output=None, timeout=12
             raise AssertionError(f'{mode}: 应用退出码 {process.returncode}: {stderr.decode(errors="replace")}')
         return data, None
     finally:
-        if process.poll() is None and not screenshot:
+        if process.poll() is None:
             process.terminate()
             process.wait(timeout=30)
 
@@ -254,6 +310,7 @@ def main():
     parser.add_argument('--skip-copy-path', action='store_true')
     parser.add_argument('--rounds', type=int, default=3)
     args = parser.parse_args()
+    ensure_event_posting_host()
     DEBUG_APP = args.app.resolve()
     assert DEBUG_APP.exists(), f'missing debug app {DEBUG_APP}; run ./tools/test-macos.sh first'
     output = args.output.resolve()
@@ -365,10 +422,11 @@ def main():
             pids = data['shell_pids']
             assert pids[0] and pids[1] and pids[0] != pids[1], pids
             assert data['buffers_distinct']
+            assert data['real_drag'] and all(data['real_drag'].values()), (data.get('real_drag'), data.get('real_drag_detail'))
             assert data['switch_pids'][:2] == pids, data['switch_pids']
             assert data['dock_pids'][:2] == pids
             assert data['switch_markers'] and data['dock_markers']
-            assert data['focus_isolated'] and data['clear_isolated']
+            assert data['focus_isolated'] and data['clear_isolated'], (data.get('focus'), data.get('focus_detail'), data.get('clear_isolated'), data.get('tabs'))
             assert data['closed_dead'] and data['other_shell_alive'] and data['agent_alive']
             agent_pid = [tab for tab in data['tabs'] if tab['kind'] == 'agent'][0]['pid']
             assert agent_pid > 0 and data['buffers_after_close']
@@ -380,6 +438,7 @@ def main():
                     time.sleep(0.05)
                 assert not _alive(pid), pid
             tab_runs.append({'shell_pids': pids, 'agent_pid': agent_pid,
+                             'real_drag': data['real_drag'],
                              'closed': data['closed_tab_pid'],
                              'max_main_gap_ms': data['max_main_gap_ms'],
                              'all_processes_gone': True})
@@ -415,13 +474,16 @@ def main():
         (vault / 'note.md').write_text('# Note\n')
         write_config(preparing_case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=30'])
         preparing, _ = run_app(preparing_case, vault, 'preparing',
-                               extra=['--agent-gate-delay=8'],
+                               extra=['--agent-gate-delay=20'],
                                screenshot=media / 'agent-preparing.png')
         assert preparing['snapshot_ready_before_exec'], preparing
+        assert preparing['preparing_drag_valid'], preparing
         assert preparing['sessions'] and preparing['sessions'][0]['state'] == 'ready', preparing
         assert not any((preparing_case / 'scratch').rglob('*')), 'exec happened before the snapshot gate'
         summary['preparing'] = {'state': preparing['sessions'][0]['state'],
-                                'exec_after_ready': not any((preparing_case / 'scratch').rglob('*'))}
+                                'exec_after_ready': not any((preparing_case / 'scratch').rglob('*')),
+                                'drag_valid': preparing['preparing_drag_valid']}
+        details['preparing'] = preparing
 
         failed_case = base / 'visible-failure'
         vault = failed_case / 'vault'
@@ -793,7 +855,8 @@ def main():
             strings = subprocess.run(['strings', str(release)], capture_output=True, text=True).stdout
             for marker in ['--agent-launch-inspection', '--agent-mode', '--agent-scratch',
                            '--agent-gate-delay', '--agent-second-vault', '--agent-marker',
-                           'HORTUS_SNAPSHOT_GATE']:
+                           'HORTUS_SNAPSHOT_GATE', '--tool-tabs-inspection', '--tool-tabs-media',
+                           '--tool-tabs-second']:
                 assert marker not in strings, marker
         summary['release_strings_clean'] = True
 

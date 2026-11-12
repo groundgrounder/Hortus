@@ -401,52 +401,24 @@ private struct TerminalRepresentable: NSViewRepresentable {
 }
 
 struct TerminalPanel: View {
-    let controller: TerminalController
+    @Environment(Workspace.self) private var workspace
+    let tab: TerminalTab
     let fontSize: Double
 
     var body: some View {
-        VStack(spacing: 0) {
-            if controller.root != nil {
-                TerminalTabBar(controller: controller)
-            }
-            if let tab = controller.current {
-                ZStack {
-                    // 每个标签拥有自己的 PTY 视图；SwiftUI 不能把一个已运行
-                    // 的 NSView 复用给另一条会话。
-                    TerminalRepresentable(session: tab.session, fontSize: fontSize)
-                        .id(tab.id)
-                        .clipShape(.rect(cornerRadius: 12, style: .continuous))
-                    statusOverlay(for: tab)
-                }
-            } else {
-                emptyState
-            }
+        ZStack {
+            TerminalRepresentable(session: tab.session, fontSize: fontSize)
+                .id(tab.id)
+                .clipShape(.rect(cornerRadius: 12, style: .continuous))
+            statusOverlay
         }
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(L10n.string("Terminal"))
+        .accessibilityLabel(tab.title)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "terminal").font(.title2).foregroundStyle(.tertiary)
-            Text(controller.root == nil
-                 ? L10n.string("Open a knowledge base to use the terminal")
-                 : L10n.string("Open a terminal tab"))
-                .font(.callout).foregroundStyle(.secondary)
-            if controller.root != nil {
-                HStack(spacing: 8) {
-                    Button(L10n.string("New Shell Tab")) { controller.newShellTab() }
-                    Button(L10n.string("New Agent Tab")) { controller.newAgentTab() }
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    @ViewBuilder private func statusOverlay(for tab: TerminalTab) -> some View {
+    @ViewBuilder private var statusOverlay: some View {
         switch tab.kind {
         case .shell:
             if tab.session.showsStatusOverlay {
@@ -472,7 +444,7 @@ struct TerminalPanel: View {
                     Text(L10n.string("Agent failed to start")).font(.callout.weight(.medium))
                     Text(message).font(.caption).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center).frame(maxWidth: 420)
-                    Button(L10n.string("Restart Agent")) { controller.restart(tab) }
+                    Button(L10n.string("Restart Agent")) { workspace.terminals.restart(tab) }
                         .buttonStyle(.borderedProminent)
                 }
                 .padding(18)
@@ -480,7 +452,7 @@ struct TerminalPanel: View {
             case .exited:
                 VStack(spacing: 8) {
                     Text(L10n.string("Agent exited")).font(.callout).foregroundStyle(.secondary)
-                    Button(L10n.string("Restart Agent")) { controller.restart(tab) }
+                    Button(L10n.string("Restart Agent")) { workspace.terminals.restart(tab) }
                         .buttonStyle(.borderedProminent)
                 }
                 .padding(18)
@@ -489,55 +461,5 @@ struct TerminalPanel: View {
                 EmptyView()
             }
         }
-    }
-}
-
-private struct TerminalTabBar: View {
-    let controller: TerminalController
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(controller.tabs) { tab in
-                let selected = controller.selectedID == tab.id
-                HStack(spacing: 4) {
-                    Image(systemName: tab.kind == .agent ? "sparkles" : "terminal")
-                        .font(.caption2)
-                    Text(tab.title).font(.callout.weight(selected ? .semibold : .regular))
-                    if selected {
-                        Button {
-                            Task { await controller.close(tab) }
-                        } label: {
-                            Image(systemName: "xmark").font(.caption2)
-                        }
-                        .buttonStyle(.plain)
-                        .help(L10n.string("Close Tab"))
-                        .accessibilityLabel(L10n.string("Close Tab"))
-                    }
-                }
-                .foregroundStyle(selected ? .primary : .secondary)
-                .padding(.horizontal, 9).padding(.vertical, 4)
-                .background(selected ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .capsule)
-                .contentShape(.capsule)
-                .onTapGesture { controller.select(tab) }
-                .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-                .accessibilityAction { controller.select(tab) }
-            }
-            Spacer(minLength: 0)
-            Menu {
-                Button(L10n.string("New Shell Tab")) { controller.newShellTab() }
-                Button(L10n.string("New Agent Tab")) { controller.newAgentTab() }
-            } label: {
-                Image(systemName: "plus")
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .help(L10n.string("New Terminal Tab"))
-            .accessibilityLabel(L10n.string("New Terminal Tab"))
-        }
-        .lineLimit(1)
-        .padding(.horizontal, 4)
-        .padding(.bottom, 4)
     }
 }

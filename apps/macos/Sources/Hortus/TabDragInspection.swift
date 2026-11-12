@@ -171,15 +171,15 @@ enum TabDragInspection {
         try check("tree_shared", first.workspace.treeVersion == second.workspace.treeVersion && second.workspace.entries["event.md"] != nil)
         try check("external_under_second", (result["external_update_ms"] as? Double ?? 1000) < 1000)
         stage = "terminal layout"
-        for record in [first, second] { record.layout.setTerminalVisible(true) }
+        for record in [first, second] { record.workspace.showTerminal() }
         try await wait { first.workspace.terminalPid > 0 && second.workspace.terminalPid > 0 }
         let firstPID = first.workspace.terminalPid, secondPID = second.workspace.terminalPid
         result["terminal_pids"] = [firstPID, secondPID]
         try check("terminal_independent", firstPID != secondPID && first.workspace.root == root && second.workspace.root == root)
-        let originalBuffer = terminalText(first.workspace.terminals.currentSession)
+        let originalBuffer = terminalText(first.workspace.currentTerminalSession)
         second.workspace.terminals.clearScreen()
         second.workspace.terminals.focus()
-        try check("terminal_clear_focus_isolated", first.workspace.terminalPid == firstPID && terminalText(first.workspace.terminals.currentSession) == originalBuffer)
+        try check("terminal_clear_focus_isolated", first.workspace.terminalPid == firstPID && terminalText(first.workspace.currentTerminalSession) == originalBuffer)
         first.layout.visible[.left] = false
         second.layout.visible[.left] = false
         second.layout.visible[.left] = true
@@ -244,7 +244,7 @@ enum TabDragInspection {
             // 已消费的令牌不能再次创建窗口。
             guard application.finishTabDrag(payload, at: point) == nil else { throw CocoaError(.coderValueNotFound) }
         }
-        target.layout.setTerminalVisible(true)
+        target.workspace.showTerminal()
         try await wait { target.window != nil && target.workspace.terminalPid > 0 }
         let pid = target.workspace.terminalPid
         let probes = (WeakObject(target.window), WeakObject(target.workspace), WeakObject(target), pid, try WorkspaceInspection.threadCount())
