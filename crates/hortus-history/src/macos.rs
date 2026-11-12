@@ -30,6 +30,13 @@ const ACL_TYPE_EXTENDED: c_int = 0x100;
 const ATTR_CMN_CRTIME: u32 = 0x200;
 const XATTR_NOFOLLOW: c_int = 0x0001;
 
+// 阻止修改文件自身元数据的用户/系统标志；复制阶段临时清除，最后按源恢复。
+const UF_APPEND: u32 = 0x0000_0004;
+const UF_COMPRESSED: u32 = 0x0000_0020;
+const UF_IMMUTABLE: u32 = 0x0000_0002;
+const SF_APPEND: u32 = 0x0004_0000;
+const SF_IMMUTABLE: u32 = 0x0002_0000;
+
 #[repr(C)]
 struct TimeSpec {
     tv_sec: i64,
@@ -58,6 +65,7 @@ unsafe extern "C" {
     fn fchown(fd: c_int, owner: u32, group: u32) -> c_int;
     fn lchown(path: *const c_char, owner: u32, group: u32) -> c_int;
     fn fchmod(fd: c_int, mode: c_int) -> c_int;
+    fn fchflags(fd: c_int, flags: c_uint) -> c_int;
     fn fsetattrlist(
         fd: c_int,
         attrs: *const AttrList,
@@ -179,24 +187,41 @@ pub(super) fn apply_directory_metadata(source: &Path, destination: &Path) -> io:
     let metadata = fs::symlink_metadata(source)?;
     let directory = Descriptor::open(destination, O_RDONLY | O_DIRECTORY, 0)?;
     copy_ownership(directory.0, &metadata, destination)?;
-    checked(unsafe { fchmod(directory.0, (metadata.mode() & 0o7777) as c_int) })?;
-    apply_birthtime(directory.0, &metadata)?;
-    set_times(&c_path(destination)?, Some(directory.0), &metadata, false)?;
+    // 扩展属性与 ACL 需要目录仍可写；最终权限最后恢复。
     copy_xattrs(source, destination, false)?;
     copy_acl(source, destination)?;
+    apply_birthtime(directory.0, &metadata)?;
+    set_times(&c_path(destination)?, Some(directory.0), &metadata, false)?;
+    checked(unsafe { fchmod(directory.0, (metadata.mode() & 0o7777) as c_int) })?;
     checked(unsafe { fsync(directory.0) })?;
     Ok(())
 }
 
 fn apply_file_metadata(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
-    let file = Descriptor::open(destination, O_RDWR, 0)?;
+    // clonefile 会先继承 0444 等权限；只读 fd 也允许 fchmod/fchown/futimens/fsetattrlist。
+    let file = Descriptor::open(destination, O_RDONLY | O_NOFOLLOW, 0)?;
+    let flags = metadata.st_flags();
+    let blocking = flags & (UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND);
+    if blocking != 0 {
+        // 先清掉 uchg/schg，否则后续元数据写入全部 EPERM。
+        checked(unsafe { fchflags(file.0, (flags & !blocking) as c_uint) })?;
+    }
+    if metadata.mode() & 0o200 == 0 {
+        // 只读目标上的 xattr/ACL 写入要求 owner write；复制完成前再恢复只读。
+        checked(unsafe { fchmod(file.0, ((metadata.mode() | 0o200) & 0o7777) as c_int) })?;
+    }
     copy_ownership(file.0, &metadata, destination)?;
-    checked(unsafe { fchmod(file.0, (metadata.mode() & 0o7777) as c_int) })?;
-    set_times(&c_path(destination)?, Some(file.0), &metadata, false)?;
-    apply_birthtime(file.0, &metadata)?;
     copy_xattrs(source, destination, false)?;
     copy_acl(source, destination)?;
+    apply_birthtime(file.0, &metadata)?;
+    set_times(&c_path(destination)?, Some(file.0), &metadata, false)?;
+    // 最终权限与源一致，绝不留下临时可写状态。
+    checked(unsafe { fchmod(file.0, (metadata.mode() & 0o7777) as c_int) })?;
+    let restorable = flags & !UF_COMPRESSED;
+    if restorable != 0 {
+        checked(unsafe { fchflags(file.0, restorable as c_uint) })?;
+    }
     checked(unsafe { fsync(file.0) })?;
     Ok(())
 }
@@ -387,6 +412,11 @@ fn verify_file(source: &Path, destination: &Path) -> io::Result<()> {
     }
     if destination.uid() != source.uid() {
         return Err(io::Error::other("history.owner_mismatch"));
+    }
+    // 压缩是文件系统内部状态，允许由数据复制方式决定；其余标志必须逐字一致。
+    let mask = !UF_COMPRESSED;
+    if source.st_flags() & mask != destination.st_flags() & mask {
+        return Err(io::Error::other("history.flags_mismatch"));
     }
     Ok(())
 }

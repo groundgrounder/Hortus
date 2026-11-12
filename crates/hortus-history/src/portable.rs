@@ -32,15 +32,17 @@ pub(super) fn apply_directory_metadata(source: &Path, destination: &Path) -> io:
 
 fn apply_file_metadata(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
-    fs::set_permissions(
-        destination,
-        fs::Permissions::from_mode(metadata.mode() & 0o7777),
-    )?;
-    let file = fs::OpenOptions::new().write(true).open(destination)?;
+    // futimens 只需要已打开的 fd；只读文件不能先以写模式打开。
+    let file = fs::OpenOptions::new().read(true).open(destination)?;
     file.set_times(
         fs::FileTimes::new()
             .set_accessed(modified_time(&metadata, true))
             .set_modified(modified_time(&metadata, false)),
+    )?;
+    drop(file);
+    fs::set_permissions(
+        destination,
+        fs::Permissions::from_mode(metadata.mode() & 0o7777),
     )?;
     Ok(())
 }
