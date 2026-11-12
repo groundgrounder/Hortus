@@ -70,6 +70,14 @@ impl SessionState {
             Self::Ready | Self::Running | Self::Interrupted | Self::Exited
         )
     }
+
+    /// 终态不再接受 running 或其它终态写入。
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Exited | Self::Interrupted | Self::Cancelled | Self::Failed
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -170,32 +178,42 @@ impl HistoryStore {
             cancel,
         );
         match result {
-            Ok((stats, manifest)) => {
-                written_manifest(self, &record.id, &manifest)?;
+            Ok((stats, _manifest)) => {
                 record.state = SessionState::Ready;
                 record.stats = Some(SnapshotStats {
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     ..stats
                 });
-                self.write_record(&record)?;
+                if let Err(error) = self.write_record(&record) {
+                    // ready 发布失败也必须留下不可用的 failed，不能停在 preparing。
+                    self.record_failure(&record, &error, started);
+                    return Err(error);
+                }
                 Ok(record)
             }
             Err(error) => {
-                record.state = if error.kind() == io::ErrorKind::Interrupted {
-                    SessionState::Cancelled
-                } else {
-                    SessionState::Failed
-                };
-                record.ended_at_ms = Some(now_ms());
-                record.error = Some(error.to_string());
-                record.stats = Some(SnapshotStats {
-                    elapsed_ms: started.elapsed().as_millis() as u64,
-                    ..SnapshotStats::default()
-                });
-                // 失败记录也要落盘；不完整快照保持不可用。
-                let _ = self.write_record(&record);
+                self.record_failure(&record, &error, started);
                 Err(error)
             }
+        }
+    }
+
+    /// 尽力把未发布的半成品写成不可用终态；写盘本身失败时保留原始错误。
+    fn record_failure(&self, record: &SessionRecord, error: &io::Error, started: Instant) {
+        let mut failed = record.clone();
+        failed.state = if error.kind() == io::ErrorKind::Interrupted {
+            SessionState::Cancelled
+        } else {
+            SessionState::Failed
+        };
+        failed.ended_at_ms = Some(now_ms());
+        failed.error = Some(error.to_string());
+        failed.stats = Some(SnapshotStats {
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            ..SnapshotStats::default()
+        });
+        if let Err(write_error) = self.write_record(&failed) {
+            eprintln!("Hortus：写入失败会话元数据失败：{write_error}");
         }
     }
 
@@ -204,19 +222,29 @@ impl HistoryStore {
         read_record(&path)
     }
 
+    /// 只有完整快照发布出的 `ready` 才能进入 `running`；迟到的 running 不改终态。
     pub fn mark_running(&self, id: &str) -> io::Result<SessionRecord> {
+        let record = self.record(id)?;
+        if record.state != SessionState::Ready {
+            return Ok(record);
+        }
         self.update(id, |record| {
             record.state = SessionState::Running;
             record.started_at_ms = Some(now_ms());
         })
     }
 
+    /// 终态单调：已经退出、中断、取消或失败的会话不再接受新的终态或 running。
     pub fn finish(
         &self,
         id: &str,
         state: SessionState,
         exit_code: Option<i32>,
     ) -> io::Result<SessionRecord> {
+        let record = self.record(id)?;
+        if record.state.is_terminal() {
+            return Ok(record);
+        }
         self.update(id, |record| {
             record.state = state;
             record.exit_code = exit_code;
@@ -224,22 +252,59 @@ impl HistoryStore {
         })
     }
 
-    /// 应用重启后：记录仍是准备中或运行中的会话转为中断，进程已不受本应用管理。
+    /// 应用重启后：只有完整且正在运行的会话转为中断。
+    /// 准备中或缺少完整清单/统计的记录转为不可用的 failed。
     pub fn recover(&self) -> io::Result<u64> {
         let mut recovered = 0;
         for record in self.list(None)? {
-            if matches!(
-                record.state,
-                SessionState::Preparing | SessionState::Running
-            ) {
-                self.update(&record.id, |record| {
-                    record.state = SessionState::Interrupted;
-                    record.ended_at_ms = Some(now_ms());
-                })?;
-                recovered += 1;
+            match record.state {
+                SessionState::Running if self.snapshot_complete(&record) => {
+                    self.update(&record.id, |record| {
+                        record.state = SessionState::Interrupted;
+                        record.ended_at_ms = Some(now_ms());
+                    })?;
+                    recovered += 1;
+                }
+                SessionState::Preparing | SessionState::Running => {
+                    self.mark_failed(&record)?;
+                }
+                // 已发布的 ready 也必须仍有完整清单，否则不能冒充可用会话。
+                SessionState::Ready if !self.snapshot_complete(&record) => {
+                    self.mark_failed(&record)?;
+                }
+                _ => {}
             }
         }
         Ok(recovered)
+    }
+
+    fn mark_failed(&self, record: &SessionRecord) -> io::Result<()> {
+        self.update(&record.id, |record| {
+            record.state = SessionState::Failed;
+            record.ended_at_ms = Some(now_ms());
+            record.error = Some("history.incomplete_session".into());
+        })?;
+        Ok(())
+    }
+
+    /// 完整快照必须同时具备统计、快照目录与条目数一致的清单。
+    fn snapshot_complete(&self, record: &SessionRecord) -> bool {
+        let Some(stats) = record.stats.as_ref() else {
+            return false;
+        };
+        let (Ok(directory), Ok(manifest)) = (
+            self.snapshot_directory(&record.id),
+            self.manifest_path(&record.id),
+        ) else {
+            return false;
+        };
+        let Ok(data) = fs::read(manifest) else {
+            return false;
+        };
+        let Ok(entries) = serde_json::from_slice::<Vec<snapshot::ManifestEntry>>(&data) else {
+            return false;
+        };
+        directory.is_dir() && entries.len() as u64 == stats.entries
     }
 
     /// 按创建时间倒序列出会话；可按规范化库根筛选。
@@ -294,15 +359,6 @@ impl HistoryStore {
     }
 }
 
-fn written_manifest(
-    store: &HistoryStore,
-    id: &str,
-    manifest: &[snapshot::ManifestEntry],
-) -> io::Result<()> {
-    let data = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
-    atomic_write(&store.manifest_path(id)?, &data)
-}
-
 fn read_record(path: &Path) -> io::Result<SessionRecord> {
     let data = fs::read_to_string(path)?;
     serde_json::from_str(&data).map_err(|_| io::Error::other("history.invalid_metadata"))
@@ -344,8 +400,19 @@ fn new_session_id() -> io::Result<String> {
     ))
 }
 
+/// 单元测试用故障注入；只在测试构建存在。
+#[cfg(test)]
+pub(crate) static TEST_FAIL_WRITE: std::sync::Mutex<Option<fn(&Path) -> bool>> =
+    std::sync::Mutex::new(None);
+
 /// 元数据与清单共用原子写入：同目录临时文件、fsync、替换、目录 fsync。
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(predicate) = *TEST_FAIL_WRITE.lock().unwrap() {
+        if predicate(path) {
+            return Err(io::Error::other("history.test_write_failed"));
+        }
+    }
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("history.path_invalid"))?;
@@ -377,5 +444,65 @@ impl Cancellation {
 impl Default for Cancellation {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::sync::atomic::AtomicUsize;
+
+    static METADATA_WRITES: AtomicUsize = AtomicUsize::new(0);
+
+    fn fail_second_metadata(path: &Path) -> bool {
+        if path.file_name() == Some(OsStr::new(METADATA_FILE)) {
+            METADATA_WRITES.fetch_add(1, Ordering::SeqCst) == 1
+        } else {
+            false
+        }
+    }
+
+    fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::TempDir::new().unwrap();
+        let vault = root.path().join("vault");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("note.md"), "# Note\n").unwrap();
+        (root, vault)
+    }
+
+    #[test]
+    fn publish_failures_leave_only_unusable_records() {
+        let (root, vault) = fixture();
+        let store = HistoryStore::new(root.path().join("data-manifest"));
+        *TEST_FAIL_WRITE.lock().unwrap() =
+            Some(|path| path.file_name() == Some(OsStr::new(MANIFEST_FILE)));
+        let error = store.begin(&vault, None).unwrap_err();
+        *TEST_FAIL_WRITE.lock().unwrap() = None;
+        assert_eq!(error.to_string(), "history.test_write_failed");
+        let sessions = store.list(None).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].state, SessionState::Failed);
+        assert!(
+            sessions[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("test_write_failed")
+        );
+        assert!(!sessions[0].state.usable());
+
+        // ready 元数据发布失败：第二次 session.json 写入失败，第三次尽力写 failed 成功。
+        let (root, vault) = fixture();
+        let store = HistoryStore::new(root.path().join("data-ready"));
+        METADATA_WRITES.store(0, Ordering::SeqCst);
+        *TEST_FAIL_WRITE.lock().unwrap() = Some(fail_second_metadata);
+        let error = store.begin(&vault, None).unwrap_err();
+        *TEST_FAIL_WRITE.lock().unwrap() = None;
+        assert_eq!(error.to_string(), "history.test_write_failed");
+        let sessions = store.list(None).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].state, SessionState::Failed);
+        assert!(!sessions[0].state.usable());
     }
 }
