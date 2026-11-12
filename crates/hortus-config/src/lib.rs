@@ -335,24 +335,42 @@ fn resolve_executable_in(command: &str, search: Option<&std::ffi::OsStr>) -> io:
         if !path.is_absolute() {
             return Err(io::Error::other("agent.command_not_absolute"));
         }
-        if !path.try_exists()? {
-            return Err(io::Error::other("agent.not_found"));
-        }
-        if !is_executable(path) {
-            return Err(io::Error::other("agent.not_executable"));
-        }
-        return Ok(path.to_string_lossy().into_owned());
+        return verified_executable(path);
     }
     for directory in std::env::split_paths(search.unwrap_or_default()) {
-        if directory.as_os_str().is_empty() {
+        // 空项与相对 POSIX 项按进程 cwd 解析；子进程可能先 chdir 到库，
+        // 校验对象和 exec 对象会不同，因此不采用。
+        if !directory.is_absolute() {
             continue;
         }
         let candidate = directory.join(command);
-        if candidate.is_file() && is_executable(&candidate) {
-            return Ok(candidate.to_string_lossy().into_owned());
+        if let Ok(executable) = verified_executable(&candidate) {
+            return Ok(executable);
         }
     }
     Err(io::Error::other("agent.not_found"))
+}
+
+/// 只接受常规可执行文件；返回规范化后的绝对路径，保证 exec 的就是校验过的对象。
+fn verified_executable(path: &Path) -> io::Result<String> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::other("agent.not_found")
+        } else {
+            error
+        }
+    })?;
+    if !metadata.is_file() || !is_executable(path) {
+        return Err(io::Error::other("agent.not_executable"));
+    }
+    let resolved = fs::canonicalize(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::other("agent.not_found")
+        } else {
+            error
+        }
+    })?;
+    Ok(resolved.to_string_lossy().into_owned())
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -544,18 +562,60 @@ impl Store {
             &self.directories.cache,
             &self.directories.data,
         ] {
-            match fs::canonicalize(directory) {
-                Ok(path) => {
-                    if path.starts_with(&root) {
-                        return Err(io::Error::other("config.vault_contains_state"));
-                    }
-                }
-                // 持久数据根按需创建；尚不存在时不可能位于库内。
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+            let path = canonicalize_allow_missing(directory)?;
+            if path.starts_with(&root) {
+                return Err(io::Error::other("config.vault_contains_state"));
             }
         }
         Ok(())
+    }
+}
+
+enum MissingComponent {
+    Name(std::ffi::OsString),
+    Current,
+    Parent,
+}
+
+/// 规范化可能尚不存在的路径：canonicalize 最近已存在的祖先，再拼接剩余部分。
+/// 符号链接祖先按真实目标判断，库内不存在的持久数据根不能借“不存在”绕过。
+fn canonicalize_allow_missing(path: &Path) -> io::Result<PathBuf> {
+    if let Ok(resolved) = fs::canonicalize(path) {
+        return Ok(resolved);
+    }
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        match fs::canonicalize(&current) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    match component {
+                        MissingComponent::Name(name) => resolved.push(name),
+                        MissingComponent::Current => {}
+                        MissingComponent::Parent => {
+                            resolved.pop();
+                        }
+                    }
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match current.components().next_back() {
+                    Some(std::path::Component::Normal(name)) => {
+                        missing.push(MissingComponent::Name(name.to_os_string()));
+                    }
+                    Some(std::path::Component::CurDir) => {
+                        missing.push(MissingComponent::Current);
+                    }
+                    Some(std::path::Component::ParentDir) => {
+                        missing.push(MissingComponent::Parent);
+                    }
+                    _ => return Err(error),
+                }
+                current = current.parent().ok_or(error)?.to_path_buf();
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
