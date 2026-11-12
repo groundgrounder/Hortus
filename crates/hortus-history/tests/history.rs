@@ -299,3 +299,131 @@ fn unreadable_source_fails_the_snapshot_on_the_default_path() {
     assert_eq!(sessions[0].state, SessionState::Failed);
     assert!(!sessions[0].state.usable());
 }
+
+fn write_session(
+    store: &HistoryStore,
+    id: &str,
+    state: SessionState,
+    stats: Option<hortus_history::SnapshotStats>,
+    manifest: Option<&[hortus_history::snapshot::ManifestEntry]>,
+) {
+    let directory = store.session_directory(id).unwrap();
+    fs::create_dir_all(&directory).unwrap();
+    if let Some(manifest) = manifest {
+        fs::write(
+            store.manifest_path(id).unwrap(),
+            serde_json::to_vec(manifest).unwrap(),
+        )
+        .unwrap();
+    }
+    let record = hortus_history::SessionRecord {
+        format: hortus_history::FORMAT_VERSION,
+        id: id.into(),
+        vault: store.data_root().to_string_lossy().into_owned(),
+        created_at_ms: 1,
+        started_at_ms: Some(1),
+        ended_at_ms: None,
+        state,
+        snapshot: "snapshot".into(),
+        stats,
+        exit_code: None,
+        error: None,
+    };
+    fs::write(
+        directory.join("session.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn recovery_only_interrupts_complete_running_sessions() {
+    let root = fixture();
+    let vault = root.path().join("vault");
+    let store = HistoryStore::new(root.path().join("data"));
+
+    let complete = store.begin(&vault, None).unwrap();
+    store.mark_running(&complete.id).unwrap();
+
+    let preparing = "11111111-1111-4111-8111-111111111111";
+    write_session(&store, preparing, SessionState::Preparing, None, None);
+
+    let running_without_manifest = "22222222-2222-4222-8222-222222222222";
+    write_session(
+        &store,
+        running_without_manifest,
+        SessionState::Running,
+        Some(hortus_history::SnapshotStats::default()),
+        None,
+    );
+
+    let running_without_stats = "33333333-3333-4333-8333-333333333333";
+    write_session(
+        &store,
+        running_without_stats,
+        SessionState::Running,
+        None,
+        Some(&[]),
+    );
+
+    let mut mismatched = hortus_history::SnapshotStats::default();
+    mismatched.entries = 5;
+    let running_with_short_manifest = "44444444-4444-4444-8444-444444444444";
+    write_session(
+        &store,
+        running_with_short_manifest,
+        SessionState::Running,
+        Some(mismatched),
+        Some(&[]),
+    );
+
+    assert_eq!(store.recover().unwrap(), 1);
+    let interrupted = store.record(&complete.id).unwrap();
+    assert_eq!(interrupted.state, SessionState::Interrupted);
+    assert!(interrupted.state.usable());
+    for id in [
+        preparing,
+        running_without_manifest,
+        running_without_stats,
+        running_with_short_manifest,
+    ] {
+        let record = store.record(id).unwrap();
+        assert_eq!(record.state, SessionState::Failed, "{id}");
+        assert!(!record.state.usable(), "{id}");
+        assert!(record.error.is_some(), "{id}");
+    }
+}
+
+#[test]
+fn late_running_never_overrides_a_terminal_state() {
+    let root = fixture();
+    let vault = root.path().join("vault");
+    let store = HistoryStore::new(root.path().join("data"));
+
+    let record = store.begin(&vault, None).unwrap();
+    store.mark_running(&record.id).unwrap();
+    store
+        .finish(&record.id, SessionState::Exited, Some(0))
+        .unwrap();
+    assert_eq!(
+        store.mark_running(&record.id).unwrap().state,
+        SessionState::Exited
+    );
+    assert_eq!(
+        store
+            .finish(&record.id, SessionState::Cancelled, None)
+            .unwrap()
+            .state,
+        SessionState::Exited
+    );
+
+    // 只有 ready 才能进入 running；已取消的启动不能被迟到的 running 复活。
+    let cancelled = store.begin(&vault, None).unwrap();
+    store
+        .finish(&cancelled.id, SessionState::Cancelled, None)
+        .unwrap();
+    assert_eq!(
+        store.mark_running(&cancelled.id).unwrap().state,
+        SessionState::Cancelled
+    );
+}

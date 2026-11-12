@@ -594,6 +594,89 @@ fn data_root_inside_vault_is_rejected() {
     );
 }
 
+/// 库树内容与哈希；用于证明拒绝发生在任何写入之前。
+fn tree_state(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(
+        root: &std::path::Path,
+        directory: &std::path::Path,
+        found: &mut BTreeMap<String, Vec<u8>>,
+    ) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            if entry.file_type().unwrap().is_dir() {
+                found.insert(relative, Vec::new());
+                walk(root, &path, found);
+            } else {
+                found.insert(relative, fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut found = BTreeMap::new();
+    walk(root, root, &mut found);
+    found
+}
+
+#[test]
+fn nonexistent_data_roots_inside_vault_are_rejected_before_creation() {
+    let root = TempDir::new().unwrap();
+    let vault = root.path().join("vault");
+    fs::create_dir_all(vault.join("notes")).unwrap();
+    fs::write(vault.join("notes/note.md"), b"# note\n").unwrap();
+    fs::write(vault.join("root.md"), b"root\n").unwrap();
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&vault, &alias).unwrap();
+    let linked_ancestor = root.path().join("linked-ancestor");
+    std::os::unix::fs::symlink(&vault, &linked_ancestor).unwrap();
+    let before = tree_state(&vault);
+
+    let inside = [
+        ("direct", vault.clone()),
+        ("one-level", vault.join("state")),
+        ("multi-level", vault.join("state/agent/data")),
+        ("through-alias", alias.join("state/data")),
+        ("linked-ancestor", linked_ancestor.join("state/data")),
+    ];
+    for (name, data) in inside {
+        let store = Store::open(Directories {
+            config: root.path().join(format!("config-{name}")),
+            cache: root.path().join(format!("cache-{name}")),
+            data,
+        })
+        .unwrap();
+        assert_eq!(
+            store.validate_vault(&vault).unwrap_err().to_string(),
+            "config.vault_contains_state",
+            "{name}"
+        );
+        assert_eq!(
+            store.validate_vault(&alias).unwrap_err().to_string(),
+            "config.vault_contains_state",
+            "{name} via vault alias"
+        );
+        assert_eq!(tree_state(&vault), before, "{name} wrote into the vault");
+        assert!(!vault.join("state").exists(), "{name}");
+        assert!(!alias.join("state").exists(), "{name}");
+    }
+
+    // 库外不存在的持久数据根仍可用，且不会在校验时提前创建。
+    let outside = root.path().join("persistent/data");
+    let store = Store::open(Directories {
+        config: root.path().join("config-outside"),
+        cache: root.path().join("cache-outside"),
+        data: outside.clone(),
+    })
+    .unwrap();
+    store.validate_vault(&vault).unwrap();
+    assert!(!outside.exists());
+    assert_eq!(tree_state(&vault), before);
+}
+
 fn write_config(store: &Store, text: &str) {
     fs::write(store.directories.config.join("config.toml"), text).unwrap();
 }
@@ -625,6 +708,23 @@ fn agent_template_validates_structure_and_preserves_each_argument() {
     assert!(saved.contains("[agent]"), "{saved}");
     assert!(saved.contains("printf '%s' {guide}"), "{saved}");
     assert!(saved.contains("font_size = 16.0"), "{saved}");
+}
+
+#[test]
+fn agent_command_must_be_a_regular_executable_file() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    let directory = root.path().join("agent-directory");
+    fs::create_dir(&directory).unwrap();
+    let text = format!(
+        "font_size = 15.0\ndefault_view = \"reading\"\n[agent]\ncommand = {:?}\nargs = [\"{{guide}}\"]\n",
+        directory.to_string_lossy()
+    );
+    write_config(&store, &text);
+    assert_eq!(
+        store.agent_launch().unwrap_err().to_string(),
+        "agent.not_executable"
+    );
 }
 
 #[test]

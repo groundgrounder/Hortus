@@ -137,6 +137,25 @@ fn check_cancel(cancel: Option<&AtomicBool>) -> io::Result<()> {
     }
 }
 
+/// 自检用闸门：快照复制开始前等待外部放行，用来证明期间不持有全局 Store 锁。
+/// 只在 Debug 构建存在；Release 不包含这个开关。
+#[cfg(debug_assertions)]
+fn test_gate() {
+    let Some(directory) = std::env::var_os("HORTUS_SNAPSHOT_GATE") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    if !directory.join("armed").exists() {
+        return;
+    }
+    let _ = fs::write(directory.join("entered"), b"");
+    let release = directory.join("release");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !release.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// 建立完整快照；失败时目标目录可能含未完成条目，由调用方以失败元数据隔离。
 pub fn create(
     source: &Path,
@@ -162,6 +181,8 @@ pub fn create(
         })?;
 
     // 检查用开关：强制走完整复制，覆盖不支持 clonefile 的文件系统。
+    #[cfg(debug_assertions)]
+    test_gate();
     let force_copy = std::env::var_os("HORTUS_HISTORY_COPY").is_some_and(|value| value == "copy");
     let mut stats = super::SnapshotStats::default();
     for entry in &first {

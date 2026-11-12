@@ -578,3 +578,87 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     temporary.persist(path).map_err(io::Error::other)?;
     fs::File::open(parent)?.sync_all()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn make_executable(path: &Path) {
+        fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn resolved(path: &Path) -> String {
+        fs::canonicalize(path)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn bare_commands_resolve_to_the_verified_absolute_file() {
+        let root = tempfile::TempDir::new().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let tool = bin.join("hortus-test-agent");
+        make_executable(&tool);
+        // 空项与相对 PATH 项按进程 cwd 解析，和实际 exec 对象可能不同，必须跳过。
+        let search =
+            std::ffi::OsString::from(format!(":relative-dir:.:{}:also-relative", bin.display()));
+        assert_eq!(
+            resolve_executable_in("hortus-test-agent", Some(&search)).unwrap(),
+            resolved(&tool)
+        );
+
+        // 唯一命中在相对项里时不返回相对 executable。
+        let relative_only = std::ffi::OsString::from(format!("relative-dir:{}", bin.display()));
+        fs::remove_file(&tool).unwrap();
+        assert_eq!(
+            resolve_executable_in("hortus-test-agent", Some(&relative_only))
+                .unwrap_err()
+                .to_string(),
+            "agent.not_found"
+        );
+
+        // 绝对路径命中同样返回规范化后的同一文件。
+        make_executable(&tool);
+        let link = root.path().join("link-agent");
+        std::os::unix::fs::symlink(&tool, &link).unwrap();
+        assert_eq!(
+            resolve_executable_in(link.to_str().unwrap(), None).unwrap(),
+            resolved(&tool)
+        );
+    }
+
+    #[test]
+    fn directories_and_unverifiable_targets_are_rejected() {
+        let root = tempfile::TempDir::new().unwrap();
+        let directory = root.path().join("directory");
+        fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            resolve_executable_in(directory.to_str().unwrap(), None)
+                .unwrap_err()
+                .to_string(),
+            "agent.not_executable"
+        );
+
+        let plain = root.path().join("plain");
+        fs::write(&plain, b"text\n").unwrap();
+        assert_eq!(
+            resolve_executable_in(plain.to_str().unwrap(), None)
+                .unwrap_err()
+                .to_string(),
+            "agent.not_executable"
+        );
+
+        let dangling = root.path().join("dangling");
+        std::os::unix::fs::symlink(root.path().join("missing"), &dangling).unwrap();
+        assert_eq!(
+            resolve_executable_in(dangling.to_str().unwrap(), None)
+                .unwrap_err()
+                .to_string(),
+            "agent.not_found"
+        );
+    }
+}
