@@ -130,6 +130,53 @@ def check_narrow(data, target):
             'document_height': first['document_height']}
 
 
+def check_rapid_toggle(data):
+    assert data['mode'] == 'rapid-toggle-anchor', data
+    assert data['real_keyboard'] and data['keyboard_access'] and data['activated'], data
+    assert data['event_tap'] == 'cghidEventTap' and data['rapid_sleep_ms'] == 0, data
+    assert data['source_preserved'] and data['disk_matches_source'], data
+    assert [round_['phase'] for round_ in data['rounds']] == ['top', 'middle', 'bottom', 'tail', 'widened'], data
+    events = data['events']
+    summaries = []
+    for round_ in data['rounds']:
+        phase = round_['phase']
+        keys = round_['keys']
+        assert len(keys) == 4, (phase, keys)
+        assert [key['sequence'] for key in keys] == [1, 1, 2, 2], (phase, keys)
+        assert [key['down'] for key in keys] == [True, False, True, False], (phase, keys)
+        assert round_['delivered_toggles'] >= 2, (phase, round_)
+        before, immediate, final = round_['before'], round_['immediate'], round_['final']
+        assert before['view_reading'] and final['view_reading'] and final['document_reading'], (phase, before, final)
+        assert final['doc_utf16'] == before['doc_utf16'] and final['revision'] == before['revision'], (phase, before, final)
+        assert immediate.get('view_reading') is True, (phase, immediate)
+        shift = abs(final['visible'][1] - before['visible'][1])
+        immediate_shift = abs(immediate['visible'][1] - before['visible'][1])
+        assert shift <= 1, (phase, before['visible'], final['visible'])
+        assert immediate_shift <= 1, (phase, before['visible'], immediate['visible'])
+        phase_events = [event for event in events if event.get('phase') == phase]
+        assert sum(event['event'] == 'toggle_exit' for event in phase_events) >= 2, (phase, phase_events)
+        eof_reveals = [event for event in phase_events
+                       if event['event'] in ('reveal', 'initial_reveal') and event.get('eof_target')]
+        if phase in ('top', 'middle', 'widened'):
+            assert not eof_reveals, (phase, eof_reveals)
+            assert final['anchor'] < before['doc_utf16'], (phase, final)
+        summaries.append({'phase': phase, 'before_y': before['visible'][1], 'immediate_y': immediate['visible'][1],
+                          'final_y': final['visible'][1], 'shift_pt': shift,
+                          'before_height': before['document_height'], 'final_height': final['document_height'],
+                          'before_anchor': before['anchor'], 'final_anchor': final['anchor'],
+                          'eof_reveals': len(eof_reveals)})
+    repeat = data['repeat']
+    assert len(repeat['keys']) == 4 and repeat['delivered_toggles'] >= 2, repeat
+    assert repeat['final']['view_reading'] and repeat['final']['document_reading'], repeat
+    assert abs(repeat['final']['visible'][1] - repeat['before']['visible'][1]) <= 1, repeat
+    assert repeat['immediate'].get('view_reading') is True, repeat
+    repeat_events = [event for event in events if event.get('phase') == 'repeat']
+    assert not [event for event in repeat_events
+                if event['event'] in ('reveal', 'initial_reveal') and event.get('eof_target')], repeat_events
+    return {'rounds': summaries, 'repeat_shift_pt': abs(repeat['final']['visible'][1] - repeat['before']['visible'][1]),
+            'repeat_final_anchor': repeat['final']['anchor'], 'events': len(events)}
+
+
 def check_inline_table(data):
     cells = data['table_cells']
     assert [cell['text'] for cell in cells] == [
@@ -154,8 +201,8 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/reading-view')
     parser.add_argument('--cpu-only', action='store_true')
     parser.add_argument('--screenshots-only', action='store_true')
-    parser.add_argument('--checks', choices=['all', 'switching', 'toggle-spacing', 'narrow', 'performance', 'external'],
-                        default='all')
+    parser.add_argument('--checks', choices=['all', 'switching', 'toggle-spacing', 'rapid-toggle-anchor',
+                                             'narrow', 'performance', 'external'], default='all')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -213,6 +260,24 @@ def main():
             (output / 'narrow-summary.json').write_text(json.dumps(report, indent=2) + '\n')
             print('narrow', json.dumps(report), flush=True)
         if args.checks == 'narrow':
+            return
+        if args.checks in ['all', 'rapid-toggle-anchor']:
+            rounds = []
+            for index in range(3):
+                name = f'rapid-toggle-anchor-{index + 1}'
+                events_path = output / f'{name}-events.jsonl'
+                events_path.unlink(missing_ok=True)
+                data = run(base / name, output, name, sample, '参考/双图间距.md', 'rapid-toggle-anchor',
+                           extra=[f'--anchor-inspection={events_path}',
+                                  f'--snapshot={output / (name + ".png")}'])
+                summary = check_rapid_toggle(data)
+                summary['name'] = name
+                rounds.append(summary)
+            report = {'launches': len(rounds), 'rounds': rounds}
+            (output / 'rapid-toggle-anchor.json').write_text(json.dumps(report, indent=2) + '\n')
+            print('rapid-toggle-anchor', json.dumps(report), flush=True)
+            assert len(rounds) == 3
+        if args.checks == 'rapid-toggle-anchor':
             return
         if args.checks in ['all', 'toggle-spacing']:
             rounds = []

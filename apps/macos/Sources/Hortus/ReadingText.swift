@@ -485,6 +485,13 @@ struct ReadingText: NSViewRepresentable {
                 // 新视图已在文首；避免为零锚点重复迁移视口、重排首屏。
                 if source != 0 || view.visibleRect.minY > 0.5 { reveal(source: source) }
                 view.layoutSubtreeIfNeeded()
+                if AnchorInspection.isActive {
+                    var details = AnchorInspection.snapshot(view, document: input.document)
+                    details["source"] = source
+                    details["display"] = displayPosition(source: source)
+                    details["eof_target"] = source >= input.document.text.utf16.count
+                    AnchorInspection.record("initial_reveal", details)
+                }
             } else {
                 view.layoutSubtreeIfNeeded()
                 if let anchor = pendingAnchor {
@@ -647,6 +654,13 @@ struct ReadingText: NSViewRepresentable {
                 clip.scroll(to: CGPoint(x: clip.bounds.origin.x, y: max(0, clip.bounds.origin.y + delta)))
                 view.enclosingScrollView?.reflectScrolledClipView(clip)
             }
+            if AnchorInspection.isActive {
+                var details = AnchorInspection.snapshot(view, document: input?.document)
+                details["restore_block"] = String(describing: anchor.id)
+                details["restore_source"] = anchor.source
+                details["restore_offset"] = anchor.offset
+                AnchorInspection.record("restore", details)
+            }
         }
         func sourcePosition(at position: Int) -> Int {
             guard let model, let index = ranges.firstIndex(where: { NSLocationInRange(position, $0) }) else { return source.utf16.count }
@@ -667,8 +681,16 @@ struct ReadingText: NSViewRepresentable {
         }
         func reveal(source: Int) {
             guard let view else { return }
+            let inspect = AnchorInspection.isActive
+            let before = inspect ? AnchorInspection.snapshot(view, document: input?.document) : [:]
             guard view.window != nil, let clip = view.enclosingScrollView?.contentView else {
                 pendingRevealSource = source
+                if inspect {
+                    var details = before
+                    details["source"] = source
+                    details["window"] = false
+                    AnchorInspection.record("reveal_pending", details)
+                }
                 return
             }
             pendingRevealSource = nil
@@ -684,6 +706,14 @@ struct ReadingText: NSViewRepresentable {
                     : target.maxY - visible.maxY
                 clip.scroll(to: CGPoint(x: clip.bounds.origin.x, y: max(0, clip.bounds.origin.y + delta)))
                 view.enclosingScrollView?.reflectScrolledClipView(clip)
+            }
+            if inspect {
+                var details = AnchorInspection.snapshot(view, document: input?.document)
+                details["source"] = source
+                details["display"] = position
+                details["before_visible"] = before["visible"] ?? NSNull()
+                details["eof_target"] = position >= view.sourceUTF16Length
+                AnchorInspection.record("reveal", details)
             }
         }
         func didMoveToWindow() {

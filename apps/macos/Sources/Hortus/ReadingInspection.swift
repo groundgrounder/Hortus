@@ -4,6 +4,94 @@ import Darwin
 import HortusCore
 import Quartz
 
+/// 显式验收参数下记录切换与 reveal 的原始状态；默认不分配文件，也不参与布局决策。
+@MainActor
+enum AnchorInspection {
+    private static var handle: FileHandle?
+    private static var startedAt = 0.0
+    private(set) static var completedToggles = 0
+    private(set) static var records: [[String: Any]] = []
+    static var phase = ""
+    static var isActive: Bool { handle != nil }
+
+    static func beginPhase(_ name: String) {
+        guard isActive else { return }
+        phase = name
+        record("phase", [:])
+    }
+
+    static func start(arguments: [String]) {
+        guard let argument = arguments.first(where: { $0.hasPrefix("--anchor-inspection=") }) else { return }
+        let output = URL(fileURLWithPath: String(argument.dropFirst("--anchor-inspection=".count)))
+        try? FileManager.default.createDirectory(at: output.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: output.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        handle = FileHandle(forWritingAtPath: output.path)
+        _ = try? handle?.seekToEnd()
+        startedAt = ProcessInfo.processInfo.systemUptime
+        completedToggles = 0
+        records = []
+        record("started", [:])
+    }
+
+    static func record(_ event: String, _ details: [String: Any]) {
+        guard handle != nil else { return }
+        var row = details
+        row["event"] = event
+        row["phase"] = phase
+        row["t_ms"] = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+        if event == "toggle_exit" { completedToggles += 1 }
+        records.append(row)
+        guard JSONSerialization.isValidJSONObject(row),
+              let data = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]) else { return }
+        try? handle?.write(contentsOf: data + Data([0x0a]))
+        handle?.synchronizeFile()
+    }
+
+    /// 原生视图与阅读协调器的当前状态；只在检查启用时计算。
+    static func snapshot(_ view: DiagramTextView?, document: NoteDocument?) -> [String: Any] {
+        var row: [String: Any] = [:]
+        if let document {
+            row["document_reading"] = document.reading
+            row["anchor"] = document.sourceAnchor
+            row["anchor_length"] = document.sourceSelectionLength
+            row["doc_utf16"] = document.text.utf16.count
+            row["revision"] = document.revision
+        }
+        guard let view else { row["view"] = "none"; return row }
+        let visible = view.visibleRect
+        let sample = view.characterIndexForInsertion(at: CGPoint(x: 31, y: visible.minY + 1))
+        let selected = view.selectedRange()
+        row["view"] = String(describing: ObjectIdentifier(view))
+        row["view_reading"] = view.isReading
+        row["view_in_window"] = view.window != nil
+        row["view_utf16"] = view.sourceUTF16Length
+        row["visible"] = [Double(visible.minX), Double(visible.minY),
+                          Double(visible.width), Double(visible.height)]
+        row["document_height"] = Double(view.frame.height)
+        row["bounds_height"] = Double(view.bounds.height)
+        row["usage_height"] = Double(view.textLayoutManager?.usageBoundsForTextContainer.maxY ?? 0)
+        row["sample"] = sample
+        row["selected"] = [selected.location, selected.length]
+        row["at_bottom"] = visible.maxY >= view.frame.height - 1
+        if let coordinator = view.readingCoordinator {
+            row["ranges"] = coordinator.ranges.count
+            row["model_utf16"] = coordinator.model?.text.utf16.count ?? -1
+            row["model_revision"] = coordinator.model?.revision ?? 0
+            row["model_pending"] = coordinator.pending
+            row["reveal_pending"] = coordinator.revealPending
+            row["sample_source"] = coordinator.sourcePosition(at: sample)
+            row["anchor_display"] = coordinator.displayPosition(source: document?.sourceAnchor ?? 0)
+            if let anchor = coordinator.visibleAnchor() {
+                row["visible_block"] = String(describing: anchor.id)
+                row["visible_source"] = anchor.source
+                row["visible_offset"] = anchor.offset
+            }
+        }
+        return row
+    }
+}
+
 /// 真实窗口计量只由显式验收参数启动，日常运行不增加轮询。
 @MainActor
 enum ReadingInspection {
@@ -66,6 +154,10 @@ enum ReadingInspection {
         let source = try await document.io.perform { try $0.snapshot().text }
         if mode == "diagram-toggle-spacing" {
             return try await diagramToggleSpacing(document: document, view: view, source: source, path: path)
+        }
+        if mode == "rapid-toggle-anchor" {
+            AnchorInspection.start(arguments: arguments)
+            return try await rapidToggleAnchor(document: document, view: view, source: source, path: path)
         }
         if mode == "diagram-narrow" {
             return try await diagramNarrow(workspace: workspace, layout: layout, document: document, view: view,
@@ -281,6 +373,202 @@ enum ReadingInspection {
             result["reading_phases"] = coordinator.phaseMilliseconds
         }
         return result
+    }
+
+    /// 快速连续 ⌘E：真实 HID 事件之间不加等待，立即读取阅读视口并核对锚点没有落到 EOF。
+    private static func rapidToggleAnchor(document: NoteDocument, view: DiagramTextView, source: String,
+                                          path: String) async throws -> [String: Any] {
+        guard document.reading, view.isReading, view.blocks.count == 2 else { throw CocoaError(.coderValueNotFound) }
+        let width = view.layoutContentWidth
+        guard width > 180 else { throw CocoaError(.coderValueNotFound) }
+        let access = CGPreflightPostEventAccess()
+        guard access else {
+            throw NSError(domain: "ReadingInspection", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "真实 ⌘E 检查需要 Accessibility 键盘事件权限"])
+        }
+        let activated = await activateInspectionWindow(view.window)
+        guard activated else {
+            throw NSError(domain: "ReadingInspection", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "窗口未取得键盘焦点，无法发送真实 ⌘E"])
+        }
+        let initialRevision = document.revision
+        var rounds: [[String: Any]] = []
+        var reading = view
+
+        AnchorInspection.beginPhase("top")
+        try await scrollToTop(reading)
+        reading = try await settled(true, document: document)
+        rounds.append(try await rapidRound(document: document, view: reading, phase: "top"))
+        reading = try await settled(true, document: document)
+
+        AnchorInspection.beginPhase("middle")
+        try await revealMiddle(reading)
+        reading = try await settled(true, document: document)
+        rounds.append(try await rapidRound(document: document, view: reading, phase: "middle"))
+        reading = try await settled(true, document: document)
+
+        AnchorInspection.beginPhase("bottom")
+        try await scrollToBottom(reading)
+        reading = try await settled(true, document: document)
+        rounds.append(try await rapidRound(document: document, view: reading, phase: "bottom"))
+        reading = try await settled(true, document: document)
+
+        AnchorInspection.beginPhase("tail")
+        try await scrollToTop(reading)
+        reading = try await settled(true, document: document)
+        try await revealDiagram(reading, ordinal: 2)
+        reading = try await settled(true, document: document)
+        rounds.append(try await rapidRound(document: document, view: reading, phase: "tail"))
+        reading = try await settled(true, document: document)
+
+        if let window = reading.window {
+            let original = window.frame
+            var wider = original
+            wider.size.width += 180
+            window.setFrame(wider, display: true)
+            try await Task.sleep(for: .milliseconds(120))
+            reading = try await settled(true, document: document)
+            AnchorInspection.beginPhase("widened")
+            try await revealMiddle(reading)
+            reading = try await settled(true, document: document)
+            rounds.append(try await rapidRound(document: document, view: reading, phase: "widened"))
+            reading = try await settled(true, document: document)
+            window.setFrame(original, display: true)
+            try await Task.sleep(for: .milliseconds(120))
+            reading = try await settled(true, document: document)
+        }
+
+        // 上一轮 reveal 还在排队时再次快速往返；最终仍应回到阅读且位置不变。
+        AnchorInspection.beginPhase("repeat")
+        try await scrollToTop(reading)
+        reading = try await settled(true, document: document)
+        let repeatBefore = rapidSnapshot(reading, document: document, phase: "repeat_before")
+        let repeatStart = AnchorInspection.completedToggles
+        let repeatKeys = try await pressCommandERapidly(sequences: 2)
+        let repeatDelivered = await waitForToggles(repeatStart + 2)
+        let repeatImmediate = await immediateReadingSnapshot(document: document, phase: "repeat_immediate")
+        reading = try await settled(true, document: document)
+        let repeatFinal = rapidSnapshot(reading, document: document, phase: "repeat_final")
+
+        let disk = try await document.io.perform { try $0.snapshot().text }
+        let sourcePreserved = disk == source && document.text == source && document.revision == initialRevision
+        return [
+            "mode": "rapid-toggle-anchor",
+            "keyboard_access": access,
+            "activated": activated,
+            "event_tap": "cghidEventTap",
+            "real_keyboard": true,
+            "rapid_sleep_ms": 0,
+            "source_preserved": sourcePreserved,
+            "disk_matches_source": disk == source,
+            "revision": initialRevision,
+            "rounds": rounds,
+            "repeat": [
+                "before": repeatBefore,
+                "keys": repeatKeys,
+                "delivered_toggles": repeatDelivered,
+                "immediate": repeatImmediate,
+                "final": repeatFinal,
+            ],
+            "events": AnchorInspection.records,
+        ]
+    }
+
+    private static func rapidRound(document: NoteDocument, view: DiagramTextView, phase: String) async throws -> [String: Any] {
+        let before = rapidSnapshot(view, document: document, phase: "\(phase)_before")
+        let start = AnchorInspection.completedToggles
+        let keys = try await pressCommandERapidly(sequences: 2)
+        let delivered = await waitForToggles(start + 2)
+        let immediate = await immediateReadingSnapshot(document: document, phase: "\(phase)_immediate")
+        let final = try await settled(true, document: document)
+        return [
+            "phase": phase,
+            "before": before,
+            "keys": keys,
+            "delivered_toggles": delivered,
+            "immediate": immediate,
+            "final": rapidSnapshot(final, document: document, phase: "\(phase)_final"),
+        ]
+    }
+
+    /// 两组完整 ⌘E 连续投递，中间和组内都不 sleep。
+    private static func pressCommandERapidly(sequences: Int) async throws -> [[String: Any]] {
+        let source = CGEventSource(stateID: .hidSystemState)
+        var events: [[String: Any]] = []
+        for sequence in 1...sequences {
+            for down in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: source, virtualKey: 14, keyDown: down) else {
+                    throw CocoaError(.coderInvalidValue)
+                }
+                event.flags = .maskCommand
+                let postedAt = ProcessInfo.processInfo.systemUptime
+                event.post(tap: .cghidEventTap)
+                events.append(["sequence": sequence, "down": down, "tap": "cghidEventTap",
+                               "posted_at_ms": postedAt * 1000])
+            }
+        }
+        return events
+    }
+
+    /// 只等待输入事件被处理，不等页面渲染稳定。
+    private static func waitForToggles(_ target: Int) async -> Int {
+        for _ in 0..<2000 {
+            if AnchorInspection.completedToggles >= target { break }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return AnchorInspection.completedToggles
+    }
+
+    private static func immediateReadingSnapshot(document: NoteDocument, phase: String) async -> [String: Any] {
+        var waited = 0.0
+        let started = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<200 {
+            if let view = DiagramInspection.current(document: document), view.isReading {
+                waited = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                return rapidSnapshot(view, document: document, phase: phase, extra: ["immediate_wait_ms": waited])
+            }
+            if document.reading == false, waited > 0 { break }
+            try? await Task.sleep(for: .milliseconds(1))
+            waited = (ProcessInfo.processInfo.systemUptime - started) * 1000
+        }
+        return rapidSnapshot(nil, document: document, phase: phase, extra: ["immediate_wait_ms": waited])
+    }
+
+    private static func rapidSnapshot(_ view: DiagramTextView?, document: NoteDocument, phase: String,
+                                      extra: [String: Any] = [:]) -> [String: Any] {
+        var row = AnchorInspection.snapshot(view, document: document)
+        row["phase"] = phase
+        row["content_width"] = Double(view?.layoutContentWidth ?? 0)
+        row["window_width"] = Double(view?.window?.frame.width ?? 0)
+        row.merge(extra) { _, new in new }
+        return row
+    }
+
+    /// 用既有 reveal 定位阅读视口；只作切换前准备，真正的往返输入仍是 HID 键盘事件。
+    private static func revealMiddle(_ view: DiagramTextView) async throws {
+        guard let coordinator = view.readingCoordinator, view.sourceUTF16Length > 2 else {
+            throw CocoaError(.coderValueNotFound)
+        }
+        let display = view.sourceUTF16Length / 2
+        coordinator.reveal(source: coordinator.sourcePosition(at: display))
+        view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(20))
+        view.layoutSubtreeIfNeeded()
+    }
+
+    private static func scrollToBottom(_ view: DiagramTextView) async throws {
+        guard let scroll = view.enclosingScrollView, let manager = view.textLayoutManager else {
+            throw CocoaError(.coderValueNotFound)
+        }
+        view.layoutSubtreeIfNeeded()
+        let content = max(view.frame.height,
+                          manager.usageBoundsForTextContainer.maxY + view.textContainerInset.height * 2)
+        let maxY = max(0, content - scroll.contentView.bounds.height)
+        scroll.contentView.scroll(to: CGPoint(x: 0, y: maxY))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(20))
+        view.layoutSubtreeIfNeeded()
     }
 
     /// 真实 ⌘E 往返后的双图间距回归：只通过 CGEvent 键盘事件切换，直接比较图 frame。

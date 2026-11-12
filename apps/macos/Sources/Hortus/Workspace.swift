@@ -529,18 +529,41 @@ final class Workspace {
     func toggleView() { Task { await toggleCurrentView() } }
     func toggleCurrentView() async {
         guard let document = current?.document, !document.marked else { return }
+        let entryView = AnchorInspection.isActive ? textView : nil
+        if let entryView {
+            AnchorInspection.record("toggle_enter", AnchorInspection.snapshot(entryView, document: document))
+        }
         if document.reading {
             if let view = textView, let coordinator = view.readingCoordinator {
-                let position = view.selectedRange().length > 0 ? view.selectedRange().location
+                let selected = view.selectedRange()
+                let position = selected.length > 0 ? selected.location
                     : view.characterIndexForInsertion(at: CGPoint(x: 31, y: view.visibleRect.minY + 1))
-                document.sourceAnchor = coordinator.sourcePosition(at: position)
+                let mapped = coordinator.sourcePosition(at: position)
+                if AnchorInspection.isActive {
+                    var details = AnchorInspection.snapshot(view, document: document)
+                    details["sample_position"] = position
+                    details["selected_location"] = selected.location
+                    details["selected_length"] = selected.length
+                    details["mapped_source"] = mapped
+                    details["sample_in_range"] = coordinator.ranges.contains { NSLocationInRange(position, $0) }
+                    AnchorInspection.record("toggle_reading_anchor", details)
+                }
+                document.sourceAnchor = mapped
             }
         } else {
             document.sourceAnchor = textView?.selectedRange().location ?? 0
+            if AnchorInspection.isActive {
+                var details = AnchorInspection.snapshot(entryView ?? textView, document: document)
+                details["chosen_source"] = document.sourceAnchor
+                AnchorInspection.record("toggle_editing_anchor", details)
+            }
             await document.saveNow()
             guard !document.dirty, document.issue != .saveFailed, document.issue != .conflict else { return }
         }
         document.reading.toggle(); scheduleSessionSave()
+        if AnchorInspection.isActive {
+            AnchorInspection.record("toggle_exit", AnchorInspection.snapshot(textView, document: document))
+        }
         if !document.reading { focusEditor(document) }
     }
     /// 视图切换后编辑表面在下一轮渲染才出现；只在窗口仍为 key 时把焦点交给当前正文。
