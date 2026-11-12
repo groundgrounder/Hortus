@@ -32,6 +32,9 @@ def run(base, output, name, vault, note, mode='visual', editing=False, extra=())
 def toggle_spacing(snapshot):
     diagrams = sorted(snapshot['diagrams'], key=lambda row: row['ordinal'])
     assert [row['ordinal'] for row in diagrams] == [1, 2], snapshot
+    # 从顶部返回时，尚未进入视口的尾部图保持零 frame；显示间距在 reveal 后再核对。
+    if diagrams[1]['hidden'] and diagrams[1]['frame_min_y'] <= 0:
+        return None, diagrams
     assert diagrams[1]['frame_min_y'] >= diagrams[0]['frame_max_y'], snapshot
     return diagrams[1]['frame_min_y'] - diagrams[0]['frame_max_y'], diagrams
 
@@ -66,8 +69,9 @@ def check_toggle_spacing(data):
                   'scroll_return_again', 'restored']:
         snapshot = data[phase]
         spacing, current = toggle_spacing(snapshot)
-        assert abs(spacing - initial) <= 1, (phase, spacing, initial, snapshot)
-        assert abs(apparent_spacing(snapshot, reference) - initial_apparent) <= 1, (phase, snapshot)
+        if spacing is not None:
+            assert abs(spacing - initial) <= 1, (phase, spacing, initial, snapshot)
+            assert abs(apparent_spacing(snapshot, reference) - initial_apparent) <= 1, (phase, snapshot)
         assert abs(snapshot['document_height'] - data['initial_second']['document_height']) <= 1, (phase, snapshot)
         assert current[1]['frame_max_y'] <= snapshot['document_height'] + .5, (phase, current[1], snapshot)
         assert all(abs(row['scene_width'] - snapshot['content_width']) <= .5 for row in current), (phase, snapshot)
@@ -149,6 +153,12 @@ def check_rapid_toggle(data):
         assert before['view_reading'] and final['view_reading'] and final['document_reading'], (phase, before, final)
         assert final['doc_utf16'] == before['doc_utf16'] and final['revision'] == before['revision'], (phase, before, final)
         assert immediate.get('view_reading') is True, (phase, immediate)
+        if phase == 'top':
+            assert before['visible'][1] <= 1, (phase, before['visible'])
+        elif phase in ('middle', 'widened'):
+            assert before['visible'][1] > 50, (phase, before['visible'])
+        else:
+            assert before['visible'][1] > 50, (phase, before['visible'])
         shift = abs(final['visible'][1] - before['visible'][1])
         immediate_shift = abs(immediate['visible'][1] - before['visible'][1])
         assert shift <= 1, (phase, before['visible'], final['visible'])
@@ -166,14 +176,14 @@ def check_rapid_toggle(data):
                           'before_anchor': before['anchor'], 'final_anchor': final['anchor'],
                           'eof_reveals': len(eof_reveals)})
     repeat = data['repeat']
-    assert len(repeat['keys']) == 4 and repeat['delivered_toggles'] >= 2, repeat
+    assert len(repeat['keys']) == 8 and repeat['delivered_toggles'] >= 4, repeat
     assert repeat['final']['view_reading'] and repeat['final']['document_reading'], repeat
     assert abs(repeat['final']['visible'][1] - repeat['before']['visible'][1]) <= 1, repeat
     assert repeat['immediate'].get('view_reading') is True, repeat
     repeat_events = [event for event in events if event.get('phase') == 'repeat']
     assert not [event for event in repeat_events
                 if event['event'] in ('reveal', 'initial_reveal') and event.get('eof_target')], repeat_events
-    return {'rounds': summaries, 'repeat_shift_pt': abs(repeat['final']['visible'][1] - repeat['before']['visible'][1]),
+    return {'model_not_ready_toggles': data['model_not_ready_toggles'], 'rounds': summaries, 'repeat_shift_pt': abs(repeat['final']['visible'][1] - repeat['before']['visible'][1]),
             'repeat_final_anchor': repeat['final']['anchor'], 'events': len(events)}
 
 

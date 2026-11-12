@@ -14,6 +14,10 @@ enum AnchorInspection {
     static var phase = ""
     static var isActive: Bool { handle != nil }
 
+    /// 兼容仍返回非可选位置的旧检查入口。
+    static func sourceValue(_ value: Int) -> Int { value }
+    static func sourceValue(_ value: Int?) -> Int { value ?? -1 }
+
     static func beginPhase(_ name: String) {
         guard isActive else { return }
         phase = name
@@ -66,6 +70,8 @@ enum AnchorInspection {
         row["view_reading"] = view.isReading
         row["view_in_window"] = view.window != nil
         row["view_utf16"] = view.sourceUTF16Length
+        row["content_width"] = Double(view.layoutContentWidth)
+        row["window_width"] = Double(view.window?.frame.width ?? 0)
         row["visible"] = [Double(visible.minX), Double(visible.minY),
                           Double(visible.width), Double(visible.height)]
         row["document_height"] = Double(view.frame.height)
@@ -80,7 +86,7 @@ enum AnchorInspection {
             row["model_revision"] = coordinator.model?.revision ?? 0
             row["model_pending"] = coordinator.pending
             row["reveal_pending"] = coordinator.revealPending
-            row["sample_source"] = coordinator.sourcePosition(at: sample)
+            row["sample_source"] = sourceValue(coordinator.sourcePosition(at: sample))
             row["anchor_display"] = coordinator.displayPosition(source: document?.sourceAnchor ?? 0)
             if let anchor = coordinator.visibleAnchor() {
                 row["visible_block"] = String(describing: anchor.id)
@@ -323,7 +329,7 @@ enum ReadingInspection {
                     if view.visibleRect.intersects(rect) { visible += 1 }
                     else { failures.append(["source": source, "anchor": document.sourceAnchor,
                         "selected": view.selectedRange().location,
-                        "selected_source": coordinator.sourcePosition(at: view.selectedRange().location),
+                        "selected_source": AnchorInspection.sourceValue(coordinator.sourcePosition(at: view.selectedRange().location)),
                         "rect": NSStringFromRect(rect), "visible": NSStringFromRect(view.visibleRect),
                         "frame": NSStringFromRect(view.frame), "bounds": NSStringFromRect(view.bounds),
                         "scroll_content": NSStringFromRect(view.enclosingScrollView?.contentView.bounds ?? .zero)]) }
@@ -423,19 +429,19 @@ enum ReadingInspection {
 
         if let window = reading.window {
             let original = window.frame
+            let originalWidth = reading.layoutContentWidth
             var wider = original
             wider.size.width += 180
             window.setFrame(wider, display: true)
-            try await Task.sleep(for: .milliseconds(120))
-            reading = try await settled(true, document: document)
+            reading = try await waitForContentWidth(document: document, above: originalWidth + 80)
             AnchorInspection.beginPhase("widened")
             try await revealMiddle(reading)
             reading = try await settled(true, document: document)
             rounds.append(try await rapidRound(document: document, view: reading, phase: "widened"))
             reading = try await settled(true, document: document)
+            let widenedWidth = reading.layoutContentWidth
             window.setFrame(original, display: true)
-            try await Task.sleep(for: .milliseconds(120))
-            reading = try await settled(true, document: document)
+            reading = try await waitForContentWidth(document: document, below: widenedWidth - 80)
         }
 
         // 上一轮 reveal 还在排队时再次快速往返；最终仍应回到阅读且位置不变。
@@ -444,16 +450,22 @@ enum ReadingInspection {
         reading = try await settled(true, document: document)
         let repeatBefore = rapidSnapshot(reading, document: document, phase: "repeat_before")
         let repeatStart = AnchorInspection.completedToggles
-        let repeatKeys = try await pressCommandERapidly(sequences: 2)
-        let repeatDelivered = await waitForToggles(repeatStart + 2)
+        let repeatKeys = try await pressCommandERapidly(sequences: 4)
+        let repeatDelivered = await waitForToggles(repeatStart + 4)
         let repeatImmediate = await immediateReadingSnapshot(document: document, phase: "repeat_immediate")
         reading = try await settled(true, document: document)
         let repeatFinal = rapidSnapshot(reading, document: document, phase: "repeat_final")
 
         let disk = try await document.io.perform { try $0.snapshot().text }
         let sourcePreserved = disk == source && document.text == source && document.revision == initialRevision
+        let modelNotReady = AnchorInspection.records.filter { event in
+            if event["event"] as? String == "toggle_reading_unavailable" { return true }
+            guard event["event"] as? String == "toggle_reading_anchor" else { return false }
+            return (event["ranges"] as? Int ?? 0) == 0 || (event["model_utf16"] as? Int ?? -1) < 0
+        }.count
         return [
             "mode": "rapid-toggle-anchor",
+            "model_not_ready_toggles": modelNotReady,
             "keyboard_access": access,
             "activated": activated,
             "event_tap": "cghidEventTap",
@@ -522,16 +534,21 @@ enum ReadingInspection {
     private static func immediateReadingSnapshot(document: NoteDocument, phase: String) async -> [String: Any] {
         var waited = 0.0
         let started = ProcessInfo.processInfo.systemUptime
+        var fallback: DiagramTextView?
         for _ in 0..<200 {
             if let view = DiagramInspection.current(document: document), view.isReading {
-                waited = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                return rapidSnapshot(view, document: document, phase: phase, extra: ["immediate_wait_ms": waited])
+                // 刚插入的空白阅读面还不能代表用户看到的位置；等模型装好，但不等 reveal/pending 结算。
+                if view.readingCoordinator?.model != nil {
+                    waited = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                    return rapidSnapshot(view, document: document, phase: phase, extra: ["immediate_wait_ms": waited])
+                }
+                if fallback == nil { fallback = view }
             }
             if document.reading == false, waited > 0 { break }
             try? await Task.sleep(for: .milliseconds(1))
             waited = (ProcessInfo.processInfo.systemUptime - started) * 1000
         }
-        return rapidSnapshot(nil, document: document, phase: phase, extra: ["immediate_wait_ms": waited])
+        return rapidSnapshot(fallback, document: document, phase: phase, extra: ["immediate_wait_ms": waited])
     }
 
     private static func rapidSnapshot(_ view: DiagramTextView?, document: NoteDocument, phase: String,
@@ -544,19 +561,43 @@ enum ReadingInspection {
         return row
     }
 
-    /// 用既有 reveal 定位阅读视口；只作切换前准备，真正的往返输入仍是 HID 键盘事件。
+    /// 窗口改宽后，SwiftUI 和滚动容器分多轮更新宽度；等实际内容宽度生效再定位。
+    private static func waitForContentWidth(document: NoteDocument, above: Double) async throws -> DiagramTextView {
+        for _ in 0..<300 {
+            let view = try await settled(true, document: document)
+            if view.layoutContentWidth > above { return view }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        throw CocoaError(.coderValueNotFound)
+    }
+
+    private static func waitForContentWidth(document: NoteDocument, below: Double) async throws -> DiagramTextView {
+        for _ in 0..<300 {
+            let view = try await settled(true, document: document)
+            if view.layoutContentWidth < below { return view }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        throw CocoaError(.coderValueNotFound)
+    }
+
+    /// 用既有 reveal 把视口定位到正文中部；只作切换前准备，往返输入仍是 HID 键盘事件。
     private static func revealMiddle(_ view: DiagramTextView) async throws {
-        guard let coordinator = view.readingCoordinator, view.sourceUTF16Length > 2 else {
+        guard let coordinator = view.readingCoordinator, let model = coordinator.model, !model.blocks.isEmpty else {
             throw CocoaError(.coderValueNotFound)
         }
-        let display = view.sourceUTF16Length / 2
-        coordinator.reveal(source: coordinator.sourcePosition(at: display))
+        let sourceLength = model.blocks.map { Int($0.sourceStart + $0.sourceLength) }.max() ?? 0
+        let middle = Double(sourceLength) / 2
+        let block = model.blocks.filter { !$0.diagram && $0.sourceLength > 0 }.min {
+            abs(Double($0.sourceStart + $0.sourceLength / 2) - middle)
+                < abs(Double($1.sourceStart + $1.sourceLength / 2) - middle)
+        } ?? model.blocks[model.blocks.count / 2]
+        coordinator.reveal(source: Int(block.sourceStart + block.sourceLength / 2))
         view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(20))
         view.layoutSubtreeIfNeeded()
     }
 
-    private static func scrollToBottom(_ view: DiagramTextView) async throws {
+    private static func scrollDocument(_ view: DiagramTextView, fraction: Double) async throws {
         guard let scroll = view.enclosingScrollView, let manager = view.textLayoutManager else {
             throw CocoaError(.coderValueNotFound)
         }
@@ -564,11 +605,15 @@ enum ReadingInspection {
         let content = max(view.frame.height,
                           manager.usageBoundsForTextContainer.maxY + view.textContainerInset.height * 2)
         let maxY = max(0, content - scroll.contentView.bounds.height)
-        scroll.contentView.scroll(to: CGPoint(x: 0, y: maxY))
+        scroll.contentView.scroll(to: CGPoint(x: 0, y: maxY * fraction))
         scroll.reflectScrolledClipView(scroll.contentView)
         view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(20))
         view.layoutSubtreeIfNeeded()
+    }
+
+    private static func scrollToBottom(_ view: DiagramTextView) async throws {
+        try await scrollDocument(view, fraction: 1)
     }
 
     /// 真实 ⌘E 往返后的双图间距回归：只通过 CGEvent 键盘事件切换，直接比较图 frame。

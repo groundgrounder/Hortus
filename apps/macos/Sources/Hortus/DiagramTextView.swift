@@ -1063,11 +1063,14 @@ final class DiagramTextView: NSTextView {
         if head { fragment.reason = block.reason }
     }
     private func resizeDocument() {
+        // 末块图的 frame 尚为零时，usage 仍给出完整内容高度；不能因此把文档缩回视口高度。
+        let usageHeight = (textLayoutManager?.usageBoundsForTextContainer.maxY ?? 0) + 2 * textContainerInset.height
         let contentHeight: CGFloat
-        if let last = blocks.last, NSMaxRange(last.range) == sourceUTF16Length, let view = diagramViews[last.ordinal] {
+        if let last = blocks.last, NSMaxRange(last.range) == sourceUTF16Length,
+           let view = diagramViews[last.ordinal], view.frame.maxY > 0 {
             // 末块没有后续正文，只需更新图与滚动尺寸，无需重新排版所有原生段落。
-            contentHeight = view.frame.maxY + textContainerInset.height
-        } else { contentHeight = (textLayoutManager?.usageBoundsForTextContainer.maxY ?? 0) + 2 * textContainerInset.height }
+            contentHeight = max(view.frame.maxY + textContainerInset.height, usageHeight)
+        } else { contentHeight = usageHeight }
         let width = (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? frame.width
         let height = max(enclosingScrollView?.contentView.bounds.height ?? 0, contentHeight,
                          minimumDocumentHeightForTesting)

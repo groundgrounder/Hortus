@@ -456,7 +456,7 @@ struct ReadingTests {
             let block = blocks[index]
             let source = Int(block.sourceStart + block.sourceLength / 2)
             let display = f.coordinator.displayPosition(source: source)
-            let back = f.coordinator.sourcePosition(at: display)
+            let back = try #require(f.coordinator.sourcePosition(at: display))
             #expect(back >= Int(block.sourceStart) && back < Int(block.sourceStart + block.sourceLength))
             let revealed = try await f.revealAndWait(source: source)
             #expect(f.view.visibleRect.intersects(revealed.target), "\(f.diagnostics(target: revealed.target))")

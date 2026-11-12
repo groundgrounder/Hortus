@@ -501,6 +501,7 @@ final class Workspace {
 
     @ObservationIgnored var closingTabs: Set<String> = []
     @ObservationIgnored var preparingClose = false
+    @ObservationIgnored private var toggleTask: Task<Void, Never>?
 
     func bind(_ document: NoteDocument) {
         document.onCopy = { [weak self] copy in self?.openNote(copy) }
@@ -526,7 +527,14 @@ final class Workspace {
             .first { $0.representedDocument == ObjectIdentifier(document) }
     }
 
-    func toggleView() { Task { await toggleCurrentView() } }
+    /// 菜单与快捷键共用一条队列：较早的切换完成后才开始下一次，第二次不会读到过渡中的表面。
+    func toggleView() {
+        let previous = toggleTask
+        toggleTask = Task { [weak self] in
+            _ = await previous?.value
+            await self?.toggleCurrentView()
+        }
+    }
     func toggleCurrentView() async {
         guard let document = current?.document, !document.marked else { return }
         let entryView = AnchorInspection.isActive ? textView : nil
@@ -536,25 +544,45 @@ final class Workspace {
         if document.reading {
             if let view = textView, let coordinator = view.readingCoordinator {
                 let selected = view.selectedRange()
-                let position = selected.length > 0 ? selected.location
-                    : view.characterIndexForInsertion(at: CGPoint(x: 31, y: view.visibleRect.minY + 1))
-                let mapped = coordinator.sourcePosition(at: position)
+                let position = selected.length > 0 ? selected.location : coordinator.visibleInsertionPosition()
+                var mapped: Int?
+                if selected.length == 0, coordinator.atDocumentBottom() {
+                    // 无选区且视口在文末：保留 EOF；显式选区仍按选区映射。
+                    mapped = coordinator.sourceLength
+                } else if let position, let source = coordinator.sourcePosition(at: position) {
+                    mapped = source
+                } else if let fallback = coordinator.visibleInsertionPosition() {
+                    mapped = coordinator.sourcePosition(at: fallback)
+                }
+                if let mapped { document.sourceAnchor = mapped }
                 if AnchorInspection.isActive {
                     var details = AnchorInspection.snapshot(view, document: document)
-                    details["sample_position"] = position
+                    details["sample_position"] = position ?? NSNotFound
                     details["selected_location"] = selected.location
                     details["selected_length"] = selected.length
-                    details["mapped_source"] = mapped
-                    details["sample_in_range"] = coordinator.ranges.contains { NSLocationInRange(position, $0) }
+                    details["mapped_source"] = mapped ?? NSNotFound
+                    details["at_bottom"] = coordinator.atDocumentBottom()
                     AnchorInspection.record("toggle_reading_anchor", details)
                 }
-                document.sourceAnchor = mapped
+            } else if AnchorInspection.isActive {
+                AnchorInspection.record("toggle_reading_unavailable",
+                                        AnchorInspection.snapshot(textView, document: document))
             }
         } else {
-            document.sourceAnchor = textView?.selectedRange().location ?? 0
+            // 只接受真正的编辑表面；过渡中仍挂载的阅读面使用显示坐标，不能写进源码锚点。
+            let editing = textView.flatMap { $0.isReading ? nil : $0 }
+            if let editing {
+                let selected = editing.selectedRange()
+                if selected.location != NSNotFound, selected.location >= 0,
+                   selected.location <= editing.sourceUTF16Length,
+                   editing.sourceUTF16Length > 0 || document.text.isEmpty {
+                    document.sourceAnchor = selected.location
+                }
+            }
             if AnchorInspection.isActive {
-                var details = AnchorInspection.snapshot(entryView ?? textView, document: document)
+                var details = AnchorInspection.snapshot(editing ?? entryView ?? textView, document: document)
                 details["chosen_source"] = document.sourceAnchor
+                details["editing_surface"] = editing != nil
                 AnchorInspection.record("toggle_editing_anchor", details)
             }
             await document.saveNow()

@@ -255,6 +255,7 @@ struct ReadingText: NSViewRepresentable {
         private var initial = true
         private var pendingInitialSource: Int?
         private var pendingRevealSource: Int?
+        private var revealGeneration = 0
         private var pendingAnchor: (id: UInt64, source: Int, offset: Double)?
         var revealPending: Bool { pendingRevealSource != nil }
 
@@ -480,11 +481,18 @@ struct ReadingText: NSViewRepresentable {
             view.layoutRenderCount += 1
             DiagramInspection.recordScrollStability(event: "reading_render", view: view)
             let layoutStart = ProcessInfo.processInfo.systemUptime
-            if let source = pendingInitialSource {
+            if let pending = pendingRevealSource {
+                // 模型就绪前到达的更新 reveal 优先于初始锚点，较早的请求不能覆盖它。
+                pendingRevealSource = nil
+                pendingInitialSource = nil
+                // 先让滚动容器按新内容增高，再迁移视口；否则文末 reveal 没有可滚动距离。
+                view.layoutSubtreeIfNeeded()
+                reveal(source: pending)
+            } else if let source = pendingInitialSource {
                 pendingInitialSource = nil
                 // 新视图已在文首；避免为零锚点重复迁移视口、重排首屏。
-                if source != 0 || view.visibleRect.minY > 0.5 { reveal(source: source) }
                 view.layoutSubtreeIfNeeded()
+                if source != 0 || view.visibleRect.minY > 0.5 { reveal(source: source) }
                 if AnchorInspection.isActive {
                     var details = AnchorInspection.snapshot(view, document: input.document)
                     details["source"] = source
@@ -662,27 +670,84 @@ struct ReadingText: NSViewRepresentable {
                 AnchorInspection.record("restore", details)
             }
         }
-        func sourcePosition(at position: Int) -> Int {
-            guard let model, let index = ranges.firstIndex(where: { NSLocationInRange(position, $0) }) else { return source.utf16.count }
-            let block = model.blocks[index], local = position - ranges[index].location
-            guard let run = model.firstRun(in: block.runRange, matching: {
-                local >= Int($0.start) && local < Int($0.start + $0.length)
-            }) else { return Int(block.sourceStart) }
-            return Int(block.sourceStart + run.sourceStart) + (run.sourceLength == run.length ? local - Int(run.start) : 0)
+        var sourceLength: Int { source.utf16.count }
+
+        /// 文末只在滚动视口确实到达底部时才是有效锚点；首次打开时视图高度尚小于内容高度。
+        func atDocumentBottom() -> Bool {
+            guard let view, view.visibleRect.minY > 0.5 else { return false }
+            let content = max(view.frame.height,
+                              (view.textLayoutManager?.usageBoundsForTextContainer.maxY ?? 0) + view.textContainerInset.height * 2)
+            return view.visibleRect.maxY >= content - view.textContainerInset.height - 0.5
+        }
+
+        /// 命中测试在顶部内边距或图块上可能返回文末；先换到正文内的点，再用实际片段校验。
+        func visibleInsertionPosition() -> Int? {
+            guard let view, !ranges.isEmpty else { return nil }
+            let visible = view.visibleRect
+            let x = view.textContainerInset.width + 1
+            let candidates = [max(visible.minY + 1, view.textContainerInset.height + 1),
+                              visible.minY + 1]
+            for y in candidates {
+                let position = view.characterIndexForInsertion(at: CGPoint(x: x, y: y))
+                guard position != NSNotFound, position >= 0, position < view.sourceUTF16Length,
+                      ranges.contains(where: { NSLocationInRange(position, $0) }) else { continue }
+                let target = rect(at: position)
+                if target.maxY > visible.minY + 0.5, target.minY < visible.maxY - 0.5 { return position }
+            }
+            // 命中测试仍不可信时，退到与视口顶部相交的块起点。
+            let content = max(view.frame.height,
+                              (view.textLayoutManager?.usageBoundsForTextContainer.maxY ?? 0) + view.textContainerInset.height * 2)
+            for index in ranges.indices {
+                let top = rect(at: ranges[index].location).minY
+                let bottom = index + 1 < ranges.count ? rect(at: ranges[index + 1].location).minY : content
+                if bottom > visible.minY + 0.5, top < visible.maxY - 0.5 { return ranges[index].location }
+            }
+            return nil
+        }
+
+        func sourcePosition(at position: Int) -> Int? {
+            guard let model, !ranges.isEmpty, let view,
+                  position != NSNotFound, position >= 0, position <= view.sourceUTF16Length else { return nil }
+            if let index = ranges.firstIndex(where: { NSLocationInRange(position, $0) }) {
+                let block = model.blocks[index], local = position - ranges[index].location
+                guard let run = model.firstRun(in: block.runRange, matching: {
+                    local >= Int($0.start) && local < Int($0.start + $0.length)
+                }) else { return Int(block.sourceStart) }
+                return Int(block.sourceStart + run.sourceStart) + (run.sourceLength == run.length ? local - Int(run.start) : 0)
+            }
+            // 真正的文末插入点只在视口位于底部时保留；其余越界位置不能解释为 EOF。
+            if position == view.sourceUTF16Length, atDocumentBottom() { return sourceLength }
+            return nil
         }
         func displayPosition(source: Int) -> Int {
-            guard let model, let index = model.blocks.firstIndex(where: { source < Int($0.sourceStart + $0.sourceLength) }) else { return view?.sourceUTF16Length ?? 0 }
-            let block = model.blocks[index], local = source - Int(block.sourceStart)
+            guard let view else { return 0 }
+            guard let model, source >= 0, source <= sourceLength else { return 0 }
+            if source == sourceLength { return view.sourceUTF16Length }
+            guard let index = model.blocks.firstIndex(where: { source < Int($0.sourceStart + $0.sourceLength) })
+            else { return view.sourceUTF16Length }
+            let block = model.blocks[index], local = max(0, source - Int(block.sourceStart))
             let run = model.firstRun(in: block.runRange, matching: {
                 local < Int($0.sourceStart + $0.sourceLength)
             })
             let adjustment = run.map { $0.length == $0.sourceLength ? max(0, local - Int($0.sourceStart)) : 0 } ?? 0
-            return ranges[index].location + Int(run?.start ?? 0) + adjustment
+            return min(view.sourceUTF16Length, ranges[index].location + Int(run?.start ?? 0) + adjustment)
         }
         func reveal(source: Int) {
             guard let view else { return }
+            revealGeneration += 1
+            let request = revealGeneration
             let inspect = AnchorInspection.isActive
             let before = inspect ? AnchorInspection.snapshot(view, document: input?.document) : [:]
+            guard model != nil, !ranges.isEmpty else {
+                pendingRevealSource = source
+                if inspect {
+                    var details = before
+                    details["source"] = source
+                    details["model_ready"] = false
+                    AnchorInspection.record("reveal_pending", details)
+                }
+                return
+            }
             guard view.window != nil, let clip = view.enclosingScrollView?.contentView else {
                 pendingRevealSource = source
                 if inspect {
@@ -713,6 +778,7 @@ struct ReadingText: NSViewRepresentable {
                 details["display"] = position
                 details["before_visible"] = before["visible"] ?? NSNull()
                 details["eof_target"] = position >= view.sourceUTF16Length
+                details["request"] = request
                 AnchorInspection.record("reveal", details)
             }
         }
@@ -723,8 +789,10 @@ struct ReadingText: NSViewRepresentable {
                 return
             }
             guard pendingRevealSource != nil else { return }
+            let request = revealGeneration
             DispatchQueue.main.async { [weak self] in
-                guard let self, let source = self.pendingRevealSource, self.view?.window != nil else { return }
+                guard let self, self.revealGeneration == request,
+                      let source = self.pendingRevealSource, self.view?.window != nil else { return }
                 self.reveal(source: source)
             }
         }
@@ -737,9 +805,8 @@ struct ReadingText: NSViewRepresentable {
             return fragment.layoutFragmentFrame.offsetBy(dx: view.textContainerInset.width, dy: view.textContainerInset.height)
         }
         func visibleAnchor() -> (id: UInt64, source: Int, offset: Double)? {
-            guard let view, let model else { return nil }
-            let position = view.characterIndexForInsertion(at: CGPoint(x: 31, y: view.visibleRect.minY + 1))
-            guard let index = ranges.firstIndex(where: { NSLocationInRange(position, $0) }) else { return nil }
+            guard let view, let model, let position = visibleInsertionPosition(),
+                  let index = ranges.firstIndex(where: { NSLocationInRange(position, $0) }) else { return nil }
             return (model.blocks[index].id, Int(model.blocks[index].sourceStart), rect(at: ranges[index].location).minY - view.visibleRect.minY)
         }
         func copyMarkdown() {
@@ -754,7 +821,8 @@ struct ReadingText: NSViewRepresentable {
                   let first = ranges.firstIndex(where: { NSIntersectionRange($0, selected).length > 0 }),
                   let last = ranges.lastIndex(where: { NSIntersectionRange($0, selected).length > 0 }) else { return }
             // 块边界包含语法外壳，复制整个块时仍是合法 Markdown。
-            let start = selected.location <= ranges[first].location ? Int(model.blocks[first].sourceStart) : sourcePosition(at: selected.location)
+            let start = selected.location <= ranges[first].location ? Int(model.blocks[first].sourceStart)
+                : (sourcePosition(at: selected.location) ?? Int(model.blocks[first].sourceStart))
             let end = NSMaxRange(selected) >= NSMaxRange(ranges[last]) ? Int(model.blocks[last].sourceStart + model.blocks[last].sourceLength) : sourceEnd(at: NSMaxRange(selected) - 1)
             let text = source as NSString
             NSPasteboard.general.clearContents()
