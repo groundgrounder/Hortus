@@ -155,10 +155,10 @@ pub struct WorkspaceCore {
 }
 
 fn session_info(
-    store: &Store,
+    data: &std::path::Path,
     record: &history::SessionRecord,
 ) -> Result<AgentSessionInfo, CoreError> {
-    let snapshot = history::HistoryStore::new(store.data_root())
+    let snapshot = history::HistoryStore::new(data)
         .snapshot_directory(&record.id)?
         .to_string_lossy()
         .into_owned();
@@ -390,12 +390,16 @@ impl WorkspaceCore {
     }
 
     /// 同步建立全库快照；Swift 在后台任务中调用，不占用主线程。
+    /// 只在锁内校验库并复制数据根，遍历、复制与会话写入都在锁外进行。
     pub fn begin_agent_session(&self, vault: String) -> Result<AgentSessionInfo, CoreError> {
-        let store = self.store.lock().unwrap();
-        store.validate_vault(std::path::Path::new(&vault))?;
-        let history = history::HistoryStore::new(store.data_root());
+        let data = {
+            let store = self.store.lock().unwrap();
+            store.validate_vault(std::path::Path::new(&vault))?;
+            store.data_root().to_path_buf()
+        };
+        let history = history::HistoryStore::new(data.clone());
         let record = history.begin(std::path::Path::new(&vault), None)?;
-        session_info(&store, &record)
+        session_info(&data, &record)
     }
 
     pub fn mark_agent_session(
@@ -419,8 +423,8 @@ impl WorkspaceCore {
         &self,
         vault: Option<String>,
     ) -> Result<Vec<AgentSessionInfo>, CoreError> {
-        let store = self.store.lock().unwrap();
-        let history = history::HistoryStore::new(store.data_root());
+        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let history = history::HistoryStore::new(data.clone());
         let canonical = vault
             .map(|vault| {
                 std::fs::canonicalize(vault)
@@ -431,7 +435,7 @@ impl WorkspaceCore {
         let records = history.list(canonical.as_deref())?;
         records
             .iter()
-            .map(|record| session_info(&store, record))
+            .map(|record| session_info(&data, record))
             .collect()
     }
 

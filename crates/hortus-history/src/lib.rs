@@ -402,16 +402,18 @@ fn new_session_id() -> io::Result<String> {
 
 /// 单元测试用故障注入；只在测试构建存在。
 #[cfg(test)]
-pub(crate) static TEST_FAIL_WRITE: std::sync::Mutex<Option<fn(&Path) -> bool>> =
+type WritePredicate = fn(&Path) -> bool;
+#[cfg(test)]
+pub(crate) static TEST_FAIL_WRITE: std::sync::Mutex<Option<WritePredicate>> =
     std::sync::Mutex::new(None);
 
 /// 元数据与清单共用原子写入：同目录临时文件、fsync、替换、目录 fsync。
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
-    if let Some(predicate) = *TEST_FAIL_WRITE.lock().unwrap() {
-        if predicate(path) {
-            return Err(io::Error::other("history.test_write_failed"));
-        }
+    if let Some(predicate) = *TEST_FAIL_WRITE.lock().unwrap()
+        && predicate(path)
+    {
+        return Err(io::Error::other("history.test_write_failed"));
     }
     let parent = path
         .parent()

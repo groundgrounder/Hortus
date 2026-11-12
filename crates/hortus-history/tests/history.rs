@@ -366,8 +366,10 @@ fn recovery_only_interrupts_complete_running_sessions() {
         Some(&[]),
     );
 
-    let mut mismatched = hortus_history::SnapshotStats::default();
-    mismatched.entries = 5;
+    let mismatched = hortus_history::SnapshotStats {
+        entries: 5,
+        ..hortus_history::SnapshotStats::default()
+    };
     let running_with_short_manifest = "44444444-4444-4444-8444-444444444444";
     write_session(
         &store,
