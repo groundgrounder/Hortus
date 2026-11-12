@@ -32,7 +32,7 @@ struct PanelContent: View {
         } else if kind == .outline {
             OutlinePanel()
         } else if kind == .terminal {
-            TerminalPanel(session: workspace.terminal, fontSize: workspace.fontSize)
+            TerminalPanel(controller: workspace.terminals, fontSize: workspace.fontSize)
         } else {
             VStack(spacing: 8) {
                 Image(systemName: kind.symbol).font(.title2).foregroundStyle(.tertiary)

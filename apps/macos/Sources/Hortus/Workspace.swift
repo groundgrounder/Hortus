@@ -57,6 +57,8 @@ final class Workspace {
     weak var application: ApplicationWorkspace?
     var context: VaultContext?
     var root: String? { context?.root }
+    /// 自检读取当前标签的 shell PID；普通代码走标签控制器。
+    var terminalPid: pid_t { terminals.currentSession?.inspectionShellPid ?? 0 }
     private var fixtureEntries: [String: TreeEntry] = [:]
     var entries: [String: TreeEntry] {
         get { context?.entries ?? fixtureEntries }
@@ -69,9 +71,9 @@ final class Workspace {
     var scanning: Bool { context?.scanning ?? false }
     var opening = false
     var error: String?
-    var terminal = TerminalSession()
+    let terminals = TerminalController()
     var fontSize = 15.0 {
-        didSet { terminal.update(fontSize: fontSize) }
+        didSet { terminals.update(fontSize: fontSize) }
     }
     var defaultView = "reading"
     var scanMicros: UInt64 { context?.scanMicros ?? 0 }
@@ -88,7 +90,7 @@ final class Workspace {
     var searchFocusRequest = 0
     var searchResults: [SearchResult] = []
     var searchLoading = false
-    @ObservationIgnored private var core: WorkspaceCore?
+    @ObservationIgnored var core: WorkspaceCore?
     @ObservationIgnored private var epoch = UUID()
     @ObservationIgnored private var openingRequest = UUID()
     @ObservationIgnored private var loads: [String: UUID] = [:]
@@ -103,6 +105,10 @@ final class Workspace {
     @ObservationIgnored private var quickOpenMarked = false
     @ObservationIgnored private var searchMarked = false
     @ObservationIgnored private var pendingSearchReveals: [String: (start: Int, length: Int)] = [:]
+
+    init() {
+        terminals.workspace = self
+    }
 
     var current: NoteTab? { tabs.first { $0.path == selected } }
     var title: String { current?.title ?? root.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Hortus" }
@@ -121,7 +127,7 @@ final class Workspace {
         openedAt = .now
         restoredViews = state?.views ?? [:]
         context.attach(self)
-        await terminal.setRootAndWait(context.root)
+        await terminals.setRootAndWait(context.root)
         for path in state?.tabs ?? [] {
             if application?.owner(of: path, from: self) != nil {
                 application?.recordDuplicate(path, window: self)
@@ -159,7 +165,7 @@ final class Workspace {
         epoch = UUID()
         openingRequest = UUID()
         for tab in tabs { tab.document?.stopForShutdown() }
-        await terminal.setRootAndWait(nil)
+        await terminals.setRootAndWait(nil)
         quickOpenTask?.cancel(); searchTask?.cancel(); searchCancellation?.cancel()
         context?.detach(self)
         context = nil
@@ -670,7 +676,7 @@ final class Workspace {
         for document in tabs.compactMap(\.document) { document.stopForShutdown() }
         let group = DispatchGroup()
         group.enter()
-        terminal.stopForShutdown { group.leave() }
+        terminals.stopForShutdown { group.leave() }
         Self.drainStateWrites(queue: saves, group: group, completion: completion)
     }
 

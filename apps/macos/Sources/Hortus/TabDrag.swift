@@ -63,7 +63,7 @@ extension ApplicationWorkspace {
         #if DEBUG
         tabDragTrace.append("commit \(payload.token) to \(target.id)")
         #endif
-        target.workspace.terminal.setInitialRoot(context.root)
+        target.workspace.terminals.setInitialRoot(context.root)
         becameActive(target)
         showWindow?(target.id)
         scheduleSessionSave()

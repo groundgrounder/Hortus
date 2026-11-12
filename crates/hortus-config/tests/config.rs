@@ -52,6 +52,7 @@ fn store(root: &TempDir) -> Store {
     Store::open(Directories {
         config: root.path().join("config"),
         cache: root.path().join("cache"),
+        data: root.path().join("data"),
     })
     .unwrap()
 }
@@ -535,4 +536,175 @@ fn legacy_layout_visible_is_accepted_but_new_snapshot_omits_it() {
             .unwrap()
             .contains("visible")
     );
+}
+
+#[test]
+fn data_root_is_persistent_and_independent_of_cache() {
+    let home = TempDir::new().unwrap();
+    let lookup = |key: &str| match key {
+        "HOME" => Some(home.path().to_path_buf()),
+        _ => None,
+    };
+    let directories = Directories::resolve_from_lookup(lookup).unwrap();
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            directories.data,
+            home.path().join("Library/Application Support/Hortus")
+        );
+    } else {
+        assert_eq!(directories.data, home.path().join(".local/share/hortus"));
+    }
+    assert_ne!(directories.data, directories.cache);
+
+    let custom = home.path().join("custom-data");
+    let overridden = Directories::resolve_from_lookup(|key| match key {
+        "HOME" => Some(home.path().to_path_buf()),
+        "HORTUS_DATA_DIR" => Some(custom.clone()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(overridden.data, custom);
+
+    let relative = Directories::resolve_from_lookup(|key| match key {
+        "HOME" => Some(home.path().to_path_buf()),
+        "HORTUS_DATA_DIR" => Some("relative/data".into()),
+        _ => None,
+    });
+    assert_eq!(
+        relative.unwrap_err().to_string(),
+        "config.path_not_absolute"
+    );
+}
+
+#[test]
+fn data_root_inside_vault_is_rejected() {
+    let root = TempDir::new().unwrap();
+    let vault = root.path().join("vault");
+    fs::create_dir_all(&vault).unwrap();
+    let store = Store::open(Directories {
+        config: root.path().join("config"),
+        cache: root.path().join("cache"),
+        data: vault.join("app-data"),
+    })
+    .unwrap();
+    fs::create_dir_all(store.directories.data.clone()).unwrap();
+    assert_eq!(
+        store.validate_vault(&vault).unwrap_err().to_string(),
+        "config.vault_contains_state"
+    );
+}
+
+fn write_config(store: &Store, text: &str) {
+    fs::write(store.directories.config.join("config.toml"), text).unwrap();
+}
+
+#[test]
+fn agent_template_validates_structure_and_preserves_each_argument() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    write_config(
+        &store,
+        "font_size = 15.0\ndefault_view = \"reading\"\n\n# keep this comment\nunknown_key = 7\n\n[agent]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"printf '%s' {guide}\"]\n",
+    );
+    let launch = store.agent_launch().unwrap();
+    assert_eq!(launch.executable, "/bin/sh");
+    assert_eq!(launch.args.len(), 2);
+    assert!(launch.args[1].starts_with("printf '%s' # Working in a Hortus knowledge base\n"));
+    assert!(launch.args[1].contains("[[Note name]]"));
+    assert!(launch.args[1].contains(AGENT_GUIDE));
+    // 保存设置仍保留注释、未知键与 [agent]。
+    store
+        .save_settings(&Settings {
+            font_size: 16.0,
+            default_view: ViewMode::Editing,
+        })
+        .unwrap();
+    let saved = fs::read_to_string(store.directories.config.join("config.toml")).unwrap();
+    assert!(saved.contains("# keep this comment"), "{saved}");
+    assert!(saved.contains("unknown_key = 7"), "{saved}");
+    assert!(saved.contains("[agent]"), "{saved}");
+    assert!(saved.contains("printf '%s' {guide}"), "{saved}");
+    assert!(saved.contains("font_size = 16.0"), "{saved}");
+}
+
+#[test]
+fn agent_template_errors_are_stable_keys() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    let cases = [
+        (
+            "font_size = 15.0\ndefault_view = \"reading\"\n",
+            "agent.not_configured",
+        ),
+        (
+            "font_size = 15.0\ndefault_view = \"reading\"\n[agent]\nargs = [\"{guide}\"]\n",
+            "agent.command_missing",
+        ),
+        (
+            "font_size = 15.0\ndefault_view = \"reading\"\n[agent]\ncommand = \"/bin/sh\"\nargs = [\"-l\"]\n",
+            "agent.guide_missing",
+        ),
+        (
+            "font_size = 15.0\ndefault_view = \"reading\"\n[agent]\ncommand = \"relative/tool\"\nargs = [\"{guide}\"]\n",
+            "agent.command_not_absolute",
+        ),
+        (
+            "font_size = 15.0\ndefault_view = \"reading\"\n[agent]\ncommand = \"/definitely/missing\"\nargs = [\"{guide}\"]\n",
+            "agent.not_found",
+        ),
+        (
+            "font_size = 15.0\ndefault_view = \"reading\"\n[agent]\ncommand = \"/bin/sh\"\nargs = [3]\n",
+            "agent.config_invalid",
+        ),
+        (
+            "font_size = 15.0\ndefault_view = \"reading\"\n[agent]\ncommand = \"/bin/sh\"\nargs = [\"{guide}\", \"a\\u0000b\"]\n",
+            "agent.invalid_argument",
+        ),
+    ];
+    for (text, expected) in cases {
+        write_config(&store, text);
+        assert_eq!(store.agent_launch().unwrap_err().to_string(), expected);
+    }
+}
+
+#[test]
+fn agent_guide_override_replaces_the_whole_guide() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    write_config(
+        &store,
+        "font_size = 15.0\ndefault_view = \"reading\"\n[agent]\ncommand = \"/bin/sh\"\nargs = [\"{guide}\"]\n",
+    );
+    let guide = "  Spaces \"quotes\" $(echo nope); 中文\nline two\n";
+    fs::write(store.directories.config.join("agent-guide.md"), guide).unwrap();
+    let launch = store.agent_launch().unwrap();
+    assert_eq!(launch.args, vec![guide.to_string()]);
+    assert!(!launch.args[0].contains("Working in a Hortus"));
+
+    fs::write(store.directories.config.join("agent-guide.md"), b"  \n\t\n").unwrap();
+    assert_eq!(store.agent_launch().unwrap_err().to_string(), "guide.empty");
+    fs::write(
+        store.directories.config.join("agent-guide.md"),
+        b"\xff\xfeinvalid",
+    )
+    .unwrap();
+    assert_eq!(
+        store.agent_launch().unwrap_err().to_string(),
+        "guide.invalid_utf8"
+    );
+    fs::remove_file(store.directories.config.join("agent-guide.md")).unwrap();
+    fs::create_dir(store.directories.config.join("agent-guide.md")).unwrap();
+    assert_eq!(
+        store.agent_launch().unwrap_err().to_string(),
+        "guide.read_failed"
+    );
+}
+
+#[test]
+fn resolving_the_guide_does_not_create_the_config_directory() {
+    let root = TempDir::new().unwrap();
+    let config = root.path().join("missing-config");
+    let text = effective_guide(&config).unwrap();
+    assert_eq!(text, AGENT_GUIDE);
+    assert!(!config.exists());
 }

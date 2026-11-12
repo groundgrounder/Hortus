@@ -38,6 +38,7 @@ final class ApplicationWorkspace {
     #endif
     private var bootstrapID: String = ""
     var ready = false
+    private(set) var recoveredSessions = 0
     var fontSize = 15.0
     var defaultView = "reading"
     var defaultVisible: [String: Bool] = ["left": true, "right": true, "bottom": false]
@@ -78,6 +79,8 @@ final class ApplicationWorkspace {
         do {
             let service = try await Task.detached { try providedCore ?? WorkspaceCore() }.value
             core = service
+            // 上次退出时仍是运行中的会话不能假装进程还受管理。
+            recoveredSessions = Int((try? await Task.detached { try service.recoverAgentSessions() }.value) ?? 0)
             let values = try await Task.detached {
                 (try service.layoutJson(), try service.sessionJson(), try service.fontSize(), try service.defaultView())
             }.value

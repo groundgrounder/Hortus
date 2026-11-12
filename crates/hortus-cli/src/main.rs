@@ -2,9 +2,16 @@ use hortus_diagram::{
     Diagram, LayoutOptions, SystemFonts, Theme, layout, layout_graph, mermaid_block,
 };
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::PathBuf;
 
-const USAGE: &str = "Usage: hortus mermaid render <note.md> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json] [--scene scene.json]";
+const USAGE: &str = "Usage: hortus guide\n       hortus mermaid render <note.md> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json] [--scene scene.json]";
+
+enum Command {
+    Usage,
+    Guide,
+    Render(Box<Arguments>),
+}
 
 struct Arguments {
     input: PathBuf,
@@ -15,13 +22,23 @@ struct Arguments {
     options: LayoutOptions,
 }
 
-fn arguments() -> Result<Option<Arguments>, String> {
+fn arguments() -> Result<Command, String> {
     let mut args = std::env::args().skip(1);
-    let first = args.next();
-    if first.as_deref() == Some("--help") || first.as_deref() == Some("-h") {
-        return Ok(None);
+    let Some(first) = args.next() else {
+        return Ok(Command::Usage);
+    };
+    match first.as_str() {
+        "--help" | "-h" => return Ok(Command::Usage),
+        "guide" => {
+            if let Some(extra) = args.next() {
+                return Err(format!("unknown argument {extra}"));
+            }
+            return Ok(Command::Guide);
+        }
+        "mermaid" => {}
+        other => return Err(format!("unknown command {other}")),
     }
-    if first.as_deref() != Some("mermaid") || args.next().as_deref() != Some("render") {
+    if args.next().as_deref() != Some("render") {
         return Err(USAGE.into());
     }
     let input = args.next().filter(|s| !s.starts_with('-')).ok_or(USAGE)?;
@@ -32,7 +49,7 @@ fn arguments() -> Result<Option<Arguments>, String> {
     let mut options = LayoutOptions::default();
     while let Some(option) = args.next() {
         if option == "--help" || option == "-h" {
-            return Ok(None);
+            return Ok(Command::Usage);
         }
         let value = args
             .next()
@@ -67,14 +84,35 @@ fn arguments() -> Result<Option<Arguments>, String> {
             _ => return Err(format!("unknown option {option}")),
         }
     }
-    Ok(Some(Arguments {
+    Ok(Command::Render(Box::new(Arguments {
         input: input.into(),
         out: out.ok_or("--out is required")?,
         metrics,
         scene,
         block,
         options,
-    }))
+    })))
+}
+
+/// 写出有效指南原文；只读取配置目录，不创建目录、不迁移旧数据。
+fn run_guide() -> std::io::Result<()> {
+    let directories = hortus_config::Directories::resolve_from_env()?;
+    let guide = hortus_config::effective_guide(&directories.config)?;
+    let mut output = std::io::stdout().lock();
+    output.write_all(guide.as_bytes())?;
+    output.flush()
+}
+
+fn describe(error: &std::io::Error) -> String {
+    match error.to_string().as_str() {
+        "guide.invalid_utf8" => "agent-guide.md is not valid UTF-8".into(),
+        "guide.empty" => "agent-guide.md is empty".into(),
+        "guide.read_failed" => "unable to read agent-guide.md".into(),
+        "config.home_missing" => "HOME is not set".into(),
+        "config.path_not_absolute" => "configuration paths must be absolute".into(),
+        other if other.starts_with("guide.") || other.starts_with("config.") => other.into(),
+        other => other.into(),
+    }
 }
 
 fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
@@ -150,16 +188,25 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
 }
 
 fn main() -> std::process::ExitCode {
-    let result = match arguments() {
-        Ok(Some(args)) => run(args),
-        Ok(None) => {
+    match arguments() {
+        Ok(Command::Usage) => {
             println!("{USAGE}");
-            Ok(())
+            std::process::ExitCode::SUCCESS
         }
-        Err(error) => Err(error.into()),
-    };
-    match result {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(Command::Guide) => match run_guide() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{}", describe(&error));
+                std::process::ExitCode::FAILURE
+            }
+        },
+        Ok(Command::Render(args)) => match run(*args) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::ExitCode::FAILURE
+            }
+        },
         Err(error) => {
             eprintln!("{error}");
             std::process::ExitCode::FAILURE

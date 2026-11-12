@@ -86,10 +86,10 @@ enum MultiWindowInspection {
                 try await wait { application.records.count == 2 && application.contexts.count == 2 }
                 stage = "start terminals"
                 for record in [first, second] { record.layout.setTerminalVisible(true) }
-                try await wait { first.workspace.terminal.inspectionShellPid > 0 && second.workspace.terminal.inspectionShellPid > 0 }
-                let aPID = first.workspace.terminal.inspectionShellPid, bPID = second.workspace.terminal.inspectionShellPid
+                try await wait { first.workspace.terminalPid > 0 && second.workspace.terminalPid > 0 }
+                let aPID = first.workspace.terminalPid, bPID = second.workspace.terminalPid
                 result["terminal_pids"] = [aPID, bPID]
-                result["terminal_roots"] = [first.workspace.terminal.root ?? "", second.workspace.terminal.root ?? ""]
+                result["terminal_roots"] = [first.workspace.root ?? "", second.workspace.root ?? ""]
                 first.workspace.presentQuickOpen()
                 first.workspace.updateQuickOpen(query: "same", marked: false)
                 result["quick_open_isolated"] = first.workspace.quickOpenVisible && !second.workspace.quickOpenVisible
@@ -106,7 +106,7 @@ enum MultiWindowInspection {
                 try await wait { secondDocument.reading != oldView }
                 result["key_window_command"] = performed && firstDocument.reading && !secondDocument.reading
                 application.activate(first)
-                result["background_terminal_preserved"] = aPID == first.workspace.terminal.inspectionShellPid && bPID == second.workspace.terminal.inspectionShellPid
+                result["background_terminal_preserved"] = aPID == first.workspace.terminalPid && bPID == second.workspace.terminalPid
                 // 外部批次覆盖同名路径、创建、改名与删除；每库独立刷新。
                 let aURL = URL(fileURLWithPath: root!)
                 stage = "external refresh"
@@ -151,13 +151,13 @@ enum MultiWindowInspection {
             }
             // 恢复证据取完后检查非最后窗口关闭：背景 shell 与文档继续可用。
             if restoring, let second = application.records.last, let first = application.records.first, second !== first {
-                let aPID = first.workspace.terminal.inspectionShellPid
-                let bPID = second.workspace.terminal.inspectionShellPid
+                let aPID = first.workspace.terminalPid
+                let bPID = second.workspace.terminalPid
                 let weakWindow = second.window
                 second.window?.performClose(nil)
                 try await wait { application.records.count == 1 && application.contexts.count == 1 }
                 result["closed_shell_pid"] = bPID
-                result["other_shell_survived"] = aPID == first.workspace.terminal.inspectionShellPid && aPID > 0
+                result["other_shell_survived"] = aPID == first.workspace.terminalPid && aPID > 0
                 result["closed_window_hidden"] = weakWindow?.isVisible != true
                 result["remaining_contexts"] = application.contexts.count
             }
@@ -266,8 +266,8 @@ enum MultiWindowInspection {
          "visible": record.window?.isVisible == true, "tabs": record.workspace.tabs.map(\.path),
          "selected": record.workspace.selected ?? "", "views": record.workspace.sessionViews(),
          "documents": record.workspace.tabs.compactMap { $0.document.map { String(describing: ObjectIdentifier($0)) } },
-         "terminal_pid": record.workspace.terminal.inspectionShellPid,
-         "terminal_root": record.workspace.terminal.root ?? "",
+         "terminal_pid": record.workspace.terminalPid,
+         "terminal_root": record.workspace.root ?? "",
          "left_size": record.layout.size[.left] ?? 0,
          "left_visible": record.layout.visible[.left] ?? true,
          "frame": record.window.map { NSStringFromRect($0.frame) } ?? ""]

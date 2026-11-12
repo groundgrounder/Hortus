@@ -1,5 +1,6 @@
 //! Swift 只通过这层调用 Rust；目录 I/O 和扫描在 Swift 后台任务及 Rust 工作线程执行。
 use hortus_config::{Directories, LayoutState, Store, VaultState};
+use hortus_history as history;
 use hortus_search::SearchIndex;
 use hortus_vault::Vault;
 use std::fmt;
@@ -127,19 +128,67 @@ impl SearchCancellation {
     }
 }
 
+#[derive(Debug, uniffi::Record)]
+pub struct AgentSpec {
+    pub executable: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct AgentSessionInfo {
+    pub id: String,
+    pub vault: String,
+    pub state: String,
+    pub snapshot_path: String,
+    pub created_at_ms: i64,
+    pub started_at_ms: Option<i64>,
+    pub ended_at_ms: Option<i64>,
+    pub entries: u64,
+    pub bytes: u64,
+    pub method: String,
+    pub error: Option<String>,
+}
+
 #[derive(uniffi::Object)]
 pub struct WorkspaceCore {
     store: Mutex<Store>,
+}
+
+fn session_info(
+    store: &Store,
+    record: &history::SessionRecord,
+) -> Result<AgentSessionInfo, CoreError> {
+    let snapshot = history::HistoryStore::new(store.data_root())
+        .snapshot_directory(&record.id)?
+        .to_string_lossy()
+        .into_owned();
+    let stats = record.stats.clone().unwrap_or_default();
+    Ok(AgentSessionInfo {
+        id: record.id.clone(),
+        vault: record.vault.clone(),
+        state: record.state.as_str().into(),
+        snapshot_path: snapshot,
+        created_at_ms: record.created_at_ms,
+        started_at_ms: record.started_at_ms,
+        ended_at_ms: record.ended_at_ms,
+        entries: stats.entries,
+        bytes: stats.bytes,
+        method: stats.method,
+        error: record.error.clone(),
+    })
 }
 
 #[uniffi::export]
 impl WorkspaceCore {
     #[uniffi::constructor]
     pub fn in_directories(config: String, cache: String) -> Result<Arc<Self>, CoreError> {
+        // 测试与检查用显式 config/cache；持久数据根仍按 HORTUS_DATA_DIR 或系统规则解析。
+        let directories = Directories::resolve_from_env()?;
         Ok(Arc::new(Self {
             store: Mutex::new(Store::open(Directories {
                 config: config.into(),
                 cache: cache.into(),
+                data: directories.data,
             })?),
         }))
     }
@@ -319,6 +368,77 @@ impl WorkspaceCore {
             vault: Vault::open(path)?,
             search: Mutex::new(SearchIndex::new()),
         }))
+    }
+
+    /// 读取并校验全局 [agent] 模板；返回已解析的命令与 `{guide}` 已替换的 argv。
+    /// 不创建目录、不建立快照、不启动进程。
+    pub fn agent_spec(&self) -> Result<AgentSpec, CoreError> {
+        let launch = self.store.lock().unwrap().agent_launch()?;
+        Ok(AgentSpec {
+            executable: launch.executable,
+            args: launch.args,
+        })
+    }
+
+    pub fn data_directory(&self) -> String {
+        self.store
+            .lock()
+            .unwrap()
+            .data_root()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// 同步建立全库快照；Swift 在后台任务中调用，不占用主线程。
+    pub fn begin_agent_session(&self, vault: String) -> Result<AgentSessionInfo, CoreError> {
+        let store = self.store.lock().unwrap();
+        store.validate_vault(std::path::Path::new(&vault))?;
+        let history = history::HistoryStore::new(store.data_root());
+        let record = history.begin(std::path::Path::new(&vault), None)?;
+        session_info(&store, &record)
+    }
+
+    pub fn mark_agent_session(
+        &self,
+        id: String,
+        state: String,
+        exit_code: Option<i32>,
+    ) -> Result<(), CoreError> {
+        let state = history::SessionState::parse(&state)
+            .ok_or_else(|| CoreError::failure("history.invalid_state"))?;
+        let store = self.store.lock().unwrap();
+        let history = history::HistoryStore::new(store.data_root());
+        match state {
+            history::SessionState::Running => history.mark_running(&id)?,
+            other => history.finish(&id, other, exit_code)?,
+        };
+        Ok(())
+    }
+
+    pub fn list_agent_sessions(
+        &self,
+        vault: Option<String>,
+    ) -> Result<Vec<AgentSessionInfo>, CoreError> {
+        let store = self.store.lock().unwrap();
+        let history = history::HistoryStore::new(store.data_root());
+        let canonical = vault
+            .map(|vault| {
+                std::fs::canonicalize(vault)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .map_err(CoreError::from)
+            })
+            .transpose()?;
+        let records = history.list(canonical.as_deref())?;
+        records
+            .iter()
+            .map(|record| session_info(&store, record))
+            .collect()
+    }
+
+    /// 应用启动时调用：上次仍标为准备中/运行中的会话转为中断。
+    pub fn recover_agent_sessions(&self) -> Result<u32, CoreError> {
+        let store = self.store.lock().unwrap();
+        Ok(history::HistoryStore::new(store.data_root()).recover()? as u32)
     }
 }
 

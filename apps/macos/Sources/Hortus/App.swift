@@ -217,12 +217,19 @@ private struct HortusCommands: Commands {
                 get: { layout.terminalVisible },
                 set: { shown in
                     layout.setTerminalVisible(shown)
-                    if shown { DispatchQueue.main.async { workspace.terminal.focus() } }
+                    if shown { DispatchQueue.main.async { workspace.terminals.focus() } }
                 }))
                 .keyboardShortcut("`", modifiers: .control)
-            Button(L10n.string("Clear Terminal")) { workspace.terminal.clearScreen() }
+            Button(L10n.string("Clear Terminal")) { workspace.terminals.clearScreen() }
                 .keyboardShortcut("k", modifiers: .command)
-                .disabled(workspace.terminal.state != .running)
+                .disabled(workspace.terminals.currentSession?.state != .running)
+            Divider()
+            Button(L10n.string("New Shell Tab")) { workspace.terminals.newShellTab() }
+                .keyboardShortcut("t", modifiers: .command)
+                .disabled(workspace.root == nil)
+            Button(L10n.string("New Agent Tab")) { workspace.terminals.newAgentTab() }
+                .keyboardShortcut("t", modifiers: [.command, .option])
+                .disabled(workspace.root == nil)
         }
         CommandMenu("Panels") {
             Toggle("Left Sidebar", isOn: shown(.left)).keyboardShortcut("s", modifiers: [.control, .command])
@@ -254,6 +261,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var focusObserver: NSObjectProtocol?
     private var toolbarFocusObserver: NSObjectProtocol?
     private var commandAvailabilityObservers: [NSObjectProtocol] = []
+    private var agentInspectionRequested: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--agent-") }
+        #else
+        return false
+        #endif
+    }
 
     func showAboutPanel() {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -344,7 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
         #endif
-        guard terminalFontInspection || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
+        guard terminalFontInspection || agentInspectionRequested || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
         // 自检只设置两次一次性唤醒，其余等待由界面状态变更触发。
         let deadline = DispatchWorkItem { fputs("Hortus 自检超时\n", stderr); exit(2) }
         inspectionDeadline = deadline
@@ -408,7 +422,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
         #endif
-        let visualInspection = terminalFontInspection || ProcessInfo.processInfo.arguments.contains {
+        let visualInspection = terminalFontInspection || agentInspectionRequested || ProcessInfo.processInfo.arguments.contains {
             $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--quick-open-query=") || $0.hasPrefix("--search-query=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || $0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top"
         }
         let settled = withObservationTracking {
@@ -471,6 +485,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try await Task.detached { try data.write(to: URL(fileURLWithPath: path)) }.value
                 if args.contains("--inspect-hold-open") { return }
             }
+            #if DEBUG
+            if let arg = args.first(where: { $0.hasPrefix("--agent-launch-inspection=") }), let layout {
+                let result = try await AgentInspection.run(workspace: workspace, layout: layout, arguments: args)
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--agent-launch-inspection=".count))))
+            }
+            #endif
             if let arg = args.first(where: { $0.hasPrefix("--terminal-inspection=") }), let layout {
                 let result = try await TerminalInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])

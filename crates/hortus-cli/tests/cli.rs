@@ -130,10 +130,8 @@ fn errors_have_nonzero_exit_codes_and_do_not_write_output() {
     let help = sandbox.invoke(&["--help"]);
     assert!(help.status.success());
     let stdout = String::from_utf8_lossy(&help.stdout);
-    assert!(
-        stdout.starts_with("Usage: hortus mermaid render"),
-        "{stdout}"
-    );
+    assert!(stdout.starts_with("Usage: hortus"), "{stdout}");
+    assert!(stdout.contains("hortus guide") && stdout.contains("hortus mermaid render"));
     assert!(
         !contains_han(&stdout),
         "CLI help output must be English: {stdout}"

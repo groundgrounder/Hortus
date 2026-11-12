@@ -22,6 +22,7 @@ hortus-diagram = { path = "../hortus-diagram" }
 hortus-vault = { path = "../hortus-vault" }
 hortus-config = { path = "../hortus-config" }
 hortus-search = { path = "../hortus-search" }
+hortus-history = { path = "../hortus-history" }
 serde_json.workspace = true
 uniffi = { version = "=0.32.2", default-features = false }
 

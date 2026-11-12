@@ -5,54 +5,42 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_CONFIG: &str = "# Hortus 通用设置；布局与会话分别保存在 layout.toml 和系统缓存目录。\n# 正文字号（单位：pt）。\nfont_size = 15.0\ndefault_view = \"reading\"\n";
+pub const DEFAULT_CONFIG: &str = "# Hortus 通用设置；布局与会话分别保存在 layout.toml 和系统缓存目录。\n# 正文字号（单位：pt）。\nfont_size = 15.0\ndefault_view = \"reading\"\n\n# Agent 启动模板（当前不启用）。command 是可执行文件；裸命令名按应用启动时的 PATH 查找。\n# args 的每个元素是一个 argv 元素，不做 shell 拆分；\"{guide}\" 会替换成完整的内置指南。\n# 含路径分隔符的 command 必须是绝对路径。\n# [agent]\n# command = \"codex\"\n# args = [\"{guide}\"]\n";
+
+/// 内置 Agent 指南；CLI 与 FFI 共用同一份文本。
+pub const AGENT_GUIDE: &str = include_str!("../agent-guide.md");
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Directories {
     pub config: PathBuf,
     pub cache: PathBuf,
+    /// 不可删除的持久数据（Agent 会话与快照），不是缓存。
+    pub data: PathBuf,
 }
 
 impl Directories {
     pub fn from_env() -> io::Result<Self> {
-        Self::from_lookup(|key| {
-            if key == "HOME" {
-                // 图形界面启动可能没有 HOME；由标准库回退到系统账户的主目录。
-                std::env::home_dir()
-            } else {
-                std::env::var_os(key).map(PathBuf::from)
-            }
-        })
+        Self::from_lookup(environment_lookup)
+    }
+
+    /// 只解析路径，不创建目录、不迁移旧版本目录。
+    pub fn resolve_from_env() -> io::Result<Self> {
+        Self::resolve_from_lookup(environment_lookup)
     }
 
     /// 注入环境查询，测试无需修改进程级环境变量。
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<PathBuf>) -> io::Result<Self> {
+        let directories = Self::resolve_from_lookup(&lookup)?;
         // 空值视同未设置：launchctl setenv 留下的空字符串不能变成相对路径而阻止启动。
         let get = |key: &str| lookup(key).filter(|path| !path.as_os_str().is_empty());
         let home = get("HOME").ok_or_else(|| io::Error::other("config.home_missing"))?;
-        let config_override = get("HORTUS_CONFIG_DIR");
-        let cache_override = get("HORTUS_CACHE_DIR");
-        let old_config = get("MARKNOTE_CONFIG_DIR");
-        let old_cache = get("MARKNOTE_CACHE_DIR");
-        let config = config_override
-            .clone()
-            .unwrap_or_else(|| home.join(".config/hortus"));
-        let cache = cache_override.clone().unwrap_or_else(|| {
-            if cfg!(target_os = "macos") {
-                home.join("Library/Caches/Hortus")
-            } else {
-                get("XDG_CACHE_HOME")
-                    .unwrap_or_else(|| home.join(".cache"))
-                    .join("hortus")
-            }
-        });
-        let old_config = old_config.or_else(|| {
-            config_override
+        let old_config = get("MARKNOTE_CONFIG_DIR").or_else(|| {
+            get("HORTUS_CONFIG_DIR")
                 .is_none()
                 .then(|| home.join(".config/marknote"))
         });
-        let old_cache = old_cache.or_else(|| {
-            cache_override.is_none().then(|| {
+        let old_cache = get("MARKNOTE_CACHE_DIR").or_else(|| {
+            get("HORTUS_CACHE_DIR").is_none().then(|| {
                 if cfg!(target_os = "macos") {
                     home.join("Library/Caches/MarkNote")
                 } else {
@@ -62,22 +50,59 @@ impl Directories {
                 }
             })
         });
-        if [&config, &cache]
+        // 新覆盖目录隔离测试与个人状态；只有显式提供旧覆盖目录时才迁移它。
+        if let Some(old) = old_config {
+            migrate_directory(&old, &directories.config)?;
+        }
+        if let Some(old) = old_cache {
+            migrate_directory(&old, &directories.cache)?;
+        }
+        Ok(directories)
+    }
+
+    pub fn resolve_from_lookup(lookup: impl Fn(&str) -> Option<PathBuf>) -> io::Result<Self> {
+        let get = |key: &str| lookup(key).filter(|path| !path.as_os_str().is_empty());
+        let home = get("HOME").ok_or_else(|| io::Error::other("config.home_missing"))?;
+        let config = get("HORTUS_CONFIG_DIR").unwrap_or_else(|| home.join(".config/hortus"));
+        let cache = get("HORTUS_CACHE_DIR").unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                home.join("Library/Caches/Hortus")
+            } else {
+                get("XDG_CACHE_HOME")
+                    .unwrap_or_else(|| home.join(".cache"))
+                    .join("hortus")
+            }
+        });
+        // 快照与保留会话不属于可删除缓存，单独放在持久数据根。
+        let data = get("HORTUS_DATA_DIR").unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                home.join("Library/Application Support/Hortus")
+            } else {
+                get("XDG_DATA_HOME")
+                    .unwrap_or_else(|| home.join(".local/share"))
+                    .join("hortus")
+            }
+        });
+        if [&config, &cache, &data]
             .into_iter()
-            .chain(old_config.iter())
-            .chain(old_cache.iter())
             .any(|path| !path.is_absolute())
         {
             return Err(io::Error::other("config.path_not_absolute"));
         }
-        // 新覆盖目录隔离测试与个人状态；只有显式提供旧覆盖目录时才迁移它。
-        if let Some(old) = old_config {
-            migrate_directory(&old, &config)?;
-        }
-        if let Some(old) = old_cache {
-            migrate_directory(&old, &cache)?;
-        }
-        Ok(Self { config, cache })
+        Ok(Self {
+            config,
+            cache,
+            data,
+        })
+    }
+}
+
+fn environment_lookup(key: &str) -> Option<PathBuf> {
+    if key == "HOME" {
+        // 图形界面启动可能没有 HOME；由标准库回退到系统账户的主目录。
+        std::env::home_dir()
+    } else {
+        std::env::var_os(key).map(PathBuf::from)
     }
 }
 
@@ -262,6 +287,93 @@ pub struct SessionState {
     pub default_visible: BTreeMap<String, bool>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentLaunch {
+    pub executable: String,
+    pub args: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    agent: Option<RawAgent>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RawAgent {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+}
+
+/// 有效指南：`<config>/agent-guide.md` 整篇覆盖内置文本，读取失败不静默回退。
+pub fn effective_guide(config_directory: &Path) -> io::Result<String> {
+    let path = config_directory.join("agent-guide.md");
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let text =
+                String::from_utf8(bytes).map_err(|_| io::Error::other("guide.invalid_utf8"))?;
+            if text.trim().is_empty() {
+                return Err(io::Error::other("guide.empty"));
+            }
+            Ok(text)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(AGENT_GUIDE.to_string()),
+        Err(_) => Err(io::Error::other("guide.read_failed")),
+    }
+}
+
+/// 裸命令名按应用启动时的 PATH 逐项查找；返回可直接 execve 的绝对路径。
+fn resolve_executable(command: &str) -> io::Result<String> {
+    resolve_executable_in(command, std::env::var_os("PATH").as_deref())
+}
+
+fn resolve_executable_in(command: &str, search: Option<&std::ffi::OsStr>) -> io::Result<String> {
+    if command.contains('/') {
+        let path = Path::new(command);
+        if !path.is_absolute() {
+            return Err(io::Error::other("agent.command_not_absolute"));
+        }
+        if !path.try_exists()? {
+            return Err(io::Error::other("agent.not_found"));
+        }
+        if !is_executable(path) {
+            return Err(io::Error::other("agent.not_executable"));
+        }
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    for directory in std::env::split_paths(search.unwrap_or_default()) {
+        if directory.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = directory.join(command);
+        if candidate.is_file() && is_executable(&candidate) {
+            return Ok(candidate.to_string_lossy().into_owned());
+        }
+    }
+    Err(io::Error::other("agent.not_found"))
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn access(path: *const std::ffi::c_char, mode: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // X_OK = 1；access 还覆盖 ACL 与文件系统标志。
+        unsafe { access(path.as_ptr(), 1) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
 pub struct Store {
     pub directories: Directories,
 }
@@ -391,12 +503,56 @@ impl Store {
         write_toml(&self.directories.cache.join("session.toml"), &session)
     }
 
+    /// 只读取并校验模板，不创建目录、不启动进程。
+    pub fn agent_launch(&self) -> io::Result<AgentLaunch> {
+        let text = fs::read_to_string(self.config_path())?;
+        let raw: RawConfig =
+            toml_edit::de::from_str(&text).map_err(|_| io::Error::other("agent.config_invalid"))?;
+        let agent = raw
+            .agent
+            .ok_or_else(|| io::Error::other("agent.not_configured"))?;
+        let command = agent.command.unwrap_or_default();
+        if command.trim().is_empty() {
+            return Err(io::Error::other("agent.command_missing"));
+        }
+        let args = agent.args.unwrap_or_default();
+        if args.is_empty() || !args.iter().any(|argument| argument.contains("{guide}")) {
+            return Err(io::Error::other("agent.guide_missing"));
+        }
+        if command.contains('\0') || args.iter().any(|argument| argument.contains('\0')) {
+            return Err(io::Error::other("agent.invalid_argument"));
+        }
+        let guide = effective_guide(&self.directories.config)?;
+        let executable = resolve_executable(&command)?;
+        // 每个元素仍是一个 argv 元素；替换指南不会拆分或再解释内容。
+        let args = args
+            .iter()
+            .map(|argument| argument.replace("{guide}", &guide))
+            .collect();
+        Ok(AgentLaunch { executable, args })
+    }
+
+    pub fn data_root(&self) -> &Path {
+        &self.directories.data
+    }
+
     /// 即使用户把覆盖目录或其祖先当成库打开，也不能让配置写进笔记库。
     pub fn validate_vault(&self, root: &Path) -> io::Result<()> {
         let root = fs::canonicalize(root)?;
-        for directory in [&self.directories.config, &self.directories.cache] {
-            if fs::canonicalize(directory)?.starts_with(&root) {
-                return Err(io::Error::other("config.vault_contains_state"));
+        for directory in [
+            &self.directories.config,
+            &self.directories.cache,
+            &self.directories.data,
+        ] {
+            match fs::canonicalize(directory) {
+                Ok(path) => {
+                    if path.starts_with(&root) {
+                        return Err(io::Error::other("config.vault_contains_state"));
+                    }
+                }
+                // 持久数据根按需创建；尚不存在时不可能位于库内。
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(())

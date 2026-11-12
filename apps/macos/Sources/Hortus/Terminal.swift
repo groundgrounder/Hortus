@@ -3,19 +3,24 @@ import Darwin
 import SwiftTerm
 import SwiftUI
 
-/// The single terminal session owned by a workspace.
+/// 单个 PTY 的执行体：普通 shell 或一个 Agent。
 ///
-/// SwiftTerm owns the PTY and its terminal emulator. This object owns the
-/// session boundary: a vault change always tears down the old shell before a
-/// new one is started, and application shutdown waits for the child to exit.
+/// SwiftTerm 拥有 PTY 和终端仿真；窗口级的标签控制器拥有多个实例。
+/// 这个对象只负责一条会话的启动、终止与退出等待。
 @Observable @MainActor
 final class TerminalSession {
+    enum Kind {
+        case shell
+        case agent
+    }
+
     enum State: Equatable {
         case empty
-        /// A vault root is set and the shell starts once the view is attached.
-        /// This is the only state that starts a shell automatically, so a shell
-        /// that exits on its own stays exited across SwiftUI updates.
+        /// 库根已设置，视图挂载后启动 shell。
+        /// 只有这个状态会自动启动 shell，自己退出的 shell 不因界面刷新被重新拉起。
         case starting
+        /// Agent 模板已通过，等待视图挂载后 exec。
+        case startingAgent
         case running
         case exited(Int32?)
         case failed
@@ -27,11 +32,24 @@ final class TerminalSession {
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     private var killTask: Task<Void, Never>?
     private(set) var nerdFonts: TerminalNerdFonts?
+    /// 进程结束回调由标签控制器接管，用于记录 Agent 会话终态。
+    var onTerminated: ((Int32?) -> Void)?
+    var onFailedToStart: (() -> Void)?
+    private var pendingAgent: AgentStart?
     #if DEBUG
     private(set) var inspectionFontReadyBeforeShell = false
     #endif
 
-    init() {
+    struct AgentStart {
+        let executable: String
+        let args: [String]
+        let session: String
+    }
+
+    private let kind: Kind
+
+    init(kind: Kind = .shell) {
+        self.kind = kind
         let installed = TerminalNerdFonts.installed
         Task { [weak self] in
             let catalog = await installed.value
@@ -45,10 +63,15 @@ final class TerminalSession {
     var statusText: String {
         switch state {
         case .empty: return L10n.string("Open a knowledge base to use the terminal")
-        case .starting, .running: return ""
+        case .starting, .startingAgent, .running: return ""
         case .exited: return L10n.string("Process exited")
         case .failed: return L10n.string("Unable to start the shell")
         }
+    }
+
+    var isRunning: Bool {
+        if case .running = state { return view?.process.running == true }
+        return false
     }
 
     func attach(_ view: HortusTerminalView, fontSize: Double) {
@@ -57,19 +80,19 @@ final class TerminalSession {
         view.applyAppearance(fontSize: fontSize)
         view.glyphFallbackProvider = nerdFonts?.provider
         startIfPossible()
+        startPendingAgent()
     }
 
-    /// The status and Restart overlay is only for a shell that exited or failed.
+    /// 状态和 Restart 覆盖层只用于已经退出或失败的 shell。
     var showsStatusOverlay: Bool {
         switch state {
         case .exited, .failed: true
-        case .empty, .starting, .running: false
+        case .empty, .starting, .startingAgent, .running: false
         }
     }
 
     func detach(_ view: HortusTerminalView) {
-        // Keep the one PTY-backed view alive while SwiftUI moves the panel.
-        // The next representable update will reuse it in its new hierarchy.
+        // SwiftUI 移动面板时复用同一个 PTY 视图，不能在这里结束进程。
         guard self.view === view else { return }
     }
 
@@ -103,7 +126,7 @@ final class TerminalSession {
         Task { @MainActor [weak self] in await self?.setRootAndWait(root) }
     }
 
-    /// A new window has no old PTY to drain. Set its root before any close can interleave.
+    /// 新窗口没有旧 PTY 需要等待；在第一次关闭可能插入前设置根目录。
     func setInitialRoot(_ root: String) {
         guard self.root == nil, state == .empty else { return }
         self.root = root
@@ -112,7 +135,7 @@ final class TerminalSession {
     }
 
     func setRootAndWait(_ root: String?) async {
-        // Reopening the same vault keeps the running shell.
+        // 再次打开同一个库保留正在运行的 shell。
         if self.root == root, state == .running { return }
         if self.root != root {
             await stopAndWait()
@@ -123,13 +146,32 @@ final class TerminalSession {
     }
 
     func restart() {
-        guard root != nil else { return }
+        guard kind == .shell, root != nil else { return }
+        switch state {
+        case .exited, .failed: break
+        default: return
+        }
         guard let view, !view.process.running, !view.process.windingDown else { return }
         state = .starting
         startIfPossible()
     }
 
+    /// Agent 的 exec 在模板校验和快照完成后才开始；视图尚未挂载时排队。
+    @discardableResult
+    func startAgent(executable: String, args: [String], session: String) -> Bool {
+        guard root != nil else { return false }
+        pendingAgent = AgentStart(executable: executable, args: args, session: session)
+        state = .startingAgent
+        startPendingAgent()
+        return true
+    }
+
     func stopAndWait() async {
+        pendingAgent = nil
+        if state == .startingAgent {
+            state = .empty
+            return
+        }
         guard let view, view.process.running || view.process.windingDown else {
             killTask?.cancel()
             return
@@ -140,13 +182,17 @@ final class TerminalSession {
         }
     }
 
-    /// Start shutdown before AppKit enters terminateLater's nested run loop.
-    /// Neither MainActor tasks nor SwiftTerm's main-queue exit monitor can be
-    /// relied on there. Observe exit without taking over SwiftTerm's reaping.
+    /// 在 AppKit 进入 terminateLater 的嵌套循环前开始关闭。
+    /// 那里不能依赖 MainActor 任务或 SwiftTerm 的主队列退出监视。
     func stopForShutdown(completion: @escaping @Sendable () -> Void) {
         killTask?.cancel()
         killTask = nil
-        guard let pid = view?.process.shellPid, pid > 0 else { completion(); return }
+        pendingAgent = nil
+        guard let pid = view?.process.shellPid, pid > 0 else {
+            state = .empty
+            completion()
+            return
+        }
         Self.signalProcessGroup(pid, signal: SIGHUP)
         DispatchQueue.global(qos: .userInitiated).async {
             let deadline = ProcessInfo.processInfo.systemUptime + 1
@@ -161,20 +207,21 @@ final class TerminalSession {
 
     nonisolated private static func hasExited(_ pid: pid_t) -> Bool {
         var info = siginfo_t()
-        // kill(pid, 0) also succeeds for zombies. WNOWAIT leaves the wait
-        // status available to SwiftTerm when its main-queue monitor resumes.
+        // kill(pid, 0) 对僵尸进程也成功；WNOWAIT 把状态留给 SwiftTerm 的主队列监视。
         let result = waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT)
         return result == 0 ? info.si_pid == pid : errno == ECHILD
     }
 
     private func startIfPossible() {
-        guard nerdFonts != nil, state == .starting, let root, let view, !view.process.running, !view.process.windingDown else { return }
+        guard kind == .shell, nerdFonts != nil, state == .starting, let root, let view,
+              !view.process.running, !view.process.windingDown else { return }
         let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
         var environment = ProcessInfo.processInfo.environment
         environment["TERM"] = "xterm-256color"
         environment["HORTUS_VAULT"] = root
-        // Apps started from Finder or the Dock get no locale variables. Without
-        // one the shell treats input as ASCII, so CJK file names and output break.
+        // 普通 shell 不是 Agent 会话，不能继承可能残留的会话标识。
+        environment.removeValue(forKey: "HORTUS_AGENT_SESSION")
+        // 从 Finder 或程序坞启动时没有 locale；缺省会把中文文件名和输出当成 ASCII。
         if ["LANG", "LC_ALL", "LC_CTYPE"].allSatisfy({ environment[$0]?.isEmpty ?? true }) {
             environment["LANG"] = Self.utf8Locale()
         }
@@ -184,6 +231,23 @@ final class TerminalSession {
         #endif
         state = .running
         view.startProcess(executable: shell, args: ["-l"], environment: variables, currentDirectory: root)
+    }
+
+    private func startPendingAgent() {
+        guard state == .startingAgent, let pending = pendingAgent, let root, let view,
+              !view.process.running, !view.process.windingDown else { return }
+        var environment = ProcessInfo.processInfo.environment
+        environment["TERM"] = "xterm-256color"
+        environment["HORTUS_VAULT"] = root
+        environment["HORTUS_AGENT_SESSION"] = pending.session
+        if ["LANG", "LC_ALL", "LC_CTYPE"].allSatisfy({ environment[$0]?.isEmpty ?? true }) {
+            environment["LANG"] = Self.utf8Locale()
+        }
+        let variables = environment.map { "\($0.key)=\($0.value)" }.sorted()
+        state = .running
+        pendingAgent = nil
+        view.startProcess(executable: pending.executable, args: pending.args,
+                          environment: variables, currentDirectory: root)
     }
 
     private func sendTerminationSignals(for view: HortusTerminalView) {
@@ -209,6 +273,7 @@ final class TerminalSession {
         let waiters = stopWaiters
         stopWaiters.removeAll()
         waiters.forEach { $0.resume() }
+        onTerminated?(exitCode)
     }
 
     private func processFailed() {
@@ -218,10 +283,10 @@ final class TerminalSession {
         let waiters = stopWaiters
         stopWaiters.removeAll()
         waiters.forEach { $0.resume() }
+        onFailedToStart?()
     }
 
-    /// The first installed UTF-8 locale that matches the user's language order,
-    /// in the form Terminal.app uses, for example zh_CN.UTF-8.
+    /// 第一个已安装、符合用户语言顺序的 UTF-8 locale；形式与 Terminal.app 相同，例如 zh_CN.UTF-8。
     nonisolated static func utf8Locale(preferred: [String] = Locale.preferredLanguages,
                                        region: String? = Locale.current.region?.identifier,
                                        installed: (String) -> Bool = {
@@ -244,15 +309,13 @@ final class TerminalSession {
     fileprivate func didFailToStart() { processFailed() }
 
     nonisolated private static func signalProcessGroup(_ pid: pid_t, signal: Int32) {
-        // forkpty creates a session for the child on macOS. Signal the process
-        // group first so programs launched by the shell do not become orphans;
-        // also signal the PID as a fallback for shells that changed groups.
+        // forkpty 在 macOS 上为子进程建立会话；先发进程组，避免 shell 启动的程序变成孤儿。
         _ = kill(-pid, signal)
         _ = kill(pid, signal)
     }
 }
 
-// Used only by TerminalInspection, which runs behind explicit check arguments.
+// Used only by inspections that run behind explicit check arguments.
 extension TerminalSession {
     var inspectionShellPid: pid_t { view?.process.running == true ? view?.process.shellPid ?? 0 : 0 }
     var inspectionView: HortusTerminalView? { view }
@@ -292,12 +355,9 @@ final class HortusTerminalView: LocalProcessTerminalView {
     }
 
     private func applyNativeColors() {
-        // SwiftTerm converts the foreground to RGB outside AppKit drawing.
-        // Resolve it with this view's appearance, which can differ from the OS.
-        // The background must be the real panel color too: SwiftTerm reports it for OSC 11,
-        // uses it for reverse video and derives the 256-color ramp from it. `.clear` is
-        // black with zero alpha, so programs saw a black terminal. Only the alpha keeps
-        // the view transparent over the glass panel.
+        // SwiftTerm 在 AppKit 绘制之外换算前景色；用本视图的外观解析。
+        // 背景必须是面板的真实颜色：SwiftTerm 用它回答 OSC 11、反显并从它派生 256 色。
+        // `.clear` 是零 alpha 的黑色，曾让程序看到黑色终端。只保留 alpha 让玻璃透出。
         effectiveAppearance.performAsCurrentDrawingAppearance {
             nativeForegroundColor = NSColor.labelColor.usingColorSpace(.sRGB) ?? .labelColor
             nativeBackgroundColor = NSColor.textBackgroundColor.usingColorSpace(.sRGB) ?? .textBackgroundColor
@@ -322,48 +382,6 @@ final class HortusTerminalView: LocalProcessTerminalView {
     }
 }
 
-struct TerminalPanel: View {
-    let session: TerminalSession
-    let fontSize: Double
-
-    var body: some View {
-        ZStack {
-            if session.root == nil {
-                emptyState
-            } else {
-                TerminalRepresentable(session: session, fontSize: fontSize)
-                    .clipShape(.rect(cornerRadius: 12, style: .continuous))
-                if session.showsStatusOverlay {
-                    exitedOverlay
-                }
-            }
-        }
-        .padding(8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(L10n.string("Terminal"))
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "terminal").font(.title2).foregroundStyle(.tertiary)
-            Text(session.statusText).font(.callout).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var exitedOverlay: some View {
-        VStack(spacing: 10) {
-            Text(session.statusText).font(.callout).foregroundStyle(.secondary)
-            Button(L10n.string("Restart")) { session.restart() }
-                .buttonStyle(.borderedProminent)
-                .disabled(session.state == .failed && session.root == nil)
-        }
-        .padding(18)
-        .glassEffect(.regular, in: .rect(cornerRadius: 14, style: .continuous))
-    }
-}
-
 private struct TerminalRepresentable: NSViewRepresentable {
     let session: TerminalSession
     let fontSize: Double
@@ -378,7 +396,148 @@ private struct TerminalRepresentable: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: HortusTerminalView, coordinator: ()) {
-        // The workspace owns the session and stops it when the vault or app
-        // closes. Detaching here must not kill a shell during a SwiftUI redraw.
+        // 会话由窗口控制器拥有并在库或窗口关闭时停止；重绘不能杀掉进程。
+    }
+}
+
+struct TerminalPanel: View {
+    let controller: TerminalController
+    let fontSize: Double
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if controller.root != nil {
+                TerminalTabBar(controller: controller)
+            }
+            if let tab = controller.current {
+                ZStack {
+                    // 每个标签拥有自己的 PTY 视图；SwiftUI 不能把一个已运行
+                    // 的 NSView 复用给另一条会话。
+                    TerminalRepresentable(session: tab.session, fontSize: fontSize)
+                        .id(tab.id)
+                        .clipShape(.rect(cornerRadius: 12, style: .continuous))
+                    statusOverlay(for: tab)
+                }
+            } else {
+                emptyState
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L10n.string("Terminal"))
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "terminal").font(.title2).foregroundStyle(.tertiary)
+            Text(controller.root == nil
+                 ? L10n.string("Open a knowledge base to use the terminal")
+                 : L10n.string("Open a terminal tab"))
+                .font(.callout).foregroundStyle(.secondary)
+            if controller.root != nil {
+                HStack(spacing: 8) {
+                    Button(L10n.string("New Shell Tab")) { controller.newShellTab() }
+                    Button(L10n.string("New Agent Tab")) { controller.newAgentTab() }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder private func statusOverlay(for tab: TerminalTab) -> some View {
+        switch tab.kind {
+        case .shell:
+            if tab.session.showsStatusOverlay {
+                VStack(spacing: 10) {
+                    Text(tab.session.statusText).font(.callout).foregroundStyle(.secondary)
+                    Button(L10n.string("Restart")) { tab.session.restart() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(18)
+                .glassEffect(.regular, in: .rect(cornerRadius: 14, style: .continuous))
+            }
+        case .agent:
+            switch tab.agentPhase {
+            case .preparing:
+                VStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(L10n.string("Preparing snapshot…")).font(.callout).foregroundStyle(.secondary)
+                }
+                .padding(18)
+                .glassEffect(.regular, in: .rect(cornerRadius: 14, style: .continuous))
+            case .failed(let message):
+                VStack(spacing: 8) {
+                    Text(L10n.string("Agent failed to start")).font(.callout.weight(.medium))
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center).frame(maxWidth: 420)
+                    Button(L10n.string("Restart Agent")) { controller.restart(tab) }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(18)
+                .glassEffect(.regular, in: .rect(cornerRadius: 14, style: .continuous))
+            case .exited:
+                VStack(spacing: 8) {
+                    Text(L10n.string("Agent exited")).font(.callout).foregroundStyle(.secondary)
+                    Button(L10n.string("Restart Agent")) { controller.restart(tab) }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(18)
+                .glassEffect(.regular, in: .rect(cornerRadius: 14, style: .continuous))
+            case .idle, .running:
+                EmptyView()
+            }
+        }
+    }
+}
+
+private struct TerminalTabBar: View {
+    let controller: TerminalController
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(controller.tabs) { tab in
+                let selected = controller.selectedID == tab.id
+                HStack(spacing: 4) {
+                    Image(systemName: tab.kind == .agent ? "sparkles" : "terminal")
+                        .font(.caption2)
+                    Text(tab.title).font(.callout.weight(selected ? .semibold : .regular))
+                    if selected {
+                        Button {
+                            Task { await controller.close(tab) }
+                        } label: {
+                            Image(systemName: "xmark").font(.caption2)
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.string("Close Tab"))
+                        .accessibilityLabel(L10n.string("Close Tab"))
+                    }
+                }
+                .foregroundStyle(selected ? .primary : .secondary)
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                .background(selected ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .capsule)
+                .contentShape(.capsule)
+                .onTapGesture { controller.select(tab) }
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+                .accessibilityAction { controller.select(tab) }
+            }
+            Spacer(minLength: 0)
+            Menu {
+                Button(L10n.string("New Shell Tab")) { controller.newShellTab() }
+                Button(L10n.string("New Agent Tab")) { controller.newAgentTab() }
+            } label: {
+                Image(systemName: "plus")
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .help(L10n.string("New Terminal Tab"))
+            .accessibilityLabel(L10n.string("New Terminal Tab"))
+        }
+        .lineLimit(1)
+        .padding(.horizontal, 4)
+        .padding(.bottom, 4)
     }
 }

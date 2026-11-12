@@ -72,9 +72,40 @@ enum L10n {
             return string("A file already exists at the destination")
         case "document.save_failed":
             return string("Save failed")
-        case "document.range_invalid", "io.failure":
-            return string("Operation failed")
+        case "agent.not_configured":
+            return string("Agent launch is not configured in ~/.config/hortus/config.toml")
+        case "agent.command_missing":
+            return string("The agent command is empty")
+        case "agent.guide_missing":
+            return string("The agent arguments do not include {guide}")
+        case "agent.command_not_absolute":
+            return string("The agent command must be an absolute path")
+        case "agent.not_found":
+            return string("The agent command was not found")
+        case "agent.not_executable":
+            return string("The agent command is not executable")
+        case "agent.invalid_argument":
+            return string("The agent arguments are invalid")
+        case "agent.config_invalid":
+            return string("The agent configuration is invalid")
+        case "guide.invalid_utf8":
+            return string("agent-guide.md is not valid UTF-8")
+        case "guide.empty":
+            return string("agent-guide.md is empty")
+        case "guide.read_failed":
+            return string("Unable to read agent-guide.md")
+        case "history.source_changed", "history.unsupported_entry":
+            return string("The snapshot could not be completed because the folder changed")
+        case "history.destination_exists":
+            return string("The snapshot destination already exists")
+        case "history.invalid_metadata", "history.invalid_session", "history.invalid_state":
+            return string("The session metadata is invalid")
+        case "history.invalid_path", "history.source_not_directory", "history.path_invalid":
+            return string("The snapshot could not be written")
         default:
+            if key.hasPrefix("history.") || key.hasPrefix("agent.") || key.hasPrefix("guide.") {
+                return string("Unable to complete the snapshot")
+            }
             return string("Operation failed")
         }
     }

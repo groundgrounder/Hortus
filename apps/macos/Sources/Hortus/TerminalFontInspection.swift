@@ -94,8 +94,9 @@ enum TerminalFontInspection {
               let shot = argument("terminal-font-snapshot", arguments) else { throw CocoaError(.coderValueNotFound) }
         layout.setTerminalVisible(true)
         layout.size[.bottom] = 520
-        try await wait { workspace.terminal.state == .running && workspace.terminal.inspectionViewAttached }
-        let session = workspace.terminal
+        if workspace.terminals.currentSession == nil { workspace.terminals.newShellTab() }
+        guard let session = workspace.terminals.currentSession else { throw CocoaError(.coderValueNotFound) }
+        try await wait { session.state == .running && session.inspectionViewAttached }
         guard let view = session.inspectionView, let catalog = session.nerdFonts,
               let window = view.window else { throw CocoaError(.coderValueNotFound) }
         // The complete fixture needs 92 columns at the product's default 15 pt.

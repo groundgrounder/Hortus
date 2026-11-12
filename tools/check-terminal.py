@@ -23,6 +23,8 @@ APP = HELPERS.APP
 DEMO = ROOT / 'fixtures/demo-vault'
 NEW_NOTE = '终端新建.md'
 NEW_TITLE = '终端里写的笔记'
+DEBUG_APP = ROOT / 'apps/macos/.build/debug/Hortus'
+FAKE_AGENT = ROOT / 'tools/fixtures/fake-agent.sh'
 
 
 def environment(base):
@@ -140,10 +142,60 @@ def idle(base, output, mode=None, appearance='--light', snapshot=None):
             process.wait(timeout=30)
 
 
+def tabs(base, output, app):
+    """同一窗口两个普通 shell 与一个假 Agent 标签：PID、cwd、缓冲、焦点、清屏与关闭隔离。"""
+    if not app.exists():
+        print(f'跳过多标签检查：缺少 Debug 可执行文件 {app}（先运行 ./tools/test-macos.sh）', flush=True)
+        return None
+    vault = base / 'vault'
+    vault.mkdir(parents=True)
+    (vault / 'note.md').write_text('# Note\n')
+    env = environment(base / 'state')
+    env['FAKE_AGENT_SCRATCH'] = str(base / 'scratch')
+    (base / 'state/config/config.toml').write_text(
+        'font_size = 15.0\ndefault_view = "reading"\n\n[agent]\n'
+        f'command = {json.dumps(str(FAKE_AGENT))}\n'
+        'args = ["--guide", "{guide}", "--sleep=30"]\n')
+    result_path = output / 'terminal-tabs.json'
+    result_path.unlink(missing_ok=True)
+    screenshot = output / 'terminal-tabs.png'
+    screenshot.unlink(missing_ok=True)
+    command = [str(app), '--light', f'--vault={vault}', '--agent-mode=tabs',
+               f'--agent-launch-inspection={result_path}',
+               f'--agent-scratch={base / "scratch"}',
+               f'--snapshot={screenshot}', '--inspect-hold-open']
+    with subprocess.Popen(command, env=env) as process:
+        HELPERS.wait_for(result_path, process, seconds=180)
+        HELPERS.wait_for(screenshot, process, seconds=60)
+        result = json.loads(result_path.read_text())
+        process.terminate()
+        process.wait(timeout=30)
+    pids = result['shell_pids']
+    assert len(set(pids)) == 2 and all(pids), result
+    assert os.path.realpath(result['shell_cwds'][0]) == os.path.realpath(vault)
+    assert os.path.realpath(result['shell_cwds'][1]) == os.path.realpath(vault)
+    assert result['switch_pids'][:2] == pids and result['dock_pids'][:2] == pids, result
+    assert result['switch_markers'] and result['dock_markers'], result
+    assert result['focus_isolated'] and result['clear_isolated'], result
+    assert result['closed_dead'] and result['other_shell_alive'] and result['agent_alive'], result
+    assert result['buffers_distinct'] and result['buffers_after_close'], result
+    agent_pid = [tab for tab in result['tabs'] if tab['kind'] == 'agent'][0]['pid']
+    assert agent_pid > 0, result['tabs']
+    deadline = time.monotonic() + 5
+    while any(alive(pid) for pid in pids + [agent_pid, result['closed_tab_pid']]) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    for pid in pids + [agent_pid, result['closed_tab_pid']]:
+        assert not alive(pid), (pid, result)
+    return {'shell_pids': pids, 'agent_pid': agent_pid, 'closed_pid': result['closed_tab_pid'],
+            'max_main_gap_ms': result['max_main_gap_ms']}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/terminal')
     parser.add_argument('--skip-cpu', action='store_true')
+    parser.add_argument('--tabs', action='store_true', help='追加多标签/Agent 隔离检查（需要 Debug 构建）')
+    parser.add_argument('--app-debug', type=Path, default=DEBUG_APP)
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -153,6 +205,8 @@ def main():
         summary = {key: result[key] for key in ['new_note_tree_ms', 'switch_old_exit_ms', 'quit_s']}
         summary['refresh'] = result['refresh']
         summary['lang'] = result['scratch']['lang.txt']
+        if args.tabs:
+            summary['tabs'] = tabs(base / 'tabs', output, args.app_debug.resolve())
         print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
         if args.skip_cpu:
             return

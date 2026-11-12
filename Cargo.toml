@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/hortus-math", "crates/hortus-diagram", "crates/hortus-cli", "crates/hortus-vault", "crates/hortus-config", "crates/hortus-document", "crates/hortus-search", "crates/hortus-ffi"]
+members = ["crates/hortus-math", "crates/hortus-diagram", "crates/hortus-cli", "crates/hortus-vault", "crates/hortus-config", "crates/hortus-document", "crates/hortus-search", "crates/hortus-history", "crates/hortus-ffi"]
 resolver = "2"
 
 [workspace.package]

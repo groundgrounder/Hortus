@@ -172,14 +172,14 @@ enum TabDragInspection {
         try check("external_under_second", (result["external_update_ms"] as? Double ?? 1000) < 1000)
         stage = "terminal layout"
         for record in [first, second] { record.layout.setTerminalVisible(true) }
-        try await wait { first.workspace.terminal.inspectionShellPid > 0 && second.workspace.terminal.inspectionShellPid > 0 }
-        let firstPID = first.workspace.terminal.inspectionShellPid, secondPID = second.workspace.terminal.inspectionShellPid
+        try await wait { first.workspace.terminalPid > 0 && second.workspace.terminalPid > 0 }
+        let firstPID = first.workspace.terminalPid, secondPID = second.workspace.terminalPid
         result["terminal_pids"] = [firstPID, secondPID]
-        try check("terminal_independent", firstPID != secondPID && first.workspace.terminal.root == root && second.workspace.terminal.root == root)
-        let originalBuffer = terminalText(first.workspace.terminal)
-        second.workspace.terminal.clearScreen()
-        second.workspace.terminal.focus()
-        try check("terminal_clear_focus_isolated", first.workspace.terminal.inspectionShellPid == firstPID && terminalText(first.workspace.terminal) == originalBuffer)
+        try check("terminal_independent", firstPID != secondPID && first.workspace.root == root && second.workspace.root == root)
+        let originalBuffer = terminalText(first.workspace.terminals.currentSession)
+        second.workspace.terminals.clearScreen()
+        second.workspace.terminals.focus()
+        try check("terminal_clear_focus_isolated", first.workspace.terminalPid == firstPID && terminalText(first.workspace.terminals.currentSession) == originalBuffer)
         first.layout.visible[.left] = false
         second.layout.visible[.left] = false
         second.layout.visible[.left] = true
@@ -245,15 +245,15 @@ enum TabDragInspection {
             guard application.finishTabDrag(payload, at: point) == nil else { throw CocoaError(.coderValueNotFound) }
         }
         target.layout.setTerminalVisible(true)
-        try await wait { target.window != nil && target.workspace.terminal.inspectionShellPid > 0 }
-        let pid = target.workspace.terminal.inspectionShellPid
+        try await wait { target.window != nil && target.workspace.terminalPid > 0 }
+        let pid = target.workspace.terminalPid
         let probes = (WeakObject(target.window), WeakObject(target.workspace), WeakObject(target), pid, try WorkspaceInspection.threadCount())
         application.requestClose(target)
         try await wait { application.records.count == 2 }
         return probes
     }
-    private static func terminalText(_ session: TerminalSession) -> String {
-        guard let view = session.inspectionView else { return "" }
+    private static func terminalText(_ session: TerminalSession?) -> String {
+        guard let view = session?.inspectionView else { return "" }
         return view.visibleRowsText(0..<view.terminalDimensions.rows).joined(separator: "\n")
     }
     private static func documentState(_ document: NoteDocument) -> [String: Any] {
@@ -267,7 +267,7 @@ enum TabDragInspection {
          "selected": record.workspace.selected ?? "", "views": record.workspace.sessionViews(),
          "documents": record.workspace.tabs.compactMap { $0.document.map(documentState) },
          "diagrams": diagramState(record),
-         "terminal_pid": record.workspace.terminal.inspectionShellPid, "terminal_root": record.workspace.terminal.root ?? "",
+         "terminal_pid": record.workspace.terminalPid, "terminal_root": record.workspace.root ?? "",
          "visible": Dictionary(uniqueKeysWithValues: record.layout.visible.map { ($0.key.rawValue, $0.value) }),
          "frame": record.window.map { NSStringFromRect($0.frame) } ?? ""]
     }
