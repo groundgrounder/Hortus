@@ -623,26 +623,29 @@ def main():
         summary['late_callbacks'] = late
 
         # A1: 库内（含不存在子项）的持久数据根必须拒绝、零写入，普通 shell 仍可用。
-        case = base / 'data-inside-vault'
-        vault = case / 'vault'
-        vault.mkdir(parents=True)
-        (vault / 'note.md').write_text('# Note\n')
-        blocked = case / 'blocked-vault'
-        blocked.mkdir()
-        (blocked / 'note.md').write_text('# Blocked\n')
-        blocked_before = describe(blocked)
-        write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=5'])
-        data, _ = run_app(case, vault, 'data-inside-vault',
-                          extra=[f'--agent-blocked-vault={blocked}'],
-                          env_extra={'HORTUS_DATA_DIR': str(blocked / 'state/agent-data')})
-        assert data['error'], data
-        assert data['shell_ran'] and data['shell_alive'], data
-        assert data['sessions'] == [], data
-        assert describe(blocked) == blocked_before, '库内数据根被写入'
-        assert not (blocked / 'state').exists()
-        assert not any((case / 'scratch').rglob('*')), list((case / 'scratch').rglob('*'))
-        summary['data_inside_vault'] = {'error': data['error'], 'shell_alive': True,
-                                        'vault_unchanged': True}
+        data_inside = []
+        for round_index in range(args.rounds):
+            case = base / f'data-inside-vault-{round_index}'
+            vault = case / 'vault'
+            vault.mkdir(parents=True)
+            (vault / 'note.md').write_text('# Note\n')
+            blocked = case / 'blocked-vault'
+            blocked.mkdir()
+            (blocked / 'note.md').write_text('# Blocked\n')
+            blocked_before = describe(blocked)
+            write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=5'])
+            data, _ = run_app(case, vault, 'data-inside-vault',
+                              extra=[f'--agent-blocked-vault={blocked}'],
+                              env_extra={'HORTUS_DATA_DIR': str(blocked / 'state/agent-data')})
+            assert data['error'], data
+            assert data['shell_ran'] and data['shell_alive'], data
+            assert data['sessions'] == [], data
+            assert describe(blocked) == blocked_before, '库内数据根被写入'
+            assert not (blocked / 'state').exists()
+            assert not any((case / 'scratch').rglob('*')), list((case / 'scratch').rglob('*'))
+            data_inside.append({'error': data['error'], 'shell_alive': True,
+                                'vault_unchanged': True})
+        summary['data_inside_vault'] = {'rounds': len(data_inside), 'runs': data_inside}
 
         # A4: PATH 只有相对/空项时不执行库根同名未校验文件；目录 command 不产生快照。
         case = base / 'path-relative'
