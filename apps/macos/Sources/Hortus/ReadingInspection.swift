@@ -434,6 +434,8 @@ enum ReadingInspection {
             wider.size.width += 180
             window.setFrame(wider, display: true)
             reading = try await waitForContentWidth(document: document, above: originalWidth + 80)
+            try await Task.sleep(for: .milliseconds(200))
+            reading = try await settled(true, document: document)
             AnchorInspection.beginPhase("widened")
             try await revealMiddle(reading)
             reading = try await settled(true, document: document)
@@ -442,6 +444,8 @@ enum ReadingInspection {
             let widenedWidth = reading.layoutContentWidth
             window.setFrame(original, display: true)
             reading = try await waitForContentWidth(document: document, below: widenedWidth - 80)
+            try await Task.sleep(for: .milliseconds(200))
+            reading = try await settled(true, document: document)
         }
 
         // 上一轮 reveal 还在排队时再次快速往返；最终仍应回到阅读且位置不变。
