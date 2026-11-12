@@ -80,7 +80,8 @@ def default_agent_args(scratch, sleep=30, extra=None):
     return args
 
 
-def run_app(base, vault, mode, extra=(), env_extra=None, output=None, timeout=120, screenshot=None):
+def run_app(base, vault, mode, extra=(), env_extra=None, output=None, timeout=120,
+            screenshot=None, cwd=None, marker=None):
     result_path = (output or base) / f'agent-{mode}.json'
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.unlink(missing_ok=True)
@@ -90,9 +91,11 @@ def run_app(base, vault, mode, extra=(), env_extra=None, output=None, timeout=12
     command = [str(DEBUG_APP), '--light', f'--vault={vault}', f'--agent-mode={mode}',
                f'--agent-launch-inspection={result_path}',
                f'--agent-scratch={base / "scratch"}', *extra]
+    if marker is not None:
+        command += [f'--agent-marker={marker}']
     if screenshot:
         command += [f'--snapshot={screenshot}', '--inspect-hold-open']
-    process = subprocess.Popen(command, env=environment(base, extra=env_extra),
+    process = subprocess.Popen(command, env=environment(base, extra=env_extra), cwd=cwd,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         HELPERS.wait_for(result_path, process, seconds=timeout)
@@ -139,9 +142,39 @@ def describe(root, skip_git=True):
                 else:
                     with open(entry.path, 'rb') as handle:
                         digest = hashlib.sha256(handle.read()).hexdigest()
-                    result[name] = ('file', digest)
+                    info = os.lstat(entry.path)
+                    result[name] = ('file', digest, stat.S_IMODE(info.st_mode), info.st_flags)
     walk(root, '')
     return result
+
+
+def build_slow_vault(vault, count=40000):
+    """足够大的公开夹具，让全库快照持续数秒，检查可在 preparing 阶段操作。"""
+    vault.mkdir(parents=True)
+    for index in range(count):
+        (vault / f'note-{index:05d}.md').write_text('x\n')
+
+
+def wait_path(path, process=None, seconds=60):
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert process is None or process.poll() is None, f'应用提前退出，等待 {path}'
+        assert time.monotonic() < deadline, f'等待 {path} 超时'
+        time.sleep(0.01)
+
+
+def assert_readonly_fidelity(vault, snapshot):
+    names = ['readonly-0444.md', 'owner-0400.md', 'readonly-0500.sh', 'locked-uchg.md']
+    for name in names:
+        src = os.lstat(vault / name)
+        dst = os.lstat(snapshot / name)
+        assert (vault / name).read_bytes() == (snapshot / name).read_bytes(), name
+        assert stat.S_IMODE(src.st_mode) == stat.S_IMODE(dst.st_mode), name
+        assert src.st_flags == dst.st_flags, (name, src.st_flags, dst.st_flags)
+        assert src.st_mtime_ns == dst.st_mtime_ns, name
+    locked = os.lstat(snapshot / 'locked-uchg.md')
+    assert locked.st_flags & stat.UF_IMMUTABLE, 'uchg 未保留'
+    return {'files': names, 'uchg_restored': True}
 
 
 def compare_snapshot(vault, snapshot):
@@ -181,6 +214,17 @@ def build_fixture(vault, outside):
     script = vault / 'run.sh'
     script.write_text('#!/bin/sh\necho hi\n')
     script.chmod(0o755)
+    for name, mode, text in [
+        ('readonly-0444.md', 0o444, 'read only\n'),
+        ('owner-0400.md', 0o400, 'owner read only\n'),
+        ('readonly-0500.sh', 0o500, '#!/bin/sh\necho hi\n'),
+    ]:
+        path = vault / name
+        path.write_text(text)
+        path.chmod(mode)
+    locked = vault / 'locked-uchg.md'
+    locked.write_text('locked\n')
+    subprocess.run(['/usr/bin/chflags', 'uchg', str(locked)], check=True)
     outside.write_text('outside\n')
     os.symlink(outside, vault / 'outside-link')
     os.symlink('notes.md', vault / 'relative-link')
@@ -402,6 +446,7 @@ def main():
         assert session['method'] == 'clonefile', session
         assert describe(vault) == before, 'source changed during snapshot'
         compare_snapshot(vault, snapshot)
+        readonly = assert_readonly_fidelity(vault, snapshot)
         entries = manifest_for(session)
         by_path = {entry['path']: entry for entry in entries}
         assert by_path['empty folder']['kind'] == 'directory'
@@ -414,7 +459,8 @@ def main():
         assert not list(vault.rglob('agent-sessions')) and not list(vault.rglob('manifest.json'))
         assert not str(snapshot).startswith(str(vault))
         summary['snapshot_clone'] = {'entries': session['entries'], 'bytes': session['bytes'],
-                                     'method': session['method'], 'files': len(entries)}
+                                     'method': session['method'], 'files': len(entries),
+                                     'readonly': readonly}
         metadata = metadata_for(session)
         assert 'argv' not in json.dumps(metadata) and 'PATH' not in json.dumps(metadata)
         details['snapshot_clone'] = {'session': session, 'metadata': metadata,
@@ -441,11 +487,15 @@ def main():
         vault.mkdir(parents=True)
         build_fixture(vault, case / 'outside.txt')
         write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=30'])
+        before = describe(vault)
         data, _ = run_app(case, vault, 'launch', env_extra={'HORTUS_HISTORY_COPY': 'copy'})
         session = data['sessions'][0]
         assert session['method'] == 'copy', session
         compare_snapshot(vault, Path(session['snapshot_path']))
-        summary['snapshot_copy'] = {'method': session['method'], 'entries': session['entries']}
+        assert describe(vault) == before, 'source changed during forced copy'
+        readonly = assert_readonly_fidelity(vault, Path(session['snapshot_path']))
+        summary['snapshot_copy'] = {'method': session['method'], 'entries': session['entries'],
+                                    'readonly': readonly}
         details['snapshot_copy'] = {'session': session, 'metadata': metadata_for(session),
                                     'manifest': manifest_for(session)}
 
@@ -572,95 +622,178 @@ def main():
             late[name] = '3/3'
         summary['late_callbacks'] = late
 
-        # A5: 正常/异常退出、崩溃恢复、历史不自动执行。
-        exit_case = base / 'exit'
-        vault = exit_case / 'vault'
+        # A1: 库内（含不存在子项）的持久数据根必须拒绝、零写入，普通 shell 仍可用。
+        case = base / 'data-inside-vault'
+        vault = case / 'vault'
         vault.mkdir(parents=True)
         (vault / 'note.md').write_text('# Note\n')
-        write_config(exit_case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=0'])
-        data, _ = run_app(exit_case, vault, 'exit')
-        assert data['exit_code'] == 0, data
-        assert data['sessions'][0]['state'] == 'exited'
-        normal_snapshot = Path(data['sessions'][0]['snapshot_path'])
-        normal_bytes = describe(normal_snapshot)
+        blocked = case / 'blocked-vault'
+        blocked.mkdir()
+        (blocked / 'note.md').write_text('# Blocked\n')
+        blocked_before = describe(blocked)
+        write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=5'])
+        data, _ = run_app(case, vault, 'data-inside-vault',
+                          extra=[f'--agent-blocked-vault={blocked}'],
+                          env_extra={'HORTUS_DATA_DIR': str(blocked / 'state/agent-data')})
+        assert data['error'], data
+        assert data['shell_ran'] and data['shell_alive'], data
+        assert data['sessions'] == [], data
+        assert describe(blocked) == blocked_before, '库内数据根被写入'
+        assert not (blocked / 'state').exists()
+        assert not any((case / 'scratch').rglob('*')), list((case / 'scratch').rglob('*'))
+        summary['data_inside_vault'] = {'error': data['error'], 'shell_alive': True,
+                                        'vault_unchanged': True}
 
-        abnormal = base / 'abnormal'
-        vault = abnormal / 'vault'
+        # A4: PATH 只有相对/空项时不执行库根同名未校验文件；目录 command 不产生快照。
+        case = base / 'path-relative'
+        vault = case / 'vault'
         vault.mkdir(parents=True)
         (vault / 'note.md').write_text('# Note\n')
-        write_config(abnormal, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=0'])
-        data, _ = run_app(abnormal, vault, 'exit', env_extra={'FAKE_AGENT_EXIT_CODE': '7'})
-        assert data['exit_code'] == 7, data
-        assert data['sessions'][0]['state'] == 'exited'
+        marker = case / 'violation'
+        trojan = vault / 'fake-agent.sh'
+        trojan.write_text('#!/bin/sh\necho pwned > "$VIOLATION_MARKER"\n')
+        trojan.chmod(0o755)
+        write_config(case, 'fake-agent.sh', ['--guide', '{guide}', '--sleep=5'])
+        data, _ = run_app(case, vault, 'fail', cwd=vault,
+                          env_extra={'PATH': '.', 'VIOLATION_MARKER': str(marker)})
+        assert data.get('failure'), data
+        assert data['sessions'] == [], data
+        assert not marker.exists(), '执行了库根下未校验的同名文件'
+        assert not any((case / 'scratch').rglob('*'))
+        assert data['shell_alive']
+        summary['path_relative_skipped'] = data['failure']
 
-        # 运行中崩溃：SIGKILL 应用后重启，记录转为中断且不自动执行。
-        crash = base / 'crash'
-        vault = crash / 'vault'
+        case = base / 'command-directory'
+        vault = case / 'vault'
         vault.mkdir(parents=True)
         (vault / 'note.md').write_text('# Note\n')
-        write_config(crash, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=60'])
-        result_path = crash / 'running.json'
-        command = [str(DEBUG_APP), '--light', f'--vault={vault}', '--agent-mode=launch',
+        directory = case / 'agent-command'
+        directory.mkdir()
+        write_config(case, str(directory), ['{guide}'])
+        data, _ = run_app(case, vault, 'fail')
+        assert data.get('failure'), data
+        assert data['sessions'] == [], data
+        assert not any((case / 'scratch').rglob('*'))
+        assert data['shell_alive']
+        assert not (case / 'data/agent-sessions').exists()
+        summary['command_directory'] = data['failure']
+
+        # A3: 快照仍在进行时关闭标签、换库、关窗。
+        slow_vault = base / 'slow-vault'
+        build_slow_vault(slow_vault)
+        during = {}
+        for name in ['close-tab', 'vault', 'window']:
+            case = base / f'during-{name}'
+            case.mkdir(parents=True)
+            second = case / 'second'
+            second.mkdir()
+            (second / 'other.md').write_text('# Other\n')
+            write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=30'])
+            extra = [f'--agent-second-vault={second}'] if name == 'window' else []
+            data, _ = run_app(case, slow_vault, f'during-{name}', extra=extra, timeout=180)
+            session = data['sessions'][0]
+            assert session['state'] == 'cancelled', (name, session)
+            assert not any((case / 'scratch').rglob('*')), (name, list((case / 'scratch').rglob('*')))
+            if name == 'close-tab':
+                assert data['shell_alive'], data
+            during[name] = {'state': session['state'], 'scratch_empty': True}
+        summary['during_close'] = during
+
+        # A5: 快照进行时，另一窗口的布局、会话与 Agent 状态写入仍完成。
+        case = base / 'during-saves'
+        case.mkdir(parents=True)
+        write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=30'])
+        data, _ = run_app(case, slow_vault, 'during-saves', timeout=180)
+        assert data['save_within_2s'], data
+        assert data['save_ms'] < 2000, data['save_ms']
+        assert data['max_main_gap_ms'] < 100, data['max_main_gap_ms']
+        baseline = [session for session in data['sessions'] if session['id'] == data['baseline']]
+        assert baseline and baseline[0]['state'] == 'running', data['sessions']
+        assert (case / 'config/layout.toml').is_file()
+        session_text = (case / 'cache/session.toml').read_text()
+        assert 'windows' in session_text, session_text
+        assert not any((case / 'scratch').rglob('*')), list((case / 'scratch').rglob('*'))
+        summary['during_saves'] = {'save_ms': data['save_ms'],
+                                   'max_main_gap_ms': data['max_main_gap_ms'],
+                                   'baseline_state': baseline[0]['state']}
+
+        # A5/A3: 快照仍在进行时退出，3 秒内结束并保留会话；半成品重启后不可用。
+        case = base / 'during-quit'
+        case.mkdir(parents=True)
+        write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=30'])
+        marker = case / 'marker'
+        marker.mkdir()
+        result_path = case / 'agent-during-quit.json'
+        command = [str(DEBUG_APP), '--light', f'--vault={slow_vault}', '--agent-mode=during-quit',
                    f'--agent-launch-inspection={result_path}',
-                   f'--agent-scratch={crash / "scratch"}']
-        process = subprocess.Popen(command, env=environment(crash),
+                   f'--agent-scratch={case / "scratch"}', f'--agent-marker={marker}']
+        env = environment(case)
+        process = subprocess.Popen(command, env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        HELPERS.wait_for(result_path, process, seconds=120)
-        first = json.loads(result_path.read_text())
-        os.kill(process.pid, signal.SIGKILL)
-        process.wait(timeout=30)
-        agent_pid = int((crash / 'scratch' / 'pid').read_text())
         try:
-            os.kill(agent_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        shutil.rmtree(crash / 'scratch')
-        history, _ = run_app(crash, vault, 'history')
-        assert history['app_start_recovered'] >= 1, history
-        recovered = [item for item in history['sessions'] if item['state'] == 'interrupted']
-        assert recovered, history['sessions']
-        assert not any((crash / 'scratch').rglob('*')), 'history inspection launched an agent'
-        summary['recovery'] = {'recovered': history['app_start_recovered'],
-                               'state': recovered[0]['state'],
-                               'no_auto_launch': True}
-        details['recovery'] = history
+            wait_path(marker / 'quit', process, 120)
+            started = time.monotonic()
+            try:
+                process.wait(timeout=3)
+                exit_within_gate = True
+            except subprocess.TimeoutExpired:
+                exit_within_gate = False
+                process.wait(timeout=60)
+            quit_seconds = time.monotonic() - started
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        assert exit_within_gate, f'退出等待快照 {quit_seconds:.2f}s'
+        assert quit_seconds < 3.0, quit_seconds
+        session_text = (case / 'cache/session.toml').read_text()
+        assert 'windows' in session_text, session_text
+        history, _ = run_app(case, slow_vault, 'history', timeout=180)
+        assert history['sessions'], history
+        state = history['sessions'][0]['state']
+        assert state in ('failed', 'cancelled'), history['sessions']
+        assert not any((case / 'scratch').rglob('*')), list((case / 'scratch').rglob('*'))
+        summary['during_quit'] = {'seconds': quit_seconds,
+                                  'session_saved': True,
+                                  'state_after_restart': state}
 
-        # 跨库会话共用数据根时互不覆盖。
-        multi = base / 'multi-vault'
-        shared_data = multi / 'data'
-        for name, builder in [('a', lambda v: (v / 'a.md').write_text('# A\n')),
-                              ('b', lambda v: (v / 'b.md').write_text('# B\n'))]:
-            case = multi / name
-            vault = case / 'vault'
-            vault.mkdir(parents=True)
-            builder(vault)
-            write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=0'])
-            data, _ = run_app(case, vault, 'exit', env_extra={'HORTUS_DATA_DIR': str(shared_data)})
-            assert data['exit_code'] == 0, data
-        case = multi / 'history'
-        case.mkdir()
-        vault = multi / 'a' / 'vault'
-        write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=0'])
-        history, _ = run_app(case, vault, 'history', env_extra={'HORTUS_DATA_DIR': str(shared_data)})
-        sessions = history['sessions']
-        assert len(sessions) == 2, sessions
-        assert len({item['vault'] for item in sessions}) == 2, sessions
-        assert len({item['snapshot_path'] for item in sessions}) == 2, sessions
-        assert all(Path(item['snapshot_path']).is_dir() for item in sessions), sessions
-        summary['cross_vault_sessions'] = [item['id'] for item in sessions]
-        details['cross_vault'] = sessions
-
-        # 恢复后快照字节不变。
-        assert describe(normal_snapshot) == normal_bytes
+        # A3: 快照中崩溃，重启后记录不可用且不自动执行。
+        case = base / 'during-crash'
+        case.mkdir(parents=True)
+        write_config(case, str(FAKE_AGENT), ['--guide', '{guide}', '--sleep=30'])
+        marker = case / 'marker'
+        marker.mkdir()
+        command = [str(DEBUG_APP), '--light', f'--vault={slow_vault}', '--agent-mode=during-hold',
+                   f'--agent-launch-inspection={case / "agent-during-crash.json"}',
+                   f'--agent-scratch={case / "scratch"}', f'--agent-marker={marker}']
+        env = environment(case)
+        process = subprocess.Popen(command, env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            wait_path(marker / 'holding', process, 120)
+            os.kill(process.pid, signal.SIGKILL)
+            process.wait(timeout=30)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        history, _ = run_app(case, slow_vault, 'history', timeout=180)
+        assert history['sessions'], history
+        assert history['sessions'][0]['state'] == 'failed', history['sessions']
+        assert not any((case / 'scratch').rglob('*')), list((case / 'scratch').rglob('*'))
+        summary['during_crash'] = {'state_after_restart': history['sessions'][0]['state']}
 
         # A6: Release 可执行文件不含新增检查参数。
         release = ROOT / 'build/Hortus.app/Contents/MacOS/Hortus'
         if release.exists():
             strings = subprocess.run(['strings', str(release)], capture_output=True, text=True).stdout
             for marker in ['--agent-launch-inspection', '--agent-mode', '--agent-scratch',
-                           '--agent-gate-delay', '--agent-second-vault']:
+                           '--agent-gate-delay', '--agent-second-vault', '--agent-marker',
+                           'HORTUS_SNAPSHOT_GATE']:
                 assert marker not in strings, marker
         summary['release_strings_clean'] = True
+
+    subprocess.run(['/usr/bin/chflags', '-R', 'nouchg', str(base)], check=False)
 
     details['release_strings_clean'] = summary['release_strings_clean']
     (output / 'details.json').write_text(json.dumps(details, ensure_ascii=False, indent=2) + '\n')

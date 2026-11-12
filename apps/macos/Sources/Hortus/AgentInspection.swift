@@ -1,3 +1,5 @@
+import Foundation
+
 #if DEBUG
 import AppKit
 import Darwin
@@ -7,6 +9,13 @@ import Foundation
 /// 只在 Debug 构建里存在；Release 可执行文件不包含这些参数。
 @MainActor
 enum AgentInspection {
+    /// 另一窗口写入检查使用的完整布局与会话 JSON。
+    private nonisolated static let persistedLayoutJSON = """
+    {"regions":{"left":{"groups":[{"id":"1","tabs":["files","search","tags"],"selected":"files"}],"size":260.0},"right":{"groups":[{"id":"2","tabs":["outline","backlinks"],"selected":"outline"}],"size":250.0},"bottom":{"groups":[{"id":"3","tabs":["terminal","changes"],"selected":"terminal"}],"size":230.0}}}
+    """
+    private nonisolated static let emptySessionJSON = """
+    {"diagrams":[],"last_vault":null,"recent":[],"windows":[],"default_visible":{}}
+    """
     private static func argument(_ name: String, in arguments: [String]) -> String? {
         arguments.first { $0.hasPrefix("--\(name)=") }.map { String($0.dropFirst(name.count + 3)) }
     }
@@ -104,6 +113,47 @@ enum AgentInspection {
     private static func ensureAgent(_ controller: TerminalController) throws -> TerminalTab {
         guard let tab = controller.newAgentTab() else { throw CocoaError(.coderValueNotFound) }
         return tab
+    }
+
+    /// 外部检查用来判断时机的标记目录；应用只写标记，不阻塞快照。
+    private static func markerDirectory(_ arguments: [String]) throws -> URL {
+        guard let path = argument("agent-marker", in: arguments) else {
+            throw CocoaError(.coderValueNotFound)
+        }
+        return URL(fileURLWithPath: path)
+    }
+
+    private static func writeMarker(_ marker: URL, _ name: String) {
+        _ = FileManager.default.createFile(
+            atPath: marker.appendingPathComponent(name).path, contents: Data())
+    }
+
+    /// 快照记录在扫描前先写 `preparing`；检查据此在快照进行中操作。
+    private static func waitPreparing(_ workspace: Workspace, seconds: Double = 120) async throws {
+        let directory = URL(fileURLWithPath: workspace.core?.dataDirectory() ?? "")
+            .appendingPathComponent("agent-sessions")
+        try await wait(seconds: seconds, until: "出现 preparing 会话") {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+            for name in names {
+                let metadata = directory.appendingPathComponent(name).appendingPathComponent("session.json")
+                if let text = try? String(contentsOf: metadata, encoding: .utf8),
+                   text.contains("\"preparing\"") {
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    private static func waitSessionState(
+        _ workspace: Workspace, _ state: String, seconds: Double
+    ) async throws -> [[String: Any]] {
+        var latest: [[String: Any]] = []
+        try await wait(seconds: seconds, until: "会话进入 \(state)") {
+            latest = sessions(workspace)
+            return latest.contains { $0["state"] as? String == state }
+        }
+        return latest
     }
 
     static func run(workspace: Workspace, layout: Layout, arguments: [String]) async throws -> [String: Any] {
@@ -375,6 +425,114 @@ enum AgentInspection {
             result["sessions"] = sessions(workspace)
             result["scratch"] = scratch(scratchDirectory)
 
+        case "during-close-tab":
+            let first = try await ensureShell(controller)
+            let tab = try ensureAgent(controller)
+            try await waitPreparing(workspace)
+            await controller.close(tab)
+            result["sessions"] = try await waitSessionState(workspace, "cancelled", seconds: 30)
+            result["tabs"] = tabStates(controller)
+            result["scratch"] = scratch(scratchDirectory)
+            result["shell_alive"] = alive(first.session.inspectionShellPid)
+
+        case "during-vault":
+            _ = try await ensureShell(controller)
+            _ = try ensureAgent(controller)
+            try await waitPreparing(workspace)
+            await workspace.releaseDocuments()
+            result["sessions"] = try await waitSessionState(workspace, "cancelled", seconds: 30)
+            result["scratch"] = scratch(scratchDirectory)
+
+        case "during-window":
+            guard let secondVault = argument("agent-second-vault", in: arguments),
+                  let application = workspace.application else {
+                throw CocoaError(.coderValueNotFound)
+            }
+            _ = try await ensureShell(controller)
+            _ = try ensureAgent(controller)
+            try await waitPreparing(workspace)
+            await workspace.openFolder(secondVault)
+            try await Task.sleep(for: .milliseconds(300))
+            guard let record = application.records.first(where: { $0.workspace === workspace }) else {
+                throw CocoaError(.coderValueNotFound)
+            }
+            let started = ProcessInfo.processInfo.systemUptime
+            record.window?.performClose(nil)
+            try await Task.sleep(for: .milliseconds(300))
+            result["window_close_ms"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
+            result["sessions"] = try await waitSessionState(workspace, "cancelled", seconds: 30)
+            result["scratch"] = scratch(scratchDirectory)
+
+        case "during-quit":
+            _ = try await ensureShell(controller)
+            _ = try ensureAgent(controller)
+            try await waitPreparing(workspace)
+            // 快照仍在进行时请求退出；结果写出后应用立即终止。
+            writeMarker(try markerDirectory(arguments), "quit")
+            result["quit"] = true
+
+        case "during-hold":
+            _ = try ensureAgent(controller)
+            try await waitPreparing(workspace)
+            writeMarker(try markerDirectory(arguments), "holding")
+            try await Task.sleep(for: .seconds(120))
+
+        case "during-saves":
+            guard let core = workspace.core,
+                  let root = workspace.root else { throw CocoaError(.coderValueNotFound) }
+            _ = try await ensureShell(controller)
+            // 先建立一个 ready 会话，作为状态写入对象。
+            let baseline = try await Task.detached { try core.beginAgentSession(vault: root) }.value
+            let tab = try ensureAgent(controller)
+            try await waitPreparing(workspace)
+            let measurement = Measurement()
+            let gap = GapRecorder()
+            gap.start()
+            Task.detached {
+                let before = ProcessInfo.processInfo.systemUptime
+                _ = try? core.saveLayout(json: Self.persistedLayoutJSON)
+                _ = try? core.saveWindowSession(json: Self.emptySessionJSON)
+                _ = try? core.markAgentSession(id: baseline.id, state: "running", exitCode: nil)
+                measurement.finish(ProcessInfo.processInfo.systemUptime - before)
+            }
+            let deadline = ProcessInfo.processInfo.systemUptime + 1.2
+            while ProcessInfo.processInfo.systemUptime < deadline,
+                  !measurement.snapshot.completed {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            let sampled = measurement.snapshot
+            gap.stop()
+            result["save_within_2s"] = sampled.completed
+            result["save_ms"] = sampled.elapsed * 1000
+            result["max_main_gap_ms"] = gap.maxGapMilliseconds
+            try await wait(seconds: 30, until: "快照完成并尝试启动") {
+                switch tab.agentPhase {
+                case .running, .exited, .failed: return true
+                case .idle, .preparing: return false
+                }
+            }
+            result["tabs"] = tabStates(controller)
+            result["sessions"] = sessions(workspace)
+            result["scratch"] = scratch(scratchDirectory)
+            result["baseline"] = baseline.id
+
+        case "data-inside-vault":
+            guard let blocked = argument("agent-blocked-vault", in: arguments) else {
+                throw CocoaError(.coderValueNotFound)
+            }
+            let first = try await ensureShell(controller)
+            send(first, "printf 'HORTUS_SHELL_READY\\n'")
+            try await wait(seconds: 10, until: "普通 shell 响应") {
+                screen(first).contains("HORTUS_SHELL_READY")
+            }
+            await workspace.openFolder(blocked)
+            try await Task.sleep(for: .milliseconds(500))
+            result["error"] = workspace.error ?? ""
+            result["sessions"] = sessions(workspace)
+            result["tabs"] = tabStates(controller)
+            result["shell_alive"] = alive(first.session.inspectionShellPid)
+            result["shell_ran"] = screen(first).contains("HORTUS_SHELL_READY")
+
         default:
             throw NSError(domain: "Hortus.AgentInspection", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "未知 agent-mode \(mode)"])
@@ -409,3 +567,28 @@ private final class GapRecorder {
     }
 }
 #endif
+
+/// 另一窗口写入的完成状态；轮询在主线程，实际写入在后台任务。
+private final class Measurement: @unchecked Sendable {
+    struct Sample {
+        let completed: Bool
+        let elapsed: Double
+    }
+
+    private let lock = NSLock()
+    private var done = false
+    private var duration = 0.0
+
+    func finish(_ elapsed: Double) {
+        lock.lock()
+        duration = elapsed
+        done = true
+        lock.unlock()
+    }
+
+    var snapshot: Sample {
+        lock.lock()
+        defer { lock.unlock() }
+        return Sample(completed: done, elapsed: duration)
+    }
+}
