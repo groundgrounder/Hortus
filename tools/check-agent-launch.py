@@ -712,7 +712,8 @@ def main():
         assert (case / 'config/layout.toml').is_file()
         session_text = (case / 'cache/session.toml').read_text()
         assert 'windows' in session_text, session_text
-        assert not any((case / 'scratch').rglob('*')), list((case / 'scratch').rglob('*'))
+        # 该用例不取消 Agent：快照结束后正常 exec，scratch 应有 argv 证据。
+        assert (case / 'scratch/argc').exists(), list((case / 'scratch').rglob('*'))
         summary['during_saves'] = {'save_ms': data['save_ms'],
                                    'max_main_gap_ms': data['max_main_gap_ms'],
                                    'baseline_state': baseline[0]['state']}
