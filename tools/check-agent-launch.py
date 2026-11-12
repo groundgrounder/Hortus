@@ -423,6 +423,20 @@ def main():
             assert pids[0] and pids[1] and pids[0] != pids[1], pids
             assert data['buffers_distinct']
             assert data['real_drag'] and all(data['real_drag'].values()), (data.get('real_drag'), data.get('real_drag_detail'))
+            steps = data['real_drag_steps']
+            assert [step['step'] for step in steps] == [
+                'agent_to_right', 'agent_to_bottom', 'shell_to_left', 'shell_to_bottom',
+                'static_to_right', 'static_to_bottom', 'invalid_drop', 'cancel'], steps
+            assert all(step['ok'] for step in steps), steps
+            invariants = data['real_drag_invariants']
+            assert invariants['pids_same'] and invariants['cwds_same'] and invariants['views_same'], invariants
+            assert invariants['agent_session_same'] and invariants['buffers_marked'], invariants
+            sessions = data['drag_sessions']
+            assert len(sessions) == 8, sessions
+            for phases in sessions.values():
+                # SwiftUI 可能先回调 completed 再回调 initial；只要求两端都出现。
+                assert any(phase == 'initial' or phase.startswith('active') for phase in phases), phases
+                assert any(phase.startswith('ended') or phase.startswith('completed') for phase in phases), phases
             assert data['switch_pids'][:2] == pids, data['switch_pids']
             assert data['dock_pids'][:2] == pids
             assert data['switch_markers'] and data['dock_markers']

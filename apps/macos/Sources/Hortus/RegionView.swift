@@ -27,14 +27,16 @@ struct GroupView: View {
             TabStrip(group: group)
                 .padding(.horizontal, 6).padding(.top, 6).padding(.bottom, 2)
                 // 拖到标签栏：并入这一组
-                .modifier(DropZone(enabled: layout.canMerge(layout.dragging, into: group), shape: .capsule) {
+                .modifier(DropZone(name: "merge:" + group.id.uuidString,
+                                   enabled: layout.canMerge(layout.dragging, into: group), shape: .capsule) {
                     layout.move($0, into: group.id)
                 })
             PanelContent(tool: group.selected)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .background(ContentFrameProbe(name: "group-content-" + group.id.uuidString))
                 // 拖到内容区：在这一组后面新开一组。高亮只盖住新组会出现的那一半
-                .modifier(DropZone(enabled: layout.canSplit(layout.dragging, after: group), shape: .rect(cornerRadius: 12),
+                .modifier(DropZone(name: "split:" + group.id.uuidString,
+                                   enabled: layout.canSplit(layout.dragging, after: group), shape: .rect(cornerRadius: 12),
                                    preview: region == .bottom ? .trailing : .bottom) {
                     layout.split($0, to: region, after: group.id)
                 })
@@ -46,6 +48,7 @@ struct GroupView: View {
 /// 放置目标：只有指针所在的位置高亮；窗口边缘的落点（idleVisible）拖动时一直淡淡显示，否则找不到
 struct DropZone<S: Shape>: ViewModifier {
     @Environment(Layout.self) private var layout
+    let name: String
     let enabled: Bool
     let idleVisible: Bool
     let shape: S
@@ -53,7 +56,9 @@ struct DropZone<S: Shape>: ViewModifier {
     let action: (ToolID) -> Void
     @State private var targeted = false
 
-    init(enabled: Bool, idleVisible: Bool = false, shape: S, preview: Edge? = nil, action: @escaping (ToolID) -> Void) {
+    init(name: String, enabled: Bool, idleVisible: Bool = false, shape: S, preview: Edge? = nil,
+         action: @escaping (ToolID) -> Void) {
+        self.name = name
         self.enabled = enabled
         self.idleVisible = idleVisible
         self.shape = shape
@@ -81,7 +86,15 @@ struct DropZone<S: Shape>: ViewModifier {
                 }
             }
             .dropDestination(for: String.self, isEnabled: enabled) { items, _ in
-                guard let raw = items.first, let tool = ToolID(dragPayload: raw), layout.locateTool(tool) != nil else { return }
+                guard let raw = items.first, let tool = ToolID(dragPayload: raw), layout.locateTool(tool) != nil else {
+                    #if DEBUG
+                    DragInspection.recordDropRejected(zone: name)
+                    #endif
+                    return
+                }
+                #if DEBUG
+                DragInspection.recordDropAccepted(zone: name, tool: tool)
+                #endif
                 withAnimation(.snappy) { action(tool) }
                 layout.dragging = nil
             }
@@ -90,6 +103,10 @@ struct DropZone<S: Shape>: ViewModifier {
                 case .entering, .active: targeted = true
                 default: targeted = false
                 }
+                #if DEBUG
+                DragInspection.recordDrop(zone: name, session: session, enabled: enabled, targeted: targeted,
+                                          dragging: layout.dragging)
+                #endif
             }
             .animation(.snappy(duration: 0.18), value: enabled)
     }
@@ -136,10 +153,17 @@ struct TabStrip: View {
         .draggable(tool.token)
         // 拖动开始时亮出所有落点，结束（放下或取消）时收起
         .onDragSessionUpdated { session in
+            #if DEBUG
+            let before = layout.dragging
+            #endif
             switch session.phase {
             case .initial, .active: layout.dragging = tool
             default: layout.dragging = nil
             }
+            #if DEBUG
+            DragInspection.recordDrag(session, tool: tool, groupID: group.id,
+                                      before: before, after: layout.dragging)
+            #endif
         }
         .contextMenu { menu(for: tool) }
         .accessibilityElement(children: .combine)

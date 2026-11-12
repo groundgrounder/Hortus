@@ -616,7 +616,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if args.contains("--inspect-slow-shutdown") { workspace.shutdownDelayForInspection = 10 }
             if args.contains("--inspect-hold-open") { return }
             NSApp.terminate(nil)
-        } catch { fputs("Hortus 自检失败：\(error)\n", stderr); exit(1) }
+        } catch {
+            #if DEBUG
+            if let arg = args.first(where: { $0.hasPrefix("--agent-launch-inspection=") }) {
+                DragInspection.append(["event": "error", "message": "\(error)"])
+                let path = String(arg.dropFirst("--agent-launch-inspection=".count)) + ".drag.json"
+                if let data = try? JSONSerialization.data(withJSONObject: DragInspection.dump(),
+                                                          options: [.prettyPrinted, .sortedKeys]) {
+                    try? data.write(to: URL(fileURLWithPath: path))
+                }
+            }
+            #endif
+            fputs("Hortus 自检失败：\(error)\n", stderr)
+            exit(1)
+        }
     }
 
     /// 捕获窗口与 + 菜单的弹出窗口，合成到白底上；不包含桌面或其它应用。

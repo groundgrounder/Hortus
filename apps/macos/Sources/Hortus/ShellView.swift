@@ -80,7 +80,8 @@ struct ShellView: View {
         return Text(L10n.string("Move to %@", region.title))
             .font(.callout.weight(.medium)).foregroundStyle(.tint)
             .frame(maxWidth: vertical ? Self.edgeZoneWidth : .infinity, maxHeight: vertical ? .infinity : 150)
-            .modifier(DropZone(enabled: true, idleVisible: true, shape: .rect(cornerRadius: 16, style: .continuous)) { layout.split($0, to: region) })
+            .modifier(DropZone(name: "edge:" + region.rawValue, enabled: true, idleVisible: true,
+                               shape: .rect(cornerRadius: 16, style: .continuous)) { layout.split($0, to: region) })
             .padding(.leading, vertical ? 0 : side(.left))
             .padding(.trailing, vertical ? 0 : side(.right))
             // 侧栏落点停在底部面板上方：侧栏收起时底部面板会伸到窗口边，不能被侧栏落点压住

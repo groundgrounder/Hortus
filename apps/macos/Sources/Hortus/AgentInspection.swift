@@ -2,6 +2,7 @@ import Foundation
 
 #if DEBUG
 import AppKit
+import CoreGraphics
 import Darwin
 import Foundation
 
@@ -69,11 +70,42 @@ enum AgentInspection {
     }
 
     #if DEBUG
-    private static func dragTerminal(_ tab: TerminalTab, to region: Region, layout: Layout, window: NSWindow) async throws -> Bool {
-        guard let group = layout.availableGroups(in: region).first else { return false }
+    private static func dragTool(_ tool: ToolID, to region: Region, layout: Layout, window: NSWindow,
+                                 step: String) async throws -> Bool {
+        let groups = layout.availableGroups(in: region)
+        DragInspection.note("target_lookup", [
+            "region": region.rawValue,
+            "groups": groups.count,
+            "visible": layout.visible[region] ?? false,
+            "shown": layout.isShown(region),
+        ])
+        guard let group = groups.first else { return false }
+        DragInspection.note("target_group", ["group": group.id.uuidString, "tabs": group.tabs.map(\.id)])
+        let sourceGroup = layout.group(containing: tool)?.id
         return try await ToolDragInspection.drag(
-            from: "panel-tab-terminal-\(tab.id.uuidString)",
-            to: "group-tabs-\(group.id.uuidString)", window: window)
+            from: tool.probeName,
+            to: "group-tabs-\(group.id.uuidString)",
+            containedIn: sourceGroup.map { "group-tabs-\($0.uuidString)" },
+            window: window, step: step)
+    }
+
+    private static func dragTerminal(_ tab: TerminalTab, to region: Region, layout: Layout, window: NSWindow,
+                                     step: String) async throws -> Bool {
+        try await dragTool(.terminal(tab.id), to: region, layout: layout, window: window, step: step)
+    }
+
+    /// 拖动结束必须由明确状态确认：拖动会话收起，且目标区域已经生效。
+    private static func waitDrag(_ description: String, layout: Layout, region: Region?, tool: ToolID) async throws {
+        try await wait(seconds: 3, until: description + "：拖动状态收起") { layout.dragging == nil }
+        if let region {
+            try await wait(seconds: 3, until: description + "：落点 " + region.rawValue) {
+                layout.region(containing: tool) == region
+            }
+        }
+        DragInspection.note("region_after", [
+            "region": layout.region(containing: tool)?.rawValue ?? "nil",
+            "dragging": layout.dragging?.id ?? "nil",
+        ])
     }
     #endif
 
@@ -254,11 +286,13 @@ enum AgentInspection {
                 result["snapshot_ready_before_exec"] = tab.agentSessionID != nil
                 if let window = workspace.application?.records.first(where: { $0.workspace === workspace })?.window {
                     let generation = tab.generation, session = tab.agentSessionID
-                    let moved = try await dragTerminal(tab, to: .right, layout: layout, window: window)
+                    let moved = try await dragTerminal(tab, to: .right, layout: layout, window: window,
+                                                       step: "preparing_to_right")
                     let right = layout.region(containing: .terminal(tab.id)) == .right
                         && tab.generation == generation && tab.agentSessionID == session
                         && tab.agentPhase == .preparing
-                    _ = try await dragTerminal(tab, to: .bottom, layout: layout, window: window)
+                    _ = try await dragTerminal(tab, to: .bottom, layout: layout, window: window,
+                                               step: "preparing_to_bottom")
                     result["preparing_drag_valid"] = moved && right && tab.generation == generation
                         && tab.agentSessionID == session && tab.agentPhase == .preparing
                 }
@@ -297,58 +331,190 @@ enum AgentInspection {
             result["max_main_gap_ms"] = gap.maxGapMilliseconds
 
             #if DEBUG
-            // 真实拖动：Agent 和 Shell 跨区后 PID、cwd、scrollback 与 Agent 会话不变。
+            // 连续真实拖动：每次完整 HID 序列只执行一次；跨区后 PID、cwd、scrollback、
+            // Agent 会话与视图身份不变，迟到的旧会话回调不能清掉新拖动。
             if let window = workspace.application?.records.first(where: { $0.workspace === workspace })?.window {
+                // 静态大纲先放左侧，第二个 Shell 作为右侧落点组；拖动本身仍走真实 HID。
+                layout.moveToRegion(.tool(.outline), .left)
+                layout.moveToRegion(.terminal(second.id), .right)
+                try await Task.sleep(for: .milliseconds(400))
+
+                let agentTool = ToolID.terminal(agentTab.id)
+                let shellTool = ToolID.terminal(first.id)
+                let outlineTool = ToolID.tool(.outline)
                 let agentPidBefore = agentTab.session.inspectionShellPid
                 let agentSessionBefore = agentTab.agentSessionID
                 let agentCwdBefore = currentDirectory(agentPidBefore) ?? ""
                 let agentBufferBefore = collapsedScreen(agentTab)
                 let agentViewBefore = agentTab.session.inspectionView
-                let agentToRight = try await dragTerminal(agentTab, to: .right, layout: layout, window: window)
-                try await wait(seconds: 3, until: "Agent 拖到右侧") {
-                    layout.region(containing: .terminal(agentTab.id)) == .right
+                let shellCwdBefore = currentDirectory(firstPid) ?? ""
+                let shellViewBefore = first.session.inspectionView
+                let secondCwdBefore = currentDirectory(secondPid) ?? ""
+                let secondViewBefore = second.session.inspectionView
+                var steps: [[String: Any]] = []
+                func recordStep(_ name: String, _ ok: Bool, _ tool: ToolID, _ detail: [String: Any] = [:]) {
+                    steps.append(["step": name, "ok": ok,
+                                  "region": layout.region(containing: tool)?.rawValue ?? "nil",
+                                  "dragging": layout.dragging?.id ?? "nil"]
+                        .merging(detail) { current, _ in current })
                 }
-                let agentRegionRight = layout.region(containing: .terminal(agentTab.id)) == .right
+
+                // Agent 底部 → 右侧 → 底部。
+                let agentToRight = try await dragTerminal(agentTab, to: .right, layout: layout, window: window,
+                                                          step: "agent_to_right")
+                try await waitDrag("Agent 拖到右侧", layout: layout, region: .right, tool: agentTool)
+                let agentRegionRight = layout.region(containing: agentTool) == .right
                 let agentPidRight = agentTab.session.inspectionShellPid == agentPidBefore
                 let agentSessionRight = agentTab.agentSessionID == agentSessionBefore
                 let agentCwdRight = (currentDirectory(agentPidBefore) ?? "") == agentCwdBefore
                 let agentBufferRight = collapsedScreen(agentTab) == agentBufferBefore
+                let agentViewRight = agentTab.session.inspectionView === agentViewBefore
                 let agentRightOK = agentRegionRight && controller.tab(agentTab.id) === agentTab
-                    && agentPidRight && agentSessionRight && agentCwdRight && agentBufferRight
-                    && agentTab.session.inspectionView === agentViewBefore
-                let agentToBottom = try await dragTerminal(agentTab, to: .bottom, layout: layout, window: window)
-                try await wait(seconds: 3, until: "Agent 拖回底部") {
-                    layout.region(containing: .terminal(agentTab.id)) == .bottom
-                }
-                let agentRegionBottom = layout.region(containing: .terminal(agentTab.id)) == .bottom
+                    && agentPidRight && agentSessionRight && agentCwdRight && agentBufferRight && agentViewRight
+                recordStep("agent_to_right", agentToRight && agentRightOK, agentTool, [
+                    "event": agentToRight, "region_ok": agentRegionRight, "pid": agentPidRight,
+                    "session": agentSessionRight, "cwd": agentCwdRight, "buffer": agentBufferRight,
+                    "view": agentViewRight,
+                ])
+
+                let agentToBottom = try await dragTerminal(agentTab, to: .bottom, layout: layout, window: window,
+                                                           step: "agent_to_bottom")
+                try await waitDrag("Agent 拖回底部", layout: layout, region: .bottom, tool: agentTool)
+                let agentRegionBottom = layout.region(containing: agentTool) == .bottom
                 let agentPidBottom = agentTab.session.inspectionShellPid == agentPidBefore
                 let agentSessionBottom = agentTab.agentSessionID == agentSessionBefore
+                let agentCwdBottom = (currentDirectory(agentPidBefore) ?? "") == agentCwdBefore
                 let agentBufferBottom = collapsedScreen(agentTab) == agentBufferBefore
-                let agentBottomOK = agentRegionBottom && agentPidBottom && agentSessionBottom && agentBufferBottom
-                let shellCwdBefore = currentDirectory(firstPid) ?? ""
-                let shellViewBefore = first.session.inspectionView
-                let shellToLeft = try await dragTerminal(first, to: .left, layout: layout, window: window)
-                let shellLeftOK = layout.region(containing: .terminal(first.id)) == .left
-                    && first.session.inspectionShellPid == firstPid
-                    && (currentDirectory(firstPid) ?? "") == shellCwdBefore
-                    && screen(first).contains("HORTUS_TAB_ONE")
-                    && first.session.inspectionView === shellViewBefore
-                let shellToBottom = try await dragTerminal(first, to: .bottom, layout: layout, window: window)
-                let shellBottomOK = layout.region(containing: .terminal(first.id)) == .bottom
-                    && first.session.inspectionShellPid == firstPid
-                    && screen(first).contains("HORTUS_TAB_ONE")
+                let agentViewBottom = agentTab.session.inspectionView === agentViewBefore
+                let agentBottomOK = agentRegionBottom && agentPidBottom && agentSessionBottom
+                    && agentCwdBottom && agentBufferBottom && agentViewBottom
+                recordStep("agent_to_bottom", agentToBottom && agentBottomOK, agentTool, [
+                    "event": agentToBottom, "region_ok": agentRegionBottom, "pid": agentPidBottom,
+                    "session": agentSessionBottom, "cwd": agentCwdBottom, "buffer": agentBufferBottom,
+                    "view": agentViewBottom,
+                ])
+
+                // Shell 底部 → 左侧 → 底部。
+                let shellToLeft = try await dragTerminal(first, to: .left, layout: layout, window: window,
+                                                         step: "shell_to_left")
+                try await waitDrag("Shell 拖到左侧", layout: layout, region: .left, tool: shellTool)
+                let shellRegionLeft = layout.region(containing: shellTool) == .left
+                let shellPidLeft = first.session.inspectionShellPid == firstPid
+                let shellCwdLeft = (currentDirectory(firstPid) ?? "") == shellCwdBefore
+                let shellBufferLeft = screen(first).contains("HORTUS_TAB_ONE")
+                let shellViewLeft = first.session.inspectionView === shellViewBefore
+                let shellLeftOK = shellRegionLeft && shellPidLeft && shellCwdLeft && shellBufferLeft && shellViewLeft
+                recordStep("shell_to_left", shellToLeft && shellLeftOK, shellTool, [
+                    "event": shellToLeft, "region_ok": shellRegionLeft, "pid": shellPidLeft,
+                    "cwd": shellCwdLeft, "buffer": shellBufferLeft, "view": shellViewLeft,
+                ])
+
+                let shellToBottom = try await dragTerminal(first, to: .bottom, layout: layout, window: window,
+                                                           step: "shell_to_bottom")
+                try await waitDrag("Shell 拖回底部", layout: layout, region: .bottom, tool: shellTool)
+                let shellRegionBottom = layout.region(containing: shellTool) == .bottom
+                let shellPidBottom = first.session.inspectionShellPid == firstPid
+                let shellCwdBottom = (currentDirectory(firstPid) ?? "") == shellCwdBefore
+                let shellBufferBottom = screen(first).contains("HORTUS_TAB_ONE")
+                let shellViewBottom = first.session.inspectionView === shellViewBefore
+                let shellBottomOK = shellRegionBottom && shellPidBottom && shellCwdBottom
+                    && shellBufferBottom && shellViewBottom
+                recordStep("shell_to_bottom", shellToBottom && shellBottomOK, shellTool, [
+                    "event": shellToBottom, "region_ok": shellRegionBottom, "pid": shellPidBottom,
+                    "cwd": shellCwdBottom, "buffer": shellBufferBottom, "view": shellViewBottom,
+                ])
+
+                // 静态大纲 左 → 右 → 底部。
+                let staticToRight = try await dragTool(outlineTool, to: .right, layout: layout, window: window,
+                                                       step: "static_to_right")
+                try await waitDrag("大纲拖到右侧", layout: layout, region: .right, tool: outlineTool)
+                let staticRegionRight = layout.region(containing: outlineTool) == .right
+                let staticUniqueRight = layout.staticTools.filter { $0 == .outline }.count == 1
+                let staticPidsRight = first.session.inspectionShellPid == firstPid
+                    && second.session.inspectionShellPid == secondPid
+                    && agentTab.session.inspectionShellPid == agentPidBefore
+                let staticRightOK = staticRegionRight && staticUniqueRight && staticPidsRight
+                recordStep("static_to_right", staticToRight && staticRightOK, outlineTool, [
+                    "event": staticToRight, "region_ok": staticRegionRight, "unique": staticUniqueRight,
+                    "terminal_pids": staticPidsRight,
+                ])
+
+                let staticToBottom = try await dragTool(outlineTool, to: .bottom, layout: layout, window: window,
+                                                        step: "static_to_bottom")
+                try await waitDrag("大纲拖回底部", layout: layout, region: .bottom, tool: outlineTool)
+                let staticRegionBottom = layout.region(containing: outlineTool) == .bottom
+                let staticUniqueBottom = layout.staticTools.filter { $0 == .outline }.count == 1
+                let staticPidsBottom = first.session.inspectionShellPid == firstPid
+                    && second.session.inspectionShellPid == secondPid
+                    && agentTab.session.inspectionShellPid == agentPidBefore
+                let staticBottomOK = staticRegionBottom && staticUniqueBottom && staticPidsBottom
+                recordStep("static_to_bottom", staticToBottom && staticBottomOK, outlineTool, [
+                    "event": staticToBottom, "region_ok": staticRegionBottom, "unique": staticUniqueBottom,
+                    "terminal_pids": staticPidsBottom,
+                ])
+
+                // 无效落点：拖到标题栏松开，布局与进程都不变。
+                let invalidRegionBefore = layout.region(containing: agentTool)
+                let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
+                let invalidPoint = CGPoint(x: window.frame.midX, y: displayHeight - (window.frame.maxY - 10))
+                let invalidDragged = try await ToolDragInspection.drag(
+                    from: agentTool.probeName, to: invalidPoint,
+                    containedIn: layout.group(containing: agentTool).map { "group-tabs-\($0.id.uuidString)" },
+                    window: window, step: "invalid_drop")
+                try await wait(seconds: 3, until: "无效落点后拖动状态收起") { layout.dragging == nil }
+                try await Task.sleep(for: .milliseconds(300))
+                let invalidRegion = layout.region(containing: agentTool)
+                let invalidOK = invalidRegion == invalidRegionBefore && layout.dragging == nil
+                    && agentTab.session.inspectionShellPid == agentPidBefore
+                    && agentTab.agentSessionID == agentSessionBefore
+                recordStep("invalid_drop", invalidDragged && invalidOK, agentTool, [
+                    "event": invalidDragged, "region_before": invalidRegionBefore?.rawValue ?? "nil",
+                    "region_after": invalidRegion?.rawValue ?? "nil",
+                ])
+
+                // 取消：拖离后按 Escape，布局不变、标签不丢。
+                let cancelRegionBefore = layout.region(containing: shellTool)
                 let cancelled = try await ToolDragInspection.cancel(
-                    from: "panel-tab-terminal-\(first.id.uuidString)", window: window)
-                let cancelOK = layout.region(containing: .terminal(first.id)) == .bottom
+                    from: shellTool.probeName,
+                    containedIn: layout.group(containing: shellTool).map { "group-tabs-\($0.id.uuidString)" },
+                    window: window, step: "cancel")
+                try await wait(seconds: 3, until: "取消后拖动状态收起") { layout.dragging == nil }
+                let cancelOK = layout.region(containing: shellTool) == cancelRegionBefore
                     && layout.dragging == nil
                     && first.session.inspectionShellPid == firstPid
+                    && first.session.inspectionView === shellViewBefore
+                recordStep("cancel", cancelled && cancelOK, shellTool, [
+                    "event": cancelled, "region_before": cancelRegionBefore?.rawValue ?? "nil",
+                ])
+
+                let finalPids = [first.session.inspectionShellPid, second.session.inspectionShellPid,
+                                 agentTab.session.inspectionShellPid]
+                let finalCwds = [currentDirectory(firstPid) ?? "", currentDirectory(secondPid) ?? "",
+                                 currentDirectory(agentPidBefore) ?? ""]
+                let finalViews = [first.session.inspectionView === shellViewBefore,
+                                  second.session.inspectionView === secondViewBefore,
+                                  agentTab.session.inspectionView === agentViewBefore]
+                let invariants: [String: Any] = [
+                    "pids": [Int(firstPid), Int(secondPid), Int(agentPidBefore)],
+                    "pids_same": finalPids == [firstPid, secondPid, agentPidBefore],
+                    "cwds_same": finalCwds == [shellCwdBefore, secondCwdBefore, agentCwdBefore],
+                    "views_same": finalViews.allSatisfy { $0 },
+                    "agent_session_same": agentTab.agentSessionID == agentSessionBefore,
+                    "buffers_marked": screen(first).contains("HORTUS_TAB_ONE")
+                        && screen(second).contains("HORTUS_TAB_TWO")
+                        && collapsedScreen(agentTab) == agentBufferBefore,
+                ]
                 result["real_drag"] = [
                     "agent_to_right": agentToRight && agentRightOK,
                     "agent_to_bottom": agentToBottom && agentBottomOK,
                     "shell_to_left": shellToLeft && shellLeftOK,
                     "shell_to_bottom": shellToBottom && shellBottomOK,
+                    "static_to_right": staticToRight && staticRightOK,
+                    "static_to_bottom": staticToBottom && staticBottomOK,
+                    "invalid_drop": invalidDragged && invalidOK,
                     "cancel": cancelled && cancelOK,
                 ]
+                result["real_drag_steps"] = steps
                 result["real_drag_detail"] = [
                     "agent_event": agentToRight,
                     "agent_region_right": agentRegionRight,
@@ -356,17 +522,29 @@ enum AgentInspection {
                     "agent_session_right": agentSessionRight,
                     "agent_cwd_right": agentCwdRight,
                     "agent_buffer_right": agentBufferRight,
+                    "agent_view_right": agentViewRight,
                     "agent_bottom": agentBottomOK,
                     "agent_region_bottom": agentRegionBottom,
                     "agent_pid_bottom": agentPidBottom,
                     "agent_session_bottom": agentSessionBottom,
                     "agent_buffer_bottom": agentBufferBottom,
+                    "agent_view_bottom": agentViewBottom,
                     "shell_left_event": shellToLeft,
                     "shell_left_ok": shellLeftOK,
+                    "shell_bottom_ok": shellBottomOK,
+                    "static_right_event": staticToRight,
+                    "static_right_ok": staticRightOK,
+                    "static_bottom_event": staticToBottom,
+                    "static_bottom_ok": staticBottomOK,
+                    "invalid_event": invalidDragged,
+                    "invalid_ok": invalidOK,
                     "cancel_event": cancelled,
                     "cancel_dragging": layout.dragging == nil,
                     "cancel_pid_same": first.session.inspectionShellPid == firstPid,
                 ]
+                result["real_drag_invariants"] = invariants
+                result["drag_sessions"] = DragInspection.sessionSummary()
+                result["drag_trace"] = DragInspection.dump()
             }
             #endif
 
