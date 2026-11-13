@@ -691,7 +691,13 @@ fn agent_template_validates_structure_and_preserves_each_argument() {
         "font_size = 15.0\ndefault_view = \"reading\"\n\n# keep this comment\nunknown_key = 7\n\n[agent]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"printf '%s' {guide}\"]\n",
     );
     let launch = store.agent_launch().unwrap();
-    assert_eq!(launch.executable, "/bin/sh");
+    assert_eq!(
+        launch.executable,
+        fs::canonicalize("/bin/sh")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    );
     assert_eq!(launch.args.len(), 2);
     assert!(launch.args[1].starts_with("printf '%s' # Working in a Hortus knowledge base\n"));
     assert!(launch.args[1].contains("[[Note name]]"));
