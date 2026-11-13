@@ -3327,7 +3327,7 @@ mod tests {
     #[test]
     fn horizontal_width_change_keeps_compatible_rows() {
         let graph = graph(include_str!(
-            "../../../fixtures/mermaid/flowchart/erikson.mmd"
+            "../../../fixtures/mermaid/flowchart/release-flow.mmd"
         ));
         let mut fonts = crate::SystemFonts::new().unwrap();
         let initial = layout_graph(

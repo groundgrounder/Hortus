@@ -532,7 +532,7 @@ def scenarios(base, output):
         'chinese-labels.mmd', 'class-styles.mmd', 'connectors-shapes.mmd',
         'directions-bt.mmd', 'fanout.mmd', 'forest.mmd', 'graph-syntax.mmd',
         'identity.mmd', 'merge-diamond.mmd', 'research.mmd',
-        'dense-40.mmd', 'dense-dag.mmd', 'erikson.mmd',
+        'dense-40.mmd', 'dense-dag.mmd', 'release-flow.mmd',
         'subgraphs-top-level.mmd', 'subgraph-lr-dag.mmd', 'subgraph-lr-edge-cases.mmd',
         'invisible-links.mmd',
     ]
@@ -552,8 +552,8 @@ def scenarios(base, output):
                     assert data['accessibility_nodes'] == data['visible_nodes'], data
                     if name == 'research.mmd': assert_research_geometry(data)
                     if name == 'subgraph-lr-edge-cases.mmd': assert_lr_edge_cases_geometry(data, width)
-                    if name == 'erikson.mmd': assert data['row_counts'] == [[4, 4]], data
-                    if name == 'erikson.mmd': assert data['initial_row_counts'] == [[4, 4]], data
+                    if name == 'release-flow.mmd': assert data['row_counts'] == [[4, 4]], data
+                    if name == 'release-flow.mmd': assert data['initial_row_counts'] == [[4, 4]], data
     deterministic = ROOT / 'fixtures/mermaid/flowchart/subgraphs-top-level.mmd'
     deterministic_hashes = []
     for index in range(10):

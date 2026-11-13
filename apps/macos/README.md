@@ -83,7 +83,7 @@ python3 -B tools/check-editor-commands.py --output target/reports/editor-command
 
 每个真实场景独立启动三次，A2 交替覆盖终端可见与隐藏；A1 另运行一次确定性的空 `setMarkedText` 收尾与保存失败重试。需要简体拼音输入法 `com.apple.inputmethod.SCIM.ITABC` 和辅助功能授权。
 
-查找监视与 ⌥⌘F 冲突的永久回归使用 `V2A1`、`V2A2-cancel`、`V2A2-visible`、`V2A2-hidden`、`V2A3`：分别断言替换前后窗口 frame 逐值不变且每次按键只执行一次、旧监视取消后 50 ms 内退出且之后 500 ms 迭代数不再增加并释放正文、Escape 后同一进程立即输入的 `Q` 只进入正文、以及热键注册/失活/注销/退出生命周期和只剩 `WindowGroup` 窗口时的菜单与命令目标。`V2A2-visible` 在 `--runs>=3` 时默认重复 10 次，也可用 `--immediate-runs` 显式指定；`--scenario all --runs 1` 用于差量回归。
+查找监视与 ⌥⌘F 冲突的永久回归使用 `V2A1`、`V2A2-cancel`、`V2A2-visible`、`V2A2-hidden`、`V2A3`：分别断言替换前后窗口 frame 逐值不变且每次按键只执行一次、旧监视取消后 50 ms 内退出且之后 500 ms 迭代数不再增加并释放正文、Escape 后同一进程立即输入的 `Q` 只进入正文、以及热键注册/失活/注销/退出流程和只剩 `WindowGroup` 窗口时的菜单与命令目标。`V2A2-visible` 在 `--runs>=3` 时默认重复 10 次，也可用 `--immediate-runs` 显式指定；`--scenario all --runs 1` 用于差量回归。
 
 P1-05 的样式和性能验收：
 

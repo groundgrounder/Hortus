@@ -1433,7 +1433,7 @@ fn invalid_widths_and_very_deep_trees() {
 
 #[test]
 fn graph_chain_keeps_balanced_rows_after_window_resize() {
-    let source = include_str!("../../../fixtures/mermaid/flowchart/erikson.mmd");
+    let source = include_str!("../../../fixtures/mermaid/flowchart/release-flow.mmd");
     let Diagram::Graph(graph) = parse_diagram(source).unwrap() else {
         panic!("LR chain must preserve graph direction");
     };
