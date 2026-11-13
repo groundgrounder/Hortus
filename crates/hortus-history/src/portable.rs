@@ -1,6 +1,8 @@
 //! 非 macOS 的完整复制路径：保留字节、类型、权限与修改时间。
 use std::fs;
 use std::io;
+#[cfg(target_os = "linux")]
+use std::os::linux::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
@@ -42,7 +44,7 @@ fn apply_file_metadata(source: &Path, destination: &Path) -> io::Result<()> {
     drop(file);
     fs::set_permissions(
         destination,
-        fs::Permissions::from_mode(metadata.mode() & 0o7777),
+        fs::Permissions::from_mode(metadata.st_mode() & 0o7777),
     )?;
     Ok(())
 }

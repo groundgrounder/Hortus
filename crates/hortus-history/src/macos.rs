@@ -57,7 +57,7 @@ struct AttrList {
 unsafe extern "C" {
     fn clonefile(from: *const c_char, to: *const c_char, flags: c_int) -> c_int;
     fn fcopyfile(from: c_int, to: c_int, state: *mut c_void, flags: c_uint) -> c_int;
-    fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int;
+    fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn fsync(fd: c_int) -> c_int;
     fn futimens(fd: c_int, times: *const TimeSpec) -> c_int;
