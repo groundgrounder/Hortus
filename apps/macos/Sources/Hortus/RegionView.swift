@@ -130,22 +130,20 @@ struct TabStrip: View {
     }
 
     private func tab(_ tool: ToolID, selected: Bool) -> some View {
-        HStack(spacing: 4) {
-            Label(title(tool), systemImage: symbol(tool))
-                .labelStyle(.titleAndIcon)
-                .font(.callout.weight(selected ? .semibold : .regular))
-                .foregroundStyle(selected ? .primary : .secondary)
-            if selected {
-                Button {
-                    workspace.closeTool(tool)
-                } label: {
-                    Image(systemName: "xmark").font(.caption2)
-                }
-                .buttonStyle(.plain)
-                .help(L10n.string("Close %@", title(tool)))
-                .accessibilityLabel(L10n.string("Close %@", title(tool)))
+        // 文本只有放得下完整标题时才出现；放不下就整段隐藏，不截断、不省略。
+        ViewThatFits(in: .horizontal) {
+            Label {
+                Text(title(tool))
+                    .background(ContentFrameProbe(name: tool.probeName + "-title"))
+            } icon: {
+                Image(systemName: symbol(tool))
             }
+            .labelStyle(.titleAndIcon)
+            .fixedSize(horizontal: true, vertical: false)
+            Image(systemName: symbol(tool))
         }
+        .font(.callout.weight(selected ? .semibold : .regular))
+        .foregroundStyle(selected ? .primary : .secondary)
         .padding(.horizontal, 9).padding(.vertical, 5)
         .background(selected ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .capsule)
         .contentShape(.capsule)
