@@ -31,7 +31,13 @@ fn agent_spec_sessions_and_recovery_round_trip() {
     )
     .unwrap();
     let spec = core.agent_spec().unwrap();
-    assert_eq!(spec.executable, "/bin/sh");
+    assert_eq!(
+        spec.executable,
+        fs::canonicalize("/bin/sh")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    );
     assert_eq!(spec.args.len(), 2);
     assert!(spec.args[1].starts_with("printf '%s' # Working in a Hortus"));
 
