@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! 快照范围与保真、会话元数据与重启恢复。
 use hortus_history::{HistoryStore, SessionState};
 use std::fs;

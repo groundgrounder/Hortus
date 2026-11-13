@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! 只读、只执行与 `uchg` 锁定文件在 clone 与强制完整复制下都必须可快照。
 use hortus_history::{HistoryStore, SessionState};
 use std::collections::BTreeMap;
