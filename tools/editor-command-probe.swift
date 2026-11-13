@@ -110,6 +110,10 @@ private func describe(_ element: AXUIElement, depth: Int = 0) -> [String: Any] {
         "focused": number(element, kAXFocusedAttribute as String) == 1,
         "identifier": string(element, "AXIdentifier"),
     ]
+    var names: CFArray?
+    if AXUIElementCopyActionNames(element, &names) == .success, let list = names as? [String] {
+        row["actions"] = list
+    }
     if let value = axValue(element, kAXValueAttribute as String) {
         if let text = value as? String {
             row["value_length"] = text.utf16.count

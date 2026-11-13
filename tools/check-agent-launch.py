@@ -870,7 +870,8 @@ def main():
             for marker in ['--agent-launch-inspection', '--agent-mode', '--agent-scratch',
                            '--agent-gate-delay', '--agent-second-vault', '--agent-marker',
                            'HORTUS_SNAPSHOT_GATE', '--tool-tabs-inspection', '--tool-tabs-media',
-                           '--tool-tabs-second']:
+                           '--tool-tabs-second', '--tool-label-inspection', '--tool-label-media',
+                           '--tool-label-hold']:
                 assert marker not in strings, marker
         summary['release_strings_clean'] = True
 
