@@ -27,7 +27,8 @@ def wait(path, process, seconds=180):
         if path.exists():
             return
         if process.poll() is not None:
-            raise AssertionError(f'app exited early with {process.returncode}')
+            detail = process.stderr.read().decode(errors='replace') if process.stderr else ''
+            raise AssertionError(f'app exited early with {process.returncode}: {detail}')
         time.sleep(0.1)
     raise AssertionError(f'timed out waiting for {path}')
 
@@ -77,7 +78,7 @@ def check_states(case, name, media, title):
     assert menu.is_file() and menu.stat().st_size > 10_000, (name, menu)
 
 
-def check_accessibility(probe, language, prefix, bundle, base, output):
+def check_accessibility(probe, language, prefix, bundle, base, media, output):
     """图标-only 状态下，Accessibility 仍暴露完整标题和关闭 action，且没有独立 X 按钮。"""
     titles = TITLES[language]
     root = base / f'{prefix}-hold'
@@ -111,7 +112,7 @@ def check_accessibility(probe, language, prefix, bundle, base, output):
         '-AppleLanguages', f'({language})',
         f'--vault={vault}',
         f'--tool-label-inspection={result}',
-        f'--tool-label-media={output / (prefix + "-hold-media")}',
+        f'--tool-label-media={media / prefix / "hold"}',
         '--tool-label-hold=1',
         '--inspect-hold-open',
     ]
@@ -240,7 +241,7 @@ def main():
         summary = {}
         for language, prefix in (('en', 'en'), ('zh-Hans', 'zh-Hans')):
             summary[prefix] = run_language(language, prefix, bundle, base, media, output)
-            summary[prefix]['accessibility'] = check_accessibility(probe, language, prefix, bundle, base, output)
+            summary[prefix]['accessibility'] = check_accessibility(probe, language, prefix, bundle, base, media, output)
         (output / 'summary.json').write_text(json.dumps(summary, indent=2, ensure_ascii=False) + '\n')
         print(json.dumps({prefix: {
             'titles': [value['cases'][name]['states'][0]['title'] for name in ('static', 'shell', 'agent')],
