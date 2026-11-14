@@ -205,8 +205,8 @@ final class Workspace {
     }
 
     func closeTerminal(_ id: UUID) async {
-        layout?.remove(.terminal(id))
         await terminals.stopAndRemove(id)
+        layout?.remove(.terminal(id))
         scheduleSessionSave()
     }
 

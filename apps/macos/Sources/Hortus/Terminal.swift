@@ -260,9 +260,13 @@ final class TerminalSession {
         Self.signalProcessGroup(pid, signal: SIGHUP)
         killTask = Task { [weak self, weak view] in
             do { try await Task.sleep(for: .seconds(1)) } catch { return }
-            guard let self, let view, view.process.running || view.process.windingDown else { return }
-            Self.signalProcessGroup(pid, signal: SIGKILL)
-            self.killTask = nil
+            guard let self, let view else { return }
+            if view.process.running || view.process.windingDown {
+                Self.signalProcessGroup(pid, signal: SIGKILL)
+                view.terminate()
+            }
+            // SwiftUI 移除视图后 SwiftTerm 可能不再回调；停止等待必须显式完成。
+            self.processTerminated(exitCode: nil)
         }
     }
 
