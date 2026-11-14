@@ -618,7 +618,7 @@ def main():
                 finally:
                     locked.chmod(0o600)
                 assert data.get('failure'), (path_name, data)
-                assert 'cannot be read' in data['failure'], (path_name, data)
+                assert data['sessions'][0].get('error') == 'history.source_unreadable', (path_name, data)
                 assert not any((case / 'scratch').rglob('*')), (path_name, list((case / 'scratch').rglob('*')))
                 assert data['shell_alive'], path_name
                 assert data['sessions'] and data['sessions'][0]['state'] == 'failed', (path_name, data)

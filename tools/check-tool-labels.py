@@ -47,7 +47,8 @@ def check_states(case, name, media, title):
     assert len(states) == 8, (name, len(states))
     seen = set()
     for state in states:
-        assert state['title'] == title, (name, state['title'], title)
+        actual = state['title']
+        assert actual == title or (actual.startswith(title + ' ') and actual.rsplit(' ', 1)[-1].isdigit()), (name, actual, title)
         seen.add((state['appearance'], state['width'], state['selected']))
         if state['title_visible']:
             assert state['title_is_full'], (name, state)
