@@ -46,6 +46,7 @@ fn vault_fixture() -> (tempfile::TempDir, PathBuf, HistoryStore) {
     fs::write(root.path().join("outside/changed.txt"), b"outside\n").unwrap();
     symlink("edit.md", vault.join("link-edit")).unwrap();
     symlink("keep.md", vault.join("link-drop")).unwrap();
+    symlink("keep.md", vault.join("link-remove")).unwrap();
     symlink(root.path().join("outside"), vault.join("outside-dir")).unwrap();
     fs::write(root.path().join("outside/tracked.txt"), b"outside\n").unwrap();
     let store = HistoryStore::new(root.path().join("data"));
@@ -93,9 +94,11 @@ fn mutate(vault: &Path, root: &Path) {
     changed.rotate_left(7);
 
     symlink("keep.md", vault.join("link-new")).unwrap();
+    symlink("edit.md", vault.join("link-add")).unwrap();
     fs::remove_file(vault.join("link-edit")).unwrap();
     symlink("keep.md", vault.join("link-edit")).unwrap();
     fs::remove_file(vault.join("link-drop")).unwrap();
+    fs::remove_file(vault.join("link-remove")).unwrap();
 
     let _ = fs::read_link(vault.join("outside-dir")).unwrap();
 
@@ -229,6 +232,8 @@ fn session_review_detects_all_change_classes_and_stays_read_only() {
     assert_eq!(link_renamed.old_path.as_deref(), Some("link-drop"));
     assert!(link_renamed.content_identical);
     assert_eq!(find(&summary, "link-edit").change, ChangeKind::Modified);
+    assert_eq!(find(&summary, "link-add").change, ChangeKind::Added);
+    assert_eq!(find(&summary, "link-remove").change, ChangeKind::Deleted);
 
     // 未变化的文件、目录与 .git 内容都不进入列表。
     assert!(!changed(&summary, "keep.md"));
@@ -246,8 +251,8 @@ fn session_review_detects_all_change_classes_and_stays_read_only() {
             .iter()
             .any(|entry| entry.id.contains("outside/tracked"))
     );
-    assert_eq!(summary.counts.added, 7);
-    assert_eq!(summary.counts.deleted, 3);
+    assert_eq!(summary.counts.added, 8);
+    assert_eq!(summary.counts.deleted, 4);
     assert_eq!(summary.counts.renamed, 3);
     assert_eq!(summary.counts.modified, 4);
     assert_eq!(summary.counts.type_changed, 1);
