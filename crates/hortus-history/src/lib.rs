@@ -408,6 +408,10 @@ type WritePredicate = fn(&Path) -> bool;
 pub(crate) static TEST_FAIL_WRITE: std::sync::Mutex<Option<WritePredicate>> =
     std::sync::Mutex::new(None);
 
+/// 故障注入钩子与快照钩子都是进程级全局；使用它们的测试必须串行。
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 元数据与清单共用原子写入：同目录临时文件、fsync、替换、目录 fsync。
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
@@ -476,6 +480,9 @@ mod tests {
 
     #[test]
     fn publish_failures_leave_only_unusable_records() {
+        let _serial = crate::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let (root, vault) = fixture();
         let store = HistoryStore::new(root.path().join("data-manifest"));
         *TEST_FAIL_WRITE.lock().unwrap() =

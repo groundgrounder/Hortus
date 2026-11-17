@@ -335,6 +335,9 @@ mod tests {
 
     #[test]
     fn source_change_during_copy_fails_the_snapshot() {
+        let _serial = crate::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = tempfile::TempDir::new().unwrap();
         let vault = root.path().join("vault");
         fs::create_dir(&vault).unwrap();
