@@ -2,8 +2,16 @@
 use hortus_ffi::{ReviewCancellation, WorkspaceCore};
 use std::fs;
 
+/// 两个用例都通过进程环境变量指向各自的数据根，必须串行构造 Core。
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_environment() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 #[test]
 fn review_summary_and_details_round_trip() {
+    let _environment = lock_environment();
     let root = tempfile::TempDir::new().unwrap();
     let config = root.path().join("config");
     let cache = root.path().join("cache");
@@ -138,6 +146,7 @@ fn review_summary_and_details_round_trip() {
 
 #[test]
 fn preparing_sessions_are_listed_but_not_reviewable() {
+    let _environment = lock_environment();
     let root = tempfile::TempDir::new().unwrap();
     let data = root.path().join("data");
     let vault = root.path().join("vault");
