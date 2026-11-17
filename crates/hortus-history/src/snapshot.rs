@@ -279,6 +279,14 @@ fn scan(root: &Path, cancel: Option<&AtomicBool>) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
+/// 仅供会话审阅：按快照同一口径扫描当前库并返回清单形态。
+pub(crate) fn scan_manifest(
+    root: &Path,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<Vec<ManifestEntry>> {
+    Ok(scan(root, cancel)?.iter().map(Entry::manifest).collect())
+}
+
 fn walk(
     root: &Path,
     relative: &Path,

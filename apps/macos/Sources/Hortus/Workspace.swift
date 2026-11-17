@@ -74,6 +74,7 @@ final class Workspace {
     var opening = false
     var error: String?
     let terminals = TerminalController()
+    let changes = ChangesModel()
     var fontSize = 15.0 {
         didSet { terminals.update(fontSize: fontSize) }
     }
@@ -110,6 +111,15 @@ final class Workspace {
 
     init() {
         terminals.workspace = self
+        changes.workspace = self
+    }
+
+    /// 当前窗口最近使用的 Agent 会话；面板默认优先选中它。
+    var currentAgentSessionID: String? {
+        if let tab = terminals.current, tab.kind == .agent, let id = tab.agentSessionID {
+            return id
+        }
+        return terminals.allTabs.last { $0.kind == .agent }?.agentSessionID
     }
 
     var current: NoteTab? { tabs.first { $0.path == selected } }
@@ -279,6 +289,7 @@ final class Workspace {
         openingRequest = UUID()
         for tab in tabs { tab.document?.stopForShutdown() }
         await terminals.setRootAndWait(nil)
+        changes.reset()
         quickOpenTask?.cancel(); searchTask?.cancel(); searchCancellation?.cancel()
         context?.detach(self)
         context = nil

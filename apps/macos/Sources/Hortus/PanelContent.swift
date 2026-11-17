@@ -12,6 +12,8 @@ struct PanelContent: View {
             SearchPanel()
         case .tool(.outline):
             OutlinePanel()
+        case .tool(.changes):
+            ChangesPanel()
         case .terminal(let id):
             if let tab = workspace.terminals.tab(id) {
                 TerminalPanel(tab: tab, fontSize: workspace.fontSize)

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// 当前可用的静态工具。终端实例不属于这里，由 `ToolID.terminal` 表示。
 enum StaticTool: String, CaseIterable, Identifiable, Codable {
-    case files, search, outline
+    case files, search, outline, changes
     var id: String { rawValue }
 
     var title: String {
@@ -10,6 +10,7 @@ enum StaticTool: String, CaseIterable, Identifiable, Codable {
         case .files: L10n.string("Files")
         case .search: L10n.string("Search")
         case .outline: L10n.string("Outline")
+        case .changes: L10n.string("Changes")
         }
     }
 
@@ -18,13 +19,14 @@ enum StaticTool: String, CaseIterable, Identifiable, Codable {
         case .files: "folder"
         case .search: "magnifyingglass"
         case .outline: "list.bullet.indent"
+        case .changes: "arrow.left.arrow.right.square"
         }
     }
 }
 
 /// 旧布局里已停用的视图。只用于读取磁盘上的兼容数据，永远不进入界面或 + 菜单。
 enum LegacyTool: String, Codable {
-    case tags, backlinks, changes
+    case tags, backlinks
 }
 
 /// 一个工具标签：静态工具或带稳定 UUID 的终端实例。
@@ -131,7 +133,7 @@ final class Layout {
         let terminalID = UUID()
         groups = [
             .left: [PanelGroup(tabs: [.tool(.files), .tool(.search)], selected: .tool(.files))],
-            .right: [PanelGroup(tabs: [.tool(.outline)], selected: .tool(.outline))],
+            .right: [PanelGroup(tabs: [.tool(.outline), .tool(.changes)], selected: .tool(.outline))],
             .bottom: [PanelGroup(tabs: [.terminal(terminalID)], selected: .terminal(terminalID))],
         ]
         visible = [.left: true, .right: true, .bottom: false]
@@ -145,7 +147,7 @@ final class Layout {
         let terminalID = UUID()
         groups = [
             .left: [PanelGroup(tabs: [.tool(.files), .tool(.search)], selected: .tool(.files))],
-            .right: [PanelGroup(tabs: [.tool(.outline)], selected: .tool(.outline))],
+            .right: [PanelGroup(tabs: [.tool(.outline), .tool(.changes)], selected: .tool(.outline))],
             .bottom: [PanelGroup(tabs: [.terminal(terminalID)], selected: .terminal(terminalID))],
         ]
         visible = [.left: true, .right: true, .bottom: false]
@@ -253,8 +255,8 @@ final class Layout {
         visible[region] = true
         guard availableGroups(in: region).isEmpty else { return nil }
         let preferred: [StaticTool] = switch region {
-        case .left: [.files, .search, .outline]
-        case .right: [.outline, .files, .search]
+        case .left: [.files, .search, .outline, .changes]
+        case .right: [.outline, .changes, .files, .search]
         case .bottom: []
         }
         let present = Set(staticTools)

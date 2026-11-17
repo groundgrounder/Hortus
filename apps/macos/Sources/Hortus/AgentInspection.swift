@@ -217,6 +217,10 @@ enum AgentInspection {
     static func run(workspace: Workspace, layout: Layout, arguments: [String]) async throws -> [String: Any] {
         let mode = argument("agent-mode", in: arguments) ?? "launch"
         let scratchDirectory = argument("agent-scratch", in: arguments)
+        if mode.hasPrefix("review-") {
+            return try await ReviewInspection.run(workspace: workspace, layout: layout,
+                                                  arguments: arguments, mode: mode)
+        }
         let controller = workspace.terminals
         workspace.showTerminal()
         var result: [String: Any] = ["mode": mode, "root": workspace.root ?? ""]

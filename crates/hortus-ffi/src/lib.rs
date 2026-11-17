@@ -147,6 +147,180 @@ pub struct AgentSessionInfo {
     pub bytes: u64,
     pub method: String,
     pub error: Option<String>,
+    pub usable: bool,
+    pub snapshot_at_ms: i64,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct ReviewMetadata {
+    pub kind: String,
+    pub size: u64,
+    pub mode: u32,
+    pub modified_ms: Option<i64>,
+    pub link: Option<String>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct ReviewEntryInfo {
+    pub id: String,
+    pub old_path: Option<String>,
+    pub new_path: Option<String>,
+    pub change: String,
+    pub before: Option<ReviewMetadata>,
+    pub after: Option<ReviewMetadata>,
+    pub text: bool,
+    pub content_identical: bool,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct ReviewCounts {
+    pub added: u64,
+    pub modified: u64,
+    pub deleted: u64,
+    pub renamed: u64,
+    pub type_changed: u64,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct SessionReviewSummary {
+    pub session_id: String,
+    pub vault: String,
+    pub state: String,
+    pub snapshot_at_ms: i64,
+    pub counts: ReviewCounts,
+    pub elapsed_ms: u64,
+    pub entries: Vec<ReviewEntryInfo>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct ReviewDiffLine {
+    pub kind: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub text: String,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct ReviewDiffHunk {
+    pub old_start: u32,
+    pub old_count: u32,
+    pub new_start: u32,
+    pub new_count: u32,
+    pub lines: Vec<ReviewDiffLine>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct ReviewEntryDetail {
+    pub entry: ReviewEntryInfo,
+    pub text: bool,
+    pub binary: bool,
+    pub large: bool,
+    pub content_identical: bool,
+    pub old_no_final_newline: bool,
+    pub new_no_final_newline: bool,
+    pub line_endings_changed: bool,
+    pub hunks: Vec<ReviewDiffHunk>,
+}
+
+#[derive(uniffi::Object)]
+pub struct ReviewCancellation {
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+#[uniffi::export]
+impl ReviewCancellation {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl ReviewCancellation {
+    fn flag(&self) -> &std::sync::atomic::AtomicBool {
+        &self.cancelled
+    }
+}
+
+fn review_metadata(metadata: &history::review::EntryMetadata) -> ReviewMetadata {
+    ReviewMetadata {
+        kind: metadata.kind.clone(),
+        size: metadata.size,
+        mode: metadata.mode,
+        modified_ms: metadata.modified_ms,
+        link: metadata.link.clone(),
+    }
+}
+
+fn review_entry(entry: &history::review::ReviewEntry) -> ReviewEntryInfo {
+    ReviewEntryInfo {
+        id: entry.id.clone(),
+        old_path: entry.old_path.clone(),
+        new_path: entry.new_path.clone(),
+        change: entry.change.as_str().into(),
+        before: entry.before.as_ref().map(review_metadata),
+        after: entry.after.as_ref().map(review_metadata),
+        text: entry.text,
+        content_identical: entry.content_identical,
+    }
+}
+
+fn review_summary(summary: history::review::ReviewSummary) -> SessionReviewSummary {
+    SessionReviewSummary {
+        session_id: summary.session_id,
+        vault: summary.vault,
+        state: summary.state,
+        snapshot_at_ms: summary.snapshot_at_ms,
+        counts: ReviewCounts {
+            added: summary.counts.added,
+            modified: summary.counts.modified,
+            deleted: summary.counts.deleted,
+            renamed: summary.counts.renamed,
+            type_changed: summary.counts.type_changed,
+        },
+        elapsed_ms: summary.elapsed_ms,
+        entries: summary.entries.iter().map(review_entry).collect(),
+    }
+}
+
+fn review_detail(detail: history::review::ReviewDetail) -> ReviewEntryDetail {
+    ReviewEntryDetail {
+        entry: review_entry(&detail.entry),
+        text: detail.text,
+        binary: detail.binary,
+        large: detail.large,
+        content_identical: detail.content_identical,
+        old_no_final_newline: detail.old_no_final_newline,
+        new_no_final_newline: detail.new_no_final_newline,
+        line_endings_changed: detail.line_endings_changed,
+        hunks: detail
+            .hunks
+            .into_iter()
+            .map(|hunk| ReviewDiffHunk {
+                old_start: hunk.old_start,
+                old_count: hunk.old_count,
+                new_start: hunk.new_start,
+                new_count: hunk.new_count,
+                lines: hunk
+                    .lines
+                    .into_iter()
+                    .map(|line| ReviewDiffLine {
+                        kind: line.kind,
+                        old_line: line.old_line,
+                        new_line: line.new_line,
+                        text: line.text,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
 #[derive(uniffi::Object)]
@@ -175,6 +349,9 @@ fn session_info(
         bytes: stats.bytes,
         method: stats.method,
         error: record.error.clone(),
+        usable: record.state.usable(),
+        snapshot_at_ms: record.created_at_ms.saturating_add(stats.elapsed_ms as i64),
+        exit_code: record.exit_code,
     })
 }
 
@@ -443,6 +620,34 @@ impl WorkspaceCore {
     pub fn recover_agent_sessions(&self) -> Result<u32, CoreError> {
         let store = self.store.lock().unwrap();
         Ok(history::HistoryStore::new(store.data_root()).recover()? as u32)
+    }
+
+    /// 在后台任务中计算会话的全库改动摘要；不持有 Store 锁。
+    pub fn review_agent_session(
+        &self,
+        id: String,
+        cancellation: Arc<ReviewCancellation>,
+    ) -> Result<SessionReviewSummary, CoreError> {
+        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let history = history::HistoryStore::new(data);
+        let summary = history.review(&id, Some(cancellation.flag()))?;
+        Ok(review_summary(summary))
+    }
+
+    /// 选中条目后再按需计算逐行 diff 或二进制/符号链接元数据。
+    /// 路径只接受库内相对路径；`..`、绝对路径与空路径都拒绝。
+    pub fn review_agent_session_entry(
+        &self,
+        id: String,
+        path: String,
+        old_path: Option<String>,
+        cancellation: Arc<ReviewCancellation>,
+    ) -> Result<ReviewEntryDetail, CoreError> {
+        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let history = history::HistoryStore::new(data);
+        let detail =
+            history.review_entry(&id, &path, old_path.as_deref(), Some(cancellation.flag()))?;
+        Ok(review_detail(detail))
     }
 }
 
