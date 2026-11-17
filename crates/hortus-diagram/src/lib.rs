@@ -1,6 +1,7 @@
 //! 树形 Mermaid 的解析、字体度量、响应式排版和平台无关场景。
 mod color;
 mod font;
+mod geometry;
 mod graph;
 mod graph_layout;
 mod graph_parser;
@@ -11,6 +12,7 @@ mod parser;
 mod scene;
 mod shape;
 mod svg;
+mod syntax;
 mod text;
 
 pub use color::Color;

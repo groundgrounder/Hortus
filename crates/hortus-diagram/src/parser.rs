@@ -1,4 +1,8 @@
 use crate::graph::{Diagram, EdgeLine, Marker, Shape};
+use crate::syntax::{
+    TREE_STATEMENTS, connector_start, is_id_char, scan_shape_body, skip_space, split_style_items,
+    starts_word, unquote,
+};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -292,41 +296,52 @@ pub fn parse_diagram_at(source: &str, offset: usize) -> Result<Diagram, DiagramE
 }
 
 fn parse_diagram_relative(source: &str) -> Result<Diagram, DiagramError> {
-    let first = statements(source)
-        .first()
-        .map(|(_, statement)| *statement)
+    let first = crate::syntax::first_statement(source, TREE_STATEMENTS)
+        .map(|(_, statement)| statement)
         .unwrap_or("");
     if first.split_whitespace().next() == Some("mindmap") {
         return parse_relative(source).map(Diagram::Tree);
     }
-    // 先保留旧树入口的样式与忽略语义；能力探测不执行 Graph 样式校验。
-    if let Ok(tree) = parse_relative(source) {
-        let Ok(graph) = crate::graph_parser::tree_probe(source) else {
-            return Ok(Diagram::Tree(tree));
-        };
-        let ordinary_tree = graph.direction == crate::Direction::TopToBottom
-            && graph
-                .nodes
-                .iter()
-                .all(|node| node.shape == Shape::Rectangle)
-            && graph.edges.iter().all(|edge| {
-                edge.label.is_none()
-                    && edge.connector.line == EdgeLine::Solid
-                    && edge.connector.start == Marker::None
-                    && edge.connector.end == Marker::Arrow
-            })
-            && graph
-                .edges
-                .iter()
-                .map(|edge| (edge.from, edge.to))
-                .collect::<HashSet<_>>()
-                .len()
-                == graph.edges.len();
-        if ordinary_tree {
-            return Ok(Diagram::Tree(tree));
+    // 先用宽松探测确定是否只是普通树，避免树解析、探测、严格解析各扫一遍。
+    // 探测成功但不像普通树时，严格解析是唯一的错误来源；探测失败则回到
+    // 旧树入口，保持旧入口能接受而一般图解析器拒绝的语法。
+    match crate::graph_parser::tree_probe(source) {
+        Ok(graph) => {
+            if ordinary_tree(&graph) {
+                match parse_relative(source) {
+                    Ok(tree) => Ok(Diagram::Tree(tree)),
+                    Err(_) => crate::graph_parser::parse(source).map(Diagram::Graph),
+                }
+            } else {
+                crate::graph_parser::parse(source).map(Diagram::Graph)
+            }
         }
+        Err(_) => match parse_relative(source) {
+            Ok(tree) => Ok(Diagram::Tree(tree)),
+            Err(_) => crate::graph_parser::parse(source).map(Diagram::Graph),
+        },
     }
-    crate::graph_parser::parse(source).map(Diagram::Graph)
+}
+
+fn ordinary_tree(graph: &crate::Graph) -> bool {
+    graph.direction == crate::Direction::TopToBottom
+        && graph
+            .nodes
+            .iter()
+            .all(|node| node.shape == Shape::Rectangle)
+        && graph.edges.iter().all(|edge| {
+            edge.label.is_none()
+                && edge.connector.line == EdgeLine::Solid
+                && edge.connector.start == Marker::None
+                && edge.connector.end == Marker::Arrow
+        })
+        && graph
+            .edges
+            .iter()
+            .map(|edge| (edge.from, edge.to))
+            .collect::<HashSet<_>>()
+            .len()
+            == graph.edges.len()
 }
 
 impl Diagram {
@@ -411,69 +426,7 @@ pub(crate) fn syntax(range: Range<usize>, kind: &str) -> DiagramError {
 
 // 只在形状、引号以外切分语句，保留原始字节位置。注释中的分号不影响解析。
 pub(crate) fn statements(source: &str) -> Vec<(usize, &str)> {
-    let mut result = Vec::new();
-    let mut start = 0;
-    let mut stack = Vec::new();
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut comment = false;
-    let bytes = source.as_bytes();
-    for (i, ch) in source.char_indices() {
-        if comment {
-            if ch == '\n' {
-                comment = false;
-                start = i + 1;
-            }
-            continue;
-        }
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-            continue;
-        }
-        if ch == '"' {
-            quoted = true;
-            continue;
-        }
-        if stack.is_empty() && bytes[i..].starts_with(b"%%") {
-            push_statement(&mut result, source, start, i);
-            comment = true;
-            continue;
-        }
-        match ch {
-            '[' | '(' | '{' => stack.push(ch),
-            ']' | ')' | '}' => {
-                stack.pop();
-            }
-            '\n' | ';' if stack.is_empty() => {
-                push_statement(&mut result, source, start, i);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if !comment {
-        push_statement(&mut result, source, start, source.len());
-    }
-    result
-}
-
-fn push_statement<'a>(
-    result: &mut Vec<(usize, &'a str)>,
-    source: &'a str,
-    start: usize,
-    end: usize,
-) {
-    let raw = &source[start..end];
-    let text = raw.trim();
-    if !text.is_empty() {
-        result.push((start + raw.len() - raw.trim_start().len(), text));
-    }
+    crate::syntax::statements(source, TREE_STATEMENTS)
 }
 
 #[derive(Default)]
@@ -576,7 +529,7 @@ fn parse_flow_statement(text: &str, at: usize, builder: &mut Builder) -> Result<
     }
     if ["linkStyle", "click", "accTitle", "accDescr"]
         .iter()
-        .any(|directive| is_directive(text, directive))
+        .any(|directive| starts_word(text, directive))
     {
         return Ok(());
     }
@@ -657,16 +610,9 @@ fn parse_flow_statement(text: &str, at: usize, builder: &mut Builder) -> Result<
     }
 }
 
-fn is_directive(text: &str, directive: &str) -> bool {
-    text == directive
-        || text
-            .strip_prefix(directive)
-            .is_some_and(|rest| rest.starts_with(':') || rest.starts_with(char::is_whitespace))
-}
-
 fn parse_style_properties(properties: &str) -> ClassStyle {
     let mut style = ClassStyle::default();
-    for property in split_style_properties(properties) {
+    for property in split_style_items(properties) {
         if let Some((key, value)) = property.split_once(':') {
             match key.trim() {
                 "stroke" => style.stroke = Some(value.trim().into()),
@@ -676,25 +622,6 @@ fn parse_style_properties(properties: &str) -> ClassStyle {
         }
     }
     style
-}
-
-fn split_style_properties(properties: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut start = 0;
-    let mut depth: usize = 0;
-    for (i, ch) in properties.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                result.push(properties[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    result.push(properties[start..].trim());
-    result
 }
 
 fn parse_connector(
@@ -783,10 +710,6 @@ fn parse_connector(
     Ok(None)
 }
 
-fn skip_space(text: &str, cursor: &mut usize) {
-    *cursor += text[*cursor..].len() - text[*cursor..].trim_start().len();
-}
-
 fn parse_ref(
     text: &str,
     cursor: &mut usize,
@@ -796,7 +719,7 @@ fn parse_ref(
     skip_space(text, cursor);
     let start = *cursor;
     while let Some(ch) = text[*cursor..].chars().next() {
-        if connector_start(&text[*cursor..]) || !(ch.is_alphanumeric() || ch == '_' || ch == '-') {
+        if connector_start(&text[*cursor..]) || !is_id_char(ch) {
             break;
         }
         *cursor += ch.len_utf8();
@@ -809,13 +732,6 @@ fn parse_ref(
     let label = parse_shape(text, cursor, at)?;
     let class = parse_class(text, cursor);
     Ok(builder.node(id, label, class, at + start..at + *cursor))
-}
-
-fn connector_start(text: &str) -> bool {
-    text.starts_with("<--")
-        || text.starts_with("--")
-        || text.starts_with("-.")
-        || text.starts_with("==")
 }
 
 const SHAPES: &[(&str, &str)] = &[
@@ -841,54 +757,14 @@ fn parse_shape(text: &str, cursor: &mut usize, at: usize) -> Result<Option<Strin
     };
     let start = *cursor;
     let body = start + open.len();
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut nested = Vec::new();
-    for (relative, ch) in text[body..].char_indices() {
-        let i = body + relative;
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-            continue;
-        }
-        if ch == '"' {
-            quoted = true;
-            continue;
-        }
-        if nested.is_empty() && text[i..].starts_with(close) {
-            *cursor = i + close.len();
-            return Ok(Some(unquote(&text[body..i])));
-        }
-        match ch {
-            '[' | '(' | '{' => nested.push(ch),
-            ']' | ')' | '}' => {
-                nested.pop();
-            }
-            _ => {}
-        }
-    }
-    Err(syntax(
-        at + start..at + text.len(),
-        "node_shape_or_quote_unclosed",
-    ))
-}
-
-fn unquote(text: &str) -> String {
-    let text = text.trim();
-    let text = text
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(text);
-    text.replace("\\\"", "\"")
-        .replace("&quot;", "\"")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
+    let Some(end) = scan_shape_body(text, body, close) else {
+        return Err(syntax(
+            at + start..at + text.len(),
+            "node_shape_or_quote_unclosed",
+        ));
+    };
+    *cursor = end + close.len();
+    Ok(Some(unquote(&text[body..end])))
 }
 
 fn parse_class(text: &str, cursor: &mut usize) -> Option<String> {
@@ -899,7 +775,7 @@ fn parse_class(text: &str, cursor: &mut usize) -> Option<String> {
     *cursor += 3;
     let start = *cursor;
     while let Some(ch) = text[*cursor..].chars().next() {
-        if !(ch.is_alphanumeric() || ch == '_' || ch == '-') {
+        if !is_id_char(ch) {
             break;
         }
         *cursor += ch.len_utf8();
@@ -917,7 +793,7 @@ fn mindmap_explicit_ids(source: &str) -> HashSet<String> {
         }
         let mut cursor = 0;
         while let Some(ch) = text[cursor..].chars().next() {
-            if !(ch.is_alphanumeric() || ch == '_' || ch == '-') {
+            if !is_id_char(ch) {
                 break;
             }
             cursor += ch.len_utf8();
@@ -960,7 +836,7 @@ fn parse_mindmap(source: &str, at: usize, builder: &mut Builder) -> Result<(), D
             .sum();
         let mut cursor = 0;
         while let Some(ch) = text[cursor..].chars().next() {
-            if !(ch.is_alphanumeric() || ch == '_' || ch == '-') {
+            if !is_id_char(ch) {
                 break;
             }
             cursor += ch.len_utf8();

@@ -4,6 +4,10 @@ use crate::graph::{
     Shape, Style,
 };
 use crate::parser::{DiagramError, syntax, unsupported};
+use crate::syntax::{
+    GRAPH_STATEMENTS, connector_start, is_id_char, scan_shape_body, skip_space, split_style_items,
+    starts_word, unquote, word_tail,
+};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -16,7 +20,7 @@ pub(crate) fn tree_probe(source: &str) -> Result<Graph, DiagramError> {
 }
 
 fn parse_mode(source: &str, tree_probe: bool) -> Result<Graph, DiagramError> {
-    let statements = graph_statements(source);
+    let statements = crate::syntax::statements(source, GRAPH_STATEMENTS);
     let Some((header_at, header)) = statements.first().copied() else {
         return Err(syntax(0..0, "missing_type"));
     };
@@ -564,46 +568,19 @@ fn parse_shape(
         return Ok((Shape::Rectangle, None));
     };
     let body = *cursor + open.len();
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut nested = Vec::new();
-    for (relative, ch) in text[body..].char_indices() {
-        let index = body + relative;
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-            continue;
-        }
-        if ch == '"' {
-            quoted = true;
-            continue;
-        }
-        if nested.is_empty() && text[index..].starts_with(close) {
-            let raw = &text[body..index];
-            let trimmed = raw.trim();
-            let left = raw.len() - raw.trim_start().len();
-            let label_start = body + left;
-            let label_end = label_start + trimmed.len();
-            *cursor = index + close.len();
-            return Ok((*shape, Some((unquote(trimmed), label_start..label_end))));
-        }
-        match ch {
-            '[' | '(' | '{' => nested.push(ch),
-            ']' | ')' | '}' => {
-                nested.pop();
-            }
-            _ => {}
-        }
-    }
-    Err(syntax(
-        at + *cursor..at + text.len(),
-        "node_shape_or_quote_unclosed",
-    ))
+    let Some(end) = scan_shape_body(text, body, close) else {
+        return Err(syntax(
+            at + *cursor..at + text.len(),
+            "node_shape_or_quote_unclosed",
+        ));
+    };
+    let raw = &text[body..end];
+    let trimmed = raw.trim();
+    let left = raw.len() - raw.trim_start().len();
+    let label_start = body + left;
+    let label_end = label_start + trimmed.len();
+    *cursor = end + close.len();
+    Ok((*shape, Some((unquote(trimmed), label_start..label_end))))
 }
 
 fn parse_connector(
@@ -778,14 +755,6 @@ fn parse_connector(
     })
 }
 
-fn connector_start(text: &str) -> bool {
-    text.starts_with("--")
-        || text.starts_with("-.")
-        || text.starts_with("==")
-        || text.starts_with("<--")
-        || text.starts_with("~~~")
-}
-
 fn parse_inline_class(text: &str, cursor: &mut usize) -> Option<String> {
     skip_space(text, cursor);
     if !text[*cursor..].starts_with(":::") {
@@ -809,20 +778,7 @@ fn parse_style(
 ) -> Result<Style, DiagramError> {
     let mut style = Style::default();
     // CSS 函数的逗号属于同一属性；即使不支持该颜色也保留完整诊断范围。
-    let mut depth = 0usize;
-    let items = text.split(|ch| match ch {
-        '(' => {
-            depth += 1;
-            false
-        }
-        ')' => {
-            depth = depth.saturating_sub(1);
-            false
-        }
-        ',' => depth == 0,
-        _ => false,
-    });
-    for item in items {
+    for item in split_style_items(text) {
         let Some((key, value)) = item.split_once(':') else {
             return Err(syntax(at..at + text.len(), "style_invalid_property"));
         };
@@ -875,124 +831,4 @@ fn parse_dasharray(value: &str) -> Option<Vec<f64>> {
         && values.iter().all(|value| *value >= 0.0)
         && values.iter().any(|value| *value > 0.0))
     .then_some(values)
-}
-
-fn starts_word(text: &str, word: &str) -> bool {
-    text == word
-        || text
-            .strip_prefix(word)
-            .is_some_and(|tail| tail.starts_with(char::is_whitespace) || tail.starts_with(':'))
-}
-
-fn word_tail<'a>(text: &'a str, word: &str) -> Option<&'a str> {
-    text.strip_prefix(word)
-        .filter(|tail| tail.starts_with(char::is_whitespace))
-        .map(str::trim_start)
-}
-
-fn is_id_char(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '_' | '-')
-}
-
-fn skip_space(text: &str, cursor: &mut usize) {
-    *cursor += text[*cursor..].len() - text[*cursor..].trim_start().len();
-}
-
-fn unquote(text: &str) -> String {
-    let text = text
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(text);
-    text.replace("\\\"", "\"")
-        .replace("&quot;", "\"")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-}
-
-// 普通图的词法边界独立于旧树入口，避免改变旧场景与错误契约。
-fn graph_statements(source: &str) -> Vec<(usize, &str)> {
-    let mut result = Vec::new();
-    let mut start = 0;
-    let mut depth = 0usize;
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut pipe = false;
-    let mut infix = false;
-    let mut comment = false;
-    for (index, ch) in source.char_indices() {
-        if comment {
-            if ch == '\n' {
-                comment = false;
-                start = index + 1;
-            }
-            continue;
-        }
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if quoted {
-            if ch == '\\' {
-                escaped = true;
-            }
-            if ch == '"' {
-                quoted = false;
-            }
-            continue;
-        }
-        if ch == '"' {
-            quoted = true;
-            continue;
-        }
-        if depth == 0 && ch == '|' {
-            pipe = !pipe;
-            continue;
-        }
-        if pipe {
-            continue;
-        }
-        if depth == 0 && source[index..].starts_with("-->") {
-            infix = false;
-        }
-        if depth == 0
-            && (index == 0 || source.as_bytes()[index - 1] != b'-')
-            && source[index..].starts_with("--")
-            && source[index + 2..].starts_with(char::is_whitespace)
-        {
-            infix = true;
-        }
-        if !infix && depth == 0 && source[index..].starts_with("%%") {
-            push_graph_statement(&mut result, source, start, index);
-            comment = true;
-            continue;
-        }
-        if infix {
-            continue;
-        }
-        match ch {
-            '[' | '(' | '{' => depth += 1,
-            ']' | ')' | '}' => depth = depth.saturating_sub(1),
-            '\n' | ';' if depth == 0 => {
-                push_graph_statement(&mut result, source, start, index);
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-    if !comment {
-        push_graph_statement(&mut result, source, start, source.len());
-    }
-    result
-}
-fn push_graph_statement<'a>(
-    result: &mut Vec<(usize, &'a str)>,
-    source: &'a str,
-    start: usize,
-    end: usize,
-) {
-    let raw = &source[start..end];
-    if !raw.trim().is_empty() {
-        result.push((start + raw.len() - raw.trim_start().len(), raw.trim()));
-    }
 }

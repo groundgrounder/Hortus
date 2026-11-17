@@ -1640,6 +1640,28 @@ fn tree_dispatch_preserves_legacy_styles_before_graph_validation() {
 }
 
 #[test]
+fn diagram_dispatch_keeps_error_ranges_and_ordinary_tree_fallback() {
+    let source = "flowchart TB\nA[甲] --> B\nB --> C\nA --> C\nlinkStyle 0 stroke:red\n";
+    let DiagramError::UnsupportedConstruct { range, .. } =
+        parse_diagram_at(source, 31).unwrap_err()
+    else {
+        panic!("merge with linkStyle must keep the graph error")
+    };
+    assert_eq!(
+        &source[range.start - 31..range.end - 31],
+        "linkStyle 0 stroke:red"
+    );
+
+    // 普通树仍走旧入口：样式校验只在一般图路径执行。
+    let source = "flowchart TB\nA --> B\nclassDef x fill:not-a-color\n";
+    assert!(matches!(parse_diagram(source), Ok(Diagram::Tree(_))));
+
+    // 树入口失败但图入口成功时仍返回 Graph。
+    let source = "flowchart TB\nA --> B\nC --> B\n";
+    assert!(matches!(parse_diagram(source), Ok(Diagram::Graph(_))));
+}
+
+#[test]
 fn unsupported_graph_constructs_keep_utf8_ranges_and_class_fallback_is_diagnostic() {
     let source = "flowchart TB\nA[甲] --> C\nB --> C\nlinkStyle 0 stroke:#f00\n";
     let DiagramError::UnsupportedConstruct { range, .. } =
