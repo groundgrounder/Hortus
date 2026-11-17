@@ -69,6 +69,11 @@ enum AgentInspection {
         }
     }
 
+    private static func normalizedPath(_ path: String?) -> String {
+        guard let path, !path.isEmpty else { return "" }
+        return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
+
     #if DEBUG
     private static func dragTool(_ tool: ToolID, to region: Region, layout: Layout, window: NSWindow,
                                  step: String) async throws -> Bool {
@@ -678,6 +683,14 @@ enum AgentInspection {
             try await waitShell(secondExtra)
             let tabs = [firstTab, firstExtra, secondFirst, secondExtra]
             let pids = tabs.map(\.session.inspectionShellPid)
+            // 子进程 fork 后先继承应用 cwd，再由当前目录参数切换；等切换完成再取样。
+            let expectedRoots = [workspace.root ?? "", workspace.root ?? "",
+                                 secondWorkspace.root ?? "", secondWorkspace.root ?? ""]
+            for (pid, root) in zip(pids, expectedRoots) {
+                try await wait(seconds: 10, until: "shell cwd 切到库根") {
+                    normalizedPath(currentDirectory(pid)) == normalizedPath(root)
+                }
+            }
             result["pids"] = pids.map(Int.init)
             result["cwds"] = pids.map { currentDirectory($0) ?? "" }
             result["roots"] = [workspace.root ?? "", secondWorkspace.root ?? ""]
@@ -823,6 +836,8 @@ enum AgentInspection {
                 case .idle, .preparing: return false
                 }
             }
+            // argv 由假 Agent 进程异步写入；读取前等它落盘。
+            try await waitScratch(scratchDirectory)
             result["tabs"] = tabStates(controller)
             result["sessions"] = sessions(workspace)
             result["scratch"] = scratch(scratchDirectory)

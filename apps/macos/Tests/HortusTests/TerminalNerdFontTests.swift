@@ -36,7 +36,7 @@ struct TerminalNerdFontTests {
     @Test func existingPrimaryGlyphKeepsAllFourSFMonoFaces() async throws {
         let catalog = await TerminalNerdFonts.installed.value
         let view = HortusTerminalView(frame: CGRect(x: 0, y: 0, width: 600, height: 200), session: TerminalSession())
-        view.applyAppearance(fontSize: 15)
+        view.applyAppearance(fontSize: 15, terminalFont: nil)
         view.glyphFallbackProvider = catalog.provider
         view.feed(text: "\u{1b}[H\u{1b}[0mA\u{F8FF} \u{1b}[1mA\u{F8FF} \u{1b}[0;3mA\u{F8FF} \u{1b}[1;3mA\u{F8FF}")
         let cells = TerminalFontInspection.cells(in: view).filter { ($0["text"] as? String) == "A" || ($0["text"] as? String) == "\u{F8FF}" }

@@ -119,6 +119,7 @@ fn settings_layout_and_session_round_trip_and_preserve_comments() {
         .save_settings(&Settings {
             font_size: 18.0,
             default_view: ViewMode::Reading,
+            terminal_font: None,
         })
         .unwrap();
     assert_eq!(store.settings().unwrap().font_size, 18.0);
@@ -282,6 +283,7 @@ fn simultaneous_directories_use_new_state_and_leave_old_bytes_unchanged() {
         .save_settings(&Settings {
             font_size: 20.0,
             default_view: ViewMode::Reading,
+            terminal_font: None,
         })
         .unwrap();
     for name in ["old-config", "old-cache"] {
@@ -394,7 +396,8 @@ fn invalid_layout_or_settings_never_overwrite_good_state() {
         store
             .save_settings(&Settings {
                 default_view: ViewMode::Reading,
-                font_size: f64::NAN
+                font_size: f64::NAN,
+                terminal_font: None,
             })
             .is_err()
     );
@@ -417,6 +420,7 @@ fn readers_only_observe_complete_atomic_replacements() {
                     .save_settings(&Settings {
                         default_view: ViewMode::Reading,
                         font_size: 15.0 + f64::from(i % 10),
+                        terminal_font: None,
                     })
                     .unwrap();
             }
@@ -707,6 +711,7 @@ fn agent_template_validates_structure_and_preserves_each_argument() {
         .save_settings(&Settings {
             font_size: 16.0,
             default_view: ViewMode::Editing,
+            terminal_font: None,
         })
         .unwrap();
     let saved = fs::read_to_string(store.directories.config.join("config.toml")).unwrap();
@@ -814,4 +819,272 @@ fn resolving_the_guide_does_not_create_the_config_directory() {
     let text = effective_guide(&config).unwrap();
     assert_eq!(text, AGENT_GUIDE);
     assert!(!config.exists());
+}
+
+#[test]
+fn editable_config_round_trips_and_preserves_comments_unknown_keys_and_vaults() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    write_config(
+        &store,
+        "# 顶部说明 top comment\nfont_size = 14.0 # 字号 inline\ndefault_view = \"reading\"\nterminal_font = \"  \"\nunknown = { keep = [1, 2] }\n\n[[vault]]\npath = \"/vault/a\"\nfont_size = 18.0 # vault 覆盖行尾注释 keep\n\n[[vault]]\npath = \"/vault/b\"\n\n[agent]\ncommand = \"sh\"\nargs = [\"--guide\", \"{guide}\"] # argv inline\nnote = \"keep\"\n",
+    );
+    let before = store.editable_config().unwrap();
+    assert_eq!(before.settings.font_size, 14.0);
+    assert_eq!(before.settings.terminal_font, None);
+    assert_eq!(before.agent_command.as_deref(), Some("sh"));
+    assert_eq!(
+        before.agent_args,
+        vec!["--guide".to_string(), "{guide}".to_string()]
+    );
+    assert!(before.agent_configured);
+    assert!(before.diagnostics.is_empty(), "{:?}", before.diagnostics);
+    assert_eq!(before.digest.len(), 64);
+
+    let after = store
+        .save_config(
+            &EditableConfigInput {
+                settings: Settings {
+                    font_size: 22.0,
+                    default_view: ViewMode::Editing,
+                    terminal_font: Some("JetBrainsMono Nerd Font Mono".into()),
+                },
+                agent_command: Some("/bin/sh".into()),
+                agent_args: vec!["-c".into(), "printf %s {guide}".into()],
+            },
+            Some(&before.digest),
+        )
+        .unwrap();
+    assert_ne!(after.digest, before.digest);
+    assert_eq!(after.settings.font_size, 22.0);
+    assert_eq!(after.settings.default_view, ViewMode::Editing);
+    assert_eq!(
+        after.settings.terminal_font.as_deref(),
+        Some("JetBrainsMono Nerd Font Mono")
+    );
+    assert_eq!(after.agent_command.as_deref(), Some("/bin/sh"));
+    assert_eq!(
+        after.agent_args,
+        vec!["-c".to_string(), "printf %s {guide}".to_string()]
+    );
+    let text = fs::read_to_string(store.directories.config.join("config.toml")).unwrap();
+    for kept in [
+        "# 顶部说明 top comment",
+        "# 字号 inline",
+        "# vault 覆盖行尾注释 keep",
+        "unknown = { keep = [1, 2] }",
+        "note = \"keep\"",
+        "terminal_font = \"JetBrainsMono Nerd Font Mono\"",
+    ] {
+        assert!(text.contains(kept), "missing {kept:?} in:\n{text}");
+    }
+    assert_eq!(text.matches("[[vault]]").count(), 2, "{text}");
+    assert!(text.contains("font_size = 22.0"), "{text}");
+    assert!(text.contains("default_view = \"editing\""), "{text}");
+    let settings = store.settings().unwrap();
+    assert_eq!(settings.font_size, 22.0);
+    assert_eq!(
+        settings.terminal_font.as_deref(),
+        Some("JetBrainsMono Nerd Font Mono")
+    );
+}
+
+#[test]
+fn editable_config_clearing_keeps_other_agent_keys_and_rejects_invalid_values() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    write_config(
+        &store,
+        "font_size = 15.0\ndefault_view = \"reading\"\nterminal_font = \"Menlo\"\n[agent]\ncommand = \"/bin/sh\"\nargs = [\"{guide}\"]\n",
+    );
+    let before = store.editable_config().unwrap();
+    let cleared = store
+        .save_config(
+            &EditableConfigInput {
+                settings: Settings {
+                    font_size: 15.0,
+                    default_view: ViewMode::Reading,
+                    terminal_font: None,
+                },
+                agent_command: None,
+                agent_args: vec![],
+            },
+            Some(&before.digest),
+        )
+        .unwrap();
+    assert!(!cleared.agent_configured);
+    let text = fs::read_to_string(store.directories.config.join("config.toml")).unwrap();
+    assert!(!text.contains("terminal_font"), "{text}");
+    assert!(!text.contains("[agent]"), "{text}");
+
+    write_config(
+        &store,
+        "font_size = 15.0\ndefault_view = \"reading\"\n[agent]\ncommand = \"/bin/sh\"\nargs = [\"{guide}\"]\nnote = \"keep\"\n",
+    );
+    let before = store.editable_config().unwrap();
+    let saved = store
+        .save_config(
+            &EditableConfigInput {
+                settings: before.settings.clone(),
+                agent_command: None,
+                agent_args: vec![],
+            },
+            Some(&before.digest),
+        )
+        .unwrap();
+    assert!(!saved.agent_configured);
+    let text = fs::read_to_string(store.directories.config.join("config.toml")).unwrap();
+    assert!(text.contains("[agent]"), "{text}");
+    assert!(text.contains("note = \"keep\""), "{text}");
+    assert!(!text.contains("command ="), "{text}");
+
+    for (font_size, agent_command, agent_args, expected) in [
+        (
+            8.9,
+            Some("/bin/sh".to_string()),
+            vec!["{guide}".to_string()],
+            "config.font_size_invalid",
+        ),
+        (
+            40.1,
+            Some("/bin/sh".to_string()),
+            vec!["{guide}".to_string()],
+            "config.font_size_invalid",
+        ),
+        (
+            15.0,
+            Some("relative/tool".to_string()),
+            vec!["{guide}".to_string()],
+            "agent.command_not_absolute",
+        ),
+        (
+            15.0,
+            Some("/bin/sh".to_string()),
+            vec!["-l".to_string()],
+            "agent.guide_missing",
+        ),
+        (
+            15.0,
+            None,
+            vec!["{guide}".to_string()],
+            "agent.command_missing",
+        ),
+    ] {
+        let current = store.editable_config().unwrap();
+        let error = store
+            .save_config(
+                &EditableConfigInput {
+                    settings: Settings {
+                        font_size,
+                        default_view: ViewMode::Reading,
+                        terminal_font: None,
+                    },
+                    agent_command,
+                    agent_args,
+                },
+                Some(&current.digest),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(store.editable_config().unwrap().digest, current.digest);
+    }
+}
+
+#[test]
+fn external_edits_are_not_overwritten_until_reloaded() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    write_config(
+        &store,
+        "# manual\nfont_size = 15.0\ndefault_view = \"reading\"\n",
+    );
+    let before = store.editable_config().unwrap();
+    fs::write(
+        store.directories.config.join("config.toml"),
+        "# manual edit stays\nfont_size = 17.0\ndefault_view = \"reading\"\n",
+    )
+    .unwrap();
+    let input = EditableConfigInput {
+        settings: Settings {
+            font_size: 20.0,
+            default_view: ViewMode::Editing,
+            terminal_font: Some("Menlo".into()),
+        },
+        agent_command: None,
+        agent_args: vec![],
+    };
+    let error = store.save_config(&input, Some(&before.digest)).unwrap_err();
+    assert_eq!(error.to_string(), "config.externally_modified");
+    let text = fs::read_to_string(store.directories.config.join("config.toml")).unwrap();
+    assert!(text.contains("# manual edit stays"), "{text}");
+    assert!(text.contains("font_size = 17.0"), "{text}");
+    assert!(!text.contains("terminal_font"), "{text}");
+
+    let reloaded = store.editable_config().unwrap();
+    assert_eq!(reloaded.settings.font_size, 17.0);
+    let saved = store.save_config(&input, Some(&reloaded.digest)).unwrap();
+    assert_eq!(saved.settings.font_size, 20.0);
+    let text = fs::read_to_string(store.directories.config.join("config.toml")).unwrap();
+    assert!(text.contains("# manual edit stays"), "{text}");
+    assert!(text.contains("font_size = 20.0"), "{text}");
+}
+
+#[test]
+fn agent_probe_reports_keys_without_starting_a_process() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    let status = store.probe_agent_command("/bin/sh", &["{guide}".to_string()]);
+    assert!(status.available);
+    let expected = fs::canonicalize("/bin/sh")
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(status.executable.as_deref(), Some(expected.as_str()));
+    assert_eq!(status.error, None);
+
+    for (command, args, expected) in [
+        ("", vec!["{guide}".to_string()], "agent.command_missing"),
+        (
+            "relative/tool",
+            vec!["{guide}".to_string()],
+            "agent.command_not_absolute",
+        ),
+        (
+            "/definitely/missing-agent",
+            vec!["{guide}".to_string()],
+            "agent.not_found",
+        ),
+        ("/bin/sh", vec!["-l".to_string()], "agent.guide_missing"),
+        ("/bin/sh", vec![], "agent.guide_missing"),
+    ] {
+        let status = store.probe_agent_command(command, &args);
+        assert!(!status.available, "{command}");
+        assert_eq!(status.executable, None, "{command}");
+        assert_eq!(status.error.as_deref(), Some(expected), "{command}");
+    }
+}
+
+#[test]
+fn guide_state_supports_override_save_and_reset() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    let state = store.guide_state().unwrap();
+    assert!(!state.overridden);
+    assert_eq!(state.text, AGENT_GUIDE);
+    assert_eq!(state.default_text, AGENT_GUIDE);
+    assert!(state.path.ends_with("agent-guide.md"));
+
+    let custom = "Custom guide\nsecond line\n";
+    let saved = store.save_agent_guide(custom).unwrap();
+    assert!(saved.overridden);
+    assert_eq!(saved.text, custom);
+    assert_eq!(store.guide_state().unwrap().text, custom);
+    assert!(store.save_agent_guide(" \n\t ").is_err());
+    assert_eq!(store.guide_state().unwrap().text, custom);
+
+    let reset = store.reset_agent_guide().unwrap();
+    assert!(!reset.overridden);
+    assert_eq!(reset.text, AGENT_GUIDE);
+    assert!(!store.directories.config.join("agent-guide.md").exists());
+    assert!(!store.reset_agent_guide().unwrap().overridden);
 }

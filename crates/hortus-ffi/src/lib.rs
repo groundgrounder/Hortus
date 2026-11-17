@@ -135,6 +135,43 @@ pub struct AgentSpec {
 }
 
 #[derive(Debug, uniffi::Record)]
+pub struct EditableConfigInfo {
+    pub config_path: String,
+    pub digest: String,
+    pub font_size: f64,
+    pub default_view: String,
+    pub terminal_font: Option<String>,
+    pub agent_configured: bool,
+    pub agent_command: Option<String>,
+    pub agent_args: Vec<String>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct EditableConfigInputInfo {
+    pub font_size: f64,
+    pub default_view: String,
+    pub terminal_font: Option<String>,
+    pub agent_command: Option<String>,
+    pub agent_args: Vec<String>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct AgentProbeInfo {
+    pub available: bool,
+    pub executable: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct AgentGuideInfo {
+    pub text: String,
+    pub overridden: bool,
+    pub path: String,
+    pub default_text: String,
+}
+
+#[derive(Debug, uniffi::Record)]
 pub struct AgentSessionInfo {
     pub id: String,
     pub vault: String,
@@ -485,6 +522,33 @@ fn session_info(
     })
 }
 
+fn editable_config_info(config: hortus_config::EditableConfig) -> EditableConfigInfo {
+    EditableConfigInfo {
+        config_path: config.config_path,
+        digest: config.digest,
+        font_size: config.settings.font_size,
+        default_view: match config.settings.default_view {
+            hortus_config::ViewMode::Reading => "reading",
+            hortus_config::ViewMode::Editing => "editing",
+        }
+        .into(),
+        terminal_font: config.settings.terminal_font,
+        agent_configured: config.agent_configured,
+        agent_command: config.agent_command,
+        agent_args: config.agent_args,
+        diagnostics: config.diagnostics,
+    }
+}
+
+fn agent_guide_info(state: hortus_config::GuideState) -> AgentGuideInfo {
+    AgentGuideInfo {
+        text: state.text,
+        overridden: state.overridden,
+        path: state.path,
+        default_text: state.default_text,
+    }
+}
+
 #[uniffi::export]
 impl WorkspaceCore {
     #[uniffi::constructor]
@@ -571,6 +635,72 @@ impl WorkspaceCore {
 
     pub fn font_size(&self) -> Result<f64, CoreError> {
         Ok(self.store.lock().unwrap().settings()?.font_size)
+    }
+
+    pub fn terminal_font(&self) -> Result<Option<String>, CoreError> {
+        Ok(self.store.lock().unwrap().settings()?.terminal_font)
+    }
+
+    /// 完整设置快照：配置路径、原始字节指纹、已知字段与稳定诊断键。
+    pub fn editable_config(&self) -> Result<EditableConfigInfo, CoreError> {
+        let config = self.store.lock().unwrap().editable_config()?;
+        Ok(editable_config_info(config))
+    }
+
+    /// 原地保存已知键；指纹不一致时返回 `config.externally_modified`。
+    pub fn save_editable_config(
+        &self,
+        input: EditableConfigInputInfo,
+        expected_digest: Option<String>,
+    ) -> Result<EditableConfigInfo, CoreError> {
+        let default_view = match input.default_view.as_str() {
+            "reading" => hortus_config::ViewMode::Reading,
+            "editing" => hortus_config::ViewMode::Editing,
+            _ => return Err(CoreError::failure("config.default_view_invalid")),
+        };
+        let saved = self.store.lock().unwrap().save_config(
+            &hortus_config::EditableConfigInput {
+                settings: hortus_config::Settings {
+                    font_size: input.font_size,
+                    default_view,
+                    terminal_font: input.terminal_font,
+                },
+                agent_command: input.agent_command,
+                agent_args: input.agent_args,
+            },
+            expected_digest.as_deref(),
+        )?;
+        Ok(editable_config_info(saved))
+    }
+
+    /// 只解析模板与可执行文件；不启动进程、不建立快照、不创建会话目录。
+    pub fn probe_agent_launch(&self, command: String, args: Vec<String>) -> AgentProbeInfo {
+        let status = self
+            .store
+            .lock()
+            .unwrap()
+            .probe_agent_command(&command, &args);
+        AgentProbeInfo {
+            available: status.available,
+            executable: status.executable,
+            error: status.error,
+        }
+    }
+
+    pub fn agent_guide_state(&self) -> Result<AgentGuideInfo, CoreError> {
+        Ok(agent_guide_info(self.store.lock().unwrap().guide_state()?))
+    }
+
+    pub fn save_agent_guide(&self, content: String) -> Result<AgentGuideInfo, CoreError> {
+        Ok(agent_guide_info(
+            self.store.lock().unwrap().save_agent_guide(&content)?,
+        ))
+    }
+
+    pub fn reset_agent_guide(&self) -> Result<AgentGuideInfo, CoreError> {
+        Ok(agent_guide_info(
+            self.store.lock().unwrap().reset_agent_guide()?,
+        ))
     }
 
     pub fn remember(

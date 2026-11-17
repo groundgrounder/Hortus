@@ -46,6 +46,16 @@ enum L10n {
             return string("Saved layout is invalid")
         case "config.font_size_invalid":
             return string("Font size must be between 9 and 40 points")
+        case "config.externally_modified":
+            return string("config.toml changed on disk. Reload it or overwrite deliberately.")
+        case "config.invalid_toml", "config.invalid_utf8":
+            return string("config.toml could not be read")
+        case "config.default_view_invalid":
+            return string("The default view must be reading or editing")
+        case "config.terminal_font_invalid":
+            return string("The terminal font name is invalid")
+        case "guide.write_failed":
+            return string("Unable to write agent-guide.md")
         case "note.symlink":
             return string("Symbolic links cannot be edited")
         case "note.temp_inside_vault":

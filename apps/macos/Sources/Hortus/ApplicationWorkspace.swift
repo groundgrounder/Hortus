@@ -41,6 +41,7 @@ final class ApplicationWorkspace {
     var ready = false
     private(set) var recoveredSessions = 0
     var fontSize = 15.0
+    var terminalFont: String?
     var defaultView = "reading"
     var defaultVisible: [String: Bool] = ["left": true, "right": true, "bottom": false]
     var latestSize: [Region: CGFloat] = [.left: 260, .right: 250, .bottom: 230]
@@ -84,9 +85,9 @@ final class ApplicationWorkspace {
             // 上次退出时仍是运行中的会话不能假装进程还受管理。
             recoveredSessions = Int((try? await Task.detached { try service.recoverAgentSessions() }.value) ?? 0)
             let values = try await Task.detached {
-                (try service.layoutJson(), try service.sessionJson(), try service.fontSize(), try service.defaultView())
+                (try service.layoutJson(), try service.sessionJson(), try service.fontSize(), try service.defaultView(), try service.terminalFont())
             }.value
-            fontSize = values.2; defaultView = values.3
+            fontSize = values.2; defaultView = values.3; terminalFont = values.4
             let session = try JSONDecoder().decode(SessionState.self, from: Data(values.1.utf8))
             recent = session.recent
             if let json = values.0 {
@@ -265,6 +266,16 @@ final class ApplicationWorkspace {
         becameActive(record)
         record.window?.makeKeyAndOrderFront(nil)
         NSApp.activate()
+    }
+
+    /// 保存成功后只广播设置值；运行中的 shell/Agent 进程与会话保持原样。
+    func applySettings(fontSize: Double, defaultView: String, terminalFont: String?) {
+        self.fontSize = fontSize
+        self.defaultView = defaultView
+        self.terminalFont = terminalFont
+        for record in records where !record.closing {
+            record.workspace.applySettings(fontSize: fontSize, defaultView: defaultView, terminalFont: terminalFont)
+        }
     }
 
     func becameActive(_ record: WindowRecord) {

@@ -44,6 +44,7 @@ final class TerminalController {
     weak var workspace: Workspace?
     private(set) var root: String?
     private var fontSize = 15.0
+    private var terminalFont: String?
     private var shuttingDown = false
     private var shellCount = 0
     private var agentCount = 0
@@ -83,9 +84,10 @@ final class TerminalController {
         root = newRoot
     }
 
-    func update(fontSize: Double) {
+    func update(fontSize: Double, terminalFont: String?) {
         self.fontSize = fontSize
-        for tab in tabs.values { tab.session.update(fontSize: fontSize) }
+        self.terminalFont = terminalFont
+        for tab in tabs.values { tab.session.update(fontSize: fontSize, terminalFont: terminalFont) }
     }
 
     /// 退出流程不等待快照；只回收已有进程组。
@@ -321,7 +323,7 @@ final class TerminalController {
     }
 
     private func configure(_ tab: TerminalTab) {
-        tab.session.update(fontSize: fontSize)
+        tab.session.update(fontSize: fontSize, terminalFont: terminalFont)
         tab.session.onTerminated = { [weak self, weak tab] exitCode in
             guard let self, let tab, tab.kind == .agent else { return }
             tab.agentPhase = .exited(exitCode)

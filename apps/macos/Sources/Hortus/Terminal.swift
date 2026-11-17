@@ -74,10 +74,10 @@ final class TerminalSession {
         return false
     }
 
-    func attach(_ view: HortusTerminalView, fontSize: Double) {
+    func attach(_ view: HortusTerminalView, fontSize: Double, terminalFont: String?) {
         self.view = view
         view.processDelegate = view.delegateProxy
-        view.applyAppearance(fontSize: fontSize)
+        view.applyAppearance(fontSize: fontSize, terminalFont: terminalFont)
         view.glyphFallbackProvider = nerdFonts?.provider
         startIfPossible()
         startPendingAgent()
@@ -96,8 +96,8 @@ final class TerminalSession {
         guard self.view === view else { return }
     }
 
-    func update(fontSize: Double) {
-        view?.applyAppearance(fontSize: fontSize)
+    func update(fontSize: Double, terminalFont: String?) {
+        view?.applyAppearance(fontSize: fontSize, terminalFont: terminalFont)
     }
 
     func focus() {
@@ -111,14 +111,14 @@ final class TerminalSession {
         view.send([12])
     }
 
-    func makeView(fontSize: Double) -> HortusTerminalView {
+    func makeView(fontSize: Double, terminalFont: String?) -> HortusTerminalView {
         if let view {
             view.removeFromSuperview()
-            attach(view, fontSize: fontSize)
+            attach(view, fontSize: fontSize, terminalFont: terminalFont)
             return view
         }
         let view = HortusTerminalView(session: self)
-        attach(view, fontSize: fontSize)
+        attach(view, fontSize: fontSize, terminalFont: terminalFont)
         return view
     }
 
@@ -346,9 +346,10 @@ final class HortusTerminalView: LocalProcessTerminalView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func applyAppearance(fontSize: Double) {
-        if font.pointSize != CGFloat(fontSize) {
-            font = NSFont.monospacedSystemFont(ofSize: CGFloat(fontSize), weight: .regular)
+    func applyAppearance(fontSize: Double, terminalFont: String?) {
+        let resolved = TerminalFonts.font(family: terminalFont, size: CGFloat(fontSize))
+        if font.fontName != resolved.fontName || font.pointSize != resolved.pointSize {
+            font = resolved
         }
         applyNativeColors()
     }
@@ -389,14 +390,15 @@ final class HortusTerminalView: LocalProcessTerminalView {
 private struct TerminalRepresentable: NSViewRepresentable {
     let session: TerminalSession
     let fontSize: Double
+    let terminalFont: String?
 
     func makeNSView(context: Context) -> HortusTerminalView {
-        return session.makeView(fontSize: fontSize)
+        return session.makeView(fontSize: fontSize, terminalFont: terminalFont)
     }
 
     func updateNSView(_ nsView: HortusTerminalView, context: Context) {
-        session.update(fontSize: fontSize)
-        session.attach(nsView, fontSize: fontSize)
+        session.update(fontSize: fontSize, terminalFont: terminalFont)
+        session.attach(nsView, fontSize: fontSize, terminalFont: terminalFont)
     }
 
     static func dismantleNSView(_ nsView: HortusTerminalView, coordinator: ()) {
@@ -411,7 +413,7 @@ struct TerminalPanel: View {
 
     var body: some View {
         ZStack {
-            TerminalRepresentable(session: tab.session, fontSize: fontSize)
+            TerminalRepresentable(session: tab.session, fontSize: fontSize, terminalFont: workspace.terminalFont)
                 .id(tab.id)
                 .clipShape(.rect(cornerRadius: 12, style: .continuous))
             statusOverlay

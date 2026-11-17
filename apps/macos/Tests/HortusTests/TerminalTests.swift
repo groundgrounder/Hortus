@@ -26,7 +26,7 @@ struct TerminalTests {
             ambient.performAsCurrentDrawingAppearance {
                 view.appearance = appearance
                 view.viewDidChangeEffectiveAppearance()
-                view.applyAppearance(fontSize: 15)
+                view.applyAppearance(fontSize: 15, terminalFont: nil)
                 let foreground = view.nativeForegroundColor.usingColorSpace(.sRGB)
                 #expect(foreground != nil)
                 #expect(((foreground?.redComponent ?? 0) > 0.5) == isDark)

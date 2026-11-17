@@ -153,6 +153,10 @@ struct HortusApp: App {
         .restorationBehavior(.disabled)
         .defaultSize(width: 1320, height: 840)
         .windowToolbarStyle(.unified(showsTitle: false))
+
+        Settings {
+            SettingsView(application: application)
+        }
     }
 }
 
@@ -806,6 +810,13 @@ private struct VaultWindowRoot: View {
                     if args.contains("--inspect-hide-left") { layout.visible[.left] = false }
                     if let arg = args.first(where: { $0.hasPrefix("--inspect-left-width=") }), let width = Double(arg.dropFirst("--inspect-left-width=".count)) { layout.size[.left] = width }
                     delegate.ready = true
+                    #if DEBUG
+                    if let arg = args.first(where: { $0.hasPrefix("--settings-inspection=") }) {
+                        await SettingsInspection.run(application: application, workspace: workspace,
+                                                     output: String(arg.dropFirst("--settings-inspection=".count)))
+                        return
+                    }
+                    #endif
                     if let arg = args.first(where: { $0.hasPrefix("--multi-window-inspection=") }) {
                         await MultiWindowInspection.baseline(workspace: workspace, output: String(arg.dropFirst("--multi-window-inspection=".count)))
                         return

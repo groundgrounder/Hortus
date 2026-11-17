@@ -76,7 +76,10 @@ final class Workspace {
     let terminals = TerminalController()
     let changes = ChangesModel()
     var fontSize = 15.0 {
-        didSet { terminals.update(fontSize: fontSize) }
+        didSet { terminals.update(fontSize: fontSize, terminalFont: terminalFont) }
+    }
+    var terminalFont: String? {
+        didSet { terminals.update(fontSize: fontSize, terminalFont: terminalFont) }
     }
     var defaultView = "reading"
     var scanMicros: UInt64 { context?.scanMicros ?? 0 }
@@ -131,7 +134,15 @@ final class Workspace {
         self.core = core
         self.layout = layout
         fontSize = application.fontSize
+        terminalFont = application.terminalFont
         defaultView = application.defaultView
+    }
+
+    /// 设置保存后的即时传播：字号与终端字体立即作用于此窗口，默认视图只影响后续打开的笔记。
+    func applySettings(fontSize: Double, defaultView: String, terminalFont: String?) {
+        self.fontSize = fontSize
+        self.terminalFont = terminalFont
+        self.defaultView = defaultView
     }
 
     func attach(_ context: VaultContext, state: VaultState?) async {

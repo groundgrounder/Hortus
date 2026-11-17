@@ -1,11 +1,12 @@
 //! 配置、布局和可删除的会话缓存；所有写入都在目标目录原子替换。
+mod sha256;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_CONFIG: &str = "# Hortus 通用设置；布局与会话分别保存在 layout.toml 和系统缓存目录。\n# 正文字号（单位：pt）。\nfont_size = 15.0\ndefault_view = \"reading\"\n\n# Agent 启动模板（当前不启用）。command 是可执行文件；裸命令名按应用启动时的 PATH 查找。\n# args 的每个元素是一个 argv 元素，不做 shell 拆分；\"{guide}\" 会替换成完整的内置指南。\n# 含路径分隔符的 command 必须是绝对路径。\n# [agent]\n# command = \"codex\"\n# args = [\"{guide}\"]\n";
+pub const DEFAULT_CONFIG: &str = "# Hortus 通用设置；布局与会话分别保存在 layout.toml 和系统缓存目录。\n# 正文字号（单位：pt）。\nfont_size = 15.0\ndefault_view = \"reading\"\n\n# 终端等宽字体族；留空或删除跟随系统 SF Mono。\n# terminal_font = \"Menlo\"\n\n# Agent 启动模板（当前不启用）。command 是可执行文件；裸命令名按应用启动时的 PATH 查找。\n# args 的每个元素是一个 argv 元素，不做 shell 拆分；\"{guide}\" 会替换成完整的内置指南。\n# 含路径分隔符的 command 必须是绝对路径。\n# [agent]\n# command = \"codex\"\n# args = [\"{guide}\"]\n";
 
 /// 内置 Agent 指南；CLI 与 FFI 共用同一份文本。
 pub const AGENT_GUIDE: &str = include_str!("../agent-guide.md");
@@ -153,6 +154,9 @@ pub struct Settings {
     pub font_size: f64,
     #[serde(default)]
     pub default_view: ViewMode,
+    /// 终端等宽字体族；缺省或空白表示跟随系统 SF Mono。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_font: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -296,6 +300,96 @@ pub struct AgentLaunch {
     pub args: Vec<String>,
 }
 
+/// 设置界面的完整配置快照；`digest` 是 `config.toml` 原始字节的指纹。
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditableConfig {
+    pub config_path: String,
+    pub digest: String,
+    pub settings: Settings,
+    /// `[agent]` 是否已配置；未配置时 command/args 为空。
+    pub agent_configured: bool,
+    pub agent_command: Option<String>,
+    pub agent_args: Vec<String>,
+    /// 稳定错误键；界面据此提示，不阻止读取其余可用字段。
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditableConfigInput {
+    pub settings: Settings,
+    pub agent_command: Option<String>,
+    pub agent_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentCommandStatus {
+    pub available: bool,
+    pub executable: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 有效指南及其来源，供设置界面审阅、覆盖和恢复。
+#[derive(Clone, Debug, PartialEq)]
+pub struct GuideState {
+    pub text: String,
+    pub overridden: bool,
+    pub path: String,
+    pub default_text: String,
+}
+
+/// 与 `agent_launch` 一致的结构校验；不解析可执行文件，也不读取指南。
+fn validate_agent_template(command: &str, args: &[String]) -> Result<(), &'static str> {
+    if command.trim().is_empty() {
+        return Err("agent.command_missing");
+    }
+    if args.is_empty() || !args.iter().any(|argument| argument.contains("{guide}")) {
+        return Err("agent.guide_missing");
+    }
+    if command.contains('\0') || args.iter().any(|argument| argument.contains('\0')) {
+        return Err("agent.invalid_argument");
+    }
+    if command.contains('/') && !Path::new(command).is_absolute() {
+        return Err("agent.command_not_absolute");
+    }
+    Ok(())
+}
+
+fn invalid_font_size(size: f64) -> bool {
+    !size.is_finite() || !(9.0..=40.0).contains(&size)
+}
+
+fn normalized_terminal_font(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn set_value(table: &mut toml_edit::Table, key: &str, value: toml_edit::Value) {
+    let mut value = value;
+    // 沿用旧值的空白与行尾注释；只替换值本身。索引赋值保留键前缀里的独立注释。
+    if let Some(old) = table.get(key).and_then(toml_edit::Item::as_value) {
+        *value.decor_mut() = old.decor().clone();
+    }
+    table[key] = toml_edit::Item::Value(value);
+}
+
+fn set_array(table: &mut toml_edit::Table, key: &str, values: &[String]) {
+    let mut array = toml_edit::Array::new();
+    for value in values {
+        array.push(value.as_str());
+    }
+    let mut value = toml_edit::Value::Array(array);
+    if let Some(old) = table
+        .get(key)
+        .and_then(toml_edit::Item::as_value)
+        .and_then(toml_edit::Value::as_array)
+    {
+        *value.decor_mut() = old.decor().clone();
+    }
+    table[key] = toml_edit::Item::Value(value);
+}
+
 #[derive(serde::Deserialize)]
 struct RawConfig {
     #[serde(default)]
@@ -416,15 +510,16 @@ impl Store {
     }
 
     pub fn settings(&self) -> io::Result<Settings> {
-        let settings: Settings = read_toml(&self.config_path())?;
-        if !(9.0..=40.0).contains(&settings.font_size) {
+        let mut settings: Settings = read_toml(&self.config_path())?;
+        settings.terminal_font = normalized_terminal_font(settings.terminal_font.as_deref());
+        if invalid_font_size(settings.font_size) {
             return Err(io::Error::other("config.font_size_invalid"));
         }
         Ok(settings)
     }
 
     pub fn save_settings(&self, settings: &Settings) -> io::Result<()> {
-        if !(9.0..=40.0).contains(&settings.font_size) {
+        if invalid_font_size(settings.font_size) {
             return Err(io::Error::other("config.font_size_invalid"));
         }
         let mut document = fs::read_to_string(self.config_path())?
@@ -441,6 +536,279 @@ impl Store {
             ViewMode::Editing => "editing",
         });
         atomic_write(&self.config_path(), document.to_string().as_bytes())
+    }
+
+    /// 读取设置界面的完整快照；语法损坏以外的字段问题返回诊断而不是整体失败。
+    pub fn editable_config(&self) -> io::Result<EditableConfig> {
+        let path = self.config_path();
+        let bytes = fs::read(&path)?;
+        let digest = sha256::digest(&bytes);
+        let text = String::from_utf8(bytes).map_err(|_| io::Error::other("config.invalid_utf8"))?;
+        let document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| io::Error::other("config.invalid_toml"))?;
+        let mut diagnostics: Vec<String> = Vec::new();
+        let font_size = match document
+            .get("font_size")
+            .and_then(toml_edit::Item::as_value)
+            .and_then(|value| {
+                value
+                    .as_float()
+                    .or_else(|| value.as_integer().map(|integer| integer as f64))
+            }) {
+            Some(size) if size.is_finite() => {
+                if invalid_font_size(size) {
+                    diagnostics.push("config.font_size_invalid".into());
+                }
+                size
+            }
+            Some(_) => {
+                diagnostics.push("config.font_size_invalid".into());
+                15.0
+            }
+            None => {
+                diagnostics.push("config.font_size_invalid".into());
+                15.0
+            }
+        };
+        let default_view = match document
+            .get("default_view")
+            .and_then(toml_edit::Item::as_str)
+        {
+            Some("reading") | None => ViewMode::Reading,
+            Some("editing") => ViewMode::Editing,
+            Some(_) => {
+                diagnostics.push("config.default_view_invalid".into());
+                ViewMode::Reading
+            }
+        };
+        let terminal_font = match document.get("terminal_font") {
+            None => None,
+            Some(item) => match item.as_str() {
+                Some(value) => normalized_terminal_font(Some(value)),
+                None => {
+                    diagnostics.push("config.terminal_font_invalid".into());
+                    None
+                }
+            },
+        };
+        let mut agent_configured = false;
+        let mut agent_command = None;
+        let mut agent_args = Vec::new();
+        if let Some(item) = document.get("agent") {
+            match item.as_table() {
+                Some(table) => {
+                    if let Some(command) = table.get("command") {
+                        match command.as_str() {
+                            Some(value) => agent_command = Some(value.to_string()),
+                            None => diagnostics.push("agent.config_invalid".into()),
+                        }
+                    }
+                    if let Some(args) = table.get("args") {
+                        match args.as_array() {
+                            Some(values) => {
+                                for value in values.iter() {
+                                    match value.as_str() {
+                                        Some(argument) => agent_args.push(argument.to_string()),
+                                        None => diagnostics.push("agent.config_invalid".into()),
+                                    }
+                                }
+                            }
+                            None => diagnostics.push("agent.config_invalid".into()),
+                        }
+                    }
+                    // 只有 command/args 组成启动模板；其它 [agent] 子键不算已配置。
+                    agent_configured = agent_command.is_some() || !agent_args.is_empty();
+                    if let Err(key) = validate_agent_template(
+                        agent_command.as_deref().unwrap_or_default(),
+                        &agent_args,
+                    ) {
+                        diagnostics.push(key.into());
+                    }
+                }
+                None => diagnostics.push("agent.config_invalid".into()),
+            }
+        }
+        let mut seen = BTreeSet::new();
+        diagnostics.retain(|key| seen.insert(key.clone()));
+        Ok(EditableConfig {
+            config_path: path.to_string_lossy().into_owned(),
+            digest,
+            settings: Settings {
+                font_size,
+                default_view,
+                terminal_font,
+            },
+            agent_configured,
+            agent_command,
+            agent_args,
+            diagnostics,
+        })
+    }
+
+    /// 原地保存已知键；外部手改与打开时的指纹不一致时拒绝覆盖。
+    pub fn save_config(
+        &self,
+        input: &EditableConfigInput,
+        expected_digest: Option<&str>,
+    ) -> io::Result<EditableConfig> {
+        let path = self.config_path();
+        let bytes = fs::read(&path)?;
+        if let Some(expected) = expected_digest
+            && expected != sha256::digest(&bytes)
+        {
+            return Err(io::Error::other("config.externally_modified"));
+        }
+        if invalid_font_size(input.settings.font_size) {
+            return Err(io::Error::other("config.font_size_invalid"));
+        }
+        let terminal_font = normalized_terminal_font(input.settings.terminal_font.as_deref());
+        if terminal_font
+            .as_deref()
+            .is_some_and(|font| font.contains('\0'))
+        {
+            return Err(io::Error::other("config.terminal_font_invalid"));
+        }
+        let command = input
+            .agent_command
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let args = &input.agent_args;
+        let cleared = command.is_empty() && args.iter().all(|argument| argument.trim().is_empty());
+        if !cleared {
+            validate_agent_template(&command, args).map_err(io::Error::other)?;
+        }
+        let text = String::from_utf8(bytes).map_err(|_| io::Error::other("config.invalid_utf8"))?;
+        let mut document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| io::Error::other("config.invalid_toml"))?;
+        set_value(
+            &mut document,
+            "font_size",
+            toml_edit::Value::from(input.settings.font_size),
+        );
+        set_value(
+            &mut document,
+            "default_view",
+            toml_edit::Value::from(match input.settings.default_view {
+                ViewMode::Reading => "reading",
+                ViewMode::Editing => "editing",
+            }),
+        );
+        match terminal_font {
+            Some(font) => set_value(&mut document, "terminal_font", toml_edit::Value::from(font)),
+            None => {
+                document.remove("terminal_font");
+            }
+        };
+        if cleared {
+            if let Some(item) = document.get_mut("agent") {
+                let table = item
+                    .as_table_mut()
+                    .ok_or_else(|| io::Error::other("agent.config_invalid"))?;
+                table.remove("command");
+                table.remove("args");
+            }
+            let empty = document
+                .get("agent")
+                .and_then(toml_edit::Item::as_table)
+                .is_some_and(toml_edit::Table::is_empty);
+            if empty {
+                document.remove("agent");
+            }
+        } else {
+            if document.get("agent").is_none() {
+                document.insert("agent", toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            let table = document
+                .get_mut("agent")
+                .and_then(toml_edit::Item::as_table_mut)
+                .ok_or_else(|| io::Error::other("agent.config_invalid"))?;
+            set_value(table, "command", toml_edit::Value::from(command));
+            set_array(table, "args", args);
+        }
+        atomic_write(&path, document.to_string().as_bytes())?;
+        self.editable_config()
+    }
+
+    /// 只检查模板结构与本机可执行文件解析；不启动进程、不读指南、不创建目录。
+    pub fn probe_agent_command(&self, command: &str, args: &[String]) -> AgentCommandStatus {
+        let command = command.trim();
+        if let Err(key) = validate_agent_template(command, args) {
+            return AgentCommandStatus {
+                available: false,
+                executable: None,
+                error: Some(key.into()),
+            };
+        }
+        match resolve_executable(command) {
+            Ok(executable) => AgentCommandStatus {
+                available: true,
+                executable: Some(executable),
+                error: None,
+            },
+            Err(error) => AgentCommandStatus {
+                available: false,
+                executable: None,
+                error: Some(error.to_string()),
+            },
+        }
+    }
+
+    pub fn guide_state(&self) -> io::Result<GuideState> {
+        let path = self.directories.config.join("agent-guide.md");
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let text =
+                    String::from_utf8(bytes).map_err(|_| io::Error::other("guide.invalid_utf8"))?;
+                if text.trim().is_empty() {
+                    return Err(io::Error::other("guide.empty"));
+                }
+                Ok(GuideState {
+                    text,
+                    overridden: true,
+                    path: path.to_string_lossy().into_owned(),
+                    default_text: AGENT_GUIDE.to_string(),
+                })
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(GuideState {
+                text: AGENT_GUIDE.to_string(),
+                overridden: false,
+                path: path.to_string_lossy().into_owned(),
+                default_text: AGENT_GUIDE.to_string(),
+            }),
+            Err(_) => Err(io::Error::other("guide.read_failed")),
+        }
+    }
+
+    pub fn save_agent_guide(&self, content: &str) -> io::Result<GuideState> {
+        if content.trim().is_empty() {
+            return Err(io::Error::other("guide.empty"));
+        }
+        fs::create_dir_all(&self.directories.config)?;
+        atomic_write(
+            &self.directories.config.join("agent-guide.md"),
+            content.as_bytes(),
+        )?;
+        self.guide_state()
+    }
+
+    /// 只在覆盖文件存在时删除；已经不存在视同成功。
+    pub fn reset_agent_guide(&self) -> io::Result<GuideState> {
+        let path = self.directories.config.join("agent-guide.md");
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.is_dir() {
+                    return Err(io::Error::other("guide.write_failed"));
+                }
+                fs::remove_file(&path)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        self.guide_state()
     }
 
     pub fn layout(&self) -> io::Result<Option<LayoutState>> {
