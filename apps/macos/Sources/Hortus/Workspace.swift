@@ -159,13 +159,14 @@ final class Workspace {
         }
     }
 
+    /// 工具标签的新增与关闭只改布局；Layout.onChange → ApplicationWorkspace.layoutChanged
+    /// 已经统一持久化布局与会话，这里不再重复调度。
     @discardableResult
     func addShell(to groupID: UUID? = nil) -> TerminalTab? {
         guard root != nil, let layout, let tab = terminals.createShell() else { return nil }
         layout.add(.terminal(tab.id), to: groupID ?? layout.defaultTerminalGroupID)
         layout.reveal(.terminal(tab.id))
         terminals.focusSoon()
-        scheduleSessionSave()
         return tab
     }
 
@@ -176,7 +177,6 @@ final class Workspace {
         layout.reveal(.terminal(tab.id))
         terminals.start(tab)
         terminals.focusSoon()
-        scheduleSessionSave()
         return tab
     }
 
@@ -200,14 +200,12 @@ final class Workspace {
             Task { await closeTerminal(id) }
         } else {
             layout?.remove(tool)
-            scheduleSessionSave()
         }
     }
 
     func closeTerminal(_ id: UUID) async {
         await terminals.stopAndRemove(id)
         layout?.remove(.terminal(id))
-        scheduleSessionSave()
     }
 
     /// ⌃`：显示并聚焦最近使用的终端；没有终端时创建一个默认 Shell。
@@ -448,8 +446,7 @@ final class Workspace {
         }
         document.sourceAnchor = start
         document.sourceSelectionLength = length
-        guard let view = NSApp.windows.compactMap(\.contentView).flatMap({ DiagramInspection.textViews(in: $0) })
-            .first(where: { $0.representedDocument == ObjectIdentifier(document) }) else { return }
+        guard let view = document.mountedTextView else { return }
         if document.reading {
             view.readingCoordinator?.reveal(source: start)
         } else {
@@ -642,19 +639,37 @@ final class Workspace {
         return tab
     }
 
-    var textView: DiagramTextView? {
-        guard let document = current?.document else { return nil }
-        return NSApp.windows.compactMap(\.contentView).flatMap { DiagramInspection.textViews(in: $0) }
-            .first { $0.representedDocument == ObjectIdentifier(document) }
-    }
+    var textView: DiagramTextView? { current?.document?.mountedTextView }
 
     /// 菜单与快捷键共用一条队列：较早的切换完成后才开始下一次，第二次不会读到过渡中的表面。
     func toggleView() {
-        let previous = toggleTask
-        toggleTask = Task { [weak self] in
-            _ = await previous?.value
-            await self?.toggleCurrentView()
+        enqueueViewSwitch { [weak self] in await self?.toggleCurrentView() }
+    }
+
+    /// 阅读面点击图节点/边跳源码：与 ⌘E 共用同一条队列、锚点状态、会话保存与聚焦。
+    func switchToEditing(document: NoteDocument, anchor: Int, selectionLength: Int) {
+        enqueueViewSwitch { [weak self] in
+            await self?.enterEditing(document, anchor: anchor, selectionLength: selectionLength)
         }
+    }
+
+    private func enqueueViewSwitch(_ operation: @escaping @MainActor () async -> Void) {
+        let previous = toggleTask
+        toggleTask = Task {
+            _ = await previous?.value
+            await operation()
+        }
+    }
+
+    private func enterEditing(_ document: NoteDocument, anchor: Int, selectionLength: Int) async {
+        guard current?.document === document, !document.marked else { return }
+        document.sourceAnchor = anchor
+        document.sourceSelectionLength = selectionLength
+        if document.reading {
+            document.reading = false
+            scheduleSessionSave()
+        }
+        focusEditor(document)
     }
     func toggleCurrentView() async {
         guard let document = current?.document, !document.marked else { return }
@@ -722,7 +737,7 @@ final class Workspace {
             guard let document else { return }
             for _ in 0..<80 {
                 guard !document.reading, NSApp.keyWindow === window else { return }
-                if let view = DiagramInspection.current(document: document), !view.isReading,
+                if let view = document.mountedTextView, !view.isReading,
                    view.window === window, view.isEditable, window.makeFirstResponder(view) { return }
                 try? await Task.sleep(for: .milliseconds(10))
             }
@@ -741,7 +756,6 @@ final class Workspace {
         }
     }
 
-    func scheduleLayoutSave() { application?.layoutChanged(self) }
     func scheduleSessionSave() { application?.scheduleSessionSave() }
 
     func sessionViews() -> [String: String] {

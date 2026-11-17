@@ -68,7 +68,10 @@ struct EditorView: View {
             ZStack {
                 if let document = readable?.document, document.reading {
                     ReadingText(document: document, path: readable?.path ?? "", vault: workspace.root ?? "",
-                                fontSize: workspace.fontSize, service: workspace.diagrams, core: workspace.diagramCore) { ordinal, nodes in
+                                fontSize: workspace.fontSize, service: workspace.diagrams, core: workspace.diagramCore,
+                                openSource: { start, length in
+                                    workspace.switchToEditing(document: document, anchor: start, selectionLength: length)
+                                }) { ordinal, nodes in
                         if let path = readable?.path { workspace.rememberDiagram(note: path, block: ordinal, collapsed: nodes) }
                     }
                 } else {

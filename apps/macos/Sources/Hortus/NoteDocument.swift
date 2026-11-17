@@ -81,6 +81,13 @@ final class NoteDocument {
     var sourceSelectionLength = 0
     var marked = false
     @ObservationIgnored weak var viewOwner: AnyObject?
+    /// 当前挂载这篇文档的正文视图；由视图协调器在挂载时登记，生产代码不遍历窗口。
+    @ObservationIgnored var mountedTextView: DiagramTextView? {
+        let view = (viewOwner as? NoteText.EditorCoordinator)?.view
+            ?? (viewOwner as? ReadingText.Coordinator)?.view
+        guard let view, view.representedDocument == ObjectIdentifier(self) else { return nil }
+        return view
+    }
     @ObservationIgnored var transferredEditor: NoteText.Surface?
     @ObservationIgnored var refreshStartedAt = 0.0
     @ObservationIgnored var refreshIOMilliseconds = 0.0

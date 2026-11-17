@@ -180,6 +180,8 @@ struct ReadingText: NSViewRepresentable {
     let fontSize: Double
     let service: DiagramService
     let core: WorkspaceCore?
+    /// 阅读面点击图节点/边时进入编辑视图；由 Workspace 的统一切换队列处理。
+    let openSource: (Int, Int) -> Void
     let remember: (UInt32, [String]) -> Void
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
@@ -198,22 +200,8 @@ struct ReadingText: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) { context.coordinator.update(self) }
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
         coordinator.detach()
-        guard let view = scroll.documentView as? DiagramTextView else { return }
-        view.onWidthOrThemeChange = nil; view.onToggle = nil; view.onSourceRange = nil; view.readingCoordinator = nil
-        view.onFreshRender = nil
-        for diagram in view.diagramViews.values { diagram.detach() }
-        for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
-        view.mediaViews = []; view.mediaBlocks = []
-        view.mathViews.forEach { $0.removeFromSuperview() }; view.mathViews = []
-        view.blocks = []
-        view.inlineMath = [:]; view.clearFormulaAccessibility()
-        view.clearFormulaTooltips()
-        view.inlineMathViews.forEach { $0.removeFromSuperview() }; view.inlineMathViews = []
-        view.diagramViews = [:]; view.string = ""; view.textLayoutManager?.delegate = nil
-        if let manager = view.textLayoutManager { manager.textContentManager?.removeTextLayoutManager(manager) }
-        view.diagramStorage = nil; scroll.documentView = nil
-        NSWorkspace.shared.notificationCenter.removeObserver(view,
-            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        (scroll.documentView as? DiagramTextView)?.tearDownForRemoval()
+        scroll.documentView = nil
     }
 
     @MainActor final class Coordinator: NSObject, @preconcurrency NSTextLayoutManagerDelegate {
@@ -283,12 +271,11 @@ struct ReadingText: NSViewRepresentable {
                 for index in self.rendered.indices { self.rendered[index].previous = nil }
                 self.refresh(force: true)
             }
-            view.onSourceRange = { [weak self] ordinal, range in
-                guard let self, let block = rendered.first(where: { $0.ordinal == ordinal }),
+            view.onSourceRange = { [weak self, weak view] ordinal, range in
+                guard let self, let view, !view.compositionActive, let input = self.input,
+                      let block = self.rendered.first(where: { $0.ordinal == ordinal }),
                       block.revision == input.document.revision else { return }
-                input.document.sourceAnchor = range.location
-                input.document.sourceSelectionLength = range.length
-                input.document.reading = false
+                input.openSource(range.location, range.length)
             }
             view.onToggle = { [weak self] ordinal, id in
                 guard let self, let index = rendered.firstIndex(where: { $0.ordinal == ordinal }) else { return }
@@ -303,15 +290,7 @@ struct ReadingText: NSViewRepresentable {
             generation += 1; task?.cancel(); task = nil
             inFlightToken = nil; inFlightKey = nil; refreshQueued = false
             styling.reset()
-            view?.diagramViews.values.forEach { $0.detach() }
-            view?.diagramViews = [:]
-            view?.blocks = []
-            view?.mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
-            view?.mediaViews = []; view?.mediaBlocks = []; view?.mediaProjection = []
-            view?.mathViews.forEach { $0.removeFromSuperview() }; view?.mathViews = []
-            view?.inlineMath = [:]; view?.clearFormulaAccessibility()
-            view?.clearFormulaTooltips()
-            view?.inlineMathViews.forEach { $0.removeFromSuperview() }; view?.inlineMathViews = []
+            view?.clearAttachedContent()
             if input?.document.viewOwner === self {
                 input?.document.onReload = nil; input?.document.onClosing = nil
                 input?.document.onStateChange = nil; input?.document.viewOwner = nil

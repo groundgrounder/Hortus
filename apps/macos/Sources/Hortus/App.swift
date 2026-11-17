@@ -246,8 +246,9 @@ private struct HortusCommands: Commands {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var application: ApplicationWorkspace?
     var presentInitialWindow: (() -> Void)?
-    var workspace: Workspace? { application?.initial.workspace }
-    var layout: Layout? { application?.initial.layout }
+    /// 显式自检只针对启动窗口；退出提示使用 ApplicationWorkspace.terminationHost。
+    var inspectionWorkspace: Workspace? { application?.initial.workspace }
+    var inspectionLayout: Layout? { application?.initial.layout }
     var ready = false
     private let termination = TerminationGate()
     /// 用户已明确放弃未保存的正文；之后的 terminate 不再拦截。
@@ -381,7 +382,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let application, let workspace else { return .terminateNow }
+        guard let application else { return .terminateNow }
+        let host = application.terminationHost
         // 用户已放弃未保存的正文时跳过文档阶段，但终端、监听与会话仍照常清理。
         let abandoned = allowTermination
         termination.begin(
@@ -398,22 +400,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sender.reply(toApplicationShouldTerminate: false)
                 // 必须先答复 false；terminateLater 的嵌套事件循环不调度 MainActor 任务。
                 DispatchQueue.main.async { [weak self] in
-                    self?.handleBlockedTermination(unsaved, workspace: workspace)
+                    self?.handleBlockedTermination(unsaved, host: host, application: application)
                 }
             }
         }
         return .terminateLater
     }
 
-    private func handleBlockedTermination(_ unsaved: [String], workspace: Workspace) {
-        switch workspace.decideUnsaved(unsaved, quitting: true) {
+    private func handleBlockedTermination(_ unsaved: [String], host: Workspace, application: ApplicationWorkspace) {
+        switch host.decideUnsaved(unsaved, quitting: true) {
         case .retry:
             NSApp.terminate(nil)
         case .discard:
             // 用户明确放弃：清理这些文档的恢复稿，然后不再拦截后续 terminate。
             allowTermination = true
             let group = DispatchGroup()
-            for record in application?.records ?? [] {
+            for record in application.records {
                 let root = record.workspace.root ?? record.id
                 let paths = record.workspace.tabs.map(\.path).filter { unsaved.contains(root + "/" + $0) }
                 group.enter()
@@ -430,7 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { FindShortcut.setEnabled(false) }
 
     func inspectWhenReady() {
-        guard inspectionDeadline != nil, !inspectionStarted, let workspace else { return }
+        guard inspectionDeadline != nil, !inspectionStarted, let workspace = inspectionWorkspace else { return }
         var terminalFontInspection = false
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
@@ -461,7 +463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finishInspection() async {
-        guard let workspace else { return }
+        guard let workspace = inspectionWorkspace, let layout = inspectionLayout else { return }
         let args = ProcessInfo.processInfo.arguments
         if let argument = args.first(where: { $0.hasPrefix("--inspect-exit-after=") }),
            let seconds = Double(argument.dropFirst("--inspect-exit-after=".count)), seconds > 0 {
@@ -469,7 +471,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do {
             #if DEBUG
-            if let arg = args.first(where: { $0.hasPrefix(TerminalFontInspection.argumentPrefix) }), let layout {
+            if let arg = args.first(where: { $0.hasPrefix(TerminalFontInspection.argumentPrefix) }) {
                 let result = try await TerminalFontInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: URL(fileURLWithPath: String(arg.dropFirst(TerminalFontInspection.argumentPrefix.count))))
@@ -499,7 +501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if args.contains("--inspect-hold-open") { return }
             }
             #if DEBUG
-            if let arg = args.first(where: { $0.hasPrefix("--tool-tabs-inspection=") }), let layout {
+            if let arg = args.first(where: { $0.hasPrefix("--tool-tabs-inspection=") }) {
                 let result = try await ToolTabsInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--tool-tabs-inspection=".count))))
@@ -507,7 +509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
                 return
             }
-            if let arg = args.first(where: { $0.hasPrefix("--tool-label-inspection=") }), let layout {
+            if let arg = args.first(where: { $0.hasPrefix("--tool-label-inspection=") }) {
                 let result = try await ToolLabelInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--tool-label-inspection=".count))))
@@ -515,7 +517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
                 return
             }
-            if let arg = args.first(where: { $0.hasPrefix("--agent-launch-inspection=") }), let layout {
+            if let arg = args.first(where: { $0.hasPrefix("--agent-launch-inspection=") }) {
                 let result = try await AgentInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--agent-launch-inspection=".count))))
@@ -526,7 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--terminal-inspection=".count))))
             }
-            if let arg = args.first(where: { $0.hasPrefix("--terminal-idle=") }), let layout {
+            if let arg = args.first(where: { $0.hasPrefix("--terminal-idle=") }) {
                 let result = try await TerminalInspection.idle(workspace: workspace, layout: layout, arguments: args)
                 if let shot = args.first(where: { $0.hasPrefix("--snapshot=") }) {
                     try await Task.sleep(for: .milliseconds(300))
@@ -555,7 +557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         mouseButton: .left)?.post(tap: .cghidEventTap)
                 try await Task.sleep(for: .seconds(2))
             }
-            if let arg = args.first(where: { $0.hasPrefix("--toolbar-inspection=") }), let layout,
+            if let arg = args.first(where: { $0.hasPrefix("--toolbar-inspection=") }),
                let window = NSApp.windows.first(where: \.isVisible) {
                 var result = ToolbarInspection.measure(window: window, layout: layout)
                 if args.contains("--inspect-resize") {

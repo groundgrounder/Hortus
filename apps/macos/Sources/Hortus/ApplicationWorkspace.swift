@@ -66,6 +66,8 @@ final class ApplicationWorkspace {
         if let window = NSApp.keyWindow, let record = records.first(where: { $0.window === window }) { return record }
         return records.first { $0.id == focused } ?? records.first
     }
+    /// 应用级未保存提示的唯一宿主：当前活跃窗口的库；提示本身不绑定具体窗口。
+    var terminationHost: Workspace { active?.workspace ?? initial.workspace }
 
     func record(_ id: String?) -> WindowRecord? {
         records.first { $0.id == (id ?? bootstrapID) }
@@ -333,6 +335,8 @@ final class ApplicationWorkspace {
                             windows: windows, default_visible: defaultVisible)
     }
 
+    /// 会话写入的唯一防抖入口（250ms）。布局变更经 layoutChanged 触发；
+    /// Workspace 只在标签、选中项或阅读/编辑视图变化时单独触发，不在布局操作后重复调用。
     func scheduleSessionSave() {
         guard !restoring, !inspectionLaunch else { return }
         sessionTask?.cancel()

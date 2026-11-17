@@ -128,23 +128,9 @@ struct NoteText: NSViewRepresentable {
     private static func destroy(_ surface: Surface) {
         let scroll = surface.scroll, coordinator = surface.editor
         coordinator.detach()
-        guard let view = scroll.documentView as? DiagramTextView else { return }
-        view.undoManager?.removeAllActions()
-        view.editingCoordinator = nil
-        view.onWidthOrThemeChange = nil; view.onToggle = nil; view.onEditSource = nil; view.onSourceRange = nil
-        view.onCompositionState = nil; view.onCommit = nil
-        view.delegate = nil; view.textStorage?.delegate = nil
-        for diagram in view.diagramViews.values { diagram.detach() }
-        for media in view.mediaViews { media.detach(); media.removeFromSuperview() }
-        view.mediaViews = []; view.mediaBlocks = []; view.mediaProjection = []
-        view.diagramViews = [:]
-        view.blocks = []
-        view.string = ""
-        view.textLayoutManager?.delegate = nil
-        if let manager = view.textLayoutManager { manager.textContentManager?.removeTextLayoutManager(manager) }
-        view.diagramStorage = nil; scroll.documentView = nil; coordinator.view = nil
-        NSWorkspace.shared.notificationCenter.removeObserver(view,
-            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        (scroll.documentView as? DiagramTextView)?.tearDownForRemoval()
+        scroll.documentView = nil
+        coordinator.view = nil
     }
 
     @MainActor
@@ -175,10 +161,8 @@ struct NoteText: NSViewRepresentable {
                 document?.onClosing = nil; document?.onStateChange = nil
                 document?.viewOwner = nil
             }
+            view?.clearAttachedContent()
             view?.editingCoordinator = nil
-            view?.mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
-            view?.mediaViews = []; view?.mediaBlocks = []; view?.mediaProjection = []
-            view?.blocks = []
             input = nil; blocks = []
         }
 
@@ -1283,6 +1267,55 @@ final class DiagramTextView: NSTextView {
     @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
         formulaTooltips[tag] ?? ""
     }
+
+    // MARK: 统一拆卸
+
+    /// 仅清空附加内容：图、媒体、块级/行内公式、无障碍缓存与提示框。
+    /// 保留 TextKit 存储、委托和通知观察者，供同一视图切换文档或复用；幂等。
+    func clearAttachedContent() {
+        for view in diagramViews.values { view.detach() }
+        diagramViews.removeAll(keepingCapacity: true)
+        for view in mediaViews { view.detach(); view.removeFromSuperview() }
+        mediaViews.removeAll(keepingCapacity: true)
+        mediaBlocks.removeAll(keepingCapacity: true)
+        mediaProjection.removeAll(keepingCapacity: true)
+        for view in mathViews { view.removeFromSuperview() }
+        mathViews = []
+        for view in inlineMathViews { view.removeFromSuperview() }
+        inlineMathViews = []
+        inlineMath.removeAll(keepingCapacity: true)
+        inlineMathInvalidation = nil
+        clearFormulaAccessibility()
+        clearFormulaTooltips()
+        blocks = []
+        expanded = []
+        installedExpanded = []
+        diagramViewportAnchor = nil
+        diagramPending = false
+        diagramIssue = nil
+        diagramStorage?.diagrams = []
+        diagramStorage?.inlineMedia = []
+    }
+
+    /// 彻底销毁前的收尾：清空附加内容，并解除存储、委托、回调、查找栏与通知观察者。
+    /// 销毁后的视图不再复用；幂等，可重复调用。
+    func tearDownForRemoval() {
+        finishComposition()
+        clearAttachedContent()
+        cancelFindBarMonitor()
+        undoManager?.removeAllActions()
+        onWidthOrThemeChange = nil; onToggle = nil; onEditSource = nil; onSourceRange = nil
+        onFreshRender = nil; onCompositionState = nil; onCommit = nil
+        delegate = nil; textStorage?.delegate = nil
+        editingCoordinator = nil; readingCoordinator = nil
+        string = ""
+        textLayoutManager?.delegate = nil
+        if let manager = textLayoutManager { manager.textContentManager?.removeTextLayoutManager(manager) }
+        diagramStorage = nil
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
+    }
+
     override func layout() {
         let started = ProcessInfo.processInfo.systemUptime
         defer { recordMainWork(since: started) }

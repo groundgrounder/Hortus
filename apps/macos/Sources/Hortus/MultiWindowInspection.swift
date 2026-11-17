@@ -257,9 +257,12 @@ enum MultiWindowInspection {
             for record in records { record.workspace.promptUnsaved = nil }
         }
         var prompted: [String] = []
-        application.initial.workspace.promptUnsaved = { notes, quitting in
-            if quitting { prompted = notes }
-            return .cancel
+        // 退出提示只经过 ApplicationWorkspace.terminationHost；记录里不假设哪个窗口会承接。
+        for record in records {
+            record.workspace.promptUnsaved = { notes, quitting in
+                if quitting { prompted = notes }
+                return .cancel
+            }
         }
         NSApp.terminate(nil)
         try await wait { prompted.count == records.count }
