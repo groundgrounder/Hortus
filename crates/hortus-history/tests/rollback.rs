@@ -667,3 +667,60 @@ fn deleted_nested_file_recreates_missing_parents() {
         0o750
     );
 }
+
+#[test]
+fn read_only_parent_directories_are_restored_after_rollback() {
+    let fixture = Fixture::new(|vault| {
+        fs::create_dir_all(vault.join("locked/deep")).unwrap();
+        fs::write(vault.join("locked/deep/note.md"), b"locked note\n").unwrap();
+        fs::set_permissions(vault.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(vault.join("locked/deep"), fs::Permissions::from_mode(0o555)).unwrap();
+    });
+    fs::set_permissions(
+        fixture.vault.join("locked"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::set_permissions(
+        fixture.vault.join("locked/deep"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::remove_file(fixture.vault.join("locked/deep/note.md")).unwrap();
+    fs::set_permissions(
+        fixture.vault.join("locked"),
+        fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+    fs::set_permissions(
+        fixture.vault.join("locked/deep"),
+        fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+
+    let expectation = fixture.expectation("locked/deep/note.md");
+    fixture
+        .store
+        .rollback_entry(
+            &fixture.session,
+            &expectation,
+            fixture.temporary.path(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(fixture.vault.join("locked/deep/note.md")).unwrap(),
+        b"locked note\n"
+    );
+    assert_eq!(
+        fs::metadata(fixture.vault.join("locked")).unwrap().mode() & 0o777,
+        0o555
+    );
+    assert_eq!(
+        fs::metadata(fixture.vault.join("locked/deep"))
+            .unwrap()
+            .mode()
+            & 0o777,
+        0o555
+    );
+}

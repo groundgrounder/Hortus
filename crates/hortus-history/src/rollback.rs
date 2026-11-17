@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -153,14 +153,17 @@ impl HistoryStore {
             before: before_manifest(entry, &before_index)?.cloned(),
             after: entry.after.clone().map(manifest_from_metadata),
         };
+        let mut pending_modes = BTreeMap::new();
         revert_plan(
             Path::new(&record.vault),
             &snapshot,
             &before_index,
             &plan,
             temporary,
+            &mut pending_modes,
             cancel,
-        )
+        )?;
+        restore_directory_modes(&pending_modes)
     }
 
     /// 按会话回滚整批条目：按依赖顺序执行，逐项汇报成功、stale 与失败。
@@ -202,6 +205,7 @@ impl HistoryStore {
         }
 
         let mut report = SessionRollbackReport::default();
+        let mut pending_modes = BTreeMap::new();
         let phases: [fn(&Plan) -> bool; 5] = [
             |plan| {
                 plan.expectation.change == ChangeKind::TypeChanged
@@ -254,7 +258,15 @@ impl HistoryStore {
                 check_cancel(cancel)?;
                 let plan = &plans[index];
                 let display = display_path(&plan.expectation).to_string();
-                match revert_plan(vault, &snapshot, &before_index, plan, temporary, cancel) {
+                match revert_plan(
+                    vault,
+                    &snapshot,
+                    &before_index,
+                    plan,
+                    temporary,
+                    &mut pending_modes,
+                    cancel,
+                ) {
                     Ok(()) => report.reverted_paths.push(display),
                     Err(error) if error.to_string() == "history.review_stale" => {
                         report.skipped_stale.push(RollbackFailure {
@@ -273,6 +285,8 @@ impl HistoryStore {
                 }
             }
         }
+        // 回滚期间临时放开只读父目录的写权限，全部条目完成后再恢复快照 mode。
+        restore_directory_modes(&pending_modes)?;
         Ok(report)
     }
 
@@ -389,6 +403,7 @@ fn revert_plan(
     before_index: &BTreeMap<String, ManifestEntry>,
     plan: &Plan,
     temporary: &Path,
+    pending_modes: &mut BTreeMap<PathBuf, u32>,
     cancel: Option<&AtomicBool>,
 ) -> io::Result<()> {
     check_cancel(cancel)?;
@@ -414,8 +429,21 @@ fn revert_plan(
                 .before
                 .as_ref()
                 .ok_or_else(|| key_error("history.invalid_entry"))?;
-            ensure_parents(vault, snapshot, before_index, before_relative)?;
-            restore_before(snapshot, vault, before_relative, before, temporary)?;
+            ensure_parents(
+                vault,
+                snapshot,
+                before_index,
+                before_relative,
+                pending_modes,
+            )?;
+            restore_before(
+                snapshot,
+                vault,
+                before_relative,
+                before,
+                temporary,
+                pending_modes,
+            )?;
         }
         ChangeKind::Renamed => {
             let before = plan
@@ -429,8 +457,21 @@ fn revert_plan(
             if fs::symlink_metadata(vault_join(vault, before_relative)?).is_ok() {
                 return Err(key_error("history.target_exists"));
             }
-            ensure_parents(vault, snapshot, before_index, before_relative)?;
-            restore_before(snapshot, vault, before_relative, before, temporary)?;
+            ensure_parents(
+                vault,
+                snapshot,
+                before_index,
+                before_relative,
+                pending_modes,
+            )?;
+            restore_before(
+                snapshot,
+                vault,
+                before_relative,
+                before,
+                temporary,
+                pending_modes,
+            )?;
             // 只有旧路径成功恢复后才删除新路径；任何失败都保留可读副本。
             remove_after(vault, after_relative, after)?;
         }
@@ -455,8 +496,21 @@ fn revert_plan(
                 .as_ref()
                 .ok_or_else(|| key_error("history.review_stale"))?;
             remove_after(vault, after_relative, after)?;
-            ensure_parents(vault, snapshot, before_index, before_relative)?;
-            restore_before(snapshot, vault, before_relative, before, temporary)?;
+            ensure_parents(
+                vault,
+                snapshot,
+                before_index,
+                before_relative,
+                pending_modes,
+            )?;
+            restore_before(
+                snapshot,
+                vault,
+                before_relative,
+                before,
+                temporary,
+                pending_modes,
+            )?;
         }
     }
     Ok(())
@@ -532,6 +586,7 @@ fn restore_before(
     relative: &str,
     before: &ManifestEntry,
     temporary: &Path,
+    pending_modes: &mut BTreeMap<PathBuf, u32>,
 ) -> io::Result<()> {
     let absolute = vault_join(vault, relative)?;
     match before.kind.as_str() {
@@ -570,8 +625,10 @@ fn restore_before(
             if fs::symlink_metadata(&absolute).is_ok() {
                 return Err(key_error("history.target_exists"));
             }
-            fs::DirBuilder::new().mode(0o700).create(&absolute)?;
-            fs::set_permissions(&absolute, fs::Permissions::from_mode(before.mode))?;
+            fs::DirBuilder::new()
+                .mode((before.mode | 0o700) & 0o7777)
+                .create(&absolute)?;
+            pending_modes.insert(absolute, before.mode);
             Ok(())
         }
         _ => Err(key_error("history.unsupported_entry")),
@@ -710,6 +767,7 @@ fn ensure_parents(
     snapshot: &Path,
     before_index: &BTreeMap<String, ManifestEntry>,
     relative: &str,
+    pending_modes: &mut BTreeMap<PathBuf, u32>,
 ) -> io::Result<()> {
     let components: Vec<Component> = Path::new(relative).components().collect();
     if components.len() <= 1 {
@@ -727,7 +785,13 @@ fn ensure_parents(
         }
         relative_so_far.push_str(&name.to_string_lossy());
         match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                let mode = metadata.mode() & 0o7777;
+                if mode & 0o200 == 0 {
+                    fs::set_permissions(&current, fs::Permissions::from_mode(mode | 0o200))?;
+                    pending_modes.insert(current.clone(), mode);
+                }
+            }
             Ok(_) => return Err(key_error("history.path_blocked")),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let Some(entry) = before_index.get(&relative_so_far) else {
@@ -741,8 +805,10 @@ fn ensure_parents(
                 if !snapshot_directory.is_dir() {
                     return Err(key_error("history.snapshot_corrupt"));
                 }
-                fs::DirBuilder::new().mode(0o700).create(&current)?;
-                fs::set_permissions(&current, fs::Permissions::from_mode(entry.mode))?;
+                fs::DirBuilder::new()
+                    .mode((entry.mode | 0o700) & 0o7777)
+                    .create(&current)?;
+                pending_modes.insert(current.clone(), entry.mode);
             }
             Err(error) => return Err(error),
         }
@@ -760,6 +826,22 @@ fn vault_join(vault: &Path, relative: &str) -> io::Result<PathBuf> {
         path.push(name);
     }
     Ok(path)
+}
+
+fn restore_directory_modes(pending_modes: &BTreeMap<PathBuf, u32>) -> io::Result<()> {
+    let mut modes: Vec<_> = pending_modes.iter().collect();
+    // 先恢复深层目录，再恢复父目录，避免父目录先变只读。
+    modes.sort_by(|left, right| {
+        right
+            .0
+            .components()
+            .count()
+            .cmp(&left.0.components().count())
+    });
+    for (path, mode) in modes {
+        fs::set_permissions(path, fs::Permissions::from_mode(*mode))?;
+    }
+    Ok(())
 }
 
 fn remove_tree(path: &Path) -> io::Result<()> {
