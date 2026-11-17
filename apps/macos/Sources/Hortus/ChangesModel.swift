@@ -16,6 +16,10 @@ final class ChangesModel {
     var loadingDetail = false
     var error: String?
     var refreshedAt: Date?
+    var rollbackBusy = false
+    var notice: String?
+    var noticeIsError = false
+    private(set) var lastReport: SessionRollbackReportInfo?
     private(set) var lastSummaryMainThread: Bool?
 
     @ObservationIgnored weak var workspace: Workspace?
@@ -43,6 +47,26 @@ final class ChangesModel {
         if let detail, detail.entry.id == entry.id { return detail.text }
         let suffix = (path as NSString).pathExtension.lowercased()
         return ["md", "markdown", "mmd", "mermaid"].contains(suffix)
+    }
+
+    /// 只有当前详情仍匹配选中条目、且是文本文件时才提供按处回滚。
+    var canRevertHunks: Bool {
+        guard let entry = selectedEntry, let detail, detail.entry.id == entry.id else { return false }
+        return detail.text && !detail.binary && !detail.large && !detail.hunks.isEmpty
+            && entry.change != "type_changed" && entry.after?.kind == "file"
+    }
+
+    var sessionIsActive: Bool {
+        guard let state = selectedSession?.state else { return false }
+        return state == "running" || state == "preparing"
+    }
+
+    var canRollBackAll: Bool {
+        hasChanges && !sessionIsActive && !rollbackBusy && selectedSession?.usable == true
+    }
+
+    var canDeleteSnapshot: Bool {
+        selectedSession != nil && !sessionIsActive && !rollbackBusy
     }
 
     /// 打开面板或切换会话时的入口：先刷新会话列表，再计算当前会话摘要。
@@ -196,6 +220,229 @@ final class ChangesModel {
         }
     }
 
+    /// 按处回滚当前 hunk；成功后刷新摘要与详情。
+    @discardableResult
+    func rollbackHunk(_ hunk: ReviewDiffHunk, index: Int) async -> Bool {
+        guard !rollbackBusy, let core = workspace?.core, let session = selectedSession,
+              let entry = selectedEntry, let detail, detail.entry.id == entry.id else { return false }
+        let affected = Self.affectedPaths(entry)
+        guard !blockIfUnsaved(affected) else { return false }
+        let temporary = Self.replacementDirectory(for: root)
+        let expectation = Self.expectation(entry)
+        let cancellation = ReviewCancellation()
+        let sessionID = session.id
+        let path = entry.newPath ?? entry.id
+        let oldPath = entry.oldPath
+        rollbackBusy = true
+        notice = nil
+        let result = await Task.detached { () async -> Result<Void, Error> in
+            defer { Self.removeReplacementDirectory(temporary) }
+            return Result {
+                try core.rollbackAgentSessionHunk(
+                    id: sessionID,
+                    path: path,
+                    oldPath: oldPath,
+                    expectation: expectation,
+                    hunkIndex: UInt32(index),
+                    hunk: hunk,
+                    temporary: temporary,
+                    cancellation: cancellation
+                )
+            }
+        }.value
+        rollbackBusy = false
+        switch result {
+        case .success:
+            workspace?.refreshAfterRollback(affected)
+            notice = L10n.string("Reverted %@", entry.id)
+            noticeIsError = false
+            await refreshSummary()
+            return true
+        case .failure(let failure):
+            notice = L10n.error(failure)
+            noticeIsError = true
+            return false
+        }
+    }
+
+    /// 按文件回滚当前选中条目。
+    @discardableResult
+    func rollbackSelectedEntry() async -> Bool {
+        guard !rollbackBusy, let core = workspace?.core, let session = selectedSession, let entry = selectedEntry else {
+            return false
+        }
+        let affected = Self.affectedPaths(entry)
+        guard !blockIfUnsaved(affected) else { return false }
+        let temporary = Self.replacementDirectory(for: root)
+        let expectation = Self.expectation(entry)
+        let cancellation = ReviewCancellation()
+        let sessionID = session.id
+        rollbackBusy = true
+        notice = nil
+        let result = await Task.detached { () async -> Result<Void, Error> in
+            defer { Self.removeReplacementDirectory(temporary) }
+            return Result {
+                try core.rollbackAgentSessionEntry(
+                    id: sessionID,
+                    expectation: expectation,
+                    temporary: temporary,
+                    cancellation: cancellation
+                )
+            }
+        }.value
+        rollbackBusy = false
+        switch result {
+        case .success:
+            workspace?.refreshAfterRollback(affected)
+            notice = L10n.string("Reverted %@", entry.id)
+            noticeIsError = false
+            await refreshSummary()
+            return true
+        case .failure(let failure):
+            notice = L10n.error(failure)
+            noticeIsError = true
+            return false
+        }
+    }
+
+    /// 按会话回滚全部已审阅条目；部分失败或 stale 如实显示。
+    @discardableResult
+    func rollbackAll() async -> Bool {
+        guard !rollbackBusy, let core = workspace?.core, let session = selectedSession, let summary else { return false }
+        guard !sessionIsActive else {
+            notice = L10n.string("Stop the agent before rolling back or deleting this snapshot")
+            noticeIsError = true
+            return false
+        }
+        guard !summary.entries.isEmpty else { return false }
+        let affected = Set(summary.entries.flatMap { Self.affectedPaths($0) })
+        guard !blockIfUnsaved(affected) else { return false }
+        let expectations = summary.entries.map(Self.expectation)
+        let temporary = Self.replacementDirectory(for: root)
+        let cancellation = ReviewCancellation()
+        let sessionID = session.id
+        rollbackBusy = true
+        notice = nil
+        let result = await Task.detached { () async -> Result<SessionRollbackReportInfo, Error> in
+            defer { Self.removeReplacementDirectory(temporary) }
+            return Result {
+                try core.rollbackAgentSession(
+                    id: sessionID,
+                    expectations: expectations,
+                    temporary: temporary,
+                    cancellation: cancellation
+                )
+            }
+        }.value
+        rollbackBusy = false
+        switch result {
+        case .success(let report):
+            lastReport = report
+            workspace?.refreshAfterRollback(affected)
+            notice = Self.reportMessage(report)
+            noticeIsError = !report.failed.isEmpty
+            await refreshSummary()
+            return report.failed.isEmpty
+        case .failure(let failure):
+            notice = L10n.error(failure)
+            noticeIsError = true
+            return false
+        }
+    }
+
+    /// 显式删除当前会话快照；活动会话只提示，不发请求。
+    @discardableResult
+    func deleteSelectedSnapshot() async -> Bool {
+        guard !rollbackBusy, let core = workspace?.core, let session = selectedSession else { return false }
+        guard !sessionIsActive else {
+            notice = L10n.string("Stop the agent before rolling back or deleting this snapshot")
+            noticeIsError = true
+            return false
+        }
+        rollbackBusy = true
+        notice = nil
+        let sessionID = session.id
+        let result = await Task.detached { () async -> Result<Void, Error> in
+            Result { try core.deleteAgentSession(id: sessionID) }
+        }.value
+        rollbackBusy = false
+        switch result {
+        case .success:
+            sessions.removeAll { $0.id == sessionID }
+            summary = nil
+            selectedEntryID = nil
+            detail = nil
+            let next = sessions.first(where: \.usable) ?? sessions.first
+            selectedSessionID = next?.id
+            notice = L10n.string("Snapshot deleted")
+            noticeIsError = false
+            await refreshSessions(preferred: next?.id)
+            if selectedSession?.usable == true { await refreshSummary() }
+            return true
+        case .failure(let failure):
+            notice = L10n.error(failure)
+            noticeIsError = true
+            return false
+        }
+    }
+
+    private func blockIfUnsaved(_ paths: Set<String>) -> Bool {
+        guard let workspace, workspace.hasUnsavedEdits(in: paths) else { return false }
+        notice = L10n.string("Save or close unsaved edits in the affected notes before rolling back")
+        noticeIsError = true
+        return true
+    }
+
+    private static func expectation(_ entry: ReviewEntryInfo) -> RollbackExpectationInfo {
+        RollbackExpectationInfo(
+            path: entry.id,
+            oldPath: entry.oldPath,
+            newPath: entry.newPath,
+            change: entry.change,
+            expectedBefore: entry.beforeDigest,
+            expectedAfter: entry.afterDigest
+        )
+    }
+
+    private static func affectedPaths(_ entry: ReviewEntryInfo) -> Set<String> {
+        var paths = Set<String>([entry.id])
+        if let old = entry.oldPath { paths.insert(old) }
+        if let new = entry.newPath { paths.insert(new) }
+        return paths
+    }
+
+    private static func replacementDirectory(for root: String?) -> String? {
+        guard let root else { return nil }
+        return try? FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: URL(fileURLWithPath: root),
+            create: true
+        ).path
+    }
+
+    nonisolated private static func removeReplacementDirectory(_ path: String?) {
+        guard let path else { return }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    private static func reportMessage(_ report: SessionRollbackReportInfo) -> String {
+        let reverted = report.revertedPaths.count
+        if report.failed.isEmpty, report.skippedStale.isEmpty {
+            return L10n.string("Rolled back %d changes", reverted)
+        }
+        if report.failed.isEmpty {
+            return L10n.string(
+                "Rolled back %d changes; %d skipped because the disk changed",
+                reverted, report.skippedStale.count
+            )
+        }
+        return L10n.string(
+            "Rolled back %d changes; %d skipped because the disk changed, %d failed",
+            reverted, report.skippedStale.count, report.failed.count
+        )
+    }
+
     func openSelectedNote() {
         guard canOpenSelectedNote, let path = selectedEntry?.newPath else { return }
         workspace?.openNote(path)
@@ -218,6 +465,10 @@ final class ChangesModel {
         loadingDetail = false
         error = nil
         refreshedAt = nil
+        notice = nil
+        noticeIsError = false
+        rollbackBusy = false
+        lastReport = nil
     }
 
     private static func isCancellation(_ error: Error) -> Bool {

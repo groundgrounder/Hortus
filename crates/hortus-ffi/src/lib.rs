@@ -152,7 +152,7 @@ pub struct AgentSessionInfo {
     pub exit_code: Option<i32>,
 }
 
-#[derive(Debug, uniffi::Record)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct ReviewMetadata {
     pub kind: String,
     pub size: u64,
@@ -161,7 +161,7 @@ pub struct ReviewMetadata {
     pub link: Option<String>,
 }
 
-#[derive(Debug, uniffi::Record)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct ReviewEntryInfo {
     pub id: String,
     pub old_path: Option<String>,
@@ -171,6 +171,8 @@ pub struct ReviewEntryInfo {
     pub after: Option<ReviewMetadata>,
     pub text: bool,
     pub content_identical: bool,
+    pub before_digest: Option<String>,
+    pub after_digest: Option<String>,
 }
 
 #[derive(Debug, uniffi::Record)]
@@ -193,7 +195,7 @@ pub struct SessionReviewSummary {
     pub entries: Vec<ReviewEntryInfo>,
 }
 
-#[derive(Debug, uniffi::Record)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct ReviewDiffLine {
     pub kind: String,
     pub old_line: Option<u32>,
@@ -201,7 +203,7 @@ pub struct ReviewDiffLine {
     pub text: String,
 }
 
-#[derive(Debug, uniffi::Record)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct ReviewDiffHunk {
     pub old_start: u32,
     pub old_count: u32,
@@ -221,6 +223,132 @@ pub struct ReviewEntryDetail {
     pub new_no_final_newline: bool,
     pub line_endings_changed: bool,
     pub hunks: Vec<ReviewDiffHunk>,
+}
+
+/// UI 提交的审阅记录；回滚只按这份指纹复核，不信任之后重新扫描的结果。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RollbackExpectationInfo {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub new_path: Option<String>,
+    pub change: String,
+    pub expected_before: Option<String>,
+    pub expected_after: Option<String>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct RollbackFailureInfo {
+    pub path: String,
+    pub change: String,
+    pub reason: String,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct SessionRollbackReportInfo {
+    pub reverted_paths: Vec<String>,
+    pub skipped_stale: Vec<RollbackFailureInfo>,
+    pub failed: Vec<RollbackFailureInfo>,
+}
+
+fn rollback_expectation(
+    info: &RollbackExpectationInfo,
+) -> Result<history::rollback::RollbackExpectation, CoreError> {
+    let change = history::review::ChangeKind::parse(&info.change)
+        .ok_or_else(|| CoreError::failure("history.invalid_entry"))?;
+    Ok(history::rollback::RollbackExpectation {
+        path: info.path.clone(),
+        old_path: info.old_path.clone(),
+        new_path: info.new_path.clone(),
+        change,
+        expected_before: info.expected_before.clone(),
+        expected_after: info.expected_after.clone(),
+    })
+}
+
+fn rollback_report(report: history::rollback::SessionRollbackReport) -> SessionRollbackReportInfo {
+    SessionRollbackReportInfo {
+        reverted_paths: report.reverted_paths,
+        skipped_stale: report
+            .skipped_stale
+            .into_iter()
+            .map(|failure| RollbackFailureInfo {
+                path: failure.path,
+                change: failure.change,
+                reason: failure.reason,
+            })
+            .collect(),
+        failed: report
+            .failed
+            .into_iter()
+            .map(|failure| RollbackFailureInfo {
+                path: failure.path,
+                change: failure.change,
+                reason: failure.reason,
+            })
+            .collect(),
+    }
+}
+
+fn rollback_hunk(hunk: &ReviewDiffHunk) -> history::review::DiffHunk {
+    history::review::DiffHunk {
+        old_start: hunk.old_start,
+        old_count: hunk.old_count,
+        new_start: hunk.new_start,
+        new_count: hunk.new_count,
+        lines: hunk
+            .lines
+            .iter()
+            .map(|line| history::review::DiffLine {
+                kind: line.kind.clone(),
+                old_line: line.old_line,
+                new_line: line.new_line,
+                text: line.text.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// 与保存路径共用同卷临时目录规则：调用方传入 `itemReplacementDirectory`，
+/// 未传入时退回系统临时目录并在同卷校验失败时拒绝回滚。
+struct RollbackTemporary {
+    path: std::path::PathBuf,
+}
+
+impl Drop for RollbackTemporary {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn rollback_temporary(
+    vault: &std::path::Path,
+    provided: Option<String>,
+) -> Result<RollbackTemporary, CoreError> {
+    let base = provided
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let unique = format!(
+        "hortus-rollback-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    );
+    let path = base.join(unique);
+    std::fs::create_dir(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let permissions = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(&path, permissions)?;
+        let parent = std::fs::metadata(&path)?;
+        let root = std::fs::metadata(vault)?;
+        if parent.dev() != root.dev() {
+            return Err(CoreError::failure("history.temporary_unavailable"));
+        }
+    }
+    Ok(RollbackTemporary { path })
 }
 
 #[derive(uniffi::Object)]
@@ -269,6 +397,8 @@ fn review_entry(entry: &history::review::ReviewEntry) -> ReviewEntryInfo {
         after: entry.after.as_ref().map(review_metadata),
         text: entry.text,
         content_identical: entry.content_identical,
+        before_digest: entry.before_digest.clone(),
+        after_digest: entry.after_digest.clone(),
     }
 }
 
@@ -648,6 +778,92 @@ impl WorkspaceCore {
         let detail =
             history.review_entry(&id, &path, old_path.as_deref(), Some(cancellation.flag()))?;
         Ok(review_detail(detail))
+    }
+
+    /// 按处回滚：hunk 内容必须与当前审阅结果一致；只写命中的文本文件。
+    #[allow(clippy::too_many_arguments)]
+    pub fn rollback_agent_session_hunk(
+        &self,
+        id: String,
+        path: String,
+        old_path: Option<String>,
+        expectation: RollbackExpectationInfo,
+        hunk_index: u32,
+        hunk: ReviewDiffHunk,
+        temporary: Option<String>,
+        cancellation: Arc<ReviewCancellation>,
+    ) -> Result<(), CoreError> {
+        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let history = history::HistoryStore::new(data);
+        let record = history.record(&id)?;
+        let temporary = rollback_temporary(std::path::Path::new(&record.vault), temporary)?;
+        let expectation = rollback_expectation(&expectation)?;
+        let expected_hunk = rollback_hunk(&hunk);
+        history.rollback_hunk(
+            &id,
+            &path,
+            old_path.as_deref(),
+            &expectation,
+            hunk_index as usize,
+            &expected_hunk,
+            &temporary.path,
+            Some(cancellation.flag()),
+        )?;
+        Ok(())
+    }
+
+    /// 按文件回滚；`after` 指纹不匹配时返回 `history.review_stale`。
+    pub fn rollback_agent_session_entry(
+        &self,
+        id: String,
+        expectation: RollbackExpectationInfo,
+        temporary: Option<String>,
+        cancellation: Arc<ReviewCancellation>,
+    ) -> Result<(), CoreError> {
+        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let history = history::HistoryStore::new(data);
+        let record = history.record(&id)?;
+        let temporary = rollback_temporary(std::path::Path::new(&record.vault), temporary)?;
+        let expectation = rollback_expectation(&expectation)?;
+        history.rollback_entry(
+            &id,
+            &expectation,
+            &temporary.path,
+            Some(cancellation.flag()),
+        )?;
+        Ok(())
+    }
+
+    /// 按会话回滚整批条目，逐项返回成功、stale 与失败；不隐藏部分失败。
+    pub fn rollback_agent_session(
+        &self,
+        id: String,
+        expectations: Vec<RollbackExpectationInfo>,
+        temporary: Option<String>,
+        cancellation: Arc<ReviewCancellation>,
+    ) -> Result<SessionRollbackReportInfo, CoreError> {
+        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let history = history::HistoryStore::new(data);
+        let record = history.record(&id)?;
+        let temporary = rollback_temporary(std::path::Path::new(&record.vault), temporary)?;
+        let expectations = expectations
+            .iter()
+            .map(rollback_expectation)
+            .collect::<Result<Vec<_>, _>>()?;
+        let report = history.rollback_session(
+            &id,
+            &expectations,
+            &temporary.path,
+            Some(cancellation.flag()),
+        )?;
+        Ok(rollback_report(report))
+    }
+
+    /// 显式删除会话快照；活动会话（Preparing/Running）与用户库都不会被触碰。
+    pub fn delete_agent_session(&self, id: String) -> Result<(), CoreError> {
+        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        history::HistoryStore::new(data).delete_session(&id)?;
+        Ok(())
     }
 }
 

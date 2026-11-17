@@ -311,6 +311,24 @@ final class Workspace {
         }
     }
 
+    /// 回滚后只刷新受影响的干净标签；脏编辑、组合输入和活动冲突由面板预先阻止。
+    func refreshAfterRollback(_ paths: Set<String>) {
+        guard !paths.isEmpty else { return }
+        for path in paths {
+            guard let document = tabs.first(where: { $0.path == path })?.document else { continue }
+            guard !document.dirty, !document.marked, document.issue != .conflict else { continue }
+            document.refresh()
+        }
+    }
+
+    /// 未保存输入、组合输入或活动冲突的标签不允许被回滚静默覆盖。
+    func hasUnsavedEdits(in paths: Set<String>) -> Bool {
+        tabs.contains { tab in
+            guard paths.contains(tab.path), let document = tab.document else { return false }
+            return document.dirty || document.marked || document.issue == .conflict
+        }
+    }
+
     /// 后台线程更新完搜索内容后回到主线程：记录索引就绪，刷新正在显示的搜索结果
     func searchIndexUpdated(changed: Bool, scanFinished: Bool) {
         guard changed || scanFinished, !scanning else { return }

@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod digest;
 pub mod review;
+pub mod rollback;
 pub mod snapshot;
 
 pub const FORMAT_VERSION: u32 = 1;

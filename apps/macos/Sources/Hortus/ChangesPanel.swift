@@ -7,6 +7,7 @@ import HortusCore
 struct ChangesPanel: View {
     @Environment(Workspace.self) private var workspace
     @Environment(\.colorSchemeContrast) private var contrast
+    @State private var pendingRollback: PendingRollback?
 
     private var model: ChangesModel { workspace.changes }
 
@@ -39,6 +40,32 @@ struct ChangesPanel: View {
         .onChange(of: workspace.currentAgentSessionID) { _, id in
             guard let id else { return }
             Task { await model.activate(preferred: id) }
+        }
+        .confirmationDialog(
+            pendingRollback?.title ?? "",
+            isPresented: Binding(
+                get: { pendingRollback != nil },
+                set: { if !$0 { pendingRollback = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingRollback
+        ) { action in
+            switch action {
+            case .entry:
+                Button(L10n.string("Revert File"), role: .destructive) {
+                    Task { await model.rollbackSelectedEntry() }
+                }
+            case .session:
+                Button(L10n.string("Roll Back All"), role: .destructive) {
+                    Task { await model.rollbackAll() }
+                }
+            case .delete:
+                Button(L10n.string("Delete Snapshot"), role: .destructive) {
+                    Task { await model.deleteSelectedSnapshot() }
+                }
+            }
+        } message: { action in
+            Text(action.message)
         }
     }
 
@@ -74,11 +101,59 @@ struct ChangesPanel: View {
                     .foregroundStyle(.secondary)
             } else {
                 sessionSelector
+                if let session = model.selectedSession {
+                    HStack(spacing: 12) {
+                        Button(L10n.string("Roll Back All")) {
+                            pendingRollback = .session(session, model.summary?.entries.count ?? 0)
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .disabled(!model.canRollBackAll)
+                        .help(L10n.string("Restore every reviewed change from the session snapshot"))
+                        .accessibilityLabel(L10n.string("Roll Back All"))
+                        Button(L10n.string("Delete Snapshot")) {
+                            pendingRollback = .delete(session)
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .disabled(!model.canDeleteSnapshot)
+                        .help(L10n.string("Delete this session snapshot; the note folder is not changed"))
+                        .accessibilityLabel(L10n.string("Delete Snapshot"))
+                        if model.rollbackBusy {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+                if model.sessionIsActive {
+                    Text(L10n.string("Stop the agent before rolling back or deleting this snapshot"))
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text(L10n.string("Changes on disk since the session snapshot"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+            }
+            if let notice = model.notice {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(notice)
+                        .font(.caption2)
+                        .foregroundStyle(model.noticeIsError ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button {
+                        model.notice = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(L10n.string("Dismiss"))
+                }
             }
         }
         .padding(.horizontal, 14)
@@ -289,6 +364,14 @@ struct ChangesPanel: View {
                         if model.loadingDetail {
                             ProgressView().controlSize(.mini)
                         }
+                        Button(L10n.string("Revert File")) {
+                            pendingRollback = .entry(entry)
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .disabled(model.rollbackBusy)
+                        .help(L10n.string("Restore this file from the session snapshot"))
+                        .accessibilityLabel(L10n.string("Revert File"))
                         if model.canOpenSelectedNote {
                             Button(L10n.string("Open Note")) { model.openSelectedNote() }
                                 .buttonStyle(.link)
@@ -343,8 +426,8 @@ struct ChangesPanel: View {
                     note(L10n.string("No difference"))
                 }
             }
-            ForEach(Array(detail.hunks.enumerated()), id: \.offset) { _, hunk in
-                hunkView(hunk)
+            ForEach(Array(detail.hunks.enumerated()), id: \.offset) { index, hunk in
+                hunkView(hunk, index: index)
             }
             if detail.oldNoFinalNewline || detail.newNoFinalNewline {
                 Text(L10n.string("No newline at end of file"))
@@ -363,14 +446,27 @@ struct ChangesPanel: View {
         }
     }
 
-    private func hunkView(_ hunk: ReviewDiffHunk) -> some View {
+    private func hunkView(_ hunk: ReviewDiffHunk, index: Int) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("@@ -\(hunk.oldStart),\(hunk.oldCount) +\(hunk.newStart),\(hunk.newCount) @@")
-                .font(.system(size: 10.5, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.top, 4)
-                .padding(.bottom, 2)
+            HStack(spacing: 6) {
+                Text("@@ -\(hunk.oldStart),\(hunk.oldCount) +\(hunk.newStart),\(hunk.newCount) @@")
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if model.canRevertHunks {
+                    Button(L10n.string("Revert Hunk")) {
+                        Task { await model.rollbackHunk(hunk, index: index) }
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption2)
+                    .disabled(model.rollbackBusy)
+                    .help(L10n.string("Reverse only this change"))
+                    .accessibilityLabel(L10n.string("Revert hunk at line %d", Int(hunk.newStart)))
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.top, 4)
+            .padding(.bottom, 2)
             ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
                 diffRow(line)
             }
@@ -560,5 +656,40 @@ struct ChangesPanel: View {
     private func timeOnly(_ milliseconds: Int64) -> String {
         let date = Date(timeIntervalSince1970: Double(milliseconds) / 1000)
         return date.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+
+/// 显式确认的回滚/清理动作；标题与作用域在弹窗中一次说清。
+private enum PendingRollback: Identifiable {
+    case entry(ReviewEntryInfo)
+    case session(AgentSessionInfo, Int)
+    case delete(AgentSessionInfo)
+
+    var id: String {
+        switch self {
+        case .entry(let entry): "entry-\(entry.id)"
+        case .session(let session, _): "session-\(session.id)"
+        case .delete(let session): "delete-\(session.id)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .entry: L10n.string("Revert File")
+        case .session: L10n.string("Roll Back All")
+        case .delete: L10n.string("Delete Snapshot")
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .entry(let entry):
+            return L10n.string("Restore %@ from the session snapshot? Unsaved edits are never overwritten.", entry.id)
+        case .session(let session, let count):
+            return L10n.string("Session %@: restore every reviewed change? This affects %d changes.", session.id, count)
+        case .delete(let session):
+            return L10n.string("Delete the snapshot for session %@? The note folder is not changed, but this session can no longer be reviewed or rolled back.", session.id)
+        }
     }
 }

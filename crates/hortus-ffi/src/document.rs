@@ -792,6 +792,16 @@ impl DocumentSession {
         // 权限独立于正文版本，即使字节未变也要重新派生。
         state.read_only = State::read_only_reason(&state.path, disk.as_ref());
         if note::same_version(state.baseline.as_ref(), disk.as_ref()) {
+            // 回滚把删除的文件按原字节恢复后，干净的标签页必须退出 Missing，
+            // 不能停留在“磁盘已删除”的旧状态。
+            if disk.is_some()
+                && !state.dirty
+                && state.pending_recovery.is_none()
+                && state.issue == DocumentIssue::Missing
+            {
+                state.issue = DocumentIssue::None;
+                state.message.clear();
+            }
             return Ok(state.update(None));
         }
         // 待恢复草稿归用户所有：磁盘变化只更新只读状态，不进入冲突流程，

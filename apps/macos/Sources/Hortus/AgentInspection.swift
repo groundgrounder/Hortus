@@ -221,6 +221,10 @@ enum AgentInspection {
             return try await ReviewInspection.run(workspace: workspace, layout: layout,
                                                   arguments: arguments, mode: mode)
         }
+        if mode.hasPrefix("rollback-") {
+            return try await RollbackInspection.run(workspace: workspace, layout: layout,
+                                                    arguments: arguments, mode: mode)
+        }
         let controller = workspace.terminals
         workspace.showTerminal()
         var result: [String: Any] = ["mode": mode, "root": workspace.root ?? ""]

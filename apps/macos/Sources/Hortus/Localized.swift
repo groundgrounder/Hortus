@@ -104,6 +104,28 @@ enum L10n {
             return string("The session metadata is invalid")
         case "history.invalid_path", "history.source_not_directory", "history.path_invalid":
             return string("The snapshot could not be written")
+        case "history.review_stale":
+            return string("The disk changed since this review. Refresh before rolling back.")
+        case "history.hunk_invalid":
+            return string("This change no longer matches the reviewed diff")
+        case "history.hunk_stale":
+            return string("The file changed while rolling back this change")
+        case "history.hunk_unsupported":
+            return string("Only text file changes support hunk rollback")
+        case "history.directory_not_empty":
+            return string("The folder is not empty; roll back its added contents first")
+        case "history.target_exists":
+            return string("A file already exists at the destination")
+        case "history.path_blocked":
+            return string("A file blocks the folder needed for this rollback")
+        case "history.temporary_unavailable":
+            return string("A temporary folder on the same volume is unavailable")
+        case "history.session_active":
+            return string("Stop the agent before rolling back or deleting this snapshot")
+        case "history.session_missing":
+            return string("The session snapshot was not found")
+        case "history.snapshot_corrupt":
+            return string("The session snapshot is damaged and cannot be used")
         default:
             if key.hasPrefix("history.") || key.hasPrefix("agent.") || key.hasPrefix("guide.") {
                 return string("Unable to complete the snapshot")

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+hortus-vault = { path = "../hortus-vault" }
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "=3.27.0"

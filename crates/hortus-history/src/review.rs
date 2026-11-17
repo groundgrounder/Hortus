@@ -5,6 +5,7 @@
 //! 不依赖时间戳：大小不同直接视为内容变化，大小相同也读取字节比较。
 //! 列表只统计改动，逐行 diff 与内容详情在选中条目时按需计算。
 use crate::HistoryStore;
+use crate::digest::state_digest;
 use crate::snapshot::ManifestEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,6 +55,17 @@ impl ChangeKind {
             Self::TypeChanged => "type_changed",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "added" => Self::Added,
+            "modified" => Self::Modified,
+            "deleted" => Self::Deleted,
+            "renamed" => Self::Renamed,
+            "type_changed" => Self::TypeChanged,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +111,10 @@ pub struct ReviewEntry {
     pub text: bool,
     /// 前后两侧内容逐字节相同（纯重命名或仅权限变化）。
     pub content_identical: bool,
+    /// 审阅时快照侧的强指纹；用于回滚时确认没有纳入错误的基线。
+    pub before_digest: Option<String>,
+    /// 审阅时磁盘侧的强指纹；回滚必须匹配它才允许写入。
+    pub after_digest: Option<String>,
 }
 
 impl ReviewEntry {
@@ -301,6 +317,14 @@ impl HistoryStore {
             }
         }
 
+        let before_digest = match before_entry {
+            Some(_) => state_digest(&snapshot, before_path)?,
+            None => None,
+        };
+        let after_digest = match after_entry {
+            Some(_) => state_digest(vault, after_path)?,
+            None => None,
+        };
         let entry = ReviewEntry {
             id: path.to_string(),
             old_path: old_relative.map(str::to_string),
@@ -310,6 +334,8 @@ impl HistoryStore {
             after: after_entry.as_ref().map(EntryMetadata::from_manifest),
             text,
             content_identical: identical,
+            before_digest,
+            after_digest,
         };
         Ok(ReviewDetail {
             entry,
@@ -324,7 +350,7 @@ impl HistoryStore {
         })
     }
 
-    fn reviewable_record(&self, id: &str) -> io::Result<crate::SessionRecord> {
+    pub(crate) fn reviewable_record(&self, id: &str) -> io::Result<crate::SessionRecord> {
         let record = self.record(id)?;
         if !record.state.usable() {
             return Err(key_error("history.session_unusable"));
@@ -334,7 +360,7 @@ impl HistoryStore {
 
     /// 读取并校验清单。`verify` 为真时逐条核对快照目录中的类型、大小与链接目标，
     /// 防止损坏或被清空的快照被误报成“全新增/全删除”。
-    fn load_snapshot(
+    pub(crate) fn load_snapshot(
         &self,
         record: &crate::SessionRecord,
         cancel: Option<&AtomicBool>,
@@ -456,6 +482,8 @@ fn compare_entries(
                         after: Some(EntryMetadata::from_manifest(new)),
                         text: false,
                         content_identical: false,
+                        before_digest: state_digest(snapshot, &path)?,
+                        after_digest: state_digest(vault, &path)?,
                     });
                     continue;
                 }
@@ -472,6 +500,8 @@ fn compare_entries(
                     after: Some(EntryMetadata::from_manifest(new)),
                     text: false,
                     content_identical: identical,
+                    before_digest: state_digest(snapshot, &path)?,
+                    after_digest: state_digest(vault, &path)?,
                 });
             }
             (Some(old), None) => pending_deleted.push(old.clone()),
@@ -489,6 +519,8 @@ fn compare_entries(
             after: None,
             text: false,
             content_identical: false,
+            before_digest: state_digest(snapshot, &entry.path)?,
+            after_digest: None,
         });
     }
     for entry in &pending_added {
@@ -501,6 +533,8 @@ fn compare_entries(
             after: Some(EntryMetadata::from_manifest(entry)),
             text: false,
             content_identical: false,
+            before_digest: None,
+            after_digest: state_digest(vault, &entry.path)?,
         });
     }
     Ok(Changes { entries })
@@ -571,6 +605,8 @@ fn pair_renames(
             after: Some(EntryMetadata::from_manifest(new_entry)),
             text: false,
             content_identical: exact,
+            before_digest: state_digest(snapshot, &old)?,
+            after_digest: state_digest(vault, &new)?,
         });
     }
     Ok(())
@@ -848,7 +884,7 @@ fn same_content(
     }
 }
 
-fn safe_join(root: &Path, relative: &str, missing: &str) -> io::Result<PathBuf> {
+pub(crate) fn safe_join(root: &Path, relative: &str, missing: &str) -> io::Result<PathBuf> {
     validate_relative(relative)?;
     let mut path = root.to_path_buf();
     let mut components = Path::new(relative).components().peekable();
@@ -873,7 +909,7 @@ fn safe_join(root: &Path, relative: &str, missing: &str) -> io::Result<PathBuf> 
     Ok(path)
 }
 
-fn validate_relative(path: &str) -> io::Result<()> {
+pub(crate) fn validate_relative(path: &str) -> io::Result<()> {
     if path.is_empty()
         || path.contains('\0')
         || path.starts_with('/')
@@ -891,7 +927,7 @@ fn validate_relative(path: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn disk_entry(root: &Path, relative: &str) -> io::Result<ManifestEntry> {
+pub(crate) fn disk_entry(root: &Path, relative: &str) -> io::Result<ManifestEntry> {
     let path = safe_join(root, relative, "history.entry_missing")?;
     let metadata = fs::symlink_metadata(&path)?;
     let Some(kind) = kind_name(&metadata) else {
@@ -1015,7 +1051,7 @@ fn normalize_eol(text: &str) -> String {
 }
 
 /// 把正文拆成行：去掉 CRLF 的 `\r`，记录是否缺末尾换行。
-fn text_lines(text: &str) -> (Vec<String>, bool) {
+pub(crate) fn text_lines(text: &str) -> (Vec<String>, bool) {
     if text.is_empty() {
         return (Vec::new(), false);
     }
@@ -1231,11 +1267,11 @@ fn new_line_at(lines: &[DiffLine], index: usize) -> u32 {
         .unwrap_or(1)
 }
 
-fn key_error(key: &str) -> io::Error {
+pub(crate) fn key_error(key: &str) -> io::Error {
     io::Error::other(key)
 }
 
-fn check_cancel(cancel: Option<&AtomicBool>) -> io::Result<()> {
+pub(crate) fn check_cancel(cancel: Option<&AtomicBool>) -> io::Result<()> {
     match cancel {
         Some(flag) if flag.load(Ordering::Acquire) => Err(io::Error::new(
             io::ErrorKind::Interrupted,
