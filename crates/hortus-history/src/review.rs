@@ -1295,7 +1295,7 @@ mod tests {
             path_similarity("notes/alpha.md", "notes/alpha-copy.md")
                 > path_similarity("notes/alpha.md", "notes/beta.md")
         );
-        assert!(path_similarity("notes/alpha.md", "archive/alpha.md") == 1.0);
+        assert!(path_similarity("notes/alpha.md", "moved/alpha.md") == 1.0);
     }
 
     #[test]
