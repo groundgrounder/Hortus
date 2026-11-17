@@ -37,6 +37,7 @@ struct ReadingTests {
     @MainActor final class Fixture {
         let editing: EditingTests.Fixture
         let coordinator = ReadingText.Coordinator()
+        var openSource: (Int, Int) -> Void = { _, _ in }
         var view: DiagramTextView { editing.view }
         var document: NoteDocument { editing.document }
         init(_ source: String) throws { editing = try EditingTests.Fixture(source) }
@@ -48,7 +49,7 @@ struct ReadingTests {
             view.isReading = true; view.isEditable = false; view.isRichText = true; view.allowsUndo = false
             view.readingCoordinator = coordinator; coordinator.view = view
             coordinator.update(ReadingText(mathService: mathService, document: document, path: "note.md", vault: editing.vault.path,
-                fontSize: size, service: editing.service, core: editing.core) { _, _ in })
+                fontSize: size, service: editing.service, core: editing.core, openSource: openSource) { _, _ in })
             try await ready()
         }
         func ready() async throws {
