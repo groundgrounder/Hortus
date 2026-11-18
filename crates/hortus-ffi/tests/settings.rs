@@ -113,7 +113,13 @@ fn editable_config_round_trip_and_guide_management() {
 
     let probe = core.probe_agent_launch("/bin/sh".into(), vec!["{guide}".into()]);
     assert!(probe.available);
-    assert!(probe.executable.unwrap().ends_with("/sh"));
+    assert_eq!(
+        probe.executable.unwrap(),
+        fs::canonicalize("/bin/sh")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    );
     assert_eq!(probe.error, None);
     let missing = core.probe_agent_launch("/definitely/missing".into(), vec!["{guide}".into()]);
     assert!(!missing.available);
