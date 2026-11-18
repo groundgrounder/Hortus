@@ -23,7 +23,7 @@ use render::{LayoutState, assemble_scene};
 use retain::retain_positions;
 #[cfg(test)]
 use retain::vertical_bands;
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 use scene::marker_clearance;
 pub(crate) use scene::place_edge_label;
 use scene::{
