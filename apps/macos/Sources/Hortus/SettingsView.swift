@@ -161,6 +161,9 @@ private struct AgentSettingsView: View {
     var body: some View {
         let indices: [Int] = Array(model.agentArgs.indices)
         Form {
+            Section(L10n.string("Detected Agents")) {
+                detectedAgents
+            }
             Section(L10n.string("Agent Launch")) {
                 LabeledContent(L10n.string("Command")) {
                     HStack(spacing: 8) {
@@ -223,6 +226,57 @@ private struct AgentSettingsView: View {
             Button(L10n.string("Cancel"), role: .cancel) {}
         } message: {
             Text(L10n.string("This removes agent-guide.md from the configuration folder. Notes are not affected."))
+        }
+    }
+
+    @ViewBuilder private var detectedAgents: some View {
+        if model.agentScanning && model.detectedAgents.isEmpty {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(L10n.string("Scanning for installed Agents…")).foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(L10n.string("Scanning for installed Agents"))
+        } else if model.detectedAgents.isEmpty {
+            if model.agentScanComplete {
+                Text(L10n.string("No known Agent CLI was found. Enter a command below or choose an executable."))
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            ForEach(model.detectedAgents) { agent in
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(agent.displayName).font(.body.weight(.medium))
+                        Text(agent.executable)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                    Spacer(minLength: 8)
+                    Button(model.isAgentSelected(agent) ? L10n.string("Selected") : L10n.string("Use")) {
+                        model.useAgent(agent)
+                    }
+                    .disabled(model.isAgentSelected(agent))
+                    .accessibilityLabel(model.isAgentSelected(agent)
+                                            ? L10n.string("Selected %@", agent.displayName)
+                                            : L10n.string("Use %@", agent.displayName))
+                    .accessibilityHint(L10n.string("Fills the command and arguments without saving."))
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(agent.displayName)
+            }
+        }
+        HStack(spacing: 10) {
+            Button(L10n.string("Rescan")) { model.refreshDetectedAgents() }
+                .disabled(model.agentScanning)
+                .accessibilityLabel(L10n.string("Rescan for installed Agents"))
+            if model.agentScanning, !model.detectedAgents.isEmpty {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel(L10n.string("Scanning for installed Agents"))
+            }
+            Spacer()
         }
     }
 

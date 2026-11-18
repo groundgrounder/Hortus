@@ -2,6 +2,15 @@ import AppKit
 import HortusCore
 import SwiftUI
 
+/// 设置界面展示的已发现 Agent；只含核心静态解析出的绝对路径与预设参数。
+struct DetectedAgent: Identifiable, Hashable {
+    let id: String
+    let displayName: String
+    let binaryName: String
+    let executable: String
+    let suggestedArgs: [String]
+}
+
 /// 设置窗口的唯一状态：读取 `config.toml` 快照、校验并保存，再把结果广播给所有窗口。
 @Observable @MainActor
 final class SettingsModel {
@@ -20,6 +29,9 @@ final class SettingsModel {
     var agentCommand = ""
     var agentArgs: [String] = []
     var probe: AgentProbeInfo?
+    var detectedAgents: [DetectedAgent] = []
+    var agentScanning = false
+    var agentScanComplete = false
     var guideText = ""
     var guideOverridden = false
     var guidePath = ""
@@ -37,6 +49,8 @@ final class SettingsModel {
     var guideMessageIsError = false
     var conflict = false
     @ObservationIgnored private var probeTask: Task<Void, Never>?
+    @ObservationIgnored private var agentScanTask: Task<Void, Never>?
+    @ObservationIgnored private var loginPath: String?
     @ObservationIgnored private var loaded = false
 
     init(application: ApplicationWorkspace) {
@@ -82,7 +96,46 @@ final class SettingsModel {
             return
         }
         await loadGuide(core)
+        refreshDetectedAgents()
         scheduleProbe()
+    }
+
+    /// 后台只读扫描内置预设；扫描完成前不阻塞表单。
+    func refreshDetectedAgents() {
+        guard let core = application.core else { return }
+        agentScanTask?.cancel()
+        agentScanning = true
+        agentScanTask = Task { [weak self] in
+            let loginPath = await LoginShellEnvironment.resolvedPath()
+            guard !Task.isCancelled, let self else { return }
+            self.loginPath = loginPath
+            let agents = await Task.detached {
+                core.discoverAgents(loginPath: loginPath)
+            }.value
+            guard !Task.isCancelled else { return }
+            self.detectedAgents = agents.map { info in
+                DetectedAgent(id: info.id,
+                              displayName: info.displayName,
+                              binaryName: info.binaryName,
+                              executable: info.executable,
+                              suggestedArgs: info.suggestedArgs)
+            }
+            self.agentScanning = false
+            self.agentScanComplete = true
+            // 登录 PATH 到达后重新解析裸命令名与扩展目录。
+            self.scheduleProbe()
+        }
+    }
+
+    /// 只预填表单，不写盘；用户仍需点 Save。
+    func useAgent(_ agent: DetectedAgent) {
+        agentCommand = agent.executable
+        agentArgs = agent.suggestedArgs
+        scheduleProbe()
+    }
+
+    func isAgentSelected(_ agent: DetectedAgent) -> Bool {
+        agentCommand.trimmingCharacters(in: .whitespacesAndNewlines) == agent.executable
     }
 
     private func loadGuide(_ core: WorkspaceCore) async {
@@ -154,6 +207,7 @@ final class SettingsModel {
             if Self.kind(of: error) == "config.externally_modified" {
                 conflict = true
                 statusMessage = L10n.errorKey("config.externally_modified")
+                statusIsError = true
             } else {
                 statusMessage = L10n.error(error)
                 statusIsError = true
@@ -194,11 +248,12 @@ final class SettingsModel {
         probeTask?.cancel()
         let command = agentCommand
         let args = agentArgs
+        let loginPath = loginPath
         probeTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled, let self, let core = application.core else { return }
             let status = await Task.detached {
-                core.probeAgentLaunch(command: command, args: args)
+                core.probeAgentLaunchWithPath(command: command, args: args, loginPath: loginPath)
             }.value
             guard !Task.isCancelled else { return }
             probe = status

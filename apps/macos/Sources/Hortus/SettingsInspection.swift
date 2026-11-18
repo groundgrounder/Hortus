@@ -117,6 +117,34 @@ enum SettingsInspection {
             result["diagnostics"] = model.diagnostics
             result["font_families"] = model.fontFamilies.count
 
+            // A1：登录 PATH 注入后只读发现模拟 Agent；陷阱文件从未被执行。
+            if argument("settings-login-path", arguments) != nil {
+                stage = "discover agents"
+                try await wait { model.agentScanComplete }
+                result["detected_agents"] = model.detectedAgents.map { agent in
+                    ["id": agent.id,
+                     "executable": agent.executable,
+                     "args": agent.suggestedArgs]
+                }
+                if let marker = argument("settings-trap-marker", arguments) {
+                    result["trap_executed"] = FileManager.default.fileExists(atPath: marker)
+                }
+                let omp = try require(model.detectedAgents.first { $0.id == "omp" })
+                let beforeFill = try String(contentsOfFile: model.configPath, encoding: .utf8)
+                model.useAgent(omp)
+                try await Task.sleep(for: .milliseconds(100))
+                let afterFill = try String(contentsOfFile: model.configPath, encoding: .utf8)
+                result["fill_command"] = model.agentCommand
+                result["fill_args"] = model.agentArgs
+                result["fill_selected"] = model.isAgentSelected(omp)
+                result["fill_without_save"] = beforeFill == afterFill
+                await model.save()
+                let afterSave = try String(contentsOfFile: model.configPath, encoding: .utf8)
+                result["saved_agent_executable"] = afterSave.contains("command = \"\(omp.executable)\"")
+                result["saved_agent_args"] = afterSave.contains("--append-system-prompt={guide}")
+                result["saved_vaults_after_fill"] = afterSave.matches(of: /\n\[\[vault\]\]/).count == 2
+            }
+
             // A1：打开后外部手改，普通保存被拒绝；重载后成功且注释/未知键/[[vault]] 保留。
             stage = "external conflict"
             let path = model.configPath
@@ -129,6 +157,7 @@ enum SettingsInspection {
             model.defaultView = "editing"
             await model.save()
             result["conflict_detected"] = model.conflict
+            result["conflict_status_is_error"] = model.statusIsError
             let refused = try String(contentsOfFile: path, encoding: .utf8)
             result["external_edit_preserved"] = refused.contains("# external manual edit")
                 && refused.contains("font_size = 16.0")
@@ -263,6 +292,12 @@ enum SettingsInspection {
                     let agentGuide = try String(contentsOfFile: URL(fileURLWithPath: scratch).appendingPathComponent("arg-2").path, encoding: .utf8)
                     result["agent_guide_received"] = agentGuide == guideText
                     result["agent_args_received"] = try String(contentsOfFile: URL(fileURLWithPath: scratch).appendingPathComponent("arg-3").path, encoding: .utf8)
+                    let receivedPath = try String(contentsOfFile: URL(fileURLWithPath: scratch).appendingPathComponent("path").path, encoding: .utf8)
+                    result["agent_path_received"] = receivedPath
+                    if let login = argument("settings-login-path", arguments) {
+                        result["agent_path_has_login"] = receivedPath.split(separator: ":").contains(Substring(login))
+                        result["agent_path_has_homebrew"] = receivedPath.split(separator: ":").contains("/opt/homebrew/bin")
+                    }
                 }
             }
 
@@ -270,6 +305,11 @@ enum SettingsInspection {
             stage = "screenshots"
             if let media = argument("settings-media", arguments),
                let label = argument("settings-label", arguments) {
+                // 截图展示已填入并保存后的状态，页脚与表单保持一致。
+                if let omp = model.detectedAgents.first(where: { $0.id == "omp" }) {
+                    model.useAgent(omp)
+                    await model.save()
+                }
                 let directory = URL(fileURLWithPath: media)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 var shots: [String] = []

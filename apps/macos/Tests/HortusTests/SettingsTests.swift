@@ -51,6 +51,32 @@ struct SettingsTests {
         #expect(!model.fontSizeIsValid)
     }
 
+    @Test func usingDetectedAgentOnlyPrefillsTheForm() {
+        let model = SettingsModel(application: ApplicationWorkspace())
+        let agent = DetectedAgent(id: "omp", displayName: "OMP", binaryName: "omp",
+                                  executable: "/opt/homebrew/bin/omp",
+                                  suggestedArgs: ["--append-system-prompt={guide}"])
+        #expect(!model.isAgentSelected(agent))
+        model.useAgent(agent)
+        #expect(model.agentCommand == "/opt/homebrew/bin/omp")
+        #expect(model.agentArgs == ["--append-system-prompt={guide}"])
+        #expect(model.isAgentSelected(agent))
+        model.agentCommand = "  /opt/homebrew/bin/omp  "
+        #expect(model.isAgentSelected(agent))
+        model.agentCommand = "/opt/homebrew/bin/codex"
+        #expect(!model.isAgentSelected(agent))
+    }
+
+    @Test func debugLoginPathInjectionHandlesAbsentAndEmptyValues() {
+        #expect(LoginShellEnvironment.injectedPath(arguments: []) == .absent)
+        #expect(LoginShellEnvironment.injectedPath(arguments: ["--settings-login-path=/tmp/login"])
+                == .path("/tmp/login"))
+        #expect(LoginShellEnvironment.injectedPath(arguments: ["--settings-login-path="])
+                == .path(nil))
+        #expect(LoginShellEnvironment.injectedPath(arguments: ["--settings-login-path=   "])
+                == .path(nil))
+    }
+
     @Test func guidePlaceholderDetectionUsesArgvElements() {
         let model = SettingsModel(application: ApplicationWorkspace())
         model.agentArgs = ["--guide", "{guide}"]

@@ -259,7 +259,13 @@ final class TerminalController {
         let session = tab.session
         Task { [weak self, weak tab] in
             do {
-                let spec = try await Task.detached { try core.agentSpec() }.value
+                let loginPath = await LoginShellEnvironment.resolvedPath()
+                let spec = try await Task.detached {
+                    try core.agentSpecWithPath(loginPath: loginPath)
+                }.value
+                let environmentPath = await Task.detached {
+                    core.effectiveAgentPath(loginPath: loginPath)
+                }.value
                 guard let self, let tab, self.valid(tab, generation, root: root) else { return }
                 let record = try await Task.detached {
                     try core.beginAgentSession(vault: root)
@@ -279,7 +285,8 @@ final class TerminalController {
                     self.mark(record.id, "cancelled", nil)
                     return
                 }
-                guard session.startAgent(executable: spec.executable, args: spec.args, session: record.id) else {
+                guard session.startAgent(executable: spec.executable, args: spec.args,
+                                         session: record.id, path: environmentPath) else {
                     tab.agentPhase = .failed(L10n.string("Unable to start the shell"))
                     self.mark(record.id, "failed", nil)
                     return

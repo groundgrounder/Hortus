@@ -328,6 +328,71 @@ pub struct AgentCommandStatus {
     pub error: Option<String>,
 }
 
+/// 内置 Agent 预设：只描述命令名与交互启动参数，不执行任何文件。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentPreset {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub binary_name: &'static str,
+    pub suggested_args: &'static [&'static str],
+}
+
+/// 设置界面按此顺序展示；参数都可被用户修改后保存。
+pub const AGENT_PRESETS: &[AgentPreset] = &[
+    AgentPreset {
+        id: "omp",
+        display_name: "OMP",
+        binary_name: "omp",
+        suggested_args: &["--append-system-prompt={guide}"],
+    },
+    AgentPreset {
+        id: "codex",
+        display_name: "Codex",
+        binary_name: "codex",
+        suggested_args: &["{guide}"],
+    },
+    AgentPreset {
+        id: "claude",
+        display_name: "Claude Code",
+        binary_name: "claude",
+        suggested_args: &["--append-system-prompt", "{guide}"],
+    },
+    AgentPreset {
+        id: "gemini",
+        display_name: "Gemini CLI",
+        binary_name: "gemini",
+        suggested_args: &["-i", "{guide}"],
+    },
+    AgentPreset {
+        id: "opencode",
+        display_name: "opencode",
+        binary_name: "opencode",
+        suggested_args: &["--prompt", "{guide}"],
+    },
+    AgentPreset {
+        id: "aider",
+        display_name: "Aider",
+        binary_name: "aider",
+        suggested_args: &["--message", "{guide}"],
+    },
+    AgentPreset {
+        id: "goose",
+        display_name: "Goose",
+        binary_name: "goose",
+        suggested_args: &["run", "--text", "{guide}"],
+    },
+];
+
+/// 本机实际存在的预设 Agent；`executable` 已规范化为绝对路径。
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscoveredAgent {
+    pub id: String,
+    pub display_name: String,
+    pub binary_name: String,
+    pub executable: String,
+    pub suggested_args: Vec<String>,
+}
+
 /// 有效指南及其来源，供设置界面审阅、覆盖和恢复。
 #[derive(Clone, Debug, PartialEq)]
 pub struct GuideState {
@@ -421,9 +486,91 @@ pub fn effective_guide(config_directory: &Path) -> io::Result<String> {
     }
 }
 
-/// 裸命令名按应用启动时的 PATH 逐项查找；返回可直接 execve 的绝对路径。
-fn resolve_executable(command: &str) -> io::Result<String> {
-    resolve_executable_in(command, std::env::var_os("PATH").as_deref())
+/// 组合搜索路径：进程 PATH → 登录 shell PATH → 常见安装目录。
+///
+/// 只保留非空绝对目录，按首次出现去重；相对项与 POSIX 路径列表无法表示的
+/// 含冒号目录被跳过。`login_path` 由调用方显式传入，本函数不启动任何进程。
+pub fn build_search_paths(
+    process_path: Option<&std::ffi::OsStr>,
+    login_path: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+    include_common_dirs: bool,
+) -> std::ffi::OsString {
+    let mut directories: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |directory: PathBuf| {
+        if directory.as_os_str().is_empty() || !directory.is_absolute() {
+            return;
+        }
+        if !path_entry_is_listable(&directory) {
+            return;
+        }
+        if seen.insert(directory.clone()) {
+            directories.push(directory);
+        }
+    };
+    for source in [process_path, login_path] {
+        for directory in std::env::split_paths(source.unwrap_or_default()) {
+            push(directory);
+        }
+    }
+    if include_common_dirs {
+        for directory in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+            push(PathBuf::from(directory));
+        }
+        if let Some(home) = home {
+            for relative in [
+                ".local/bin",
+                ".cargo/bin",
+                ".npm-global/bin",
+                ".bun/bin",
+                ".opencode/bin",
+                ".volta/bin",
+            ] {
+                push(home.join(relative));
+            }
+        }
+    }
+    std::env::join_paths(directories).unwrap_or_default()
+}
+
+/// POSIX 路径列表用冒号分隔；含冒号的目录无法原样表达，宁可跳过。
+fn path_entry_is_listable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        !path.as_os_str().as_bytes().contains(&b':')
+    }
+    #[cfg(not(unix))]
+    {
+        !path.to_string_lossy().contains(':')
+    }
+}
+
+/// 进程 PATH + 登录 shell PATH + 常见安装目录；`None` 时不启动外部 shell。
+fn default_search_paths(login_path: Option<&std::ffi::OsStr>) -> std::ffi::OsString {
+    let home = std::env::home_dir();
+    build_search_paths(
+        std::env::var_os("PATH").as_deref(),
+        login_path,
+        home.as_deref(),
+        true,
+    )
+}
+
+/// 裸命令名按组合搜索路径逐项查找；返回可直接 execve 的绝对路径。
+/// `search` 为空时退回进程 PATH + 常见安装目录，不启动外部 shell。
+fn resolve_executable_with_paths(
+    command: &str,
+    search: Option<&std::ffi::OsStr>,
+) -> io::Result<String> {
+    match search.filter(|search| !search.is_empty()) {
+        Some(search) => resolve_executable_in(command, Some(search)),
+        None => {
+            let search = default_search_paths(None);
+            resolve_executable_in(command, Some(&search))
+        }
+    }
 }
 
 fn resolve_executable_in(command: &str, search: Option<&std::ffi::OsStr>) -> io::Result<String> {
@@ -735,6 +882,16 @@ impl Store {
 
     /// 只检查模板结构与本机可执行文件解析；不启动进程、不读指南、不创建目录。
     pub fn probe_agent_command(&self, command: &str, args: &[String]) -> AgentCommandStatus {
+        self.probe_agent_command_with_paths(command, args, None)
+    }
+
+    /// 探测时追加后台登录 shell 得到的 PATH；仍只做静态解析。
+    pub fn probe_agent_command_with_paths(
+        &self,
+        command: &str,
+        args: &[String],
+        login_path: Option<&std::ffi::OsStr>,
+    ) -> AgentCommandStatus {
         let command = command.trim();
         if let Err(key) = validate_agent_template(command, args) {
             return AgentCommandStatus {
@@ -743,7 +900,8 @@ impl Store {
                 error: Some(key.into()),
             };
         }
-        match resolve_executable(command) {
+        let search = default_search_paths(login_path);
+        match resolve_executable_with_paths(command, Some(&search)) {
             Ok(executable) => AgentCommandStatus {
                 available: true,
                 executable: Some(executable),
@@ -755,6 +913,46 @@ impl Store {
                 error: Some(error.to_string()),
             },
         }
+    }
+
+    /// 按预设顺序只读扫描默认组合路径；不启动任何目标二进制。
+    pub fn discover_agents(&self) -> Vec<DiscoveredAgent> {
+        let search = default_search_paths(None);
+        self.discover_agents_in(Some(&search))
+    }
+
+    /// 显式搜索路径版本；单测与检查可完全隔离宿主机目录。
+    pub fn discover_agents_in(&self, search: Option<&std::ffi::OsStr>) -> Vec<DiscoveredAgent> {
+        let mut discovered: Vec<DiscoveredAgent> = Vec::new();
+        for preset in AGENT_PRESETS {
+            let Ok(executable) = resolve_executable_with_paths(preset.binary_name, search) else {
+                continue;
+            };
+            // 同一真实文件只给第一个预设，避免符号链接造成重复行。
+            if discovered
+                .iter()
+                .any(|agent| agent.executable == executable)
+            {
+                continue;
+            }
+            discovered.push(DiscoveredAgent {
+                id: preset.id.into(),
+                display_name: preset.display_name.into(),
+                binary_name: preset.binary_name.into(),
+                executable,
+                suggested_args: preset
+                    .suggested_args
+                    .iter()
+                    .map(|argument| (*argument).to_string())
+                    .collect(),
+            });
+        }
+        discovered
+    }
+
+    /// 子进程 PATH：发现、探测与启动共用同一份组合路径。
+    pub fn effective_agent_path(&self, login_path: Option<&std::ffi::OsStr>) -> std::ffi::OsString {
+        default_search_paths(login_path)
     }
 
     pub fn guide_state(&self) -> io::Result<GuideState> {
@@ -895,6 +1093,14 @@ impl Store {
 
     /// 只读取并校验模板，不创建目录、不启动进程。
     pub fn agent_launch(&self) -> io::Result<AgentLaunch> {
+        self.agent_launch_with_paths(None)
+    }
+
+    /// 启动解析追加后台登录 shell 得到的 PATH；仍不执行模板里的命令。
+    pub fn agent_launch_with_paths(
+        &self,
+        login_path: Option<&std::ffi::OsStr>,
+    ) -> io::Result<AgentLaunch> {
         let text = fs::read_to_string(self.config_path())?;
         let raw: RawConfig =
             toml_edit::de::from_str(&text).map_err(|_| io::Error::other("agent.config_invalid"))?;
@@ -913,7 +1119,8 @@ impl Store {
             return Err(io::Error::other("agent.invalid_argument"));
         }
         let guide = effective_guide(&self.directories.config)?;
-        let executable = resolve_executable(&command)?;
+        let search = default_search_paths(login_path);
+        let executable = resolve_executable_with_paths(&command, Some(&search))?;
         // 每个元素仍是一个 argv 元素；替换指南不会拆分或再解释内容。
         let args = args
             .iter()
@@ -1092,5 +1299,120 @@ mod tests {
                 .to_string(),
             "agent.not_found"
         );
+    }
+
+    fn entries(paths: &std::ffi::OsStr) -> Vec<PathBuf> {
+        std::env::split_paths(paths).collect()
+    }
+
+    #[test]
+    fn search_paths_merge_process_login_and_common_directories_in_order() {
+        let process = std::ffi::OsString::from("/process/bin:/shared/bin:relative:.:");
+        let login = std::ffi::OsString::from("/login/bin:/shared/bin:/opt/homebrew/bin");
+        let merged = build_search_paths(
+            Some(&process),
+            Some(&login),
+            Some(Path::new("/Users/tester")),
+            true,
+        );
+        assert_eq!(
+            entries(&merged),
+            vec![
+                PathBuf::from("/process/bin"),
+                PathBuf::from("/shared/bin"),
+                PathBuf::from("/login/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/opt/homebrew/sbin"),
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/Users/tester/.local/bin"),
+                PathBuf::from("/Users/tester/.cargo/bin"),
+                PathBuf::from("/Users/tester/.npm-global/bin"),
+                PathBuf::from("/Users/tester/.bun/bin"),
+                PathBuf::from("/Users/tester/.opencode/bin"),
+                PathBuf::from("/Users/tester/.volta/bin"),
+            ]
+        );
+
+        // 关闭常见目录后只保留显式来源；相对项始终跳过。
+        let merged = build_search_paths(Some(&process), None, None, false);
+        assert_eq!(
+            entries(&merged),
+            vec![PathBuf::from("/process/bin"), PathBuf::from("/shared/bin")]
+        );
+        assert!(build_search_paths(None, None, None, false).is_empty());
+    }
+
+    #[test]
+    fn combined_paths_resolve_only_inside_the_injected_search() {
+        let root = tempfile::TempDir::new().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let tool = bin.join("hortus-test-agent");
+        make_executable(&tool);
+        let search = build_search_paths(None, Some(bin.as_os_str()), None, false);
+        assert_eq!(
+            resolve_executable_with_paths("hortus-test-agent", Some(&search)).unwrap(),
+            resolved(&tool)
+        );
+        fs::remove_file(&tool).unwrap();
+        assert_eq!(
+            resolve_executable_with_paths("hortus-test-agent", Some(&search))
+                .unwrap_err()
+                .to_string(),
+            "agent.not_found"
+        );
+    }
+
+    #[test]
+    fn discovery_lists_only_executable_presets_without_running_them() {
+        let root = tempfile::TempDir::new().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let marker = root.path().join("trap-marker");
+        for preset in AGENT_PRESETS {
+            let path = bin.join(preset.binary_name);
+            fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf '%s' ran > '{}'\n", marker.display()),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            fs::set_permissions(
+                &path,
+                fs::Permissions::from_mode(if preset.id == "aider" { 0o644 } else { 0o755 }),
+            )
+            .unwrap();
+        }
+        // `codex` 指向同一真实文件时只保留先出现的预设。
+        fs::remove_file(bin.join("codex")).unwrap();
+        std::os::unix::fs::symlink(bin.join("omp"), bin.join("codex")).unwrap();
+        // 无效的相对目录不参与解析。
+        let search = std::ffi::OsString::from(format!("relative-dir:{}", bin.display()));
+        let store = Store::open(Directories {
+            config: root.path().join("config"),
+            cache: root.path().join("cache"),
+            data: root.path().join("data"),
+        })
+        .unwrap();
+        let agents = store.discover_agents_in(Some(&search));
+        assert_eq!(
+            agents
+                .iter()
+                .map(|agent| agent.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["omp", "claude", "gemini", "opencode", "goose"]
+        );
+        assert!(agents.iter().all(|agent| {
+            agent
+                .suggested_args
+                .iter()
+                .any(|arg| arg.contains("{guide}"))
+        }));
+        assert_eq!(
+            agents[0].executable,
+            resolved(&bin.join("omp")),
+            "executable must be the canonical target"
+        );
+        assert!(!marker.exists(), "discovery must never execute a preset");
     }
 }

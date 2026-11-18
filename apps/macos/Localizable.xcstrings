@@ -326,6 +326,18 @@
     "The default view must be reading or editing" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "The default view must be reading or editing"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "默认视图必须是阅读或编辑"}}}},
     "The terminal font name is invalid" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "The terminal font name is invalid"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "终端字体名称无效"}}}},
     "Unable to write agent-guide.md" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Unable to write agent-guide.md"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "无法写入 agent-guide.md"}}}}
+,
+    "Detected Agents" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Detected Agents"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "已检测到的 Agent"}}}},
+    "Scanning for installed Agents…" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Scanning for installed Agents…"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "正在扫描已安装的 Agent…"}}}},
+    "Scanning for installed Agents" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Scanning for installed Agents"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "正在扫描已安装的 Agent"}}}},
+    "No known Agent CLI was found. Enter a command below or choose an executable." : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "No known Agent CLI was found. Enter a command below or choose an executable."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "未找到已知的 Agent 命令行工具。可在下方手动输入命令，或选择可执行文件。"}}}},
+    "Rescan" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Rescan"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "重新扫描"}}}},
+    "Rescan for installed Agents" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Rescan for installed Agents"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "重新扫描已安装的 Agent"}}}},
+    "Use" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Use"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "填入"}}}},
+    "Selected" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Selected"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "已填入"}}}},
+    "Selected %@" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Selected %@"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "已填入 %@"}}}},
+    "Use %@" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Use %@"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "填入 %@"}}}},
+    "Fills the command and arguments without saving." : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Fills the command and arguments without saving."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "仅填入命令与参数，不自动保存。"}}}}
   },
   "version" : "1.0"
 }

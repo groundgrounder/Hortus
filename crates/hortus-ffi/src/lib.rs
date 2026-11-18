@@ -164,6 +164,15 @@ pub struct AgentProbeInfo {
 }
 
 #[derive(Debug, uniffi::Record)]
+pub struct DiscoveredAgentInfo {
+    pub id: String,
+    pub display_name: String,
+    pub binary_name: String,
+    pub executable: String,
+    pub suggested_args: Vec<String>,
+}
+
+#[derive(Debug, uniffi::Record)]
 pub struct AgentGuideInfo {
     pub text: String,
     pub overridden: bool,
@@ -675,16 +684,53 @@ impl WorkspaceCore {
 
     /// 只解析模板与可执行文件；不启动进程、不建立快照、不创建会话目录。
     pub fn probe_agent_launch(&self, command: String, args: Vec<String>) -> AgentProbeInfo {
-        let status = self
-            .store
-            .lock()
-            .unwrap()
-            .probe_agent_command(&command, &args);
+        self.probe_agent_launch_with_path(command, args, None)
+    }
+
+    /// 探测追加后台登录 shell 得到的 PATH；仍只做静态解析。
+    pub fn probe_agent_launch_with_path(
+        &self,
+        command: String,
+        args: Vec<String>,
+        login_path: Option<String>,
+    ) -> AgentProbeInfo {
+        let status = self.store.lock().unwrap().probe_agent_command_with_paths(
+            &command,
+            &args,
+            login_path.as_deref().map(std::ffi::OsStr::new),
+        );
         AgentProbeInfo {
             available: status.available,
             executable: status.executable,
             error: status.error,
         }
+    }
+
+    /// 只读扫描内置预设；绝不执行目标二进制。
+    pub fn discover_agents(&self, login_path: Option<String>) -> Vec<DiscoveredAgentInfo> {
+        self.store
+            .lock()
+            .unwrap()
+            .discover_agents_in(login_path.as_deref().map(std::ffi::OsStr::new))
+            .into_iter()
+            .map(|agent| DiscoveredAgentInfo {
+                id: agent.id,
+                display_name: agent.display_name,
+                binary_name: agent.binary_name,
+                executable: agent.executable,
+                suggested_args: agent.suggested_args,
+            })
+            .collect()
+    }
+
+    /// 子进程 PATH：发现、探测与启动共用同一份组合路径。
+    pub fn effective_agent_path(&self, login_path: Option<String>) -> String {
+        self.store
+            .lock()
+            .unwrap()
+            .effective_agent_path(login_path.as_deref().map(std::ffi::OsStr::new))
+            .to_string_lossy()
+            .into_owned()
     }
 
     pub fn agent_guide_state(&self) -> Result<AgentGuideInfo, CoreError> {
@@ -810,7 +856,16 @@ impl WorkspaceCore {
     /// 读取并校验全局 [agent] 模板；返回已解析的命令与 `{guide}` 已替换的 argv。
     /// 不创建目录、不建立快照、不启动进程。
     pub fn agent_spec(&self) -> Result<AgentSpec, CoreError> {
-        let launch = self.store.lock().unwrap().agent_launch()?;
+        self.agent_spec_with_path(None)
+    }
+
+    /// 启动解析追加后台登录 shell 得到的 PATH；不执行模板里的命令。
+    pub fn agent_spec_with_path(&self, login_path: Option<String>) -> Result<AgentSpec, CoreError> {
+        let launch = self
+            .store
+            .lock()
+            .unwrap()
+            .agent_launch_with_paths(login_path.as_deref().map(std::ffi::OsStr::new))?;
         Ok(AgentSpec {
             executable: launch.executable,
             args: launch.args,

@@ -11,6 +11,7 @@ printf '%s' "${HORTUS_VAULT-}" > "$scratch/vault"
 printf '%s' "${HORTUS_AGENT_SESSION-}" > "$scratch/session"
 printf '%s' "${TERM-}" > "$scratch/term"
 printf '%s' "${LANG-}" > "$scratch/lang"
+printf '%s' "${PATH-}" > "$scratch/path"
 index=0
 for argument in "$@"; do
   index=$((index + 1))

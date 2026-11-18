@@ -44,6 +44,8 @@ final class TerminalSession {
         let executable: String
         let args: [String]
         let session: String
+        /// 核心补强后的子进程 PATH；Finder 启动下也能找到 Homebrew 与工具链。
+        let path: String
     }
 
     private let kind: Kind
@@ -158,9 +160,9 @@ final class TerminalSession {
 
     /// Agent 的 exec 在模板校验和快照完成后才开始；视图尚未挂载时排队。
     @discardableResult
-    func startAgent(executable: String, args: [String], session: String) -> Bool {
+    func startAgent(executable: String, args: [String], session: String, path: String) -> Bool {
         guard root != nil else { return false }
-        pendingAgent = AgentStart(executable: executable, args: args, session: session)
+        pendingAgent = AgentStart(executable: executable, args: args, session: session, path: path)
         state = .startingAgent
         startPendingAgent()
         return true
@@ -240,6 +242,7 @@ final class TerminalSession {
         environment["TERM"] = "xterm-256color"
         environment["HORTUS_VAULT"] = root
         environment["HORTUS_AGENT_SESSION"] = pending.session
+        environment["PATH"] = pending.path
         if ["LANG", "LC_ALL", "LC_CTYPE"].allSatisfy({ environment[$0]?.isEmpty ?? true }) {
             environment["LANG"] = Self.utf8Locale()
         }

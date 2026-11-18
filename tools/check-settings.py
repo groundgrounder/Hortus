@@ -37,12 +37,33 @@ note = "keep"
 
 
 def environment(base: Path) -> dict:
+    # 模拟 Finder 启动：PATH 只有系统目录，Agent 目录只通过登录 PATH 注入可见。
     return dict(os.environ,
+                PATH="/usr/bin:/bin",
                 HOME=str(base),
                 HORTUS_CONFIG_DIR=str(base / "config"),
                 HORTUS_CACHE_DIR=str(base / "cache"),
                 HORTUS_DATA_DIR=str(base / "data"),
+                HORTUS_TRAP_MARKER=str(base / "trap-marker"),
                 FAKE_AGENT_SCRATCH=str(base / "scratch"))
+
+
+def write_agents(base: Path) -> Path:
+    """模拟已安装的 Agent、不可执行项和一旦运行就留下标记的陷阱。"""
+    bin_dir = base / "agents/bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("omp", "codex"):
+        path = bin_dir / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    aider = bin_dir / "aider"
+    aider.write_text("not executable\n", encoding="utf-8")
+    aider.chmod(0o644)
+    trap = bin_dir / "gemini"
+    trap.write_text('#!/bin/sh\nprintf \'%s\' ran > "${HORTUS_TRAP_MARKER:?}"\n',
+                    encoding="utf-8")
+    trap.chmod(0o755)
+    return bin_dir
 
 
 def write_fixture(base: Path) -> tuple[Path, Path]:
@@ -104,6 +125,8 @@ def wait_for(path: Path, process, seconds: float) -> None:
 def inspect(app: Path, base: Path, label: str, language: str, theme: str,
             output: Path, media: Path | None) -> dict:
     vault_a, vault_b = write_fixture(base)
+    agents = write_agents(base)
+    trap_marker = base / "trap-marker"
     agent = base / "fake-agent.sh"
     shutil.copy2(FAKE_AGENT, agent)
     agent.chmod(0o755)
@@ -112,7 +135,9 @@ def inspect(app: Path, base: Path, label: str, language: str, theme: str,
     command = [str(app), "-AppleLanguages", f"({language})", f"--{theme}",
                f"--vault={vault_a}", f"--settings-second-vault={vault_b}",
                f"--settings-inspection={result}",
-               f"--settings-agent={agent}"]
+               f"--settings-agent={agent}",
+               f"--settings-login-path={agents}",
+               f"--settings-trap-marker={trap_marker}"]
     if media is not None:
         command += [f"--settings-media={media}", f"--settings-label={label}"]
     process = subprocess.Popen(command, env=environment(base),
@@ -129,6 +154,26 @@ def inspect(app: Path, base: Path, label: str, language: str, theme: str,
 
 
 def validate(data: dict, base: Path, screenshots: list[Path]) -> dict:
+    agents = {agent["id"]: agent for agent in data["detected_agents"]}
+    for expected in ("omp", "codex", "gemini"):
+        assert expected in agents, data["detected_agents"]
+    assert "aider" not in agents, data["detected_agents"]
+    canonical = base / "agents/bin"
+    for name in ("omp", "codex"):
+        assert Path(agents[name]["executable"]).resolve() == (canonical / name).resolve(), agents
+    assert agents["omp"]["args"] == ["--append-system-prompt={guide}"], agents["omp"]
+    assert Path(agents["gemini"]["executable"]).name == "gemini", agents
+    assert data["trap_executed"] is False, data
+    assert not (base / "trap-marker").exists(), "discovery executed the trap script"
+    assert data["fill_without_save"] is True, data
+    assert data["fill_selected"] is True, data
+    assert data["fill_command"].endswith("/omp"), data
+    assert data["fill_args"] == ["--append-system-prompt={guide}"], data
+    assert data["saved_agent_executable"] and data["saved_agent_args"], data
+    assert data["saved_vaults_after_fill"], data
+    assert data["conflict_status_is_error"] is True, data
+    assert data["agent_path_has_login"] is True, data
+    assert data["agent_path_has_homebrew"] is True, data
     assert data["conflict_detected"], data
     assert data["external_edit_preserved"], data
     assert data["comments_preserved"], data
@@ -166,6 +211,8 @@ def validate(data: dict, base: Path, screenshots: list[Path]) -> dict:
         for shot in screenshots:
             assert shot.is_file() and shot.stat().st_size > 10_000, shot
     return {
+        "detected_agents": sorted(agents),
+        "agent_path_has_login": data["agent_path_has_login"],
         "terminal_font": data["terminal_font"],
         "font_families": data["font_families"],
         "pids": data["pids_before"],
@@ -217,7 +264,8 @@ def main() -> None:
         (output / "screenshot-hashes.json").write_text(
             json.dumps(hashes, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    markers = [b"--settings-inspection=", b"Settings check guide"]
+    markers = [b"--settings-inspection=", b"--settings-login-path=",
+               b"--settings-trap-marker=", b"Settings check guide"]
     binary = release.read_bytes()
     for marker in markers:
         assert marker not in binary, f"Debug self-check marker in release executable: {marker!r}"
