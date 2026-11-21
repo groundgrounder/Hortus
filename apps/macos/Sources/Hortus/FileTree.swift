@@ -36,7 +36,7 @@ struct FileTree: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let outline = scroll.documentView as? DrawingOutlineView else { return }
-        context.coordinator.update(outline, version: workspace.treeVersion, selected: workspace.selected, root: workspace.root)
+        context.coordinator.update(outline, version: workspace.treeVersion, selected: workspace.folderSelection ?? workspace.selected, root: workspace.root)
     }
 
     @MainActor final class Node: NSObject {
@@ -153,18 +153,97 @@ struct FileTree: NSViewRepresentable {
             cell.toolTip = node.entry.path
             return cell
         }
+        /// 点选文件夹只更新新建目标（`folderSelection`）；点选笔记打开并把新建目标交回标签选中。
+        /// 取消选中同样清空文件夹目标，避免顶栏按钮继续落在旧文件夹。
         func outlineViewSelectionDidChange(_ notification: Notification) {
-            guard !updating, let outline = notification.object as? NSOutlineView,
-                  let node = outline.item(atRow: outline.selectedRow) as? Node, !node.entry.directory else { return }
-            workspace.openNote(node.entry.path)
+            guard !updating, let outline = notification.object as? NSOutlineView else { return }
+            guard outline.selectedRow >= 0,
+                  let node = outline.item(atRow: outline.selectedRow) as? Node else {
+                workspace.folderSelection = nil
+                return
+            }
+            if node.entry.directory {
+                workspace.folderSelection = node.entry.path
+            } else {
+                workspace.openNote(node.entry.path)
+            }
         }
-    }
-}
 
-@MainActor final class DrawingOutlineView: NSOutlineView {
-    var didDraw: (() -> Void)?
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        if numberOfRows > 0 { DispatchQueue.main.async { [weak self] in self?.didDraw?() } }
+        /// 右键菜单：笔记项与文件夹项提供新建、重命名与移到废纸篓；
+        /// 空白区域只提供库根的新建。右键先选中目标行，与 ⌘⌫ 保持一致。
+        func menu(for event: NSEvent, outline: NSOutlineView) -> NSMenu? {
+            let location = outline.convert(event.locationInWindow, from: nil)
+            let row = outline.row(at: location)
+            let node = row >= 0 ? outline.item(atRow: row) as? Node : nil
+            if row >= 0, node != nil, outline.selectedRow != row {
+                outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+            let entry = node?.entry
+            let parent = entry.map { $0.directory ? $0.path : $0.parent } ?? ""
+            let menu = NSMenu()
+            let newNote = NSMenuItem(title: L10n.string("New Note"), action: #selector(newNoteUnder), keyEquivalent: "")
+            newNote.target = self
+            newNote.representedObject = parent
+            menu.addItem(newNote)
+            let newFolder = NSMenuItem(title: L10n.string("New Folder"), action: #selector(newFolderUnder), keyEquivalent: "")
+            newFolder.target = self
+            newFolder.representedObject = parent
+            menu.addItem(newFolder)
+            if let entry {
+                menu.addItem(.separator())
+                let rename = NSMenuItem(title: L10n.string("Rename"), action: #selector(renameEntry), keyEquivalent: "")
+                rename.target = self
+                rename.representedObject = entry.path
+                menu.addItem(rename)
+                let trash = NSMenuItem(title: L10n.string("Move to Trash"), action: #selector(trashEntry), keyEquivalent: "")
+                trash.target = self
+                trash.representedObject = entry.path
+                menu.addItem(trash)
+            }
+            return menu.items.isEmpty ? nil : menu
+        }
+
+        @objc private func newNoteUnder(_ item: NSMenuItem) {
+            workspace.requestNewNote(parent: item.representedObject as? String ?? "")
+        }
+        @objc private func newFolderUnder(_ item: NSMenuItem) {
+            workspace.requestNewFolder(parent: item.representedObject as? String ?? "")
+        }
+        @objc private func renameEntry(_ item: NSMenuItem) {
+            workspace.requestRename(path: item.representedObject as? String ?? "")
+        }
+        @objc private func trashEntry(_ item: NSMenuItem) {
+            workspace.requestTrash(path: item.representedObject as? String ?? "")
+        }
+
+        /// 仅当大纲自身是 firstResponder 且有选中项时，⌘⌫ 触发移到废纸篓；
+        /// 绝不干扰正文编辑器与终端的删除键。
+        func trashSelection(outline: NSOutlineView) -> Bool {
+            guard outline.selectedRow >= 0,
+                  let node = outline.item(atRow: outline.selectedRow) as? Node else { return false }
+            workspace.requestTrash(path: node.entry.path)
+            return true
+        }
+     }
+ }
+ 
+ @MainActor final class DrawingOutlineView: NSOutlineView {
+     var didDraw: (() -> Void)?
+    override func menu(for event: NSEvent) -> NSMenu? {
+        (delegate as? FileTree.Coordinator)?.menu(for: event, outline: self) ?? super.menu(for: event)
     }
-}
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown, event.modifierFlags.contains(.command),
+           event.charactersIgnoringModifiers == "\u{7f}",
+           self === window?.firstResponder,
+           let coordinator = delegate as? FileTree.Coordinator {
+            return coordinator.trashSelection(outline: self)
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+     override func draw(_ dirtyRect: NSRect) {
+         super.draw(dirtyRect)
+         if numberOfRows > 0 { DispatchQueue.main.async { [weak self] in self?.didDraw?() } }
+     }
+ }
+

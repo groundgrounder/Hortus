@@ -183,6 +183,10 @@ private struct HortusCommands: Commands {
             .keyboardShortcut("z", modifiers: [.command, .shift])
         }
         CommandGroup(replacing: .newItem) {
+            Button("New Note…") { workspace.requestNewNote() }.keyboardShortcut("n", modifiers: .command)
+                .disabled(workspace.root == nil)
+            Button("New Folder…") { workspace.requestNewFolder() }.keyboardShortcut("n", modifiers: [.command, .shift])
+                .disabled(workspace.root == nil)
             Button("Open Folder…") { workspace.chooseFolder() }.keyboardShortcut("o", modifiers: .command)
             Menu("Recent") {
                 if workspace.recent.isEmpty { Text("No recently opened folders") }
@@ -287,6 +291,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
+    private var fileOpsInspectionRequested: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--file-ops-inspection=") }
+        #else
+        return false
+        #endif
+    }
+
     func showAboutPanel() {
         let info = Bundle.main.infoDictionary ?? [:]
         let version = info["CFBundleShortVersionString"] as? String ?? "0.3.0"
@@ -376,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
         #endif
-        guard terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
+        guard terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
         // 自检只设置两次一次性唤醒，其余等待由界面状态变更触发。
         let deadline = DispatchWorkItem { fputs("Hortus 自检超时\n", stderr); exit(2) }
         inspectionDeadline = deadline
@@ -441,7 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
         #endif
-        let visualInspection = terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || ProcessInfo.processInfo.arguments.contains {
+        let visualInspection = terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || ProcessInfo.processInfo.arguments.contains {
             $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--quick-open-query=") || $0.hasPrefix("--search-query=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || $0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top"
         }
         let settled = withObservationTracking {
@@ -525,6 +537,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let result = try await AgentInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--agent-launch-inspection=".count))))
+            }
+            if let arg = args.first(where: { $0.hasPrefix("--file-ops-inspection=") }) {
+                let result = try await FileOpsInspection.run(workspace: workspace, arguments: args)
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: URL(fileURLWithPath: String(arg.dropFirst("--file-ops-inspection=".count))))
+                if args.contains("--inspect-hold-open") { return }
+                NSApp.terminate(nil)
+                return
             }
             #endif
             if let arg = args.first(where: { $0.hasPrefix("--terminal-inspection=") }) {

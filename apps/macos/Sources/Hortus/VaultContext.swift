@@ -104,6 +104,67 @@ final class VaultContext {
         for workspace in windows.values.compactMap(\.value) { workspace.applyVaultEvents(batches) }
     }
 
+    /// 新建文件成功后的立即更新：不等文件监听批次，树缓存先行反映磁盘。
+    func upsert(_ entry: TreeEntry) {
+        entries[entry.path] = entry
+        treeVersion += 1
+        let handle = handle
+        if !entry.directory {
+            DispatchQueue.global(qos: .userInitiated).async {
+                handle.updateSearchIndex(upserted: [entry.path], removed: [])
+            }
+        }
+    }
+
+    /// 重命名成功后的立即迁移：条目、父目录与搜索索引按新旧路径同步搬家，
+    /// 避免文件监听批次到达前出现闪烁或误触 Missing 提示条。
+    func entryRenamed(oldPath: String, entry: TreeEntry) {
+        let prefix = entry.directory ? oldPath + "/" : nil
+        let affected = entries.filter { key, _ in
+            key == oldPath || prefix.map({ key.hasPrefix($0) }) == true
+        }
+        var movedNotes: [String] = []
+        let removedNotes = affected.filter { !$0.value.directory }.map(\.key)
+        for (key, value) in affected {
+            entries.removeValue(forKey: key)
+            var item = value
+            if key == oldPath {
+                // 同目录重命名：父目录不变，路径与名称一起更新。
+                item.path = entry.path
+                item.name = entry.name
+            } else if let prefix {
+                item.path = entry.path + "/" + key.dropFirst(prefix.count)
+                item.name = (item.path as NSString).lastPathComponent
+                if value.parent == oldPath { item.parent = entry.path }
+                else if value.parent.hasPrefix(prefix) {
+                    item.parent = entry.path + "/" + value.parent.dropFirst(prefix.count)
+                }
+            }
+            if !item.directory { movedNotes.append(item.path) }
+            entries[item.path] = item
+        }
+        treeVersion += 1
+        let upsertedNotes = movedNotes
+        let removedNotePaths = Array(removedNotes)
+        let handle = handle
+        DispatchQueue.global(qos: .userInitiated).async {
+            handle.updateSearchIndex(upserted: upsertedNotes, removed: removedNotePaths)
+        }
+    }
+
+    /// 移到废纸篓成功后的立即移除：条目与搜索索引同步清理。
+    func removeTrashed(_ path: String, directory: Bool) {
+        let prefix = directory ? path + "/" : nil
+        let affected = entries.keys.filter { key in key == path || prefix.map({ key.hasPrefix($0) }) == true }
+        let removedNotes = affected.filter { entries[$0]?.directory == false }
+        for key in affected { entries.removeValue(forKey: key) }
+        treeVersion += 1
+        let handle = handle
+        DispatchQueue.global(qos: .userInitiated).async {
+            handle.updateSearchIndex(upserted: [], removed: removedNotes)
+        }
+    }
+
     private func indexed(changed: Bool, scanFinished: Bool) {
         if scanFinished {
             let elapsed = openedAt.duration(to: .now).components

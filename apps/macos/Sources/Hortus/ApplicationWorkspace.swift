@@ -294,6 +294,28 @@ final class ApplicationWorkspace {
         return records.first { $0.workspace.root == root && $0.workspace.tabs.contains { $0.path == path } }
     }
 
+
+    /// 受移到废纸篓影响的打开标签：单文件精确匹配，文件夹含全部子笔记。
+    func tabsUnder(root: String, path: String, directory: Bool) -> [(WindowRecord, String)] {
+        let prefix = directory ? path + "/" : nil
+        var result: [(WindowRecord, String)] = []
+        for record in records where record.workspace.root == root {
+            for tab in record.workspace.tabs {
+                let inside = tab.path == path || (prefix.map({ tab.path.hasPrefix($0) }) == true)
+                if inside { result.append((record, tab.path)) }
+            }
+        }
+        return result
+    }
+
+    /// 重命名成功后的同库全局迁移：全部窗口的标签、选中、视图记录与文档会话
+    /// 一次性搬到新路径，文件树与搜索索引立即同步，不等文件监听批次。
+    func entryRenamed(root: String, oldPath: String, entry: TreeEntry) {
+        for record in records where record.workspace.root == root {
+            record.workspace.applyRename(oldPath: oldPath, entry: entry)
+        }
+        contexts[root]?.entryRenamed(oldPath: oldPath, entry: entry)
+    }
     func recordDuplicate(_ path: String, window: Workspace) {
         let message = "Hortus session: duplicate note skipped in window \(records.first { $0.workspace === window }?.id ?? "?"): \(path)"
         restorationDiagnostics.append(message)

@@ -2,12 +2,34 @@ import AppKit
 import HortusCore
 
 /// 每篇文档一条串行队列；主线程只提交原生 UTF-16 范围，不复制全文。
-final class DocumentIO: Sendable {
+/// `url` 由 NSLock 保护：文档队列写入，检查脚本从主线程读取。
+final class DocumentIO: @unchecked Sendable {
     let session: DocumentSession
-    let url: URL
     let queue = DispatchQueue(label: "app.hortus.document", qos: .userInteractive)
+    private let lock = NSLock()
+    private var storedURL: URL
+    var url: URL {
+        lock.lock(); defer { lock.unlock() }
+        return storedURL
+    }
 
-    init(session: DocumentSession, url: URL) { self.session = session; self.url = url }
+    init(session: DocumentSession, url: URL) {
+        self.session = session
+        self.storedURL = url
+    }
+    /// 重命名后的路径迁移；在文档队列上执行会话迁移并更新磁盘路径。
+    func relocateOnQueue(root: String, newPath: String) throws -> DocumentUpdate {
+        let update = try session.relocate(newRelativePath: newPath)
+        lock.lock()
+        storedURL = URL(fileURLWithPath: root).appendingPathComponent(newPath)
+        lock.unlock()
+        return update
+    }
+    func performSelf<T: Sendable>(_ operation: @escaping @Sendable (DocumentIO) throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async { continuation.resume(with: Result { try operation(self) }) }
+        }
+    }
     func perform<T: Sendable>(_ operation: @escaping @Sendable (DocumentSession) throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { continuation.resume(with: Result { try operation(self.session) }) }
@@ -184,6 +206,14 @@ final class NoteDocument {
             let update = try await io.perform { try $0.useDisk() }
             if update.revision != revision { refresh(); return }
             apply(update, external: true)
+        } catch { message = "document.save_failed"; issue = .saveFailed }
+    }
+
+    /// 重命名后的路径迁移：正文、未保存状态与恢复稿保留，保存直达新路径。
+    func relocate(root: String, to newPath: String) async {
+        do {
+            let update = try await io.performSelf { try $0.relocateOnQueue(root: root, newPath: newPath) }
+            apply(update)
         } catch { message = "document.save_failed"; issue = .saveFailed }
     }
     func recover(_ restore: Bool) async {

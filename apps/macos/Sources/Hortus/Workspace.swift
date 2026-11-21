@@ -50,6 +50,8 @@ final class Workspace {
     @ObservationIgnored var shutdownDelayForInspection = 0.0
     /// 测试注入的未保存提示；生产环境使用原生 NSAlert。
     @ObservationIgnored var promptUnsaved: (([String], Bool) -> UnsavedDecision)?
+    /// 测试注入的移到废纸篓确认；生产环境使用原生 NSAlert。
+    @ObservationIgnored var promptTrash: (([String], String) -> Bool)?
     @ObservationIgnored var noteOpenStartedAt = 0.0
     @ObservationIgnored var noteOpenPhases: [String: Double] = [:]
     var diagramCore: WorkspaceCore? { core }
@@ -86,6 +88,10 @@ final class Workspace {
     var searchIndexReadyMilliseconds: Double? { context?.searchIndexReadyMilliseconds }
     var searchIndexPeakRSSDeltaBytes: Int64? { context?.searchIndexPeakRSSDeltaBytes }
     var restoredViews: [String: String] = [:]
+    /// 文件树中的文件夹选中（新建文件夹后展示；打开笔记时清空回到标签选中）。
+    var folderSelection: String?
+    /// 新建笔记直接进入编辑视图的待处理路径。
+    @ObservationIgnored var pendingEditingPaths: Set<String> = []
     var firstDrawMilliseconds: Double?
     var scanDisplayMilliseconds: Double?
     var quickOpenVisible = false
@@ -348,6 +354,7 @@ final class Workspace {
     }
 
     func openNote(_ path: String) {
+        folderSelection = nil
         guard vault != nil, !releasing, !preparingClose else { return }
         if let owner = application?.owner(of: path, from: self), owner.workspace !== self {
             owner.workspace.openNote(path)
@@ -540,7 +547,9 @@ final class Workspace {
             self.tabs[index].loading = false
             switch result {
             case .success(let loaded):
-                let reading = (restoredViews[path] ?? recent.first(where: { $0.path == root })?.views?[path] ?? defaultView) != "editing"
+                let stored = restoredViews[path] ?? recent.first(where: { $0.path == root })?.views?[path] ?? defaultView
+                // 新建笔记直接进入编辑视图，不读取历史视图记录。
+                let reading = pendingEditingPaths.remove(path) == nil && stored != "editing"
                 let document = NoteDocument(io: loaded.0, initial: loaded.1, prepareSourceStyles: !reading)
                 if let reveal = pendingSearchReveals.removeValue(forKey: path) {
                     document.sourceAnchor = reveal.start
@@ -642,7 +651,7 @@ final class Workspace {
         default: return .cancel
         }
     }
-    private static func noteList(_ notes: [String]) -> String {
+    static func noteList(_ notes: [String]) -> String {
         let limit = 5
         var lines = notes.prefix(limit).map { "• \($0)" }
         if notes.count > limit { lines.append(L10n.string("…and %@ more", notes.count - limit)) }
@@ -654,6 +663,57 @@ final class Workspace {
         tabs.remove(at: index)
         closingTabs.remove(target)
         if selected == target { selected = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].path }
+        scheduleSessionSave()
+    }
+
+    /// 重命名成功后的本窗口迁移：标签路径、选中状态、视图记录与文档会话
+    /// 一次性搬到新路径；文件树与搜索索引由 VaultContext 同步。
+    func applyRename(oldPath: String, entry: TreeEntry) {
+        let prefix = entry.directory ? oldPath + "/" : nil
+        func remap(_ path: String) -> String {
+            if path == oldPath { return entry.path }
+            if let prefix, path.hasPrefix(prefix) {
+                return entry.path + "/" + path.dropFirst(prefix.count)
+            }
+            return path
+        }
+        for index in tabs.indices {
+            let old = tabs[index].path
+            let newPath = remap(old)
+            guard newPath != old else { continue }
+            if tabs[index].loading {
+                // 加载中的占位标签作废旧请求，按新路径重新加载。
+                loadTasks.removeValue(forKey: old)?.cancel()
+                loads.removeValue(forKey: old)
+                tabs[index].path = newPath
+                load(newPath)
+            } else {
+                tabs[index].path = newPath
+                if let document = tabs[index].document {
+                    Task { await document.relocate(root: root ?? "", to: newPath) }
+                }
+            }
+            if selected == old { selected = newPath }
+            if let view = restoredViews.removeValue(forKey: old) { restoredViews[newPath] = view }
+            if let reveal = pendingSearchReveals.removeValue(forKey: old) { pendingSearchReveals[newPath] = reveal }
+            closingTabs.remove(old)
+        }
+        if let focus = folderSelection, focus == oldPath || prefix.map({ focus.hasPrefix($0) }) == true {
+            folderSelection = remap(focus)
+        }
+        scheduleSessionSave()
+    }
+
+    /// 移到废纸篓流程专用：会话已由调用方停止，直接移除标签，不触发未保存提示。
+    func discardTabForTrash(_ path: String) {
+        guard let index = tabs.firstIndex(where: { $0.path == path }) else { return }
+        if let document = tabs[index].document { document.abandon() }
+        loadTasks.removeValue(forKey: path)?.cancel()
+        loads.removeValue(forKey: path)
+        tabs.remove(at: index)
+        closingTabs.remove(path)
+        if selected == path { selected = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].path }
+        pendingSearchReveals.removeValue(forKey: path)
         scheduleSessionSave()
     }
 
@@ -771,12 +831,12 @@ final class Workspace {
         if !document.reading { focusEditor(document) }
     }
     /// 视图切换后编辑表面在下一轮渲染才出现；只在窗口仍为 key 时把焦点交给当前正文。
-    private func focusEditor(_ document: NoteDocument) {
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+    func focusEditor(_ document: NoteDocument) {
+        guard let app = NSApp, let window = app.keyWindow ?? app.mainWindow else { return }
         Task { @MainActor [weak document] in
             guard let document else { return }
             for _ in 0..<80 {
-                guard !document.reading, NSApp.keyWindow === window else { return }
+                guard !document.reading, app.keyWindow === window else { return }
                 if let view = document.mountedTextView, !view.isReading,
                    view.window === window, view.isEditable, window.makeFirstResponder(view) { return }
                 try? await Task.sleep(for: .milliseconds(10))

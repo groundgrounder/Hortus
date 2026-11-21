@@ -37,6 +37,16 @@ enum L10n {
             return string("The selected folder contains Hortus configuration or cache files")
         case "vault.outside_root", "vault.invalid_path", "note.invalid_path":
             return string("The selected note path is invalid")
+        case "vault.invalid_name":
+            return string("The name is invalid")
+        case "vault.not_found":
+            return string("The file was deleted or moved")
+        case "vault.already_exists":
+            return string("A file already exists at the destination")
+        case "vault.symlink_unsupported":
+            return string("Symbolic links are not supported in the note folder")
+        case "vault.trash_failed":
+            return string("Moving to the Trash failed")
         case "config.home_missing", "config.path_not_absolute", "config.path_invalid":
             return string("Hortus configuration is unavailable")
         case "config.migration_failed":

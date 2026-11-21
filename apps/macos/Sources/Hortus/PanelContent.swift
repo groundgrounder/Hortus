@@ -33,6 +33,16 @@ struct PanelContent: View {
                         Text(URL(fileURLWithPath: workspace.root!).lastPathComponent)
                             .font(.caption.weight(.medium)).foregroundStyle(.secondary).lineLimit(1)
                         Spacer()
+                        Button { workspace.requestNewNote() } label: {
+                            Image(systemName: "square.and.pencil")
+                        }
+                        .buttonStyle(.borderless).help(L10n.string("New Note"))
+                        .accessibilityLabel(L10n.string("New Note"))
+                        Button { workspace.requestNewFolder() } label: {
+                            Image(systemName: "folder.badge.plus")
+                        }
+                        .buttonStyle(.borderless).help(L10n.string("New Folder"))
+                        .accessibilityLabel(L10n.string("New Folder"))
                         if workspace.scanning { ProgressView().controlSize(.mini).accessibilityLabel(L10n.string("Scanning folder")) }
                     }.padding(.horizontal, 14).padding(.vertical, 6)
                     FileTree()
