@@ -311,6 +311,25 @@ enum DiagramFocusInspection {
         let layoutAfterZoom = canvas.inspectionRustLayoutCalls
         focusInfo["zoom"] = ["low": low, "high": high, "actual": actual, "fit": fit,
                              "rust_layout_calls": layoutAfterZoom - layoutBeforeZoom]
+        var zoomKeys: [String: Any] = [:]
+        canvas.inspectionActual()
+        if let event = keyEvent("=", [.command], keyCode: 24, window: window) {
+            _ = focus.performKeyEquivalent(with: event)
+        }
+        zoomKeys["zoom_in"] = canvas.inspectionScale
+        if let event = keyEvent("-", [.command], keyCode: 27, window: window) {
+            _ = focus.performKeyEquivalent(with: event)
+        }
+        zoomKeys["zoom_out"] = canvas.inspectionScale
+        if let event = keyEvent("0", [.command], keyCode: 29, window: window) {
+            _ = focus.performKeyEquivalent(with: event)
+        }
+        zoomKeys["fit"] = canvas.inspectionScale
+        if let event = keyEvent("1", [.command], keyCode: 18, window: window) {
+            _ = focus.performKeyEquivalent(with: event)
+        }
+        zoomKeys["actual"] = canvas.inspectionScale
+        focusInfo["zoom_keys"] = zoomKeys
         log("zoom")
         // 小地图：放大后可见，点击中心把场景中心移到视口中心；适应后隐藏。
         canvas.inspectionZoom(4)

@@ -227,6 +227,10 @@ def main():
         assert_close(zoom['actual'], 1.0)
         assert 0.25 <= zoom['fit'] <= 4.0, zoom
         assert zoom['rust_layout_calls'] == 0, zoom
+        zoom_keys = focus['zoom_keys']
+        assert zoom_keys['zoom_in'] > 1.0, zoom_keys
+        assert_close(zoom_keys['zoom_out'], 1.0), zoom_keys
+        assert 0.25 <= zoom_keys['fit'] <= 4.0 and zoom_keys['actual'] == 1.0, zoom_keys
         minimap = focus['minimap']
         assert minimap['visible_when_zoomed'] and minimap['hidden_at_fit'] and minimap['jump_matches'], minimap
         shortcuts = focus['shortcuts']
