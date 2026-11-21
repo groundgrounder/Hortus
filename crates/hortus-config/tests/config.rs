@@ -451,6 +451,7 @@ fn diagram_state_survives_session_saves_and_is_scoped_to_vault_note_and_block() 
                 note: note.into(),
                 block,
                 collapsed: vec!["A".into()],
+                ..Default::default()
             })
             .unwrap();
     }
@@ -467,6 +468,7 @@ fn diagram_state_survives_session_saves_and_is_scoped_to_vault_note_and_block() 
             note: "n1".into(),
             block: 1,
             collapsed: vec![],
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(store.session().unwrap().diagrams.len(), 3);
@@ -510,6 +512,7 @@ fn legacy_session_migrates_once_and_full_snapshot_preserves_diagrams() {
             note: "same.md".into(),
             block: 1,
             collapsed: vec!["node".into()],
+            ..Default::default()
         })
         .unwrap();
     session.windows = Some(vec![]);

@@ -79,6 +79,13 @@ pub struct TreeBatch {
 }
 
 #[derive(uniffi::Record)]
+pub struct DiagramFocus {
+    pub scale: f64,
+    pub offset_x: f64,
+    pub offset_y: f64,
+}
+
+#[derive(uniffi::Record)]
 pub struct SearchMatchRange {
     pub start: u32,
     pub length: u32,
@@ -839,7 +846,51 @@ impl WorkspaceCore {
             note,
             block,
             collapsed,
+            ..Default::default()
         })?)
+    }
+
+    /// 读取专注模式保存的缩放与平移；从未进入过专注模式时返回空。
+    pub fn diagram_focus(
+        &self,
+        vault: String,
+        note: String,
+        block: u32,
+    ) -> Result<Option<DiagramFocus>, CoreError> {
+        let session = self.store.lock().unwrap().session()?;
+        Ok(session
+            .diagrams
+            .into_iter()
+            .find(|s| s.vault == vault && s.note == note && s.block == block)
+            .and_then(|s| {
+                s.focus_scale.map(|scale| DiagramFocus {
+                    scale,
+                    offset_x: s.focus_offset_x.unwrap_or(0.0),
+                    offset_y: s.focus_offset_y.unwrap_or(0.0),
+                })
+            }))
+    }
+
+    /// 只写专注视图状态；同一图块的折叠状态保持不变。
+    pub fn remember_diagram_focus(
+        &self,
+        vault: String,
+        note: String,
+        block: u32,
+        scale: f64,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> Result<(), CoreError> {
+        let store = self.store.lock().unwrap();
+        store.validate_vault(std::path::Path::new(&vault))?;
+        Ok(store.remember_diagram_focus(
+            vault,
+            note,
+            block,
+            Some(scale),
+            Some(offset_x),
+            Some(offset_y),
+        )?)
     }
 
     pub fn open_vault(&self, path: String) -> Result<Arc<VaultHandle>, CoreError> {

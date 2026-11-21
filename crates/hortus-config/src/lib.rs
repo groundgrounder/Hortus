@@ -277,7 +277,15 @@ pub struct DiagramState {
     pub vault: String,
     pub note: String,
     pub block: u32,
+    #[serde(default)]
     pub collapsed: Vec<String>,
+    /// 专注模式的缩放与平移；旧版 session.toml 没有这些字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_scale: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_offset_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_offset_y: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -1080,13 +1088,65 @@ impl Store {
         self.session()
     }
 
+    /// 折叠状态与专注视图状态写同一条目；调用方只提交自己负责的字段。
     pub fn remember_diagram(&self, state: DiagramState) -> io::Result<()> {
         let mut session = self.session()?;
-        session.diagrams.retain(|s| {
-            !(s.vault == state.vault && s.note == state.note && s.block == state.block)
-        });
-        if !state.collapsed.is_empty() {
-            session.diagrams.push(state);
+        let existing = session
+            .diagrams
+            .iter()
+            .find(|s| s.vault == state.vault && s.note == state.note && s.block == state.block);
+        let mut next = state;
+        if next.focus_scale.is_none()
+            && next.focus_offset_x.is_none()
+            && next.focus_offset_y.is_none()
+        {
+            if let Some(old) = existing {
+                next.focus_scale = old.focus_scale;
+                next.focus_offset_x = old.focus_offset_x;
+                next.focus_offset_y = old.focus_offset_y;
+            }
+        }
+        session
+            .diagrams
+            .retain(|s| !(s.vault == next.vault && s.note == next.note && s.block == next.block));
+        let has_focus = next.focus_scale.is_some()
+            || next.focus_offset_x.is_some()
+            || next.focus_offset_y.is_some();
+        if !next.collapsed.is_empty() || has_focus {
+            session.diagrams.push(next);
+        }
+        write_toml(&self.directories.cache.join("session.toml"), &session)
+    }
+
+    /// 只更新专注模式的缩放与平移，保留同一图块的折叠状态。
+    pub fn remember_diagram_focus(
+        &self,
+        vault: String,
+        note: String,
+        block: u32,
+        scale: Option<f64>,
+        offset_x: Option<f64>,
+        offset_y: Option<f64>,
+    ) -> io::Result<()> {
+        let mut session = self.session()?;
+        let existing = session
+            .diagrams
+            .iter()
+            .find(|s| s.vault == vault && s.note == note && s.block == block);
+        let collapsed = existing.map(|s| s.collapsed.clone()).unwrap_or_default();
+        session
+            .diagrams
+            .retain(|s| !(s.vault == vault && s.note == note && s.block == block));
+        if !collapsed.is_empty() || scale.is_some() {
+            session.diagrams.push(DiagramState {
+                vault,
+                note,
+                block,
+                collapsed,
+                focus_scale: scale,
+                focus_offset_x: offset_x,
+                focus_offset_y: offset_y,
+            });
         }
         write_toml(&self.directories.cache.join("session.toml"), &session)
     }
@@ -1414,5 +1474,113 @@ mod tests {
             "executable must be the canonical target"
         );
         assert!(!marker.exists(), "discovery must never execute a preset");
+    }
+
+    fn diagram_store(root: &tempfile::TempDir) -> Store {
+        Store::open(Directories {
+            config: root.path().join("config"),
+            cache: root.path().join("cache"),
+            data: root.path().join("data"),
+        })
+        .unwrap()
+    }
+
+    fn diagram_entry(store: &Store, vault: &str, note: &str, block: u32) -> Option<DiagramState> {
+        store
+            .session()
+            .unwrap()
+            .diagrams
+            .into_iter()
+            .find(|s| s.vault == vault && s.note == note && s.block == block)
+    }
+
+    #[test]
+    fn legacy_session_without_focus_fields_still_loads() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        fs::write(
+            store.directories.cache.join("session.toml"),
+            "[[diagrams]]\nvault = \"/v\"\nnote = \"n.md\"\nblock = 1\ncollapsed = [\"a\"]\n",
+        )
+        .unwrap();
+        let entry = diagram_entry(&store, "/v", "n.md", 1).unwrap();
+        assert_eq!(entry.collapsed, vec!["a"]);
+        assert_eq!(entry.focus_scale, None);
+        assert_eq!(entry.focus_offset_x, None);
+        assert_eq!(entry.focus_offset_y, None);
+    }
+
+    #[test]
+    fn collapsed_and_focus_fields_do_not_erase_each_other() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        store
+            .remember_diagram(DiagramState {
+                vault: "/v".into(),
+                note: "n.md".into(),
+                block: 1,
+                collapsed: vec!["root".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            diagram_entry(&store, "/v", "n.md", 1).unwrap().collapsed,
+            vec!["root"]
+        );
+
+        store
+            .remember_diagram_focus(
+                "/v".into(),
+                "n.md".into(),
+                1,
+                Some(2.5),
+                Some(-40.0),
+                Some(12.0),
+            )
+            .unwrap();
+        let entry = diagram_entry(&store, "/v", "n.md", 1).unwrap();
+        assert_eq!(entry.collapsed, vec!["root"], "focus write keeps collapse");
+        assert_eq!(entry.focus_scale, Some(2.5));
+        assert_eq!(entry.focus_offset_x, Some(-40.0));
+        assert_eq!(entry.focus_offset_y, Some(12.0));
+
+        // 展开全部节点后只更新折叠字段，专注视图位置仍然保留。
+        store
+            .remember_diagram(DiagramState {
+                vault: "/v".into(),
+                note: "n.md".into(),
+                block: 1,
+                collapsed: vec![],
+                ..Default::default()
+            })
+            .unwrap();
+        let entry = diagram_entry(&store, "/v", "n.md", 1).expect("focus keeps the entry");
+        assert!(entry.collapsed.is_empty());
+        assert_eq!(entry.focus_scale, Some(2.5));
+    }
+
+    #[test]
+    fn entry_is_removed_only_when_no_state_remains() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        store
+            .remember_diagram(DiagramState {
+                vault: "/v".into(),
+                note: "n.md".into(),
+                block: 1,
+                collapsed: vec!["a".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .remember_diagram(DiagramState {
+                vault: "/v".into(),
+                note: "n.md".into(),
+                block: 1,
+                collapsed: vec![],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(diagram_entry(&store, "/v", "n.md", 1).is_none());
     }
 }
