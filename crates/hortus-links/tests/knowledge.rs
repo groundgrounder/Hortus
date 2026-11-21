@@ -178,16 +178,16 @@ fn rename_plans_skip_alias_only_links_and_keep_every_part() {
             "[[Old]] [[notes/Old#Part|Alias]] ![[Old#^block]] [[Legacy]] [[Old name]] [[Old.md]] [[image.png]]",
         ),
     ]);
-    let plan = index.plan_rename_links("notes/Old.md", "archive/New.md");
+    let plan = index.plan_rename_links("notes/Old.md", "moved/New.md");
     assert_eq!(plan.len(), 4);
     assert_eq!(plan[0].before, "[[Old]]");
     assert_eq!(plan[0].after, "[[New]]");
     assert_eq!(plan[1].before, "[[notes/Old#Part|Alias]]");
-    assert_eq!(plan[1].after, "[[archive/New#Part|Alias]]");
+    assert_eq!(plan[1].after, "[[moved/New#Part|Alias]]");
     assert_eq!(plan[2].before, "![[Old#^block]]");
     assert_eq!(plan[2].after, "![[New#^block]]");
     assert_eq!(plan[3].before, "[[Old.md]]");
-    assert_eq!(plan[3].after, "[[archive/New.md]]");
+    assert_eq!(plan[3].after, "[[moved/New.md]]");
     assert!(index.plan_rename_links("missing.md", "x.md").is_empty());
     assert!(index.plan_rename_links("../Old.md", "x.md").is_empty());
     assert!(
