@@ -109,6 +109,7 @@ pub(super) fn layout_container_graph(
                         fonts: Vec::new(),
                         layout_ms: 0.0,
                         root_hue: None,
+                        diagram_kind: "flowchart".into(),
                         branch_hues: Vec::new(),
                     },
                 },
@@ -468,6 +469,7 @@ fn compose_container_scene(
             layout_ms: outer.scene.metrics.layout_ms,
             root_hue: None,
             branch_hues: Vec::new(),
+            diagram_kind: "flowchart".into(),
         },
     };
     GraphScene {

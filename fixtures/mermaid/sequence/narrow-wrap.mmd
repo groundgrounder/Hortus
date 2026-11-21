@@ -1,0 +1,13 @@
+sequenceDiagram
+  title 知识库问答的长标签换行样例
+  participant R as 阅读视图 Reading View
+  participant I as 索引与检索 Index
+  participant M as 排序模型 Ranking Model
+  participant V as 向量缓存 Vector Cache
+  R->>I: 检索「分布式任务队列两阶段提交与幂等重试机制在离线场景下的状态流转」
+  I->>M: 对 12 条候选结果按主题相关性与最近编辑时间重新排序
+  M-->>I: 返回前 5 条并附上每条的匹配度说明文字
+  Note over I,V: 命中率统计与缓存失效策略会按最近一次同步时间自动调整，无需手工干预
+  R->>R: 折叠当前小节并在大纲面板里高亮标题
+  V--xI: 缓存条目过期，标记待重建
+  I->>V: 重建向量时跳过已删除与已归档的笔记文件

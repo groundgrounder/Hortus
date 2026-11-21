@@ -266,6 +266,9 @@ fn render(
         Diagram::Graph(graph) => {
             layout_graph(&graph, options, fonts).map(|result| (result.scene, Some(result.previous)))
         }
+        Diagram::Sequence(_) => Err(LayoutError(
+            "sequence diagrams are outside the graph matrix".into(),
+        )),
     }
     .map_err(|e| e.to_string())
 }

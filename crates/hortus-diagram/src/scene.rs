@@ -101,7 +101,7 @@ pub struct HitRegion {
     pub source_range: Range<usize>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Metrics {
     pub columns: usize,
     pub diagram_height: f64,
@@ -112,9 +112,10 @@ pub struct Metrics {
     pub layout_ms: f64,
     pub root_hue: Option<f64>,
     pub branch_hues: Vec<f64>,
+    /// 图类型标识；`Scene::to_svg` 的 aria-label 与指标 JSON 使用。
+    pub diagram_kind: String,
 }
-
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Scene {
     pub width: f64,
     pub height: f64,

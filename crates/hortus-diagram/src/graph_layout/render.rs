@@ -231,6 +231,7 @@ pub(super) fn assemble_scene(
             node_overlaps,
             fonts: fonts_used,
             layout_ms: started.elapsed().as_secs_f64() * 1000.0,
+            diagram_kind: "flowchart".into(),
             root_hue: None,
             branch_hues: Vec::new(),
         },

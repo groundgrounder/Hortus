@@ -10,6 +10,8 @@ mod graph_state;
 mod layout;
 mod parser;
 mod scene;
+mod sequence;
+mod sequence_layout;
 mod shape;
 mod svg;
 mod syntax;
@@ -31,3 +33,8 @@ pub use parser::{
     parse_at, parse_diagram, parse_diagram_at,
 };
 pub use scene::{HitRegion, Metrics, Point, Primitive, Rect, Scene, TextSpan, Theme};
+pub use sequence::{
+    FragmentKind, NoteSide, SequenceDiagram, SequenceMessage, SequenceNote, SequenceParticipant,
+    SequenceRow, SequenceText,
+};
+pub use sequence_layout::layout_sequence;

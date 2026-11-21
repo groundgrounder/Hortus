@@ -128,6 +128,7 @@ pub struct Graph {
 pub enum Diagram {
     Tree(Tree),
     Graph(Graph),
+    Sequence(crate::sequence::SequenceDiagram),
 }
 
 impl Graph {

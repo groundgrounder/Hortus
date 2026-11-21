@@ -266,6 +266,26 @@ pub(crate) fn row(
     result
 }
 
+/// 非树形排版的纯文字换行：多段样式拼接后按可用宽度折行。
+/// 供时序图的参与者、消息、便签与组合块标签使用；`<br/>` 由调用方拆行。
+pub(crate) fn plain_wrap(
+    segments: &[(&str, Style)],
+    available: f64,
+    line_height: f64,
+    fonts: &mut dyn FontMetrics,
+) -> TextLayout {
+    let pieces = segments
+        .iter()
+        .filter(|(text, _)| !text.is_empty())
+        .map(|(text, style)| Piece {
+            text: (*text).into(),
+            style: *style,
+            badge: false,
+        })
+        .collect();
+    wrap(pieces, available, line_height, fonts)
+}
+
 fn wrap(
     pieces: Vec<Piece>,
     available: f64,

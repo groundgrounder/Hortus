@@ -97,7 +97,7 @@ fn rejects_merges_cycles_forests_and_unsupported_types() {
     ] {
         assert!(matches!(parse(source), Err(DiagramError::NotATree { .. })));
     }
-    for kind in ["sequenceDiagram", "classDiagram", "stateDiagram-v2"] {
+    for kind in ["classDiagram", "stateDiagram-v2"] {
         assert!(matches!(parse(kind), Err(DiagramError::Unsupported { .. })));
     }
     for source in [
@@ -1158,10 +1158,10 @@ fn digest(source: &str, width: f64, collapsed: &[&str]) -> u64 {
 #[test]
 fn iterative_layout_matches_the_previous_recursive_output() {
     for (source, expected) in [
-        (layout_chain(64), 0x927e3b9690aa815fu64),
-        (layout_chain(200), 0xe4003fef25ced52b),
-        (layout_chain(512), 0x7751cdc05d652d14),
-        (layout_mindmap_chain(200), 0xcd6976ae246192e1),
+        (layout_chain(64), 0xcb8309dd6c6f53d9u64),
+        (layout_chain(200), 0x8b27b052c0e03d25),
+        (layout_chain(512), 0xe0871e1bfafa80ce),
+        (layout_mindmap_chain(200), 0xf38386efd5a31487),
     ] {
         let width = if source.starts_with("mindmap") {
             380.0
@@ -1172,16 +1172,16 @@ fn iterative_layout_matches_the_previous_recursive_output() {
     }
     let branching = "flowchart TB\nR[Root] --> A[Alpha section] --> A1[Leaf one]\nA --> A2[Second leaf]\nR --> B[Beta section]:::hot --> B1[Leaf three]\nB --> B2[Leaf four]\nR --> C[Gamma]\nclassDef hot fill:#fde9d9,stroke:#c33";
     for (width, expected) in [
-        (380.0, 0x3f313746a6e0d075u64),
-        (700.0, 0x6c8c5ba9350b90d6),
-        (1100.0, 0xd103e3a095eb5957),
+        (380.0, 0x9061d4eaa190bf9bu64),
+        (700.0, 0xcfa221e8a0921754),
+        (1100.0, 0x5362502ae9926311),
     ] {
         assert_eq!(digest(branching, width, &[]), expected);
     }
-    assert_eq!(digest(branching, 700.0, &["A", "B"]), 0x4ca0e0e9d9eab8c3);
+    assert_eq!(digest(branching, 700.0, &["A", "B"]), 0x009495568f6b6cdd);
     let labelled =
         "flowchart LR\nA[开始] -->|是| B{判断}\nB -- 否 --> C[结束]\nA --> D((圆)) --> E[[子程序]]";
-    assert_eq!(digest(labelled, 380.0, &[]), 0xec46a1b1cbb3f259);
+    assert_eq!(digest(labelled, 380.0, &[]), 0x3e6e028abe25b0df);
 }
 
 #[test]
@@ -1684,4 +1684,197 @@ fn unsupported_graph_constructs_keep_utf8_ranges_and_class_fallback_is_diagnosti
     assert_eq!(graph.warnings.len(), 1);
     assert_eq!(&source[graph.warnings[0].0.clone()], "font-size:18px");
     assert_eq!(graph.warnings[0].1, "ignored_style_property:font-size");
+}
+
+#[test]
+fn sequence_diagram_parses_with_utf8_ranges_and_projection() {
+    let source = concat!(
+        "前言😀\n\n",
+        "> ```mermaid\n",
+        "> sequenceDiagram\n",
+        "> participant U as 你\n",
+        "> U->>M: 发送当前笔记\n",
+        "> Note over U,M: 本地渲染\n",
+        "> ```\n",
+    );
+    let block = mermaid_block(source, 1).unwrap();
+    let Diagram::Sequence(sequence) = block.parse_diagram().unwrap() else {
+        panic!("sequence AST expected");
+    };
+    assert_eq!(sequence.participants.len(), 2);
+    assert_eq!(sequence.participants[0].display, "你");
+    assert_eq!(sequence.participants[1].id, "M");
+    // 投影后的范围必须落在原文合法字符边界，并指向原始语句。
+    for participant in &sequence.participants {
+        assert!(source.is_char_boundary(participant.source_range.start));
+        assert!(source.is_char_boundary(participant.source_range.end));
+        let slice = &source[participant.source_range.clone()];
+        assert!(slice.contains(participant.id.as_str()), "{slice}");
+    }
+    for row in &sequence.rows {
+        let range = match row {
+            SequenceRow::Message(message) => &message.source_range,
+            SequenceRow::Note(note) => &note.source_range,
+            _ => continue,
+        };
+        assert!(source.is_char_boundary(range.start));
+        assert!(source.is_char_boundary(range.end));
+        assert!(range.start < range.end);
+    }
+    // CRLF 笔记中范围同样必须落在原文边界。
+    let crlf = "序\r\n\r\n```mermaid\r\nsequenceDiagram\r\nU->>M: 请求\r\n```\r\n";
+    let block = mermaid_block(crlf, 1).unwrap();
+    let Diagram::Sequence(sequence) = block.parse_diagram().unwrap() else {
+        panic!("sequence AST expected");
+    };
+    let SequenceRow::Message(message) = &sequence.rows[0] else {
+        panic!("message row expected");
+    };
+    let range = message.source_range.clone();
+    assert!(crlf.is_char_boundary(range.start) && crlf.is_char_boundary(range.end));
+    assert_eq!(&crlf[range], "U->>M: 请求");
+}
+
+#[test]
+fn sequence_syntax_and_unsupported_errors_carry_accurate_ranges() {
+    let unclosed = "sequenceDiagram\nA->>B: x\nalt 条件\nA->>B: y\n";
+    let DiagramError::Syntax { range, kind } = parse_diagram_at(unclosed, 7).unwrap_err() else {
+        panic!("unclosed alt must be a syntax error");
+    };
+    assert_eq!(kind, "unclosed_alt");
+    assert_eq!(&unclosed[range.start - 7..range.end - 7], "alt 条件");
+    for (source, expected) in [
+        ("sequenceDiagram\nend\n", "unexpected_end"),
+        ("sequenceDiagram", "empty_sequence"),
+        ("sequenceDiagram\nA =>> B: x\n", "unknown_statement"),
+        (
+            "sequenceDiagram\nA->>B: x\ndeactivate A\n",
+            "inactive_deactivate",
+        ),
+        (
+            "sequenceDiagram\nloop 循环\nelse 分支\nend\n",
+            "else_without_alt",
+        ),
+    ] {
+        let DiagramError::Syntax { kind, range } = parse_diagram(source).unwrap_err() else {
+            panic!("{source} must be a syntax error");
+        };
+        assert_eq!(kind, expected);
+        assert!(source.is_char_boundary(range.start));
+    }
+    for (source, kind, statement) in [
+        ("sequenceDiagram\nbox 分组\nend\n", "box", "box 分组"),
+        (
+            "sequenceDiagram\ncreate participant B\n",
+            "create",
+            "create participant B",
+        ),
+        (
+            "sequenceDiagram\nA->>B: x\ndestroy B\n",
+            "destroy",
+            "destroy B",
+        ),
+        (
+            "sequenceDiagram\nlinks A: {\"x\": \"y\"}\n",
+            "links",
+            "links A: {\"x\": \"y\"}",
+        ),
+    ] {
+        let DiagramError::UnsupportedConstruct {
+            range,
+            kind: actual,
+        } = parse_diagram(source).unwrap_err()
+        else {
+            panic!("{source} must be unsupported");
+        };
+        assert_eq!(actual, kind);
+        assert_eq!(&source[range], statement);
+    }
+}
+
+#[test]
+fn sequence_layout_fits_public_samples_at_both_widths() {
+    for name in [
+        include_str!("../../../fixtures/mermaid/sequence/agent-workflow.mmd"),
+        include_str!("../../../fixtures/mermaid/sequence/control-flow.mmd"),
+        include_str!("../../../fixtures/mermaid/sequence/narrow-wrap.mmd"),
+    ] {
+        for width in [700.0, 1100.0] {
+            for theme in [Theme::Light, Theme::Dark] {
+                let Diagram::Sequence(sequence) = parse_diagram(name).unwrap() else {
+                    panic!("sequence AST expected");
+                };
+                let scene = layout_sequence(
+                    &sequence,
+                    &LayoutOptions {
+                        width,
+                        theme,
+                        ..LayoutOptions::default()
+                    },
+                    &mut DeterministicMetrics,
+                )
+                .unwrap();
+                assert!(!scene.metrics.horizontal_overflow, "{name} {width}");
+                assert_eq!(scene.metrics.node_overlaps, 0, "{name} {width}");
+                assert!(scene.metrics.min_font_px >= 12.5, "{name} {width}");
+                assert_eq!(scene.metrics.columns, 1);
+                assert_eq!(scene.width, width);
+                // 生命线：每个参与者一条竖直虚线，与主题无关。
+                let lifelines = scene
+                    .primitives
+                    .iter()
+                    .filter(|primitive| {
+                        matches!(
+                            primitive,
+                            Primitive::GraphPath { points, line, .. }
+                                if points.len() == 2
+                                    && points[0].x == points[1].x
+                                    && *line == EdgeLine::Dotted
+                        )
+                    })
+                    .count();
+                assert_eq!(lifelines, sequence.participants.len(), "{name} {width}");
+                for hit in &scene.hit_regions {
+                    assert!(!hit.can_collapse);
+                    assert!(hit.rect.x >= -0.001 && hit.rect.x + hit.rect.width <= width + 0.001);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sequence_scene_export_and_source_hits_match_the_core_contract() {
+    let source = "sequenceDiagram\nparticipant U as 你\nparticipant M as Hortus\nU->>M: 发送当前笔记\nM-->>U: 刷新阅读视图\nNote over U,M: 本地渲染\n";
+    let Diagram::Sequence(sequence) = parse_diagram_at(source, 3).unwrap() else {
+        panic!("sequence AST expected");
+    };
+    let options = LayoutOptions::default();
+    let scene = layout_sequence(&sequence, &options, &mut DeterministicMetrics).unwrap();
+    assert!(
+        scene
+            .to_svg()
+            .contains("aria-label=\"Mermaid sequence diagram\"")
+    );
+    // 命中区域覆盖参与者、消息与便签，范围回指原文。
+    let ids: Vec<&str> = scene
+        .hit_regions
+        .iter()
+        .map(|hit| hit.node_id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["U", "M", "msg-1", "msg-2", "note-1"]);
+    let you = scene.hit_regions[0].rect;
+    let hit = scene
+        .hit_test(Point {
+            x: you.x + you.width / 2.0,
+            y: you.y + you.height / 2.0,
+        })
+        .unwrap();
+    assert_eq!(
+        &source[hit.source_range.start - 3..hit.source_range.end - 3],
+        "participant U as 你"
+    );
+    // 语义场景跨两次排版完全一致（耗时字段清零后）。
+    let again = layout_sequence(&sequence, &options, &mut DeterministicMetrics).unwrap();
+    assert_eq!(scene.semantic_scene(), again.semantic_scene());
 }

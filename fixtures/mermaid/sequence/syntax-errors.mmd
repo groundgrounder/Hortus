@@ -1,0 +1,9 @@
+%% 公开语法错误样例：alt 组合块未闭合，渲染应报第 4 行的语法错误并回退源码。
+sequenceDiagram
+  participant A as 前端
+  participant B as 服务
+  A->>B: 请求配置
+  alt 网络正常
+    B-->>A: 返回配置
+  else 网络中断
+    B-->>A: 返回缓存副本

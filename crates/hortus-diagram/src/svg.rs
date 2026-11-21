@@ -64,8 +64,14 @@ fn marker_svg(marker: Marker, points: &[crate::Point], at_start: bool, color: &s
 impl Scene {
     /// 一段一段放置已测量的文字，浏览器只绘制，不参与换行或节点定位。
     pub fn to_svg(&self) -> String {
+        let label = match self.metrics.diagram_kind.as_str() {
+            "tree" => "Mermaid tree",
+            "flowchart" => "Mermaid flowchart",
+            "sequence" => "Mermaid sequence diagram",
+            _ => "Mermaid diagram",
+        };
         let mut output = format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{:.3}\" height=\"{:.3}\" viewBox=\"0 0 {:.3} {:.3}\" role=\"img\" aria-label=\"Mermaid tree\">\n",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{:.3}\" height=\"{:.3}\" viewBox=\"0 0 {:.3} {:.3}\" role=\"img\" aria-label=\"{label}\">\n",
             self.width, self.height, self.width, self.height
         );
         for primitive in &self.primitives {

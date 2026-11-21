@@ -1,0 +1,40 @@
+sequenceDiagram
+  autonumber
+  actor U as 用户
+  participant A as 应用
+  participant S as 服务
+  U->>A: 打开笔记
+  activate A
+  A->>S: 同步索引
+  S-->>A: 就绪
+  Note left of U: 本地优先，离线可用
+  A->>U: 展示内容
+  deactivate A
+  U->>+A: 修改段落
+  A->>+S: 保存快照
+  S-->>-A: 已保存
+  A-->>-U: 更新界面
+  alt 网络可用
+    A->>S: 上传改动
+    S-->>A: 完成
+  else 网络中断
+    A->>A: 记入待同步队列
+  end
+  loop 每次空闲
+    A->>S: 合并远端变更
+  end
+  opt 手动触发
+    par 并行校验
+      S->>S: 校验签名
+    and 生成摘要
+      S->>A: 回传摘要
+    end
+  end
+  critical 校验失败
+    option 使用快照
+      A->>A: 回滚到快照
+  end
+  break 用户取消
+    U-xA: 取消请求
+  end
+  Note over U,S: 全程不离开本地文件夹

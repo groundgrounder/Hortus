@@ -520,6 +520,7 @@ pub fn layout(
             layout_ms: started.elapsed().as_secs_f64() * 1000.0,
             root_hue,
             branch_hues: (0..branches.len()).map(|i| hues[i % hues.len()]).collect(),
+            diagram_kind: "tree".into(),
         },
     })
 }

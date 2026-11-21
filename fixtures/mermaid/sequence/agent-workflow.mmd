@@ -1,0 +1,16 @@
+sequenceDiagram
+  participant U as 你
+  participant H as Hortus
+  participant T as 终端 agent
+  participant C as hortus CLI
+  U->>H: 发送当前笔记
+  H->>T: 填入提示词和笔记路径
+  T->>C: search 缓存策略
+  C-->>T: 12 条结果
+  T->>C: backlinks 04-架构笔记
+  C-->>T: 5 条反链
+  T->>T: 整理成 mindmap
+  T->>C: mermaid check
+  C-->>T: 语法通过
+  T->>H: 写入 总结.md
+  H-->>U: 刷新阅读视图，列出本次改动
