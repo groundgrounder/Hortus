@@ -301,6 +301,19 @@ impl Recovery {
     pub fn load(&self) -> io::Result<Option<String>> {
         Ok(self.load_note()?.map(|(text, _)| text))
     }
+    /// 同一缓存与库下指向另一条笔记路径的恢复稿；文件内容须由调用方显式迁移。
+    pub fn for_note(&self, note: &str) -> Self {
+        let hash = fnv1a(self.vault.bytes().chain([0]).chain(note.bytes()));
+        Self {
+            path: self
+                .path
+                .parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .join(format!("{hash:016x}.json")),
+            vault: self.vault.clone(),
+            note: note.into(),
+        }
+    }
     pub fn load_note(&self) -> io::Result<Option<(String, Format)>> {
         let Some(version) = read(&self.path)? else {
             return Ok(None);

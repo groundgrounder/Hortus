@@ -335,3 +335,246 @@ fn concurrent_close_during_scan_or_pending_events_always_unblocks_consumers() {
         }
     }
 }
+
+#[test]
+fn file_operations_create_validate_and_refuse_to_clobber() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("alpha.md"), "existing").unwrap();
+    let vault = Vault::open(dir.path()).unwrap();
+    // 无扩展名自动补 .md；受支持扩展名原样保留。
+    let note = vault.create_note("", "idea").unwrap();
+    assert_eq!(
+        (note.path.as_str(), note.parent.as_str(), note.directory),
+        ("idea.md", "", false)
+    );
+    assert!(fs::read(dir.path().join("idea.md")).unwrap().is_empty());
+    let markdown = vault.create_note("", "Draft.markdown").unwrap();
+    assert_eq!(markdown.path, "Draft.markdown");
+    // 独占创建：同名（含大小写不敏感文件系统上的变体）拒绝且不覆盖。
+    for name in ["idea", "ALPHA.md", "alpha.md"] {
+        let error = vault.create_note("", name).unwrap_err();
+        assert_eq!(error.to_string(), "vault.already_exists", "{name}");
+    }
+    assert_eq!(
+        fs::read_to_string(dir.path().join("alpha.md")).unwrap(),
+        "existing"
+    );
+    // 非法名称：空、隐藏项、node_modules、分隔符与控制字符。
+    for name in [
+        "",
+        "   ",
+        ".",
+        "..",
+        ".hidden",
+        "node_modules",
+        "a/b",
+        "back\\slash",
+        "nul\0",
+        "ctrl\u{1}x",
+    ] {
+        let error = vault.create_note("", name).unwrap_err();
+        assert_eq!(error.to_string(), "vault.invalid_name", "{name:?}");
+    }
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+    // 文件夹：单级创建、重复拒绝、子目录内新建。
+    let folder = vault.create_folder("", "Projects").unwrap();
+    assert_eq!((folder.path.as_str(), folder.directory), ("Projects", true));
+    assert!(dir.path().join("Projects").is_dir());
+    assert_eq!(
+        vault.create_folder("", "Projects").unwrap_err().to_string(),
+        "vault.already_exists"
+    );
+    let nested = vault.create_note("Projects", "memo").unwrap();
+    assert_eq!(
+        (nested.path.as_str(), nested.parent.as_str()),
+        ("Projects/memo.md", "Projects")
+    );
+    assert_eq!(
+        vault.create_note("Missing", "x").unwrap_err().to_string(),
+        "vault.not_found"
+    );
+    vault.close();
+}
+
+#[test]
+fn rename_entries_keeps_folders_whole_and_rejects_conflicts() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("docs/deep")).unwrap();
+    fs::write(dir.path().join("docs/inside.md"), "inside").unwrap();
+    fs::write(dir.path().join("docs/deep/leaf.mmd"), "leaf").unwrap();
+    fs::write(dir.path().join("b.md"), "note").unwrap();
+    fs::write(dir.path().join("c.md"), "other").unwrap();
+    let vault = Vault::open(dir.path()).unwrap();
+    // 普通文件重命名 + 名称去空白。
+    let renamed = vault.rename_entry("b.md", "  beta.md  ").unwrap();
+    assert_eq!(
+        (renamed.path.as_str(), renamed.parent.as_str()),
+        ("beta.md", "")
+    );
+    assert!(!dir.path().join("b.md").exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("beta.md")).unwrap(),
+        "note"
+    );
+    // 新旧名称字节一致：无操作，返回当前条目。
+    let same = vault.rename_entry("beta.md", "beta.md").unwrap();
+    assert_eq!(same.path, "beta.md");
+    // 大小写不敏感文件系统上的原地改名（同 inode）必须成功。
+    let case = vault.rename_entry("beta.md", "Beta.md").unwrap();
+    assert_eq!(case.path, "Beta.md");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("Beta.md")).unwrap(),
+        "note"
+    );
+    // 与其他不同 inode 的文件同名（大小写不敏感命中）必须拒绝。
+    assert_eq!(
+        vault
+            .rename_entry("Beta.md", "C.md")
+            .unwrap_err()
+            .to_string(),
+        "vault.already_exists"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("c.md")).unwrap(),
+        "other"
+    );
+    assert!(dir.path().join("Beta.md").exists());
+    // 笔记不允许改成不受识别的扩展名，避免重命名后从文件树消失。
+    assert_eq!(
+        vault
+            .rename_entry("Beta.md", "plain.txt")
+            .unwrap_err()
+            .to_string(),
+        "vault.invalid_name"
+    );
+    assert!(dir.path().join("Beta.md").exists());
+    // 非空文件夹整棵原子重命名，子项不丢失。
+    let folder = vault.rename_entry("docs", "papers").unwrap();
+    assert_eq!(folder.path, "papers");
+    assert!(!dir.path().join("docs").exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("papers/inside.md")).unwrap(),
+        "inside"
+    );
+    assert!(dir.path().join("papers/deep/leaf.mmd").is_file());
+    let nested = vault.rename_entry("papers/inside.md", "intro.md").unwrap();
+    assert_eq!(nested.path, "papers/intro.md");
+    // 文件夹改到既有文件夹名、源缺失、父目录越界都拒绝。
+    fs::create_dir(dir.path().join("papers/target")).unwrap();
+    assert_eq!(
+        vault
+            .rename_entry("papers/deep", "target")
+            .unwrap_err()
+            .to_string(),
+        "vault.already_exists"
+    );
+    assert_eq!(
+        vault
+            .rename_entry("missing.md", "x.md")
+            .unwrap_err()
+            .to_string(),
+        "vault.not_found"
+    );
+    assert_eq!(
+        vault
+            .rename_entry("../outside", "x.md")
+            .unwrap_err()
+            .to_string(),
+        "vault.invalid_path"
+    );
+    assert_eq!(
+        vault
+            .rename_entry("Beta.md", "bad/name.md")
+            .unwrap_err()
+            .to_string(),
+        "vault.invalid_name"
+    );
+    vault.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn trash_target_resolution_stays_inside_the_vault() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join("folder")).unwrap();
+    fs::write(dir.path().join("note.md"), "text").unwrap();
+    let outside = TempDir::new().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("linkdir")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("far.md"), dir.path().join("link.md")).unwrap();
+    let vault = Vault::open(dir.path()).unwrap();
+    let (note, is_dir) = vault.resolve_trash_target("note.md").unwrap();
+    assert_eq!(note, dir.path().canonicalize().unwrap().join("note.md"));
+    assert!(!is_dir);
+    let (folder, is_dir) = vault.resolve_trash_target("folder").unwrap();
+    assert!(folder.ends_with("folder") && is_dir);
+    assert_eq!(
+        vault
+            .resolve_trash_target("missing.md")
+            .unwrap_err()
+            .to_string(),
+        "vault.not_found"
+    );
+    assert_eq!(
+        vault.resolve_trash_target("").unwrap_err().to_string(),
+        "vault.invalid_path"
+    );
+    assert_eq!(
+        vault
+            .resolve_trash_target("../escape.md")
+            .unwrap_err()
+            .to_string(),
+        "vault.invalid_path"
+    );
+    // 符号链接（自身或父目录）一律拒绝，不能把库外目标送进废纸篓。
+    assert_eq!(
+        vault
+            .resolve_trash_target("link.md")
+            .unwrap_err()
+            .to_string(),
+        "vault.symlink_unsupported"
+    );
+    assert_eq!(
+        vault
+            .resolve_trash_target("linkdir/any.md")
+            .unwrap_err()
+            .to_string(),
+        "vault.symlink_unsupported"
+    );
+    // 新建操作同样不进入符号链接目录。
+    assert_eq!(
+        vault.create_note("linkdir", "x").unwrap_err().to_string(),
+        "vault.symlink_unsupported"
+    );
+    assert_eq!(
+        vault
+            .rename_entry("link.md", "renamed.md")
+            .unwrap_err()
+            .to_string(),
+        "vault.symlink_unsupported"
+    );
+    vault.close();
+}
+
+#[test]
+fn case_only_rename_keeps_a_single_entry() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("case.md"), "# case").unwrap();
+    let vault = Vault::open(dir.path()).unwrap();
+    let mut tree = initial(&vault);
+    assert!(tree.contains_key("case.md"));
+    // 大小写不敏感文件系统上，原地改名的事件会同时携带新旧两个名字；
+    // 旧名不能通过不区分大小写的 stat 复活成重复条目。
+    fs::rename(dir.path().join("case.md"), dir.path().join("Case.md")).unwrap();
+    wait(&vault, |batches| {
+        for batch in batches {
+            for key in &batch.removed {
+                tree.remove(key);
+            }
+            for item in &batch.upserted {
+                tree.insert(item.path.clone(), item.clone());
+            }
+        }
+        tree.contains_key("Case.md") && !tree.contains_key("case.md")
+    });
+    vault.close();
+}

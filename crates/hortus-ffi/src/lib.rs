@@ -1052,6 +1052,15 @@ impl WorkspaceCore {
     }
 }
 
+fn tree_entry(entry: hortus_vault::Entry) -> TreeEntry {
+    TreeEntry {
+        path: entry.path,
+        parent: entry.parent,
+        name: entry.name,
+        directory: entry.directory,
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct VaultHandle {
     vault: Vault,
@@ -1091,6 +1100,28 @@ impl VaultHandle {
     }
     pub fn read_note(&self, path: String) -> Result<String, CoreError> {
         Ok(self.vault.read_note(&path)?)
+    }
+
+    pub fn create_note(&self, parent: String, name: String) -> Result<TreeEntry, CoreError> {
+        Ok(tree_entry(self.vault.create_note(&parent, &name)?))
+    }
+
+    pub fn create_folder(&self, parent: String, name: String) -> Result<TreeEntry, CoreError> {
+        Ok(tree_entry(self.vault.create_folder(&parent, &name)?))
+    }
+
+    pub fn rename_entry(&self, path: String, new_name: String) -> Result<TreeEntry, CoreError> {
+        Ok(tree_entry(self.vault.rename_entry(&path, &new_name)?))
+    }
+
+    /// 移到废纸篓前的安全目标解析；返回确认位于库内的绝对路径，目录与否由平台层复核。
+    pub fn resolve_trash_target(&self, path: String) -> Result<String, CoreError> {
+        Ok(self
+            .vault
+            .resolve_trash_target(&path)?
+            .0
+            .to_string_lossy()
+            .into_owned())
     }
 
     pub fn update_search_index(&self, upserted: Vec<String>, removed: Vec<String>) {

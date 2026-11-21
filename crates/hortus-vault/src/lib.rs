@@ -104,6 +104,66 @@ fn allowed(path: &Path) -> bool {
     })
 }
 
+/// 校验单段名称：去首尾空白后不得为空、`.`、`..`、隐藏项或 `node_modules`，
+/// 也不得含路径分隔符、NUL 或任何控制字符；返回去空白后的名称。
+fn validate_name(name: &str) -> io::Result<String> {
+    let trimmed = name.trim();
+    let invalid = trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.starts_with('.')
+        || trimmed == "node_modules"
+        || trimmed.contains(['/', '\\', '\0'])
+        || trimmed.chars().any(|character| character.is_control());
+    if invalid {
+        return Err(io::Error::other("vault.invalid_name"));
+    }
+    Ok(trimmed.into())
+}
+
+fn has_note_extension(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["md", "markdown", "mmd"]
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
+}
+
+/// 解析库内相对路径（空字符串表示库根）：逐段核对可见性与符号链接，
+/// 拒绝经过符号链接或越出 `root` 的目标；不存在返回 `vault.not_found`。
+fn resolve_inside(root: &Path, relative: &str) -> io::Result<PathBuf> {
+    if relative.is_empty() {
+        return Ok(root.to_path_buf());
+    }
+    let path = Path::new(relative);
+    if !allowed(path)
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(io::Error::other("vault.invalid_path"));
+    }
+    let mut absolute = root.to_path_buf();
+    for component in path.components() {
+        absolute.push(component);
+        match fs::symlink_metadata(&absolute) {
+            // 不跟随符号链接：任何一段是链接都拒绝，避免越出库或进入库外目录。
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(io::Error::other("vault.symlink_unsupported"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(io::Error::other("vault.not_found"));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(absolute)
+}
+
 fn entry(root: &Path, absolute: &Path) -> io::Result<Option<Entry>> {
     let relative = absolute.strip_prefix(root).map_err(io::Error::other)?;
     if relative.as_os_str().is_empty() || !allowed(relative) {
@@ -247,6 +307,112 @@ impl Vault {
         Ok(note::Format::decode(&fs::read(resolved)?).1)
     }
 
+    /// 库内新建笔记：无受支持扩展名时自动补 `.md`；独占创建绝不覆盖既有文件，
+    /// 目标已存在（含大小写不敏感文件系统上的同名冲突）返回 `vault.already_exists`。
+    pub fn create_note(&self, parent: &str, name: &str) -> io::Result<Entry> {
+        let directory = resolve_inside(&self.root, parent)?;
+        if !directory.is_dir() {
+            return Err(io::Error::other("vault.not_found"));
+        }
+        let mut name = validate_name(name)?;
+        if !has_note_extension(&name) {
+            // 纯扩展名（如 `.md`）已被隐藏名规则拒绝；这里只补缺失的扩展名。
+            name.push_str(".md");
+        }
+        let absolute = directory.join(&name);
+        if fs::symlink_metadata(&absolute).is_ok() {
+            return Err(io::Error::other("vault.already_exists"));
+        }
+        // create_new 保证与其他进程的并发创建不覆盖，只报 AlreadyExists。
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&absolute)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::AlreadyExists => io::Error::other("vault.already_exists"),
+                _ => error,
+            })?;
+        entry(&self.root, &absolute)?.ok_or_else(|| io::Error::other("vault.scan_failed"))
+    }
+
+    /// 库内新建单级文件夹：非递归创建，目标已存在返回 `vault.already_exists`。
+    pub fn create_folder(&self, parent: &str, name: &str) -> io::Result<Entry> {
+        let directory = resolve_inside(&self.root, parent)?;
+        if !directory.is_dir() {
+            return Err(io::Error::other("vault.not_found"));
+        }
+        let name = validate_name(name)?;
+        let absolute = directory.join(&name);
+        fs::create_dir(&absolute).map_err(|error| match error.kind() {
+            io::ErrorKind::AlreadyExists => io::Error::other("vault.already_exists"),
+            _ => error,
+        })?;
+        entry(&self.root, &absolute)?.ok_or_else(|| io::Error::other("vault.scan_failed"))
+    }
+
+    /// 库内同目录重命名（不跨目录移动）：新旧名称字节一致视为无操作；
+    /// 目标指向其他文件或目录返回 `vault.already_exists`，大小写不敏感文件系统上
+    /// 与源同 inode 的原地改名（如 APFS `note.md` → `Note.md`）放行。
+    /// 笔记不允许改成 `hortus-vault` 不识别的扩展名，避免重命名后从文件树消失。
+    pub fn rename_entry(&self, path: &str, new_name: &str) -> io::Result<Entry> {
+        let new_name = validate_name(new_name)?;
+        let source = resolve_inside(&self.root, path)?;
+        let source_meta = fs::symlink_metadata(&source).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => io::Error::other("vault.not_found"),
+            _ => error,
+        })?;
+        let source_entry =
+            entry(&self.root, &source)?.ok_or_else(|| io::Error::other("vault.not_found"))?;
+        if source_entry.name.as_bytes() == new_name.as_bytes() {
+            return Ok(source_entry);
+        }
+        if !source_entry.directory
+            && has_note_extension(&source_entry.name)
+            && !has_note_extension(&new_name)
+        {
+            return Err(io::Error::other("vault.invalid_name"));
+        }
+        let parent = source
+            .parent()
+            .ok_or_else(|| io::Error::other("vault.invalid_path"))?;
+        let target = parent.join(&new_name);
+        if let Ok(target_meta) = fs::symlink_metadata(&target) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let same_inode = target_meta.dev() == source_meta.dev()
+                    && target_meta.ino() == source_meta.ino();
+                if !same_inode {
+                    return Err(io::Error::other("vault.already_exists"));
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(io::Error::other("vault.already_exists"));
+            }
+        }
+        // 同目录整棵原子重命名：非空文件夹连同子项一起移动，不丢失内容。
+        fs::rename(&source, &target)?;
+        entry(&self.root, &target)?.ok_or_else(|| io::Error::other("vault.scan_failed"))
+    }
+
+    /// 移到废纸篓前的安全目标解析：返回确认位于库根之内、非符号链接且存在的
+    /// 绝对路径与是否目录，供平台层调用系统废纸篓 API。
+    pub fn resolve_trash_target(&self, path: &str) -> io::Result<(PathBuf, bool)> {
+        if path.is_empty() {
+            return Err(io::Error::other("vault.invalid_path"));
+        }
+        let absolute = resolve_inside(&self.root, path)?;
+        let metadata = fs::symlink_metadata(&absolute).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => io::Error::other("vault.not_found"),
+            _ => error,
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::other("vault.symlink_unsupported"));
+        }
+        Ok((absolute, metadata.is_dir()))
+    }
+
     pub fn close(&self) {
         self.stop.store(true, Ordering::Release);
         // 文件监听器还持有发送端，必须显式唤醒正在阻塞或去抖的工作线程。
@@ -338,6 +504,49 @@ fn run(
             errors,
             ..Batch::default()
         };
+        // 大小写不敏感文件系统（APFS 默认）上的原地改名会同时报告新旧两个名字；
+        // 旧名经不区分大小写的 stat 依然命中，须先辨明磁盘上真实存在的名字，
+        // 把旧变体从本批与已知表中清掉，避免条目复活成重复项。
+        let mut by_case: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        for path in &pending {
+            let lower = path.to_string_lossy().to_lowercase();
+            by_case.entry(lower).or_default().push(path.clone());
+        }
+        for (_, group) in by_case {
+            if group.len() < 2 {
+                continue;
+            }
+            let mut live: Vec<&PathBuf> = Vec::new();
+            for path in &group {
+                let exact = path
+                    .parent()
+                    .and_then(|parent| fs::read_dir(parent).ok())
+                    .is_some_and(|read| {
+                        read.flatten()
+                            .any(|item| item.file_name() == path.file_name().unwrap_or_default())
+                    });
+                if exact {
+                    live.push(path);
+                }
+            }
+            if live.is_empty() {
+                continue;
+            }
+            for path in &group {
+                if live.contains(&path) {
+                    continue;
+                }
+                pending.remove(path);
+                if let Some(key) = path
+                    .strip_prefix(&root)
+                    .ok()
+                    .map(|relative| relative.to_string_lossy().into_owned())
+                    && known.remove(&key).is_some()
+                {
+                    batch.removed.push(key);
+                }
+            }
+        }
         // 重叠路径只处理最上层一次，普通文件事件只读该文件的元数据。
         let mut roots: Vec<PathBuf> = Vec::new();
         for path in &pending {

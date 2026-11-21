@@ -434,6 +434,42 @@ impl State {
         self.checkpoint()?;
         Ok(self.update(None))
     }
+
+    /// 重命名后的会话迁移：磁盘路径与恢复稿按新路径重建，正文、未保存状态与
+    /// 修订号保持不变；新路径内容与基线一致时刷新指纹并退出 Missing，
+    /// 避免随后的 `refresh`/`save` 误报 Missing 或 Conflict。
+    fn relocate(&mut self, new_relative: &str) -> Result<(), CoreError> {
+        let absolute = note::note_path(&self.root, new_relative)?;
+        // 平台层先完成磁盘重命名再迁移会话；新路径必须已经存在。
+        fs::symlink_metadata(&absolute).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => CoreError::failure("vault.not_found"),
+            _ => CoreError::from(error),
+        })?;
+        let new_recovery = self.recovery.for_note(new_relative);
+        if self.pending_recovery.is_some() || self.recovery_revision.is_some() {
+            // 恢复稿 JSON 内含笔记路径归属，须按新路径重写；旧文件随即清理。
+            if let Some((text, format)) = self.recovery.load_note()? {
+                new_recovery.write_note(&text, &format)?;
+            }
+            self.recovery.clear()?;
+        }
+        self.recovery = new_recovery;
+        self.relative = new_relative.into();
+        self.path = absolute.clone();
+        let disk = note::read(&absolute)?;
+        if let Some(disk) = disk.as_ref()
+            && note::same_version(self.baseline.as_ref(), Some(disk))
+        {
+            self.baseline = Some(disk.clone());
+            if self.issue == DocumentIssue::Missing {
+                self.issue = DocumentIssue::None;
+                self.message.clear();
+            }
+        }
+        self.permissions = fs::metadata(&absolute).ok().map(|m| m.permissions());
+        self.read_only = Self::read_only_reason(&absolute, disk.as_ref());
+        Ok(())
+    }
     /// 保存状态机本体；`DocumentSession::save` 与关闭前持久化共用，避免两条路径分叉。
     fn save_body(&mut self, temporary: &Path, choice: SaveChoice) -> DocumentUpdate {
         let started = Instant::now();
@@ -816,6 +852,15 @@ impl DocumentSession {
             Some(disk) => Ok(state.propose(disk)),
             None => state.conflict(true),
         }
+    }
+
+    /// 重命名文件或其父文件夹后的路径迁移：保留内存正文与 `dirty` 状态，
+    /// 恢复稿搬到新路径；随后用户 `⌘S` 直接保存到新路径。
+    pub fn relocate(&self, new_relative_path: String) -> Result<DocumentUpdate, CoreError> {
+        self.with_core(|state| {
+            state.relocate(&new_relative_path)?;
+            Ok(state.update(None))
+        })
     }
     pub fn use_disk(&self) -> Result<DocumentUpdate, CoreError> {
         let mut state = self.lock_state();
@@ -1488,5 +1533,115 @@ mod tests {
         );
         assert_eq!(reopened.persistence(), DocumentPersistence::Persisted);
         assert!(!reopened.initial().unwrap().dirty);
+    }
+
+    #[test]
+    fn relocate_moves_recovery_keeps_dirty_and_never_reports_missing() {
+        let f = Fixture::new();
+        let cache = f._directory.path().join("cache");
+        fs::write(f.root.join("old.md"), "original\n").unwrap();
+        let session = f.open("old.md");
+        let canonical = f.root.canonicalize().unwrap();
+        session.replace(0, 0, "draft ".into()).unwrap();
+        session.checkpoint().unwrap();
+        let old_recovery = Recovery::new(&cache, &canonical, "old.md");
+        assert!(old_recovery.load().unwrap().is_some());
+        // 平台层先完成磁盘重命名，再迁移打开的会话。
+        fs::rename(f.root.join("old.md"), f.root.join("new.md")).unwrap();
+        let update = session.relocate("new.md".into()).unwrap();
+        assert!(update.dirty);
+        assert_eq!(update.issue, DocumentIssue::None);
+        assert_eq!(session.snapshot().unwrap().text, "draft original\n");
+        // 恢复稿按新路径重建，旧路径无残留。
+        assert!(old_recovery.load().unwrap().is_none());
+        assert_eq!(
+            Recovery::new(&cache, &canonical, "new.md")
+                .load()
+                .unwrap()
+                .as_deref(),
+            Some("draft original\n")
+        );
+        // 重命名后保存直接落到新路径，刷新也不误报 Missing/Conflict。
+        assert_eq!(
+            f.save(&session, SaveChoice::Normal).issue,
+            DocumentIssue::None
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("new.md")).unwrap(),
+            "draft original\n"
+        );
+        let refreshed = session.refresh().unwrap();
+        assert_eq!(refreshed.issue, DocumentIssue::None);
+        assert!(refreshed.text.is_none());
+        assert!(!refreshed.dirty);
+        assert_eq!(fs::read_dir(cache.join("recovery")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn relocate_recovers_after_restart_and_stays_honest_about_conflicts() {
+        let f = Fixture::new();
+        fs::write(f.root.join("a.md"), "one\n").unwrap();
+        let session = f.open("a.md");
+        // 干净会话迁移：内容一致即退出 Missing，不产生冲突提示。
+        fs::remove_file(f.root.join("a.md")).unwrap();
+        assert_eq!(session.refresh().unwrap().issue, DocumentIssue::Missing);
+        fs::write(f.root.join("b.md"), "one\n").unwrap();
+        session.relocate("b.md".into()).unwrap();
+        let update = session.refresh().unwrap();
+        assert_eq!(update.issue, DocumentIssue::None);
+        assert!(update.text.is_none());
+        // 迁移后外部改动仍如实进入提议/冲突流程，不会被指纹刷新掩盖。
+        fs::write(f.root.join("b.md"), "two\n").unwrap();
+        let proposal = session.refresh().unwrap();
+        assert_eq!(proposal.issue, DocumentIssue::None);
+        assert_eq!(proposal.text.as_deref(), Some("two\n"));
+        session.accept_external(proposal.revision).unwrap();
+        assert_eq!(session.snapshot().unwrap().text, "two\n");
+        // 带恢复稿重启：迁移后的草稿按新路径出现。
+        let second = Fixture::new();
+        fs::write(second.root.join("old.md"), "base\n").unwrap();
+        let draft = second.open("old.md");
+        draft.replace(0, 0, "unsaved ".into()).unwrap();
+        draft.checkpoint().unwrap();
+        fs::rename(second.root.join("old.md"), second.root.join("moved.md")).unwrap();
+        draft.relocate("moved.md".into()).unwrap();
+        let reopened = second.open("moved.md");
+        assert_eq!(reopened.initial().unwrap().issue, DocumentIssue::Recovery);
+        reopened.recover(true).unwrap();
+        assert_eq!(
+            second.save(&reopened, SaveChoice::Normal).issue,
+            DocumentIssue::None
+        );
+        assert_eq!(
+            fs::read_to_string(second.root.join("moved.md")).unwrap(),
+            "unsaved base\n"
+        );
+    }
+
+    #[test]
+    fn relocate_rejects_invalid_and_symlinked_paths() {
+        let f = Fixture::new();
+        fs::write(f.root.join("a.md"), "one\n").unwrap();
+        let session = f.open("a.md");
+        for (path, expected) in [
+            ("../x.md", "note.invalid_path"),
+            ("a/b.md", "vault.not_found"),
+        ] {
+            let error = session.relocate(path.into()).err().unwrap();
+            assert_eq!(error.to_string(), expected, "{path}");
+        }
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), f.root.join("link")).unwrap();
+            let error = session.relocate("link/x.md".into()).err().unwrap();
+            assert_eq!(error.to_string(), "note.symlink");
+        }
+        // 拒绝后原会话仍指向旧路径且可继续保存。
+        assert_eq!(session.snapshot().unwrap().text, "one\n");
+        assert_eq!(
+            f.save(&session, SaveChoice::Normal).issue,
+            DocumentIssue::None
+        );
     }
 }
