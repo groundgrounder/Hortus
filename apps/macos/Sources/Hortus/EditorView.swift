@@ -71,14 +71,20 @@ struct EditorView: View {
                                 fontSize: workspace.fontSize, service: workspace.diagrams, core: workspace.diagramCore,
                                 openSource: { start, length in
                                     workspace.switchToEditing(document: document, anchor: start, selectionLength: length)
-                                }) { ordinal, nodes in
-                        if let path = readable?.path { workspace.rememberDiagram(note: path, block: ordinal, collapsed: nodes) }
-                    }
+                                },
+                                remember: { ordinal, nodes in
+                                    if let path = readable?.path { workspace.rememberDiagram(note: path, block: ordinal, collapsed: nodes) }
+                                },
+                                onFocus: { workspace.enterFocus(block: $0) },
+                                refreshToken: workspace.diagramRefreshToken)
                 } else {
                 NoteText(text: readable?.text ?? "", path: readable?.path ?? "", vault: workspace.root ?? "", fontSize: workspace.fontSize,
-                             service: workspace.diagrams, core: workspace.diagramCore, document: readable?.document) { ordinal, nodes in
-                    if let path = readable?.path { workspace.rememberDiagram(note: path, block: ordinal, collapsed: nodes) }
-                }
+                         service: workspace.diagrams, core: workspace.diagramCore, document: readable?.document,
+                         remember: { ordinal, nodes in
+                             if let path = readable?.path { workspace.rememberDiagram(note: path, block: ordinal, collapsed: nodes) }
+                         },
+                         onFocus: { workspace.enterFocus(block: $0) },
+                         refreshToken: workspace.diagramRefreshToken)
                 .opacity(readable == nil ? 0 : 1)
                 .allowsHitTesting(readable != nil)
                 .accessibilityHidden(readable == nil)
@@ -92,6 +98,21 @@ struct EditorView: View {
                     }
                 } else {
                     ContentUnavailableView("Select a note", systemImage: "doc.text", description: Text("Open a Markdown or Mermaid note from the file tree"))
+                }
+                if let session = workspace.focusSession {
+                    FocusOverlay(session: session, core: workspace.diagramCore, fontSize: workspace.fontSize,
+                                 onExit: { workspace.exitFocus() },
+                                 onJump: { workspace.jumpFromFocus(range: $0) },
+                                 onCollapse: { nodes in
+                                     workspace.rememberDiagram(note: session.note, block: session.ordinal, collapsed: nodes)
+                                     workspace.refreshDiagramBodies()
+                                 },
+                                 onPersist: { scale, x, y in
+                                     workspace.rememberDiagramFocus(note: session.note, block: session.ordinal,
+                                                                    scale: scale, x: x, y: y)
+                                 })
+                        .id(session.id)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }

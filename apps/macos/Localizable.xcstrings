@@ -351,7 +351,19 @@
     "Selected" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Selected"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "已填入"}}}},
     "Selected %@" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Selected %@"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "已填入 %@"}}}},
     "Use %@" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Use %@"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "填入 %@"}}}},
-    "Fills the command and arguments without saving." : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Fills the command and arguments without saving."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "仅填入命令与参数，不自动保存。"}}}}
+    "Fills the command and arguments without saving." : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Fills the command and arguments without saving."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "仅填入命令与参数，不自动保存。"}}}},
+    "Jump to Source" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Jump to Source"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "跳到源码"}}}},
+    "Focus" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Focus"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "专注"}}}},
+    "Focus Mode" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Focus Mode"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "专注模式"}}}},
+    "Focus Diagram" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Focus Diagram"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "专注查看图表"}}}},
+    "Diagram focus mode" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Diagram focus mode"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "图表专注模式"}}}},
+    "Fit" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Fit"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "适应"}}}},
+    "100%" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "100%"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "100%"}}}},
+    "Expand" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Expand"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "展开"}}}},
+    "Collapse" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Collapse"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "折叠"}}}},
+    "Find node" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Find node"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "查找节点"}}}},
+    "%d in collapsed nodes" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "%d in collapsed nodes"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "%d 个在折叠节点里"}}}},
+    "Close" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Close"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "关闭"}}}}
   },
   "version" : "1.0"
 }

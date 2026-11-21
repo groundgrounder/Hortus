@@ -57,6 +57,15 @@ struct DiagramDrawing {
     let paths: [CGPath]
 }
 
+/// 光标定位高亮：淡底与细边框都在图元之前绘制，文字始终保持原色。
+extension SceneRenderer {
+    struct Highlight {
+        let rect: CGRect
+        let color: CGColor
+        let border: CGColor
+    }
+}
+
 /// CoreText 对象不可变，可在后台准备，主线程只提交绘制指令。
 final class PreparedScene: @unchecked Sendable {
     let scene: DiagramScene
@@ -214,7 +223,8 @@ enum SceneRenderer {
         }
     }
 
-    static func draw(_ prepared: PreparedScene, in context: CGContext) {
+    static func draw(_ prepared: PreparedScene, in context: CGContext, highlight: Highlight? = nil,
+                     matches: [Highlight] = [], currentMatch: Highlight? = nil, includeText: Bool = true) {
         context.saveGState()
         let clip = context.boundingBoxOfClipPath
         for (index, primitive) in prepared.scene.primitives.enumerated() {
@@ -262,6 +272,16 @@ enum SceneRenderer {
             case .text: break
             }
         }
+        for match in matches where match.rect.intersects(clip) { paint(match, in: context) }
+        if let highlight, highlight.rect.intersects(clip) { paint(highlight, in: context) }
+        if let currentMatch, currentMatch.rect.intersects(clip) {
+            context.setStrokeColor(currentMatch.border)
+            context.setLineWidth(2)
+            context.addPath(CGPath(roundedRect: currentMatch.rect.insetBy(dx: -1, dy: -1),
+                                   cornerWidth: 7, cornerHeight: 7, transform: nil))
+            context.strokePath()
+        }
+        guard includeText else { context.restoreGState(); return }
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         for (span, line) in prepared.lines {
             // 留足上下延伸与边缘字形的余量；长图只提交视口内的文字。
@@ -272,5 +292,16 @@ enum SceneRenderer {
             CTLineDraw(line, context)
         }
         context.restoreGState()
+    }
+
+    private static func paint(_ highlight: Highlight, in context: CGContext) {
+        let path = CGPath(roundedRect: highlight.rect, cornerWidth: 7, cornerHeight: 7, transform: nil)
+        context.setFillColor(highlight.color)
+        context.addPath(path)
+        context.fillPath()
+        context.setStrokeColor(highlight.border)
+        context.setLineWidth(1)
+        context.addPath(path)
+        context.strokePath()
     }
 }

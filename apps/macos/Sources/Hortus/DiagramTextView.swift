@@ -49,6 +49,8 @@ struct NoteText: NSViewRepresentable {
     let core: WorkspaceCore?
     var document: NoteDocument? = nil
     let remember: (UInt32, [String]) -> Void
+    var onFocus: ((UInt32) -> Void)? = nil
+    var refreshToken: Int = 0
 
     func makeCoordinator() -> Host { Host() }
     func makeNSView(context: Context) -> NSView {
@@ -169,6 +171,7 @@ struct NoteText: NSViewRepresentable {
         func update(_ input: NoteText) {
             let changed = self.input?.path != input.path || self.input?.vault != input.vault
                 || self.input?.document !== input.document || (input.document == nil && self.input?.text != input.text)
+            let tokenChanged = self.input?.refreshToken != input.refreshToken
             if changed { view?.finishComposition() }
             if changed, self.input?.document?.viewOwner === self {
                 self.input?.document?.onReload = nil
@@ -195,6 +198,7 @@ struct NoteText: NSViewRepresentable {
             view.onToggle = { [weak self] ordinal, id in self?.toggle(ordinal: ordinal, id: id) }
             view.onEditSource = { [weak self] ordinal in self?.editSource(ordinal) }
             view.onSourceRange = { [weak self] ordinal, range in self?.locateSource(ordinal, range: range) }
+            view.onFocus = { [weak self] ordinal in self?.input?.onFocus?(ordinal) }
             view.onCompositionState = { [weak self] marked in self?.document?.compositionChanged(marked) }
             view.onCommit = { [weak self] in self?.textDidChange(Notification(name: NSText.didChangeNotification)) }
             input.document?.onReload = { [weak self] text in self?.reload(text, preserve: true) }
@@ -222,7 +226,10 @@ struct NoteText: NSViewRepresentable {
                         } catch { self?.view?.diagramIssue = String(describing: error); self?.view?.diagramPending = false }
                     }
                 } else { reload(input.text, preserve: false) }
-            } else { schedule(); scheduleStyles() }
+            } else {
+                if tokenChanged { schedule(force: true) } else { schedule() }
+                scheduleStyles()
+            }
         }
         private func reload(_ text: String, preserve: Bool) {
             guard let view else { return }
@@ -297,8 +304,10 @@ struct NoteText: NSViewRepresentable {
                         : NSIntersectionRange(selection, block.range).length > 0
                 }
             }.map(\.ordinal))
-            guard expanded != view.expanded else { return }
-            suppressSelection = true; view.expanded = expanded; view.install(view.blocks); suppressSelection = false
+            if expanded != view.expanded {
+                suppressSelection = true; view.expanded = expanded; view.install(view.blocks); suppressSelection = false
+            }
+            view.applySourceHighlight(caret: selections.first?.location ?? NSNotFound)
         }
         func mediaSelectionChanged() { selectionChanged() }
 
@@ -381,6 +390,7 @@ struct NoteText: NSViewRepresentable {
                     guard !Task.isCancelled, generation == token, !view.compositionActive, expected == document?.revision else { return }
                     blocks = rendered
                     suppressSelection = true; view.install(rendered); suppressSelection = false
+                    view.applySourceHighlight(caret: view.selectedRange().location)
                     view.installMedia(media.map { NoteMedia(range: NSRange(location: Int($0.block.sourceStart), length: Int($0.block.sourceLength)), prepared: $0) },
                         width: width, size: input.fontSize, vault: input.vault, refresh: { [weak self] in self?.schedule(force: true) })
                     // 初次打开保持图投影；用户后续移动选择才展开。
@@ -734,6 +744,78 @@ final class DiagramTextView: NSTextView {
             _ = scrollToVisible(target)
         }
     }
+    /// 光标停在图块源码里时只更新绘制状态；不请求排版、也不重建场景。
+    func applySourceHighlight(caret: Int) {
+        guard !isReading else {
+            for view in diagramViews.values { view.highlightedNodeID = nil }
+            return
+        }
+        let source = string as NSString
+        for (ordinal, view) in diagramViews {
+            guard let block = blocks.first(where: { $0.ordinal == ordinal }), block.prepared != nil,
+                  caret != NSNotFound, NSLocationInRange(caret, block.range) else {
+                view.highlightedNodeID = nil
+                continue
+            }
+            view.highlightedNodeID = sourceNode(caret: caret, block: block, source: source)
+        }
+    }
+
+    private func sourceNode(caret: Int, block: NoteDiagram, source: NSString) -> String? {
+        guard let prepared = block.prepared else { return nil }
+        var direct: (id: String, length: Int)?
+        for hit in prepared.scene.hitRegions {
+            guard let range = prepared.sourceRanges[hit.nodeId], NSLocationInRange(caret, range) else { continue }
+            if direct == nil || range.length < direct!.length { direct = (hit.nodeId, range.length) }
+        }
+        if let direct { return direct.id }
+        let location = min(max(0, caret), max(0, source.length - 1))
+        let caretLine = source.lineRange(for: NSRange(location: location, length: 0))
+        let caretIndent = indentation(in: source, lineStart: caretLine.location)
+        let blockEnd = min(source.length, NSMaxRange(block.range))
+        var best: (id: String, indent: Int, start: Int)?
+        // 祖先后备只可能是折叠节点：其后代源码按前缀缩进顺序排在它下面。
+        for hit in prepared.scene.hitRegions where hit.collapsed {
+            guard let range = prepared.sourceRanges[hit.nodeId] else { continue }
+            let line = source.lineRange(for: NSRange(location: range.location, length: 0))
+            guard line.location < caretLine.location else { continue }
+            let indent = indentation(in: source, lineStart: line.location)
+            guard indent < caretIndent,
+                  caret < subtreeEnd(in: source, lineStart: line.location, indent: indent, end: blockEnd) else { continue }
+            if let current = best {
+                if indent > current.indent || (indent == current.indent && line.location > current.start) {
+                    best = (hit.nodeId, indent, line.location)
+                }
+            } else { best = (hit.nodeId, indent, line.location) }
+        }
+        return best?.id
+    }
+
+    private func indentation(in source: NSString, lineStart: Int) -> Int {
+        var column = 0, position = lineStart
+        while position < source.length {
+            let character = source.character(at: position)
+            if character == 0x20 { column += 1 }
+            else if character == 0x09 { column += 4 }
+            else { break }
+            position += 1
+        }
+        return column
+    }
+
+    /// 缩进树里折叠节点的子树止于下一个同级或更浅的行。
+    private func subtreeEnd(in source: NSString, lineStart: Int, indent: Int, end: Int) -> Int {
+        var position = NSMaxRange(source.lineRange(for: NSRange(location: lineStart, length: 0)))
+        while position < end {
+            let line = source.lineRange(for: NSRange(location: position, length: 0))
+            let text = source.substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty, indentation(in: source, lineStart: line.location) <= indent { return line.location }
+            if NSMaxRange(line) <= position { break }
+            position = NSMaxRange(line)
+        }
+        return end
+    }
+
     convenience init(diagramLayout: Bool) {
         let content = DiagramContentStorage()
         content.textStorage = NSTextStorage()
@@ -787,6 +869,7 @@ final class DiagramTextView: NSTextView {
     var onToggle: ((UInt32, String) -> Void)?
     var onEditSource: ((UInt32) -> Void)?
     var onSourceRange: ((UInt32, NSRange) -> Void)?
+    var onFocus: ((UInt32) -> Void)?
     var onCompositionState: ((Bool) -> Void)?
     var onCommit: (() -> Void)?
     var expanded: Set<UInt32> = []
@@ -925,6 +1008,8 @@ final class DiagramTextView: NSTextView {
                 view.onToggle = { [weak self] id in self?.onToggle?(block.ordinal, id) }
                 view.onEditSource = { [weak self] in self?.onEditSource?(block.ordinal) }
                 view.onSourceRange = { [weak self] range in self?.onSourceRange?(block.ordinal, range) }
+                view.onFocus = { [weak self] in self?.onFocus?(block.ordinal) }
+                view.refreshHoverButtons()
                 diagramViews[block.ordinal] = view
                 addSubview(view)
             }

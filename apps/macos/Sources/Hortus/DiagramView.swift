@@ -7,7 +7,19 @@ final class DiagramView: NSView {
     var onToggle: ((String) -> Void)?
     var onSourceRange: ((NSRange) -> Void)?
     var onEditSource: (() -> Void)?
+    var onFocus: (() -> Void)?
+    var highlightedNodeID: String? {
+        didSet { if oldValue != highlightedNodeID { needsDisplay = true } }
+    }
     private var hover: NSTrackingArea?
+    private lazy var focusButton: NSButton = {
+        let button = NSButton(title: L10n.string("Focus"), target: self, action: #selector(enterFocus))
+        button.bezelStyle = .inline
+        button.font = .systemFont(ofSize: 12)
+        button.isHidden = true
+        addSubview(button)
+        return button
+    }()
     private lazy var editButton: NSButton = {
         let button = NSButton(title: L10n.string("Edit Source"), target: self, action: #selector(editSource))
         button.bezelStyle = .inline
@@ -82,6 +94,8 @@ final class DiagramView: NSView {
         onToggle = nil
         onEditSource = nil
         onSourceRange = nil
+        onFocus = nil
+        highlightedNodeID = nil
         removeFromSuperview()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -90,21 +104,83 @@ final class DiagramView: NSView {
         if let hover { removeTrackingArea(hover) }
         let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
         addTrackingArea(area); hover = area
-        editButton.frame = NSRect(x: max(0, bounds.width - 86), y: 8, width: 76, height: 24)
+        let editWidth: CGFloat = 76
+        let focusWidth: CGFloat = 62
+        editButton.frame = NSRect(x: max(0, bounds.width - (onFocus == nil ? editWidth + 10 : editWidth + focusWidth + 18)),
+                                  y: 8, width: editWidth, height: 24)
+        focusButton.frame = NSRect(x: max(0, bounds.width - focusWidth - 10), y: 8, width: focusWidth, height: 24)
     }
     /// 只有编辑视图里、笔记可写时才给"编辑源码"：阅读视图和只读笔记里点了也没法改
     var canEditSource: Bool {
         guard onEditSource != nil, let host = superview as? DiagramTextView else { return false }
         return !host.isReading && host.isEditable
     }
-    override func mouseEntered(with event: NSEvent) { editButton.isHidden = !canEditSource }
-    override func mouseExited(with event: NSEvent) { editButton.isHidden = true }
+    override func mouseEntered(with event: NSEvent) {
+        editButton.isHidden = !canEditSource
+        focusButton.isHidden = onFocus == nil
+    }
+    override func mouseExited(with event: NSEvent) {
+        editButton.isHidden = true
+        focusButton.isHidden = true
+    }
     @objc private func editSource() { onEditSource?() }
+    @objc private func enterFocus() { onFocus?() }
+    @objc private func jumpFromMenu(_ item: NSMenuItem) {
+        guard let value = item.representedObject as? NSValue else { return }
+        onSourceRange?(value.rangeValue)
+    }
+    @objc private func toggleFromMenu(_ item: NSMenuItem) {
+        guard let id = item.representedObject as? String else { return }
+        onToggle?(id)
+    }
+    @objc private func focusFromMenu() { onFocus?() }
+    func refreshHoverButtons() { updateTrackingAreas() }
     override func draw(_ dirtyRect: NSRect) {
         let started = ProcessInfo.processInfo.systemUptime
         defer { (superview as? DiagramTextView)?.recordMainWork(since: started) }
         guard let context = NSGraphicsContext.current?.cgContext else { return }
-        SceneRenderer.draw(prepared, in: context)
+        SceneRenderer.draw(prepared, in: context, highlight: highlightStyle())
+    }
+    /// 高亮只用淡底叠加，颜色从节点文字色派生；不改动场景或排版结果。
+    private func highlightStyle() -> SceneRenderer.Highlight? {
+        guard let id = highlightedNodeID,
+              let hit = prepared.scene.hitRegions.first(where: { $0.nodeId == id }) else { return nil }
+        var color = NSColor.controlAccentColor.cgColor
+        let rect = hit.rect.cgRect
+        for primitive in prepared.scene.primitives {
+            guard case let .text(span) = primitive,
+                  rect.insetBy(dx: -3, dy: -3).contains(span.baseline.cgPoint) else { continue }
+            color = span.color.cgColor
+            break
+        }
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return SceneRenderer.Highlight(rect: rect.insetBy(dx: -6, dy: -4),
+                                       color: color.copy(alpha: dark ? 0.18 : 0.10) ?? color,
+                                       border: color.copy(alpha: dark ? 0.30 : 0.18) ?? color)
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) })
+        let menu = NSMenu()
+        if let range = sourceRange(at: point) {
+            let item = NSMenuItem(title: L10n.string("Jump to Source"), action: #selector(jumpFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = NSValue(range: range)
+            menu.addItem(item)
+        }
+        if let hit, hit.canCollapse {
+            let item = NSMenuItem(title: hit.collapsed ? L10n.string("Expand") : L10n.string("Collapse"),
+                                  action: #selector(toggleFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = hit.nodeId
+            menu.addItem(item)
+        }
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+        let focus = NSMenuItem(title: L10n.string("Focus Mode"), action: #selector(focusFromMenu), keyEquivalent: "")
+        focus.target = self
+        focus.isEnabled = onFocus != nil
+        menu.addItem(focus)
+        return menu
     }
     override func resetCursorRects() {
         for hit in prepared.scene.hitRegions where hit.canCollapse { addCursorRect(hit.rect.cgRect, cursor: .pointingHand) }
@@ -133,6 +209,11 @@ final class DiagramView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard prepared.acceptsInteraction else { return }
         let point = convert(event.locationInWindow, from: nil)
+        // ⌘-点击优先于折叠：可折叠节点也直接跳到源码。
+        if event.modifierFlags.contains(.command), let range = sourceRange(at: point) {
+            onSourceRange?(range)
+            return
+        }
         if let hit = prepared.scene.hitRegions.first(where: { $0.canCollapse && $0.rect.cgRect.contains(point) }) {
             onToggle?(hit.nodeId)
         } else if let range = sourceRange(at: point) { onSourceRange?(range) }
@@ -183,6 +264,7 @@ private final class DiagramAccessibilityNode: NSAccessibilityElement {
     private let parentProvider: @MainActor @Sendable () -> DiagramView?
     private let frameProvider: @MainActor @Sendable (SceneRect) -> NSRect
     private let press: @MainActor @Sendable (String) -> Bool
+    private let jump: @MainActor @Sendable (String) -> Bool
     @MainActor init(hit: DiagramHit, owner: DiagramView) {
         self.hit = hit
         parentProvider = { [weak owner] in owner }
@@ -196,6 +278,12 @@ private final class DiagramAccessibilityNode: NSAccessibilityElement {
                 owner.onToggle?(id)
             } else if let range = owner.prepared.sourceRanges[id], owner.onSourceRange != nil { owner.onSourceRange?(range) }
             else { return false }
+            return true
+        }
+        jump = { [weak owner] id in
+            guard let owner, owner.prepared.acceptsInteraction,
+                  let range = owner.prepared.sourceRanges[id], let action = owner.onSourceRange else { return false }
+            action(range)
             return true
         }
         super.init()
@@ -227,6 +315,14 @@ private final class DiagramAccessibilityNode: NSAccessibilityElement {
     override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
         if selector == #selector(isAccessibilityExpanded) { return hit.canCollapse }
         if selector == #selector(accessibilityPerformPress) { return true }
+        if selector == #selector(accessibilityCustomActions) { return true }
         return super.isAccessibilitySelectorAllowed(selector)
+    }
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        let action = jump
+        let id = hit.nodeId
+        return [NSAccessibilityCustomAction(name: L10n.string("Jump to Source")) {
+            MainActor.assumeIsolated { action(id) }
+        }]
     }
 }

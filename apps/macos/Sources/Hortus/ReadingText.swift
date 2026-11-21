@@ -183,6 +183,8 @@ struct ReadingText: NSViewRepresentable {
     /// 阅读面点击图节点/边时进入编辑视图；由 Workspace 的统一切换队列处理。
     let openSource: (Int, Int) -> Void
     let remember: (UInt32, [String]) -> Void
+    var onFocus: ((UInt32) -> Void)? = nil
+    var refreshToken: Int = 0
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = DiagramScrollView()
@@ -249,6 +251,7 @@ struct ReadingText: NSViewRepresentable {
 
         func update(_ input: ReadingText) {
             let changed = self.input?.document !== input.document
+            let tokenChanged = self.input?.refreshToken != input.refreshToken
             if changed { detach(); model = nil; ranges = []; fallbacks = []; rendered = []; initial = true }
             self.input = input
             guard let view else { return }
@@ -283,7 +286,9 @@ struct ReadingText: NSViewRepresentable {
                 else { rendered[index].collapsed.insert(id) }
                 input.remember(ordinal, rendered[index].collapsed.sorted()); refresh(force: true)
             }
-            if (changed || model?.revision != input.document.revision || size != input.fontSize),
+            view.onFocus = { [weak self] ordinal in self?.input?.onFocus?(ordinal) }
+            if tokenChanged, view.window != nil, view.hasSettledContentWidth { refresh(force: true) }
+            else if (changed || model?.revision != input.document.revision || size != input.fontSize),
                view.window != nil, view.hasSettledContentWidth { refresh() }
         }
         func detach() {

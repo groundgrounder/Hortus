@@ -221,6 +221,10 @@ private struct HortusCommands: Commands {
                 .keyboardShortcut("e", modifiers: .command).disabled(workspace.current?.document == nil)
         }
         CommandMenu("View") {
+            Button(L10n.string("Focus Diagram")) { workspace.toggleFocusMode() }
+                .keyboardShortcut("d", modifiers: [.shift, .command])
+                .disabled(!workspace.canFocusDiagram)
+            Divider()
             Button(L10n.string("Show Terminal")) { workspace.showTerminal() }
                 .keyboardShortcut("`", modifiers: .control)
             Button(L10n.string("Clear Terminal")) { workspace.clearTerminal() }
@@ -278,6 +282,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var toolTabsInspectionRequested: Bool {
         #if DEBUG
         return ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--tool-tabs-inspection=") }
+        #else
+        return false
+        #endif
+    }
+
+    /// 专注模式自检入口只在调试二进制里登记；Release 不出现参数字面量。
+    private var focusInspectionRequested: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.arguments.contains { $0.hasPrefix(DiagramFocusInspection.argumentPrefix) }
         #else
         return false
         #endif
@@ -388,7 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
         #endif
-        guard terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
+        guard terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || focusInspectionRequested || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
         // 自检只设置两次一次性唤醒，其余等待由界面状态变更触发。
         let deadline = DispatchWorkItem { fputs("Hortus 自检超时\n", stderr); exit(2) }
         inspectionDeadline = deadline
@@ -453,7 +466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
         #endif
-        let visualInspection = terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || ProcessInfo.processInfo.arguments.contains {
+        let visualInspection = terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || focusInspectionRequested || ProcessInfo.processInfo.arguments.contains {
             $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--quick-open-query=") || $0.hasPrefix("--search-query=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || $0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top"
         }
         let settled = withObservationTracking {
@@ -517,6 +530,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if args.contains("--inspect-hold-open") { return }
             }
             #if DEBUG
+            if let arg = args.first(where: { $0.hasPrefix(DiagramFocusInspection.argumentPrefix) }) {
+                let result = try await DiagramFocusInspection.run(workspace: workspace, arguments: args)
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+                let path = String(arg.dropFirst(DiagramFocusInspection.argumentPrefix.count))
+                try await Task.detached { try data.write(to: URL(fileURLWithPath: path)) }.value
+                if args.contains("--inspect-hold-open") { return }
+            }
             if let arg = args.first(where: { $0.hasPrefix("--tool-tabs-inspection=") }) {
                 let result = try await ToolTabsInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])

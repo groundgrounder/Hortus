@@ -299,6 +299,7 @@ final class Workspace {
     func releaseDocuments() async {
         releasing = true
         defer { releasing = false }
+        focusSession = nil
         application?.cancelTabDrags(in: self)
         // 加载占位在打开完成前保留；库关闭与再次打开也不能重叠创建会话。
         for task in loadTasks.values { await task.value }
@@ -365,6 +366,7 @@ final class Workspace {
             noteOpenStartedAt = ProcessInfo.processInfo.systemUptime
             noteOpenPhases = [:]
         }
+        if selected != path, focusSession != nil { exitFocus(restore: false) }
         if selected != path, let previous = current?.document { Task { await previous.saveNow() } }
         if !tabs.contains(where: { $0.path == path }) {
             tabs.append(NoteTab(path: path))
@@ -575,6 +577,7 @@ final class Workspace {
 
     func closeTab(_ path: String? = nil) {
         guard let target = path ?? selected, let index = tabs.firstIndex(where: { $0.path == target }) else { return }
+        if focusSession?.note == target { exitFocus(restore: false) }
         application?.cancelTabDrags(in: self, path: target)
         if tabs[index].loading { closingTabs.insert(target); return }
         guard let document = tabs[index].document else { removeTab(target); return }
@@ -720,6 +723,10 @@ final class Workspace {
     @ObservationIgnored var closingTabs: Set<String> = []
     @ObservationIgnored var preparingClose = false
     @ObservationIgnored private var toggleTask: Task<Void, Never>?
+    /// 专注模式覆盖编辑区；正文表面保持原样以便退出时精确恢复。
+    var focusSession: DiagramFocusSession?
+    /// 专注模式里折叠节点后同步回正文：只递增令牌，由正文视图自行重排。
+    var diagramRefreshToken = 0
 
     func bind(_ document: NoteDocument) {
         document.onCopy = { [weak self] copy in self?.openNote(copy) }
@@ -729,6 +736,7 @@ final class Workspace {
     func takeTab(_ path: String) -> NoteTab? {
         guard let tab = tabs.first(where: { $0.path == path }), !tab.loading,
               let document = tab.document, !document.marked, !closingTabs.contains(path), !preparingClose else { return nil }
+        if focusSession?.note == path { exitFocus(restore: false) }
         if let coordinator = document.viewOwner as? NoteText.EditorCoordinator {
             document.transferredEditor = coordinator.host?.take()
         } else if let coordinator = document.viewOwner as? ReadingText.Coordinator {
@@ -743,6 +751,7 @@ final class Workspace {
 
     /// 菜单与快捷键共用一条队列：较早的切换完成后才开始下一次，第二次不会读到过渡中的表面。
     func toggleView() {
+        if focusSession != nil { exitFocus(restore: false) }
         enqueueViewSwitch { [weak self] in await self?.toggleCurrentView() }
     }
 
@@ -855,6 +864,95 @@ final class Workspace {
             catch { DispatchQueue.main.async { self.error = L10n.error(error) } }
         }
     }
+
+    func rememberDiagramFocus(note: String, block: UInt32, scale: Double, x: Double, y: Double) {
+        guard let core, let root else { return }
+        saves.async {
+            do {
+                try core.rememberDiagramFocus(vault: root, note: note, block: block,
+                                             scale: scale, offsetX: x, offsetY: y)
+            } catch { DispatchQueue.main.async { self.error = L10n.error(error) } }
+        }
+    }
+
+    /// 光标所在图块优先；否则取阅读视图里视口内的首个图块。
+    func focusTarget() -> NoteDiagram? {
+        guard let document = current?.document, let view = document.mountedTextView else { return nil }
+        let prepared = view.blocks.filter { $0.prepared != nil }
+        guard !prepared.isEmpty else { return nil }
+        if !document.reading, let caret = view.selectedRanges.first?.rangeValue.location,
+           let block = prepared.first(where: { NSLocationInRange(caret, $0.range) }) {
+            return block
+        }
+        if let visible = prepared.first(where: { block in
+            view.diagramViews[block.ordinal].map { !$0.isHidden && $0.frame.intersects(view.visibleRect) } ?? false
+        }) { return visible }
+        return prepared.first
+    }
+
+    var canFocusDiagram: Bool { focusSession != nil || focusTarget() != nil }
+
+    func enterFocus(block ordinal: UInt32) {
+        guard focusSession == nil, let document = current?.document, let path = selected,
+              let vault = root, let view = document.mountedTextView else { return }
+        var initial: DiagramFocus?
+        if let core { initial = try? core.diagramFocus(vault: vault, note: path, block: ordinal) }
+        focusSession = DiagramFocusSession(
+            note: path, vault: vault, ordinal: ordinal, document: document,
+            reading: document.reading,
+            selection: view.selectedRanges.first?.rangeValue ?? NSRange(location: 0, length: 0),
+            scroll: view.enclosingScrollView?.contentView.bounds.origin ?? .zero,
+            initial: initial)
+    }
+
+    func toggleFocusMode() {
+        if focusSession != nil { exitFocus() } else if let target = focusTarget() { enterFocus(block: target.ordinal) }
+    }
+
+    /// 退出专注模式；正文从未被改动，只恢复进入前的滚动位置与选区。
+    func exitFocus(restore: Bool = true) {
+        guard let session = focusSession else { return }
+        focusSession = nil
+        guard restore, session.document === current?.document else { return }
+        let document = session.document
+        Task { @MainActor in
+            await Task.yield()
+            guard let view = document.mountedTextView else { return }
+            if let scroll = view.enclosingScrollView {
+                scroll.contentView.scroll(to: session.scroll)
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+            if !document.reading { view.setSelectedRange(session.selection) }
+            view.window?.makeFirstResponder(view)
+        }
+    }
+
+    /// 专注模式内 ⌘-点击：退出覆盖层并切到编辑视图选中源码。
+    func jumpFromFocus(range: NSRange) {
+        guard let session = focusSession else { return }
+        exitFocus(restore: false)
+        if session.document.reading {
+            switchToEditing(document: session.document, anchor: range.location, selectionLength: range.length)
+        } else {
+            revealEditing(document: session.document, range: range)
+        }
+    }
+
+    private func revealEditing(document: NoteDocument, range: NSRange) {
+        Task { @MainActor in
+            for _ in 0..<80 {
+                if let view = document.mountedTextView, !view.isReading, view.window != nil {
+                    view.window?.makeFirstResponder(view)
+                    view.setSelectedRange(range)
+                    view.scrollRangeToVisible(range)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
+    }
+
+    func refreshDiagramBodies() { diagramRefreshToken &+= 1 }
 
     func scheduleSessionSave() { application?.scheduleSessionSave() }
 
