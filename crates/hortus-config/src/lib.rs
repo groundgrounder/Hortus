@@ -1099,12 +1099,11 @@ impl Store {
         if next.focus_scale.is_none()
             && next.focus_offset_x.is_none()
             && next.focus_offset_y.is_none()
+            && let Some(old) = existing
         {
-            if let Some(old) = existing {
-                next.focus_scale = old.focus_scale;
-                next.focus_offset_x = old.focus_offset_x;
-                next.focus_offset_y = old.focus_offset_y;
-            }
+            next.focus_scale = old.focus_scale;
+            next.focus_offset_x = old.focus_offset_x;
+            next.focus_offset_y = old.focus_offset_y;
         }
         session
             .diagrams
