@@ -173,6 +173,7 @@ def screenshot(base, media, name, note, scene, extra=(), dark=False, language=No
 
 
 def main():
+    global OUTPUT
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, default=OUTPUT)
     parser.add_argument('--media', type=Path, default=None)
@@ -180,6 +181,7 @@ def main():
     parser.add_argument('--keep', action='store_true')
     args = parser.parse_args()
     output = args.output
+    OUTPUT = output
     media = args.media or output / 'media'
     output.mkdir(parents=True, exist_ok=True)
     media.mkdir(parents=True, exist_ok=True)
