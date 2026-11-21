@@ -332,6 +332,10 @@ version = "0.3.0"
 dependencies = [
  "hortus-config",
  "hortus-diagram",
+ "hortus-document",
+ "hortus-links",
+ "hortus-search",
+ "hortus-vault",
  "serde_json",
  "tempfile",
 ]
@@ -392,6 +396,10 @@ dependencies = [
  "serde_json",
  "tempfile",
 ]
+
+[[package]]
+name = "hortus-links"
+version = "0.3.0"
 
 [[package]]
 name = "hortus-math"

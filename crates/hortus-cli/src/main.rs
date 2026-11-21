@@ -1,3 +1,6 @@
+mod mermaid_check;
+mod query;
+
 use hortus_diagram::{
     Diagram, LayoutOptions, SystemFonts, Theme, layout, layout_graph, layout_sequence,
     mermaid_block,
@@ -6,12 +9,52 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 
-const USAGE: &str = "Usage: hortus guide\n       hortus mermaid render <note.md> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json] [--scene scene.json]";
+const USAGE: &str = "Usage: hortus guide
+       hortus mermaid render <note.md> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json] [--scene scene.json]
+       hortus mermaid check <note.md> [--block N]
+       hortus search <query> [--vault DIR] [--limit N]
+       hortus backlinks <note> [--vault DIR]
+       hortus links <note> [--vault DIR]
+       hortus tags [tag] [--vault DIR]
+       hortus outline <note> [--vault DIR]
+       hortus orphans [--vault DIR]
+       hortus broken-links [--vault DIR]";
 
 enum Command {
     Usage,
     Guide,
     Render(Box<Arguments>),
+    Search {
+        query: String,
+        vault: Option<PathBuf>,
+        limit: usize,
+    },
+    Backlinks {
+        note: String,
+        vault: Option<PathBuf>,
+    },
+    Links {
+        note: String,
+        vault: Option<PathBuf>,
+    },
+    Tags {
+        tag: Option<String>,
+        vault: Option<PathBuf>,
+    },
+    Outline {
+        note: String,
+        vault: Option<PathBuf>,
+    },
+    Orphans {
+        vault: Option<PathBuf>,
+    },
+    BrokenLinks {
+        vault: Option<PathBuf>,
+    },
+    MermaidCheck {
+        input: PathBuf,
+        block: Option<usize>,
+    },
 }
 
 struct Arguments {
@@ -36,11 +79,20 @@ fn arguments() -> Result<Command, String> {
             }
             return Ok(Command::Guide);
         }
-        "mermaid" => {}
+        "mermaid" => {
+            let Some(subcommand) = args.next() else {
+                return Err(USAGE.into());
+            };
+            match subcommand.as_str() {
+                "render" => {}
+                "check" => return check_command(args.collect()),
+                other => return Err(format!("unknown command mermaid {other}")),
+            }
+        }
+        "search" | "backlinks" | "links" | "tags" | "outline" | "orphans" | "broken-links" => {
+            return query_command(first.as_str(), args.collect());
+        }
         other => return Err(format!("unknown command {other}")),
-    }
-    if args.next().as_deref() != Some("render") {
-        return Err(USAGE.into());
     }
     let input = args.next().filter(|s| !s.starts_with('-')).ok_or(USAGE)?;
     let mut out = None;
@@ -93,6 +145,139 @@ fn arguments() -> Result<Command, String> {
         block,
         options,
     })))
+}
+
+fn query_command(name: &str, args: Vec<String>) -> Result<Command, String> {
+    if args
+        .iter()
+        .any(|argument| argument == "--help" || argument == "-h")
+    {
+        return Ok(Command::Usage);
+    }
+    let mut positionals = Vec::new();
+    let mut vault = None;
+    let mut limit = None;
+    let mut iter = args.into_iter();
+    while let Some(argument) = iter.next() {
+        match argument.as_str() {
+            "--vault" => {
+                let value = iter.next().ok_or("--vault requires a value")?;
+                vault = Some(PathBuf::from(value));
+            }
+            "--limit" if name == "search" => {
+                let value = iter.next().ok_or("--limit requires a value")?;
+                limit = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "--limit must be a non-negative integer")?,
+                );
+            }
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown option {other}"));
+            }
+            other => positionals.push(other.to_owned()),
+        }
+    }
+    match name {
+        "search" => {
+            if positionals.len() != 1 {
+                return Err("usage: hortus search <query> [--vault DIR] [--limit N]".into());
+            }
+            Ok(Command::Search {
+                query: positionals.remove(0),
+                vault,
+                limit: limit.unwrap_or(50),
+            })
+        }
+        "backlinks" => {
+            if positionals.len() != 1 {
+                return Err("usage: hortus backlinks <note> [--vault DIR]".into());
+            }
+            Ok(Command::Backlinks {
+                note: positionals.remove(0),
+                vault,
+            })
+        }
+        "links" => {
+            if positionals.len() != 1 {
+                return Err("usage: hortus links <note> [--vault DIR]".into());
+            }
+            Ok(Command::Links {
+                note: positionals.remove(0),
+                vault,
+            })
+        }
+        "tags" => {
+            if positionals.len() > 1 {
+                return Err("usage: hortus tags [tag] [--vault DIR]".into());
+            }
+            Ok(Command::Tags {
+                tag: positionals.pop(),
+                vault,
+            })
+        }
+        "outline" => {
+            if positionals.len() != 1 {
+                return Err("usage: hortus outline <note> [--vault DIR]".into());
+            }
+            Ok(Command::Outline {
+                note: positionals.remove(0),
+                vault,
+            })
+        }
+        "orphans" => {
+            if !positionals.is_empty() {
+                return Err("usage: hortus orphans [--vault DIR]".into());
+            }
+            Ok(Command::Orphans { vault })
+        }
+        "broken-links" => {
+            if !positionals.is_empty() {
+                return Err("usage: hortus broken-links [--vault DIR]".into());
+            }
+            Ok(Command::BrokenLinks { vault })
+        }
+        _ => Err(USAGE.into()),
+    }
+}
+
+fn check_command(args: Vec<String>) -> Result<Command, String> {
+    if args
+        .iter()
+        .any(|argument| argument == "--help" || argument == "-h")
+    {
+        return Ok(Command::Usage);
+    }
+    let mut input = None;
+    let mut block = None;
+    let mut iter = args.into_iter();
+    while let Some(argument) = iter.next() {
+        match argument.as_str() {
+            "--block" => {
+                let value = iter.next().ok_or("--block requires a value")?;
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| "--block must be a positive integer")?;
+                if parsed == 0 {
+                    return Err("--block is 1-based".into());
+                }
+                block = Some(parsed);
+            }
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown option {other}"));
+            }
+            other => {
+                if input.is_some() {
+                    return Err(USAGE.into());
+                }
+                input = Some(PathBuf::from(other));
+            }
+        }
+    }
+    Ok(Command::MermaidCheck {
+        input: input.ok_or(USAGE)?,
+        block,
+    })
 }
 
 /// 写出有效指南原文；只读取配置目录，不创建目录、不迁移旧数据。
@@ -189,6 +374,16 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     false
 }
 
+fn finish(result: Result<(), String>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     match arguments() {
         Ok(Command::Usage) => {
@@ -204,6 +399,31 @@ fn main() -> std::process::ExitCode {
         },
         Ok(Command::Render(args)) => match run(*args) {
             Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::ExitCode::FAILURE
+            }
+        },
+        Ok(Command::Search {
+            query,
+            vault,
+            limit,
+        }) => finish(crate::query::search(vault.as_deref(), &query, limit)),
+        Ok(Command::Backlinks { note, vault }) => {
+            finish(crate::query::backlinks(vault.as_deref(), &note))
+        }
+        Ok(Command::Links { note, vault }) => finish(crate::query::links(vault.as_deref(), &note)),
+        Ok(Command::Tags { tag, vault }) => {
+            finish(crate::query::tags(vault.as_deref(), tag.as_deref()))
+        }
+        Ok(Command::Outline { note, vault }) => {
+            finish(crate::query::outline(vault.as_deref(), &note))
+        }
+        Ok(Command::Orphans { vault }) => finish(crate::query::orphans(vault.as_deref())),
+        Ok(Command::BrokenLinks { vault }) => finish(crate::query::broken_links(vault.as_deref())),
+        Ok(Command::MermaidCheck { input, block }) => match mermaid_check::run(&input, block) {
+            Ok(true) => std::process::ExitCode::SUCCESS,
+            Ok(false) => std::process::ExitCode::FAILURE,
             Err(error) => {
                 eprintln!("{error}");
                 std::process::ExitCode::FAILURE

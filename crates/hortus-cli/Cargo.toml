@@ -11,6 +11,10 @@ path = "src/main.rs"
 [dependencies]
 hortus-diagram = { path = "../hortus-diagram" }
 hortus-config = { path = "../hortus-config" }
+hortus-document = { path = "../hortus-document" }
+hortus-links = { path = "../hortus-links" }
+hortus-search = { path = "../hortus-search" }
+hortus-vault = { path = "../hortus-vault" }
 serde_json.workspace = true
 
 [dev-dependencies]
