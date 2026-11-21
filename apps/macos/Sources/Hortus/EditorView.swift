@@ -104,7 +104,7 @@ struct EditorView: View {
                                  onExit: { workspace.exitFocus() },
                                  onJump: { workspace.jumpFromFocus(range: $0) },
                                  onCollapse: { nodes in
-                                     workspace.rememberDiagram(note: session.note, block: session.ordinal, collapsed: nodes)
+                                     workspace.rememberDiagramNow(note: session.note, block: session.ordinal, collapsed: nodes)
                                      workspace.refreshDiagramBodies()
                                  },
                                  onPersist: { scale, x, y in

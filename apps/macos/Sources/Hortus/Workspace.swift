@@ -865,6 +865,13 @@ final class Workspace {
         }
     }
 
+    /// 专注模式折叠后立刻落缓存，正文随后的重排才能读到同一状态。
+    func rememberDiagramNow(note: String, block: UInt32, collapsed: [String]) {
+        guard let core, let root else { return }
+        do { try core.rememberDiagram(vault: root, note: note, block: block, collapsed: collapsed) }
+        catch { self.error = L10n.error(error) }
+    }
+
     func rememberDiagramFocus(note: String, block: UInt32, scale: Double, x: Double, y: Double) {
         guard let core, let root else { return }
         saves.async {
