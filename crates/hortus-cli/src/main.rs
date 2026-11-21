@@ -1,5 +1,6 @@
 use hortus_diagram::{
-    Diagram, LayoutOptions, SystemFonts, Theme, layout, layout_graph, mermaid_block,
+    Diagram, LayoutOptions, SystemFonts, Theme, layout, layout_graph, layout_sequence,
+    mermaid_block,
 };
 use std::collections::HashSet;
 use std::io::Write;
@@ -155,6 +156,7 @@ fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     let scene = match diagram {
         Diagram::Tree(tree) => layout(&tree, &args.options, &mut fonts)?,
         Diagram::Graph(graph) => layout_graph(&graph, &args.options, &mut fonts)?.scene,
+        Diagram::Sequence(sequence) => layout_sequence(&sequence, &args.options, &mut fonts)?,
     };
     std::fs::write(out, scene.to_svg())?;
     if let Some(path) = metrics_path {

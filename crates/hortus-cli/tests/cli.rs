@@ -88,7 +88,7 @@ fn render_selects_block_theme_width_and_collapsed_nodes() {
 fn errors_have_nonzero_exit_codes_and_do_not_write_output() {
     let sandbox = Sandbox::new();
     for (source, diagnostic) in [
-        ("sequenceDiagram\nA->>B: message", "Unsupported"),
+        ("classDiagram\nA <|-- B", "Unsupported"),
         (
             "flowchart TB\nsubgraph G\nsubgraph H\nA --> B\nend\nend",
             "Unsupported",
@@ -203,5 +203,81 @@ fn never_overwrites_source_or_conflicting_outputs() {
     assert_eq!(
         std::fs::read_to_string(sandbox.0.join("note.md")).unwrap(),
         source
+    );
+}
+
+#[test]
+fn sequence_diagrams_render_with_svg_metrics_and_scene() {
+    let sandbox = Sandbox::new();
+    let source = concat!(
+        "# 时序图\n\n```mermaid\n",
+        "sequenceDiagram\n",
+        "  participant U as 你\n",
+        "  participant M as Hortus\n",
+        "  U->>M: 发送当前笔记\n",
+        "  M-->>U: 刷新阅读视图，列出本次改动\n",
+        "  Note over U,M: 本地渲染\n",
+        "```\n",
+    );
+    std::fs::write(sandbox.0.join("note.md"), source).unwrap();
+    let result = sandbox.invoke(&[
+        "mermaid",
+        "render",
+        "note.md",
+        "--width",
+        "700",
+        "--theme",
+        "dark",
+        "--out",
+        "diagram.svg",
+        "--metrics",
+        "metrics.json",
+        "--scene",
+        "scene.json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let svg = std::fs::read_to_string(sandbox.0.join("diagram.svg")).unwrap();
+    assert!(svg.contains("aria-label=\"Mermaid sequence diagram\""));
+    assert!(svg.contains("stroke-dasharray") && svg.contains("你"));
+    let metrics: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sandbox.0.join("metrics.json")).unwrap())
+            .unwrap();
+    assert_eq!(metrics["columns"], 1);
+    assert_eq!(metrics["horizontal_overflow"], false);
+    assert_eq!(metrics["node_overlaps"], 0);
+    assert!(metrics["min_font_px"].as_f64().unwrap() >= 13.6);
+    assert_eq!(metrics["diagram_kind"], "sequence");
+    // 两次渲染的语义场景一致；hit 覆盖参与者、消息与便签。
+    let scene: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sandbox.0.join("scene.json")).unwrap())
+            .unwrap();
+    let hits = scene["hit_regions"].as_array().unwrap();
+    let ids: Vec<&str> = hits
+        .iter()
+        .map(|hit| hit["node_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["U", "M", "msg-1", "msg-2", "note-1"]);
+    assert_eq!(scene["metrics"]["diagram_kind"], "sequence");
+    let second = sandbox.invoke(&[
+        "mermaid",
+        "render",
+        "note.md",
+        "--width",
+        "700",
+        "--theme",
+        "dark",
+        "--out",
+        "second.svg",
+        "--scene",
+        "second-scene.json",
+    ]);
+    assert!(second.status.success());
+    assert_eq!(
+        std::fs::read_to_string(sandbox.0.join("scene.json")).unwrap(),
+        std::fs::read_to_string(sandbox.0.join("second-scene.json")).unwrap()
     );
 }

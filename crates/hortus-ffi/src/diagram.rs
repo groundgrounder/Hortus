@@ -1,7 +1,7 @@
 //! 长期存活的字体与单篇笔记解析缓存；调用方须在后台初始化及排版。
 use hortus_diagram::{
     Diagram, DiagramError, FontMetrics, LayoutOptions, SystemFonts, layout, layout_graph,
-    mermaid_blocks, parse_diagram_at,
+    layout_sequence, mermaid_blocks, parse_diagram_at,
 };
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -279,6 +279,8 @@ impl DiagramEngine {
                     )
                 })
             }
+            Diagram::Sequence(sequence) => layout_sequence(sequence, &options, &mut state.fonts)
+                .map(|scene| (scene, None, None)),
         }
         .map_err(|error| DiagramFailure::Engine { kind: error.0 })?;
         let semantic_json = if include_semantic_json {
@@ -342,7 +344,7 @@ mod tests {
             engine.render(source.into(), true, 1, 700.0, false, collapsed)
         };
         assert!(matches!(
-            render("sequenceDiagram", vec![]),
+            render("classDiagram\nA <|-- B", vec![]),
             Err(DiagramFailure::Unsupported { .. })
         ));
         let graph = render("flowchart TB\nB & C --> D", vec![]).unwrap();
@@ -392,6 +394,63 @@ mod tests {
                 .count(),
             2
         );
+    }
+    #[test]
+    fn sequence_diagrams_render_schema_two_scenes_with_semantic_json() {
+        let source = include_str!("../../../fixtures/mermaid/sequence/agent-workflow.mmd");
+        let engine = DiagramEngine::new().unwrap();
+        let identity = crate::DiagramIdentity {
+            document: "sequence-regression".into(),
+            block: 1,
+            revision: 4,
+            dark: true,
+            ..Default::default()
+        };
+        let scene = engine
+            .render_request(
+                source.into(),
+                true,
+                700.0,
+                vec![],
+                identity.clone(),
+                None,
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(scene.schema_version, 2);
+        assert_eq!(scene.width, 700.0);
+        assert!(scene.graph_metrics.is_none());
+        // 4 顶部胶囊 + 11 条消息 + 底部镜像 4 胶囊。
+        assert_eq!(scene.hit_regions.len(), 19);
+        assert_eq!(scene.hit_regions[0].node_id, "U");
+        assert_eq!(scene.hit_regions[0].label, "你");
+        assert!(!scene.hit_regions[0].can_collapse);
+        let mut wire = Vec::new();
+        <crate::SceneData as uniffi::Lower<crate::UniFfiTag>>::write(scene.clone(), &mut wire);
+        assert_eq!(scene.wire_bytes as usize, wire.len());
+        assert_eq!(scene.identity, identity);
+        // 检查通道返回的语义 JSON 与渲染通道同源同形。
+        let inspected = engine
+            .render_request_inspection(
+                source.into(),
+                true,
+                700.0,
+                vec![],
+                identity.clone(),
+                None,
+                vec![],
+            )
+            .unwrap();
+        let semantic: serde_json::Value =
+            serde_json::from_str(inspected.semantic_json.as_deref().unwrap()).unwrap();
+        assert_eq!(semantic["metrics"]["diagram_kind"], "sequence");
+        assert_eq!(semantic["hit_regions"].as_array().unwrap().len(), 19);
+        assert!(semantic["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|primitive| primitive["kind"] == "graph_path"
+                && primitive["line"] == "dotted"));
     }
 }
 
