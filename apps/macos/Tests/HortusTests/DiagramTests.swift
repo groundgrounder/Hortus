@@ -184,13 +184,34 @@ struct DiagramTests {
 
     @Test func unsupportedAndMalformedDiagramsKeepSource() async throws {
         let service = DiagramService()
-        for (source, reason) in [("sequenceDiagram\nA->>B: Hi", L10n.string("Unsupported %@ diagram; showing source", "sequenceDiagram")),
+        for (source, reason) in [("classDiagram\nA <|-- B", L10n.string("Unsupported %@ diagram; showing source", "classDiagram")),
                                  ("flowchart TB\nA --> B\nB ??? C", L10n.string("Syntax error on line %d; showing source", 3))] {
             let blocks = try await service.blocks(source: source, mmd: true, vault: "test", note: "x.mmd", core: nil)
             let result = await service.render(source: source, mmd: true, blocks: blocks, width: 700, dark: false)
             #expect(result[0].prepared == nil)
             #expect(result[0].reason == reason)
         }
+    }
+
+    @Test func sequenceDiagramsRenderNativelyWithSourceRanges() async throws {
+        let source = "sequenceDiagram\nparticipant U as 你\nparticipant M as Hortus\nU->>M: 发送当前笔记\nM-->>U: 刷新阅读视图\nNote over U,M: 本地渲染\n"
+        let service = DiagramService()
+        let blocks = try await service.blocks(source: source, mmd: true, vault: "test", note: "seq.mmd", core: nil)
+        let result = await service.render(source: source, mmd: true, blocks: blocks, width: 700, dark: false)
+        let prepared = try #require(result[0].prepared, "\(result[0].reason ?? "No diagnostic")")
+        #expect(result[0].sceneVersion == 2)
+        #expect(result[0].reason == nil)
+        #expect(prepared.scene.hitRegions.count == 5)
+        #expect(prepared.scene.hitRegions.allSatisfy { !$0.canCollapse })
+        let diagram = DiagramView(prepared: prepared)
+        #expect(diagram.accessibilityNodeCount == 5)
+        #expect(diagram.accessibilityEdgeCount == 4)
+        let hit = try #require(prepared.scene.hitRegions.first(where: { $0.nodeId == "U" }))
+        let range = try #require(diagram.sourceRange(at: CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY)))
+        #expect((source as NSString).substring(with: range) == "participant U as 你")
+        // 窄窗口与深色模式仍原生渲染，不回退源码。
+        let dark = await service.render(source: source, mmd: true, blocks: result, width: 480, dark: true, requestGeneration: 2)
+        #expect(dark[0].prepared != nil && dark[0].reason == nil)
     }
 
     @Test func graphSourceRangesAccessibilityAndFailureRetention() async throws {

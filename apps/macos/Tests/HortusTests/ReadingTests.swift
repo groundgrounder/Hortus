@@ -482,7 +482,7 @@ struct ReadingTests {
     }
 
     @Test func diagramHeightFallbackAndContinuousQuoteBars() async throws {
-        let source = "> Line one\n> Line two\n> Line three\n\n> [!note] Title\n> Line two\n> Line three\n\n" + EditingTests.source + "\n\n~~~mermaid\nsequenceDiagram\nA->>B: Hello\n~~~\n"
+        let source = "> Line one\n> Line two\n> Line three\n\n> [!note] Title\n> Line two\n> Line three\n\n" + EditingTests.source + "\n\n~~~mermaid\nclassDiagram\nA <|-- B\n~~~\n"
         let f = try Fixture(source); try await f.start()
         #expect(f.view.diagramStorage?.diagrams.isEmpty == true)
         #expect(f.view.diagramViews.count == 1)
@@ -501,7 +501,33 @@ struct ReadingTests {
         #expect(quotes.map(\.quoteHead) == [true, false, false, true, false, false])
         #expect(quotes.map(\.quoteTail) == [false, false, true, false, false, true])
         #expect(diagrams == 1 && failures == 1)
-        #expect(f.view.string.contains("sequenceDiagram"))
+        #expect(f.view.string.contains("classDiagram"))
+        await f.close()
+    }
+
+    @Test func sequenceDiagramsRenderNativelyInTheReadingView() async throws {
+        let source = "前言😀\n\n~~~mermaid\nsequenceDiagram\nparticipant U as 你\nparticipant M as Hortus\nU->>M: 发送当前笔记\nM-->>U: 刷新阅读视图\n~~~\n"
+        let f = try Fixture(source); try await f.start()
+        #expect(f.view.diagramViews.count == 1)
+        let block = try #require(f.view.blocks.first)
+        #expect(block.reason == nil)
+        let manager = try #require(f.view.textLayoutManager), content = try #require(manager.textContentManager)
+        manager.ensureLayout(for: content.documentRange)
+        var diagrams = 0, failures = 0, tall = false
+        manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
+            if let fragment = fragment as? NoteLayoutFragment {
+                if let size = fragment.replacement {
+                    diagrams += 1
+                    if size.height > 40 { tall = true }
+                }
+                if fragment.reason != nil { failures += 1 }
+            }
+            return true
+        }
+        // 阅读视图原生渲染而不是回退源码：有替换高度、无失败原因、不显示源码文本。
+        #expect(diagrams == 1 && failures == 0)
+        #expect(tall)
+        #expect(!f.view.string.contains("sequenceDiagram"))
         await f.close()
     }
 
