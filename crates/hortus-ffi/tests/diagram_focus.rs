@@ -78,7 +78,7 @@ fn focus_state_round_trips_across_restarts_and_keeps_collapsed_nodes() {
         vec!["A", "B"]
     );
     assert_eq!(
-        fs::read_dir(&temporary.path().join("vault"))
+        fs::read_dir(temporary.path().join("vault"))
             .unwrap()
             .count(),
         1,
