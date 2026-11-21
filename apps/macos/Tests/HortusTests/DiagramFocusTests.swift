@@ -5,6 +5,54 @@ import Testing
 
 @Suite @MainActor
 struct DiagramFocusTests {
+    @Test func canFocusDiagramFollowsPreparedDiagramState() throws {
+        let workspace = Workspace()
+        #expect(!workspace.canFocusDiagram)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let vault = directory.appendingPathComponent("vault")
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        let url = vault.appendingPathComponent("note.md")
+        try Data("plain\n".utf8).write(to: url)
+        let core = try WorkspaceCore.inDirectories(config: directory.appendingPathComponent("config").path,
+                                                   cache: directory.appendingPathComponent("cache").path)
+        let session = try core.openDocument(vault: vault.path, path: "note.md")
+        let document = NoteDocument(io: DocumentIO(session: session, url: url), initial: try session.initial())
+        workspace.tabs = [NoteTab(path: "note.md", document: document, loading: false)]
+        workspace.selected = "note.md"
+        #expect(!workspace.canFocusDiagram)
+        document.hasPreparedDiagrams = true
+        #expect(workspace.canFocusDiagram)
+        document.hasPreparedDiagrams = false
+        #expect(!workspace.canFocusDiagram)
+    }
+
+    private func keyEvent(_ characters: String, _ modifiers: NSEvent.ModifierFlags) -> NSEvent? {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                         windowNumber: 0, context: nil, characters: characters,
+                         charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 0)
+    }
+
+    @Test func focusShortcutsRequireExactModifiers() throws {
+        let plain = try #require(keyEvent("f", .command))
+        #expect(FocusKeyCommand.resolve(plain) == .search)
+        if let shifted = keyEvent("f", [.command, .shift]) { #expect(FocusKeyCommand.resolve(shifted) == nil) }
+        if let option = keyEvent("f", [.command, .option]) { #expect(FocusKeyCommand.resolve(option) == nil) }
+        if let noCommand = keyEvent("f", []) { #expect(FocusKeyCommand.resolve(noCommand) == nil) }
+        if let exit = keyEvent("d", [.command, .shift]) { #expect(FocusKeyCommand.resolve(exit) == .exit) }
+        if let plainD = keyEvent("d", .command) { #expect(FocusKeyCommand.resolve(plainD) == nil) }
+        if let extra = keyEvent("d", [.command, .shift, .option]) { #expect(FocusKeyCommand.resolve(extra) == nil) }
+        if let next = keyEvent("g", .command) { #expect(FocusKeyCommand.resolve(next) == .nextMatch) }
+        if let previous = keyEvent("g", [.command, .shift]) {
+            #expect(FocusKeyCommand.resolve(previous) == .previousMatch)
+        }
+        if let optionG = keyEvent("g", [.command, .option]) { #expect(FocusKeyCommand.resolve(optionG) == nil) }
+        if let fit = keyEvent("0", .command) { #expect(FocusKeyCommand.resolve(fit) == .fit) }
+        if let actual = keyEvent("1", .command) { #expect(FocusKeyCommand.resolve(actual) == .actualSize) }
+        if let zoomIn = keyEvent("=", .command) { #expect(FocusKeyCommand.resolve(zoomIn) == .zoomIn) }
+        if let zoomOut = keyEvent("-", .command) { #expect(FocusKeyCommand.resolve(zoomOut) == .zoomOut) }
+    }
+
     @Test func zoomIsStrictlyClampedToQuarterAndFour() {
         #expect(DiagramFocusLimits.clamp(0.01) == 0.25)
         #expect(DiagramFocusLimits.clamp(0.25) == 0.25)

@@ -145,6 +145,10 @@ struct NoteText: NSViewRepresentable {
         private var input: NoteText?
         var document: NoteDocument? { input?.document }
         var retainedBlockCount: Int { blocks.count }
+        /// 图块排版结果只在原生视图里，菜单状态需要可观察的镜像。
+        private func syncPreparedDiagrams() {
+            document?.hasPreparedDiagrams = view?.blocks.contains { $0.prepared != nil } ?? false
+        }
         private var blocks: [NoteDiagram] = []
         private var generation = 0
         private var lastWidth = 0.0
@@ -158,6 +162,7 @@ struct NoteText: NSViewRepresentable {
             view?.finishComposition()
             task?.cancel(); task = nil; generation += 1
             styling.reset()
+            document?.hasPreparedDiagrams = false
             if document?.viewOwner === self {
                 document?.onReload = nil
                 document?.onClosing = nil; document?.onStateChange = nil
@@ -211,6 +216,7 @@ struct NoteText: NSViewRepresentable {
                 styling.reset()
                 generation += 1; task?.cancel(); blocks = []
                 suppressSelection = true; view.expanded = []; view.install([]); suppressSelection = false
+                syncPreparedDiagrams()
                 if let document = input.document {
                     loading = true; view.isEditable = false; view.diagramPending = true
                     let token = generation
@@ -237,6 +243,7 @@ struct NoteText: NSViewRepresentable {
             let origin = view.enclosingScrollView?.contentView.bounds.origin ?? .zero
             suppress = true; suppressSelection = true
             view.expanded = []; view.install([]); blocks = []
+            syncPreparedDiagrams()
             if preserve { styling.reset() }
             view.string = text; view.sourceUTF16Length = view.textStorage?.length ?? 0
             view.undoManager?.removeAllActions()
@@ -269,6 +276,7 @@ struct NoteText: NSViewRepresentable {
             styling.shift(for: original, delta: delta)
             view.shiftBlocks(for: original, delta: delta)
             blocks = view.blocks
+            syncPreparedDiagrams()
             scheduleStyles()
             generation += 1; task?.cancel()
             if !view.compositionActive { view.diagramPending = true }
@@ -390,6 +398,7 @@ struct NoteText: NSViewRepresentable {
                     guard !Task.isCancelled, generation == token, !view.compositionActive, expected == document?.revision else { return }
                     blocks = rendered
                     suppressSelection = true; view.install(rendered); suppressSelection = false
+                    syncPreparedDiagrams()
                     view.applySourceHighlight(caret: view.selectedRange().location)
                     view.installMedia(media.map { NoteMedia(range: NSRange(location: Int($0.block.sourceStart), length: Int($0.block.sourceLength)), prepared: $0) },
                         width: width, size: input.fontSize, vault: input.vault, refresh: { [weak self] in self?.schedule(force: true) })

@@ -16,10 +16,52 @@ struct DiagramFocusSession {
     let initial: DiagramFocus?
 }
 
-/// 只有显式验收参数下才收集逐帧耗时。
+/// 只有显式自检参数下才收集逐帧耗时。
 @MainActor
 enum FocusMeasurement {
     static var active = false
+}
+
+/// 专注模式快捷键；只接受精确的设备无关修饰键组合。
+enum FocusKeyCommand: Equatable {
+    case search, exit, nextMatch, previousMatch, fit, actualSize, zoomIn, zoomOut
+
+    static func resolve(_ event: NSEvent) -> FocusKeyCommand? {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let key = (event.charactersIgnoringModifiers ?? "").lowercased()
+        switch (modifiers, key) {
+        case (.command, "f"): return .search
+        case ([.command, .shift], "d"): return .exit
+        case (.command, "g"): return .nextMatch
+        case ([.command, .shift], "g"): return .previousMatch
+        case (.command, "0"): return .fit
+        case (.command, "1"): return .actualSize
+        case (.command, "="), (.command, "+"): return .zoomIn
+        case (.command, "-"), (.command, "_"): return .zoomOut
+        default: return nil
+        }
+    }
+}
+
+/// SwiftUI 的 CommandMenu 不随正文图块的异步排版重建；显式同步原生菜单项。
+@MainActor
+enum FocusMenuState {
+    static func setEnabled(_ enabled: Bool) {
+        guard let item = menuItem(), item.isEnabled != enabled else { return }
+        item.isEnabled = enabled
+    }
+
+    private static func menuItem() -> NSMenuItem? {
+        func visit(_ menu: NSMenu) -> NSMenuItem? {
+            for item in menu.items {
+                let modifiers = item.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask)
+                if item.keyEquivalent.lowercased() == "d", modifiers == [.command, .shift] { return item }
+                if let submenu = item.submenu, let found = visit(submenu) { return found }
+            }
+            return nil
+        }
+        return NSApp.mainMenu.flatMap(visit)
+    }
 }
 
 struct FocusOverlay: NSViewRepresentable {
@@ -157,12 +199,12 @@ final class FocusModeView: NSView {
         super.viewWillMove(toWindow: newWindow)
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command) {
-            let key = (event.charactersIgnoringModifiers ?? "").lowercased()
-            if key == "f" { showSearch(); return true }
-            if key == "d", event.modifierFlags.contains(.shift) { onExit(); return true }
-            if canvas.handleShortcut(event) { return true }
+        switch FocusKeyCommand.resolve(event) {
+        case .search?: showSearch(); return true
+        case .exit?: onExit(); return true
+        default: break
         }
+        if canvas.handleShortcut(event) { return true }
         return super.performKeyEquivalent(with: event)
     }
     override func keyDown(with event: NSEvent) {
@@ -292,7 +334,7 @@ final class FocusCanvasView: NSView {
     var onExit: (() -> Void)?
     var onReady: (() -> Void)?
 
-    // 验收数据；常规使用时只保留第一个计数。
+    // 自检数据；常规使用时只保留第一个计数。
     private(set) var rustLayoutCalls = 0
     private(set) var drawDurations: [Double] = []
     private(set) var firstFrameMilliseconds: Double?
@@ -570,19 +612,19 @@ final class FocusCanvasView: NSView {
 
     // MARK: 输入
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.modifierFlags.contains(.command), handleShortcut(event) else { return false }
-        return true
+        handleShortcut(event) ? true : super.performKeyEquivalent(with: event)
     }
     func handleShortcut(_ event: NSEvent) -> Bool {
-        let key = (event.charactersIgnoringModifiers ?? "").lowercased()
-        switch key {
-        case "g":
-            nextMatch(event.modifierFlags.contains(.shift) ? -1 : 1)
-            return true
-        case "0": fit(); return true
-        case "1": actualSize(); return true
-        case "=", "+": setScale(scale * 1.2, anchor: CGPoint(x: bounds.midX, y: bounds.midY)); return true
-        case "-", "_": setScale(scale / 1.2, anchor: CGPoint(x: bounds.midX, y: bounds.midY)); return true
+        guard let command = FocusKeyCommand.resolve(event) else { return false }
+        switch command {
+        case .nextMatch: nextMatch(1); return true
+        case .previousMatch: nextMatch(-1); return true
+        case .fit: fit(); return true
+        case .actualSize: actualSize(); return true
+        case .zoomIn:
+            setScale(scale * 1.2, anchor: CGPoint(x: bounds.midX, y: bounds.midY)); return true
+        case .zoomOut:
+            setScale(scale / 1.2, anchor: CGPoint(x: bounds.midX, y: bounds.midY)); return true
         default: return false
         }
     }
@@ -814,7 +856,7 @@ final class FocusCanvasView: NSView {
         return source.length
     }
 
-    // MARK: 验收
+    // MARK: 自检
     func measureFrames(_ count: Int) -> [Double] {
         FocusMeasurement.active = true
         persistenceSuspended = true

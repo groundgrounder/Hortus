@@ -223,7 +223,6 @@ private struct HortusCommands: Commands {
         CommandMenu("View") {
             Button(L10n.string("Focus Diagram")) { workspace.toggleFocusMode() }
                 .keyboardShortcut("d", modifiers: [.shift, .command])
-                .disabled(!workspace.canFocusDiagram)
             Divider()
             Button(L10n.string("Show Terminal")) { workspace.showTerminal() }
                 .keyboardShortcut("`", modifiers: .control)
@@ -261,6 +260,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 显式自检只针对启动窗口；退出提示使用 ApplicationWorkspace.terminationHost。
     var inspectionWorkspace: Workspace? { application?.initial.workspace }
     var inspectionLayout: Layout? { application?.initial.layout }
+    /// SwiftUI 不重建 CommandMenu 的图块状态；菜单可用性跟随当前窗口的库。
+    private func syncFocusDiagramMenu() {
+        guard let workspace = application?.active?.workspace ?? application?.initial.workspace else { return }
+        workspace.syncFocusDiagramMenu()
+    }
     var ready = false
     private let termination = TerminationGate()
     /// 用户已明确放弃未保存的正文；之后的 terminate 不再拦截。
@@ -376,8 +380,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      NSMenu.didChangeItemNotification] {
             commandAvailabilityObservers.append(NotificationCenter.default.addObserver(
                 forName: name, object: nil, queue: .main
-            ) { _ in
-                MainActor.assumeIsolated { UndoMenuState.scheduleRefresh() }
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    UndoMenuState.scheduleRefresh()
+                    self?.syncFocusDiagramMenu()
+                }
             })
         }
         focusObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
@@ -830,6 +837,7 @@ private struct VaultWindowRoot: View {
                 let first = record === application.initial
                 if first {
                     await application.start()
+                    record.workspace.syncFocusDiagramMenu()
                     EditorCommandInspection.application = application
                     let workspace = record.workspace
                     let layout = record.layout

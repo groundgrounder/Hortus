@@ -99,6 +99,10 @@ final class NoteDocument {
     var message: String
     var saveMilliseconds = 0.0
     var reading = true
+    /// 当前正文视图是否已排版出可进入专注模式的图块；视图安装、更新和卸载时同步。
+    var hasPreparedDiagrams = false {
+        didSet { if hasPreparedDiagrams != oldValue { onDiagramAvailabilityChange?() } }
+    }
     var sourceAnchor = 0
     var sourceSelectionLength = 0
     var marked = false
@@ -117,6 +121,7 @@ final class NoteDocument {
     @ObservationIgnored var onReload: ((String) -> Void)?
     @ObservationIgnored var onClosing: (() -> Void)?
     @ObservationIgnored var onStateChange: (() -> Void)?
+    @ObservationIgnored var onDiagramAvailabilityChange: (() -> Void)?
     @ObservationIgnored var onCopy: ((String) -> Void)?
     @ObservationIgnored private var autoSave: Task<Void, Never>?
     @ObservationIgnored private var outlineTask: Task<Void, Never>?

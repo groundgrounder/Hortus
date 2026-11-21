@@ -296,6 +296,7 @@ struct ReadingText: NSViewRepresentable {
             inFlightToken = nil; inFlightKey = nil; refreshQueued = false
             styling.reset()
             view?.clearAttachedContent()
+            input?.document.hasPreparedDiagrams = false
             if input?.document.viewOwner === self {
                 input?.document.onReload = nil; input?.document.onClosing = nil
                 input?.document.onStateChange = nil; input?.document.viewOwner = nil
@@ -625,6 +626,7 @@ struct ReadingText: NSViewRepresentable {
             phaseMilliseconds["text_storage_ms"] = (ProcessInfo.processInfo.systemUptime - assemblyStart) * 1000 - assemblyMilliseconds
             model = next; ranges = nextRanges; fallbacks = fallback; view.sourceUTF16Length = storage.length
             view.install(nextDiagrams)
+            input.document.hasPreparedDiagrams = view.blocks.contains { $0.prepared != nil }
             view.needsLayout = true
             if initial {
                 initial = false; pendingInitialSource = input.document.sourceAnchor

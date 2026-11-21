@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P1-08：源码与图双向定位、专注模式、缓存与性能的真实窗口验收。"""
+"""P1-08：源码与图双向定位、专注模式、缓存与性能的真实窗口检查。"""
 import argparse
 import hashlib
 import json
@@ -73,6 +73,7 @@ def prepare_vault(base):
     vault.mkdir(parents=True)
     for name, source in SOURCES.items():
         shutil.copyfile(source, vault / name)
+    (vault / 'plain.md').write_text('# Plain note\n\nNo diagrams here.\n')
     empty = base / 'empty-vault'
     empty.mkdir(exist_ok=True)
     return vault
@@ -218,8 +219,16 @@ def main():
         focus = data['focus']
         entry = focus['entry']
         assert entry['hover_button'], entry
-        assert entry['menu']['present'] and entry['menu']['key'] == 'd' and entry['menu_action'], entry
+        assert entry['menu']['present'] and entry['menu']['key'] == 'd', entry
+        assert entry['menu']['enabled'] is True, entry
+        assert entry['menu_from_reading'] and entry['menu_key_handled'] and entry['menu_action'], entry
         assert data['exits']['escape'] and data['exits']['shift_command_d'], data['exits']
+        assert data['exits']['menu_enabled'] and data['exits']['menu_shift_command_d'], data['exits']
+        print('== 纯文本文档菜单禁用 ==', flush=True)
+        plain = launch(base, vault, 'plain.md', output / 'plain-menu.json', ['--diagram-focus-only-menu'])
+        assert plain['reading'] and not plain['prepared_diagrams'], plain
+        assert plain['menu']['present'] and plain['menu']['enabled'] is False, plain['menu']
+        summary['plain_menu'] = plain
         assert focus['first_frame_ms'] <= 100, focus
         assert focus['inside_editor'] and focus['covers_editor'] and focus['toolbar_present'], focus
         assert focus['sidebar_untouched'], focus

@@ -2,7 +2,7 @@
 import AppKit
 import HortusCore
 
-/// P1-08 验收：双向定位与专注模式的真实窗口检查；Release 包不包含此入口。
+/// 双向定位与专注模式的真实窗口检查；Release 包不包含此入口。
 @MainActor
 enum DiagramFocusInspection {
     static let argumentPrefix = "--diagram-focus-inspection="
@@ -34,6 +34,15 @@ enum DiagramFocusInspection {
         var result: [String: Any] = ["path": path]
         func log(_ step: String) { fputs("P1-08 \(step)\n", stderr) }
         log("document ready")
+        if arguments.contains("--diagram-focus-only-menu") {
+            if !document.reading { await workspace.toggleCurrentView() }
+            _ = try await ReadingInspection.settled(true, document: document)
+            result["reading"] = document.reading
+            result["prepared_diagrams"] = document.hasPreparedDiagrams
+            result["menu"] = diagramMenuEntry(for: workspace)
+            window.displayIfNeeded()
+            return result
+        }
         if arguments.contains("--diagram-focus-only-scene"),
            let scene = arguments.first(where: { $0.hasPrefix("--diagram-focus-scene=") })?
             .dropFirst("--diagram-focus-scene=".count).lowercased() {
@@ -261,15 +270,15 @@ enum DiagramFocusInspection {
         } else {
             entry["hover_button"] = false
         }
-        if let item = menuItem(L10n.string("Focus Diagram")) {
-            entry["menu"] = ["present": true, "key": item.keyEquivalent,
-                             "modifiers": Int(item.keyEquivalentModifierMask.rawValue),
-                             "enabled": item.isEnabled]
-        } else {
-            entry["menu"] = ["present": false]
+        entry["menu"] = diagramMenuEntry(for: workspace)
+        entry["menu_from_reading"] = document.reading
+        var menuHandled = false
+        if let menu = entry["menu"] as? [String: Any], menu["enabled"] as? Bool == true,
+           let event = keyEvent("d", [.command, .shift], keyCode: 2, window: window) {
+            menuHandled = NSApp.mainMenu?.performKeyEquivalent(with: event) ?? false
         }
-        workspace.toggleFocusMode()
         for _ in 0..<600 where workspace.focusSession == nil { try await Task.sleep(for: .milliseconds(5)) }
+        entry["menu_key_handled"] = menuHandled
         entry["menu_action"] = workspace.focusSession != nil
         workspace.exitFocus(restore: false)
         for _ in 0..<600 where workspace.focusSession != nil { try await Task.sleep(for: .milliseconds(5)) }
@@ -542,6 +551,17 @@ enum DiagramFocusInspection {
         }
         for _ in 0..<600 where workspace.focusSession != nil { try await Task.sleep(for: .milliseconds(5)) }
         exits["shift_command_d"] = workspace.focusSession == nil
+        workspace.enterFocus(block: try await targetOrdinal(workspace, document))
+        _ = try await waitForFocus(window)
+        let exitMenu = diagramMenuEntry(for: workspace)
+        exits["menu_enabled"] = exitMenu["enabled"] ?? false
+        var exitMenuHandled = false
+        if exitMenu["enabled"] as? Bool == true,
+           let event = keyEvent("d", [.command, .shift], keyCode: 2, window: window) {
+            exitMenuHandled = NSApp.mainMenu?.performKeyEquivalent(with: event) ?? false
+        }
+        for _ in 0..<600 where workspace.focusSession != nil { try await Task.sleep(for: .milliseconds(5)) }
+        exits["menu_shift_command_d"] = exitMenuHandled && workspace.focusSession == nil
         result["exits"] = exits
         workspace.exitFocus()
         for _ in 0..<800 where workspace.focusSession != nil {
@@ -735,6 +755,17 @@ enum DiagramFocusInspection {
                          timestamp: 0, windowNumber: window.windowNumber, context: nil,
                          characters: characters, charactersIgnoringModifiers: characters,
                          isARepeat: false, keyCode: keyCode)
+    }
+
+    private static func diagramMenuEntry(for workspace: Workspace) -> [String: Any] {
+        guard let item = menuItem(L10n.string("Focus Diagram")) else { return ["present": false] }
+        item.menu?.update()
+        FocusMenuState.setEnabled(workspace.canFocusDiagram)
+        return ["present": true, "key": item.keyEquivalent,
+                "modifiers": Int(item.keyEquivalentModifierMask.rawValue),
+                "enabled": item.isEnabled,
+                "action": item.action.map(NSStringFromSelector) ?? "nil",
+                "target": item.target.map { String(describing: type(of: $0)) } ?? "nil"]
     }
 
     private static func menuItem(_ title: String) -> NSMenuItem? {

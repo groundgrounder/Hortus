@@ -300,6 +300,7 @@ final class Workspace {
         releasing = true
         defer { releasing = false }
         focusSession = nil
+        syncFocusDiagramMenu()
         application?.cancelTabDrags(in: self)
         // 加载占位在打开完成前保留；库关闭与再次打开也不能重叠创建会话。
         for task in loadTasks.values { await task.value }
@@ -373,6 +374,7 @@ final class Workspace {
             load(path)
         }
         selected = path
+        syncFocusDiagramMenu()
         scheduleSessionSave()
     }
 
@@ -666,6 +668,7 @@ final class Workspace {
         tabs.remove(at: index)
         closingTabs.remove(target)
         if selected == target { selected = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].path }
+        syncFocusDiagramMenu()
         scheduleSessionSave()
     }
 
@@ -730,7 +733,14 @@ final class Workspace {
 
     func bind(_ document: NoteDocument) {
         document.onCopy = { [weak self] copy in self?.openNote(copy) }
+        document.onDiagramAvailabilityChange = { [weak self, weak document] in
+            guard let self, document === self.current?.document else { return }
+            self.syncFocusDiagramMenu()
+        }
     }
+
+    /// SwiftUI 的 CommandMenu 不随图块异步排版或专注会话变化重建；显式同步原生菜单项。
+    func syncFocusDiagramMenu() { FocusMenuState.setEnabled(canFocusDiagram) }
 
     /// 转移不停止文档队列，也不按路径重新载入。原生编辑表面携带正文与撤销栈。
     func takeTab(_ path: String) -> NoteTab? {
@@ -897,7 +907,8 @@ final class Workspace {
         return prepared.first
     }
 
-    var canFocusDiagram: Bool { focusSession != nil || focusTarget() != nil }
+    /// 菜单启用只看可观察状态：图块排版完成或已处于专注模式。
+    var canFocusDiagram: Bool { focusSession != nil || current?.document?.hasPreparedDiagrams == true }
 
     func enterFocus(block ordinal: UInt32) {
         guard focusSession == nil, let document = current?.document, let path = selected,
@@ -910,6 +921,7 @@ final class Workspace {
             selection: view.selectedRanges.first?.rangeValue ?? NSRange(location: 0, length: 0),
             scroll: view.enclosingScrollView?.contentView.bounds.origin ?? .zero,
             initial: initial)
+        syncFocusDiagramMenu()
     }
 
     func toggleFocusMode() {
@@ -920,6 +932,7 @@ final class Workspace {
     func exitFocus(restore: Bool = true) {
         guard let session = focusSession else { return }
         focusSession = nil
+        syncFocusDiagramMenu()
         guard restore, session.document === current?.document else { return }
         let document = session.document
         Task { @MainActor in
