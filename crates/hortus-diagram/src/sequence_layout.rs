@@ -542,8 +542,9 @@ impl Layout<'_> {
         }
     }
 
-    /// 参与者胶囊；`top` 为表头带顶部（镜像栏复用）。
-    fn emit_pills(&mut self, top: f64) {
+    /// 参与者胶囊；`top` 为表头带顶部。底部镜像胶囊用独立 `node_id`，
+    /// 避免与顶部同名参与者重复；标签与源码范围仍指向同一声明。
+    fn emit_pills(&mut self, top: f64, mirrored: bool) {
         let diagram = self.diagram;
         let band = band_height(&self.pills);
         for (index, participant) in diagram.participants.iter().enumerate() {
@@ -588,8 +589,17 @@ impl Layout<'_> {
                 label_top,
                 PARTICIPANT_LINE,
             );
+            let node_id = if mirrored {
+                let mut id = format!("{}#mirror", participant.id);
+                while diagram.participants.iter().any(|other| other.id == id) {
+                    id.push('#');
+                }
+                id
+            } else {
+                participant.id.clone()
+            };
             self.hits.push(HitRegion {
-                node_id: participant.id.clone(),
+                node_id,
                 label: participant.display.clone(),
                 prefix: None,
                 rect,
@@ -1277,7 +1287,7 @@ pub fn layout_sequence(
             TITLE_LINE,
         );
     }
-    layout.emit_pills(header_top);
+    layout.emit_pills(header_top, false);
     let lifeline_top = header_top + band + 2.0;
     let rows_top = header_top + band + 18.0;
     let rows_bottom = layout.walk(rows_top).max(lifeline_top + 44.0);
@@ -1287,7 +1297,7 @@ pub fn layout_sequence(
     let height = if mirror {
         let mirror_top = rows_bottom + 14.0;
         layout.emit_lifelines(lifeline_top, mirror_top - 4.0);
-        layout.emit_pills(mirror_top);
+        layout.emit_pills(mirror_top, true);
         mirror_top + band + 16.0
     } else {
         layout.emit_lifelines(lifeline_top, rows_bottom + 4.0);
@@ -1532,9 +1542,27 @@ mod tests {
             assert_eq!(lifelines(&scene).len(), 4);
             // 4 顶部胶囊 + 11 条消息 + 高图底部镜像 4 胶囊。
             assert_eq!(scene.hit_regions.len(), 19);
+            let mut ids = std::collections::BTreeSet::new();
             for hit in &scene.hit_regions {
+                assert!(
+                    ids.insert(hit.node_id.as_str()),
+                    "duplicate {}",
+                    hit.node_id
+                );
                 assert!(!hit.can_collapse);
                 assert!(hit.rect.x >= -0.001 && hit.rect.x + hit.rect.width <= width + 0.001);
+            }
+            // 镜像胶囊使用独立 node_id，源码范围仍指向同一参与者声明。
+            let mirrored = &scene.hit_regions[scene.hit_regions.len() - 4..];
+            let mirror_ids = mirrored
+                .iter()
+                .map(|hit| hit.node_id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(mirror_ids, ["U#mirror", "H#mirror", "T#mirror", "C#mirror"]);
+            for (top, mirror) in scene.hit_regions[..4].iter().zip(mirrored) {
+                assert_eq!(mirror.source_range, top.source_range);
+                assert_eq!(mirror.label, top.label);
+                assert!(source[mirror.source_range.clone()].starts_with("participant "));
             }
             for span in text_spans(&scene) {
                 assert!(span.baseline.x >= -0.001, "{:?}", span.baseline);

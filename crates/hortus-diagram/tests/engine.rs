@@ -1838,6 +1838,14 @@ fn sequence_layout_fits_public_samples_at_both_widths() {
                     assert!(!hit.can_collapse);
                     assert!(hit.rect.x >= -0.001 && hit.rect.x + hit.rect.width <= width + 0.001);
                 }
+                let mut ids = std::collections::BTreeSet::new();
+                for hit in &scene.hit_regions {
+                    assert!(
+                        ids.insert(hit.node_id.as_str()),
+                        "{name} {width}: duplicate node_id {}",
+                        hit.node_id
+                    );
+                }
             }
         }
     }
