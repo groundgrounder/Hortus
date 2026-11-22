@@ -64,6 +64,32 @@ pub(crate) struct RoutePolicy<'a> {
     pub accepted: &'a [bool],
     pub lr_bands: Option<&'a [usize]>,
     pub distinct_ports: bool,
+    /// 同侧相邻端口的最小中心间距上限；UML 端点标记需要更大的净空。
+    pub port_gap: f64,
+}
+
+/// 类图与 ER 图共用：端口间距按端点标记宽度放大。
+pub(crate) fn route_uml(
+    graph: &Graph,
+    nodes: &[(Rect, Shape)],
+    accepted: &[bool],
+    size: (f64, f64),
+    labels: &[Option<(f64, f64)>],
+) -> Result<Routes, LayoutError> {
+    route_grid(
+        graph,
+        nodes,
+        RoutePolicy {
+            accepted,
+            lr_bands: None,
+            distinct_ports: true,
+            port_gap: 20.0,
+        },
+        size,
+        LabelSizes::Measured(labels),
+        &vec![None; graph.edges.len()],
+        None,
+    )
 }
 
 /// 状态已按区域分层，直接使用共享的障碍网格和多行标签尺寸。
@@ -81,6 +107,7 @@ pub(crate) fn route_state(
             accepted,
             lr_bands: None,
             distinct_ports: true,
+            port_gap: 12.0,
         },
         size,
         LabelSizes::Measured(labels),

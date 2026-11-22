@@ -130,6 +130,8 @@ pub enum Diagram {
     Graph(Graph),
     Sequence(crate::sequence::SequenceDiagram),
     State(crate::StateDiagram),
+    Class(crate::ClassDiagram),
+    Er(crate::ErDiagram),
 }
 
 impl Graph {

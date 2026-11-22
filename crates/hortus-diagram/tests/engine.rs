@@ -97,7 +97,7 @@ fn rejects_merges_cycles_forests_and_unsupported_types() {
     ] {
         assert!(matches!(parse(source), Err(DiagramError::NotATree { .. })));
     }
-    for kind in ["classDiagram", "erDiagram"] {
+    for kind in ["gantt", "pie"] {
         assert!(matches!(parse(kind), Err(DiagramError::Unsupported { .. })));
     }
     for source in [

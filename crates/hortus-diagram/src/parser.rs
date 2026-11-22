@@ -327,6 +327,12 @@ fn parse_diagram_relative(source: &str) -> Result<Diagram, DiagramError> {
     let first = crate::syntax::first_statement(source, TREE_STATEMENTS)
         .map(|(_, statement)| statement)
         .unwrap_or("");
+    if crate::class_parser::is_class_diagram(source) {
+        return crate::class_parser::parse(source).map(Diagram::Class);
+    }
+    if crate::er_parser::is_er_diagram(source) {
+        return crate::er_parser::parse(source).map(Diagram::Er);
+    }
     if crate::state_parser::is_state_diagram(source) {
         return crate::state_parser::parse(source).map(Diagram::State);
     }
@@ -385,6 +391,8 @@ impl Diagram {
             Self::Graph(graph) => graph.map_ranges(map),
             Self::Sequence(sequence) => sequence.map_ranges(map),
             Self::State(state) => state.map_ranges(map),
+            Self::Class(class) => class.map_ranges(map),
+            Self::Er(er) => er.map_ranges(map),
         }
     }
 }

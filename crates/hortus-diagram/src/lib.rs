@@ -1,5 +1,11 @@
 //! 树形 Mermaid 的解析、字体度量、响应式排版和平台无关场景。
+mod class;
+mod class_layout;
+mod class_parser;
 mod color;
+mod er;
+mod er_layout;
+mod er_parser;
 mod font;
 mod geometry;
 mod graph;
@@ -19,8 +25,17 @@ mod state_parser;
 mod svg;
 mod syntax;
 mod text;
+mod uml;
+mod uml_parser;
 
+pub use class::{
+    ClassDiagram, ClassMarker, ClassMember, ClassMemberKind, ClassNamespace, ClassNode, ClassNote,
+    ClassRelation, ClassVisibility,
+};
+pub use class_layout::layout_class;
 pub use color::Color;
+pub use er::{ErAttribute, ErCardinality, ErDiagram, ErEntity, ErKey, ErRelation};
+pub use er_layout::layout_er;
 pub use font::{
     DeterministicMetrics, FontInfo, FontMetrics, MeasuredRun, Measurement, SystemFonts,
 };

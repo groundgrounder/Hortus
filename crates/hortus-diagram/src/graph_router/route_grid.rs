@@ -50,6 +50,7 @@ pub(super) fn route_grid(
         lr_bands,
         &plan,
         policy.distinct_ports,
+        policy.port_gap,
     );
     let edge_sides = &plan.sides;
     let mut seeds = seeds.to_vec();

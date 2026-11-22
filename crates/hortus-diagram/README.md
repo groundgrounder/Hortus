@@ -23,8 +23,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - flowchart / graph 树形子集支持 `-->`、`---`、`-.->`、`-.-`、`==>`、`===` 及更长的同类变体；边标签支持 `-->|标签|` 与 `-- 标签 -->`，`A --> B & C` 会展开为多条边。`~~~` 只约束排序和布局，不生成可见路径、箭头或边命中。双向箭头和带 `o` / `x` 端点的连线返回 `Syntax`。
 - 支持顶层 `subgraph ID`、`subgraph ID[Title]` 和 `subgraph ID["Title"]` 及其 `direction`；容器可参与可见或不可见连线。嵌套 subgraph 明确返回 `UnsupportedConstruct`。
 - 支持 `classDef`、`class`、`:::class` 和 `style` 的 `fill`、`stroke`、`color`、`stroke-width`、`stroke-dasharray`；颜色接受 CSS 命名色、`#RGB` / `#RGBA` / `#RRGGBB` / `#RRGGBBAA`、`rgb()` / `rgba()`、`hsl()` / `hsla()`。其他 CSS 属性保留为 warning。
+- `classDiagram` / `classDiagram-v2` 支持 `direction`、`title`、隐式与显式类、`class Name["显示名"]`、`~T~` 泛型、块级与行内成员、`+`/`-`/`#`/`~` 可见性、`*`/`$` 修饰符、`<<interface>>` 等构造型、`namespace` 分组、`note` 与 `note for`、`classDef`/`class`/`cssClass`/`A:::cls`。八类关系（继承、实现、组合、聚合、关联、依赖、实线链接、虚线链接）可带端点基数与标签，支持自关联和双向关系。排版为三段式卡片，继承/实现用空心三角、组合/聚合用实心/空心菱形，关系标签带底色。
+- `erDiagram` 支持 `direction`、`title`、实体块与别名（`USER["用户"]`）、带连字符实体名、`PK`/`FK`/`UK` 及逗号组合、类型与引号注释、空实体块；关系支持全部 Crow's Foot 基数（含 `one or zero` 等别名）、实线识别与虚线非识别、引号或空标签、同一对实体的多条关系与自关联。实体卡片按键徽标、属性名、淡色类型/注释三列排布，鸦脚与竖杠/圆圈端点按进入端口方向旋转。
 - `linkStyle`、`click`、`accTitle`、`accDescr` 等只影响外观或交互的语句会忽略；`linkStyle` 返回明确的 `UnsupportedConstruct`，其他未实现语法返回带 UTF-8 字节范围的 `Syntax`。
-- `DiagramError::NotATree` 包含多父节点 id 和结构原因；其他图类型返回 `Unsupported`。
+- `DiagramError::NotATree` 包含多父节点 id 和结构原因；未实现的图类型（如 `gantt`、`pie`）返回 `Unsupported`。
 - `LayoutOptions.width` 包括左右各 24px 内边距，默认 700px；拒绝非有限数值和小于 120px 的宽度。`theme` 选择浅/深主题，`collapsed` 放折叠节点 id。
 - `Scene` 包含尺寸、sRGB 图元、每段文字的字体/宽度/基线、节点命中区域和 metrics。平台直接绘制图元，`hit_test` 返回节点及源码范围。
 - `FontMetrics` 可替换。运行时使用 `SystemFonts`（fontdb + rustybuzz），测试使用 `DeterministicMetrics`。西文优先系统 UI 字体，中文优先 PingFang SC，缺少时查找可用回退字体；实际字体记录在 metrics 中。
@@ -32,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## CLI
 
-产品入口使用 `parse_diagram` / `parse_diagram_at` 或 `MermaidBlock::parse_diagram`，返回 `Diagram::Tree` 或 `Diagram::Graph`。能够由旧类型完整表达的单根树继续使用原来的 `layout()`；多根、汇合、回路、自环，以及包含方向、形状、边标签或重复边的图使用 `layout_graph()`。上面的 `parse` / `parse_at` / `MermaidBlock::parse` 保持原有 Tree API 和错误行为。
+产品入口使用 `parse_diagram` / `parse_diagram_at` 或 `MermaidBlock::parse_diagram`，返回 `Diagram::Tree`、`Diagram::Graph`、`Diagram::Sequence`、`Diagram::State`、`Diagram::Class` 或 `Diagram::Er`。能够由旧类型完整表达的单根树继续使用原来的 `layout()`；多根、汇合、回路、自环，以及包含方向、形状、边标签或重复边的图使用 `layout_graph()`；其余类型分别使用 `layout_sequence()`、`layout_state()`、`layout_class()` 和 `layout_er()`。上面的 `parse` / `parse_at` / `MermaidBlock::parse` 保持原有 Tree API 和错误行为。
 
 Graph 保留节点、容器、边及标签的 UTF-8 半开范围与稳定身份，支持 TB/TD/BT/LR/RL，矩形、圆角、体育场、子程序、圆柱、圆、双圆、菱形、六边形、不对称及两种平行四边形。支持实线、虚线、粗线、无箭头、单向/双向箭头、圆点/叉端点、链式边、两种边标签、`A & B --> C` 和不可见布局边。顶层容器有独立成员和内部方向；嵌套容器、linkStyle 等范围外语法返回带范围的明确诊断。
 

@@ -1,0 +1,28 @@
+erDiagram
+title 订单库表
+CUSTOMER {
+    bigint id PK "主键"
+    varchar(120) name "显示名"
+    varchar(160) email UK
+}
+ORDERS {
+    bigint id PK
+    bigint customer_id FK
+    decimal(12,2) total "含税总额，保留两位小数"
+    varchar(32) status
+}
+ORDER-ITEM {
+    bigint order_id PK,FK
+    bigint line_no PK
+    varchar(64) sku FK
+    int quantity
+}
+INVOICE {
+    bigint id PK
+    bigint order_id FK
+    date issued_on
+}
+CUSTOMER ||--o{ ORDERS : places
+ORDERS ||--|{ ORDER-ITEM : contains
+ORDERS |o..o| INVOICE : billed
+INVOICE }o..|| ORDERS : settles

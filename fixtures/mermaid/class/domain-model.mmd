@@ -1,0 +1,48 @@
+classDiagram
+direction TB
+title 订单域模型
+class Order {
+    <<abstract>>
+    +id: UUID
+    +total() Decimal
+    #status: Status
+    -recalculate() void
+}
+class LineItem {
+    +sku: String
+    +quantity: int
+    +subtotal() Decimal
+}
+class Payment {
+    <<service>>
+    +capture(amount: Decimal) Receipt
+}
+class Receipt {
+    +id: UUID
+    +issued_on: Date
+}
+class Repository~T~ {
+    <<interface>>
+    +find(id: UUID) T
+    +save(item: T) void
+}
+class OrderRepository {
+    +find(id: UUID) Order
+}
+class CardPayment {
+    +last4: String
+}
+Order "1" *-- "1..*" LineItem : contains
+Order o-- Payment : settles
+Payment <|-- CardPayment
+OrderRepository ..|> Repository
+OrderRepository ..> Order : reads
+Order --> Status : state
+Order <|-- RushOrder
+Order -- Address : ships to
+Receipt .. AuditLog : recorded in
+note for Order "金额按分计算并按订单币种汇总"
+classDef service fill:#e4edda,stroke:#6b893d,color:#3d5628
+class Payment service
+classDef persistence fill:#c1e8ff,stroke:#3485ae,color:#154b65
+class OrderRepository,Repository persistence

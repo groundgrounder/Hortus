@@ -74,6 +74,7 @@ pub(super) fn assemble_scene(
                 distinct_ports: false,
                 accepted: &accepted,
                 lr_bands,
+                port_gap: 12.0,
             },
             options.width,
             height,

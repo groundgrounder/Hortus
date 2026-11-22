@@ -1,0 +1,27 @@
+classDiagram
+direction LR
+title 网关与存储
+namespace Core {
+    class Gateway {
+        +route(path: String) Response
+    }
+    class Router {
+        +match(path: String) Route
+    }
+    Router --> Gateway : forwards
+}
+namespace Adapters {
+    class HttpAdapter {
+        +handle(request: Request) Response
+    }
+    class Cache {
+        +get(key: String) Option
+        +put(key: String, value: String) void
+    }
+    HttpAdapter ..> Cache : reads
+}
+Gateway <-- HttpAdapter : implements
+HttpAdapter --> HttpAdapter : retry
+note for Gateway "共享入口，按前缀分发"
+classDef edge fill:#c1e8ff,stroke:#3485ae,color:#154b65
+class HttpAdapter edge

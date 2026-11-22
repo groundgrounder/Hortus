@@ -200,6 +200,7 @@ pub(super) fn compute_ends(
     lr_bands: Option<&[usize]>,
     plan: &EdgePlan,
     distinct_ports: bool,
+    port_gap: f64,
 ) -> Vec<Ends> {
     let edge_sides = &plan.sides;
     let peer_counts = &plan.peer_counts;
@@ -290,7 +291,7 @@ pub(super) fn compute_ends(
             .all(|index| graph.edges[*index].label.is_none());
         let span = (if is_vertical { rect.width } else { rect.height }) * PORT_SPAN_RATIO;
         let spacing = if distinct_ports && count > 1 {
-            (2.0 * span / (count - 1) as f64).min(12.0)
+            (2.0 * span / (count - 1) as f64).min(port_gap)
         } else if !unlabeled || count < 2 || span >= MIN_PORT_GAP * (count as f64 - 2.0) {
             12.0
         } else {

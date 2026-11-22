@@ -272,6 +272,9 @@ fn render(
         Diagram::State(_) => Err(LayoutError(
             "state diagrams are outside the graph matrix".into(),
         )),
+        Diagram::Class(_) | Diagram::Er(_) => Err(LayoutError(
+            "class and ER diagrams are outside the graph matrix".into(),
+        )),
     }
     .map_err(|e| e.to_string())
 }

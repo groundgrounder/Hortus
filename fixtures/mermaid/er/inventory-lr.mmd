@@ -1,0 +1,21 @@
+erDiagram
+direction LR
+title 库存流转
+WAREHOUSE["仓库"] {
+    bigint id PK
+    varchar(64) code UK "业务编码"
+}
+STOCK_ITEM["库存项"] {
+    bigint id PK
+    bigint warehouse_id FK
+    int on_hand
+}
+STOCK_MOVE["库存流水"] {
+    bigint id PK
+    bigint item_id FK
+    int delta
+}
+WAREHOUSE ||--o{ STOCK_ITEM : stores
+STOCK_ITEM ||--o{ STOCK_MOVE : records
+STOCK_MOVE }o..|| STOCK_ITEM : reverses
+STOCK_ITEM |o..o{ STOCK_ITEM : splits

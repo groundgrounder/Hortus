@@ -169,6 +169,7 @@ fn emergency_units(pieces: Vec<Piece>) -> Vec<Vec<Piece>> {
     units
 }
 
+#[derive(Clone)]
 pub(crate) struct TextLayout {
     pub primitives: Vec<Primitive>,
     pub height: f64,
