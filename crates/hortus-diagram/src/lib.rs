@@ -27,6 +27,7 @@ mod syntax;
 mod text;
 mod uml;
 mod uml_parser;
+mod wikilink;
 
 pub use class::{
     ClassDiagram, ClassMarker, ClassMember, ClassMemberKind, ClassNamespace, ClassNode, ClassNote,

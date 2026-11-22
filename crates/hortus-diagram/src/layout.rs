@@ -163,6 +163,10 @@ impl PanelLayout<'_> {
         let x = (depth as f64 * 17.5).min((self.width - 48.0).max(0.0));
         let has_children = !node.children.is_empty();
         let collapsed = has_children && self.options.collapsed.contains(&node.id);
+        let link = crate::wikilink::extract(&node.label);
+        let display = link
+            .as_ref()
+            .map_or(node.label.as_str(), |link| link.display.as_str());
         let color = if head {
             self.palette.title(self.hue)
         } else if has_children {
@@ -171,7 +175,7 @@ impl PanelLayout<'_> {
             self.palette.secondary
         };
         let mut text = row(
-            &node.label,
+            display,
             node.prefix.as_deref(),
             collapsed.then_some(node.children.len()),
             RowStyle {
@@ -199,7 +203,7 @@ impl PanelLayout<'_> {
         self.panel.primitives.extend(text.primitives);
         self.panel.hits.push(HitRegion {
             node_id: node.id.clone(),
-            label: node.label.clone(),
+            label: display.to_owned(),
             prefix: node.prefix.clone(),
             rect: Rect {
                 x,
@@ -210,6 +214,8 @@ impl PanelLayout<'_> {
             can_collapse: has_children,
             collapsed,
             source_range: node.source_range.clone(),
+            link_target: link.as_ref().map(|link| link.target.clone()),
+            link_heading: link.as_ref().and_then(|link| link.heading.clone()),
         });
         let bottom = y + height;
         Frame {
@@ -309,8 +315,12 @@ pub fn layout(
         )
     });
     let root_collapsed = options.collapsed.contains(&root.id) && !root.children.is_empty();
+    let root_link = crate::wikilink::extract(&root.label);
+    let root_display = root_link
+        .as_ref()
+        .map_or(root.label.as_str(), |link| link.display.as_str());
     let mut title = row(
-        &root.label,
+        root_display,
         None,
         root_collapsed.then_some(root.children.len()),
         RowStyle {
@@ -331,7 +341,7 @@ pub fn layout(
     let mut primitives = title.primitives;
     let mut hits = vec![HitRegion {
         node_id: root.id.clone(),
-        label: root.label.clone(),
+        label: root_display.to_owned(),
         prefix: root.prefix.clone(),
         rect: Rect {
             x: SIDE,
@@ -342,6 +352,8 @@ pub fn layout(
         can_collapse: !root.children.is_empty(),
         collapsed: root_collapsed,
         source_range: root.source_range.clone(),
+        link_target: root_link.as_ref().map(|link| link.target.clone()),
+        link_heading: root_link.as_ref().and_then(|link| link.heading.clone()),
     }];
     let rule_width = if root_hue.is_some() { 2.0 } else { 1.0 };
     let rule_y = 22.0 + title.height + 14.0 + rule_width / 2.0;
@@ -370,8 +382,7 @@ pub fn layout(
         .iter()
         .map(|&branch| {
             let node = &tree.nodes[branch];
-            let title = node
-                .label
+            let title = crate::wikilink::display(&node.label)
                 .replace("<br/>", " ")
                 .replace("<br>", " ")
                 .replace("<br />", " ");
@@ -391,7 +402,7 @@ pub fn layout(
         let node = &tree.nodes[index];
         let width = fonts
             .measure(
-                &node.label,
+                &crate::wikilink::display(&node.label),
                 if depth == 0 { 16.5 } else { 15.0 },
                 if depth == 0 { 600 } else { 400 },
             )

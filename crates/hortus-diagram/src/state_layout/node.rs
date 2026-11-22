@@ -27,10 +27,15 @@ impl Layout<'_> {
         limit: f64,
         vertical: bool,
     ) -> Result<Cell, LayoutError> {
+        let link = matches!(node.kind, StateKind::Ordinary | StateKind::Composite(_))
+            .then(|| crate::wikilink::extract(&node.label))
+            .flatten();
         let label = match node.kind {
             StateKind::Start => "[*] — start",
             StateKind::End => "[*] — end",
-            _ => &node.label,
+            _ => link
+                .as_ref()
+                .map_or(node.label.as_str(), |link| link.display.as_str()),
         };
         let mut cell = match node.kind {
             StateKind::Ordinary | StateKind::Composite(_) => {
@@ -38,11 +43,12 @@ impl Layout<'_> {
             }
             _ => self.pseudo_cell(node, vertical),
         };
-        cell.layer.hit(
+        cell.layer.hit_with_link(
             key.clone(),
             label.to_owned(),
             cell.rect,
             node.source_range.clone(),
+            link.as_ref(),
         );
         self.place_notes(&mut cell, notes, &key, limit);
         Ok(cell)
@@ -90,7 +96,13 @@ impl Layout<'_> {
 
         let text_limit =
             (limit.min(if composite { f64::INFINITY } else { 224.0 }) - 2.0 * PAD).max(40.0);
-        let title = self.text(&node.label, text_limit, 15.0, 550, color);
+        let title = self.text(
+            &crate::wikilink::display(&node.label),
+            text_limit,
+            15.0,
+            550,
+            color,
+        );
         let descriptions = self.text(
             &node.descriptions.join("\n"),
             text_limit,

@@ -83,6 +83,9 @@ struct BoxedNode {
     stroke_width: f64,
     stroke_dasharray: Vec<f64>,
     label_lines: Vec<(String, f64, f64, f64)>,
+    display_label: String,
+    link_target: Option<String>,
+    link_heading: Option<String>,
 }
 
 struct Palette {

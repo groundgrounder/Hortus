@@ -90,7 +90,7 @@ pub enum Primitive {
     Text(TextSpan),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct HitRegion {
     pub label: String,
     pub prefix: Option<String>,
@@ -99,6 +99,34 @@ pub struct HitRegion {
     pub can_collapse: bool,
     pub collapsed: bool,
     pub source_range: Range<usize>,
+    /// 节点头部含 `[[Target]]` 时的目标笔记；无链接保持缺省，语义 JSON 逐字节不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_target: Option<String>,
+    /// `[[Target#Heading]]` 的标题部分。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_heading: Option<String>,
+}
+
+impl std::fmt::Debug for HitRegion {
+    /// 无链接时输出与新增字段之前完全相同，现有黄金哈希保持稳定。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut fields = f.debug_struct("HitRegion");
+        fields
+            .field("label", &self.label)
+            .field("prefix", &self.prefix)
+            .field("node_id", &self.node_id)
+            .field("rect", &self.rect)
+            .field("can_collapse", &self.can_collapse)
+            .field("collapsed", &self.collapsed)
+            .field("source_range", &self.source_range);
+        if let Some(target) = &self.link_target {
+            fields.field("link_target", target);
+        }
+        if let Some(heading) = &self.link_heading {
+            fields.field("link_heading", heading);
+        }
+        fields.finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

@@ -407,7 +407,11 @@ pub(super) fn build_boxes(
 ) -> Vec<BoxedNode> {
     let mut boxes = Vec::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
-        let label = crate::text::label_parts(&node.label);
+        let link = crate::wikilink::extract(&node.label);
+        let display = link
+            .as_ref()
+            .map_or(node.label.as_str(), |link| link.display.as_str());
+        let label = crate::text::label_parts(display);
         let main = format!("{}{}", label.main, label.rest);
         let horizontal = matches!(
             graph.direction,
@@ -530,6 +534,9 @@ pub(super) fn build_boxes(
             stroke_width: style.stroke_width.unwrap_or(1.4),
             stroke_dasharray: style.stroke_dasharray.unwrap_or_default(),
             label_lines,
+            display_label: display.to_owned(),
+            link_target: link.as_ref().map(|link| link.target.clone()),
+            link_heading: link.as_ref().and_then(|link| link.heading.clone()),
         });
     }
 

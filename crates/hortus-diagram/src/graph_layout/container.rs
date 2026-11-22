@@ -374,6 +374,8 @@ fn compose_container_scene(
             can_collapse: false,
             collapsed: false,
             source_range: container.source_range.clone(),
+            link_target: None,
+            link_heading: None,
         });
         let anchor = outer
             .previous

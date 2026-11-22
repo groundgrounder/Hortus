@@ -247,9 +247,10 @@ fn plan_pills(
     };
     let mut pills = Vec::new();
     for participant in &diagram.participants {
+        let display = crate::wikilink::display(&participant.display);
         let pad = PILL_PAD_X * 2.0 + if participant.actor { ACTOR_ICON } else { 0.0 };
         let mut label = wrap_text(
-            &participant.display,
+            &display,
             None,
             style,
             f64::INFINITY,
@@ -259,14 +260,7 @@ fn plan_pills(
         if let Some(limit) = target {
             let limit = (limit - pad).max(52.0);
             if label.width() + pad > limit {
-                label = wrap_text(
-                    &participant.display,
-                    None,
-                    style,
-                    limit,
-                    PARTICIPANT_LINE,
-                    fonts,
-                );
+                label = wrap_text(&display, None, style, limit, PARTICIPANT_LINE, fonts);
             }
         }
         let height = if label.lines() <= 1 {
@@ -598,14 +592,17 @@ impl Layout<'_> {
             } else {
                 participant.id.clone()
             };
+            let link = crate::wikilink::extract(&participant.display);
             self.hits.push(HitRegion {
                 node_id,
-                label: participant.display.clone(),
+                label: crate::wikilink::display(&participant.display).into_owned(),
                 prefix: None,
                 rect,
                 can_collapse: false,
                 collapsed: false,
                 source_range: participant.source_range.clone(),
+                link_target: link.as_ref().map(|link| link.target.clone()),
+                link_heading: link.as_ref().and_then(|link| link.heading.clone()),
             });
         }
     }
@@ -663,11 +660,9 @@ impl Layout<'_> {
     }
 
     fn display_head(&self, index: usize) -> String {
-        let display = &self.diagram.participants[index].display;
-        hard_lines(display)
-            .first()
-            .cloned()
-            .unwrap_or_else(|| display.clone())
+        let display =
+            crate::wikilink::display(&self.diagram.participants[index].display).into_owned();
+        hard_lines(&display).first().cloned().unwrap_or(display)
     }
 
     /// 普通消息文字的目标宽度：两端生命线之间减去激活条与留白。
@@ -699,12 +694,14 @@ impl Layout<'_> {
             match row {
                 SequenceRow::Message(message) => {
                     ordinal += 1;
+                    let text = crate::wikilink::display(&message.text.text);
+                    let link = crate::wikilink::extract(&message.text.text);
                     let number = diagram
                         .autonumber
                         .then(|| format!("{ordinal}. "))
                         .map(|prefix| (prefix, self.muted_style()));
                     let label = wrap_text(
-                        &message.text.text,
+                        &text,
                         number
                             .as_ref()
                             .map(|(prefix, style)| (prefix.as_str(), *style)),
@@ -864,12 +861,14 @@ impl Layout<'_> {
                     self.message_ordinal += 1;
                     self.hits.push(HitRegion {
                         node_id: format!("msg-{}", self.message_ordinal),
-                        label: message.text.text.clone(),
+                        label: text.to_string(),
                         prefix: Some(format!("{from_display} → {to_display}")),
                         rect: hit_rect,
                         can_collapse: false,
                         collapsed: false,
                         source_range: message.source_range.clone(),
+                        link_target: link.as_ref().map(|link| link.target.clone()),
+                        link_heading: link.as_ref().and_then(|link| link.heading.clone()),
                     });
                     self.edge_id += 1;
                     // 激活简写：`-` 关发送方，`+` 开接收方。
@@ -888,10 +887,12 @@ impl Layout<'_> {
                     };
                 }
                 SequenceRow::Note(note) => {
+                    let text = crate::wikilink::display(&note.text.text);
+                    let link = crate::wikilink::extract(&note.text.text);
                     let (rect, box_w) = match &note.side {
                         NoteSide::LeftOf(c) => {
                             let cap = self.xs[*c] - 10.0 - 10.0;
-                            let w = (single_width(&note.text.text, self.fonts) + NOTE_PAD_X * 2.0)
+                            let w = (single_width(&text, self.fonts) + NOTE_PAD_X * 2.0)
                                 .min(NOTE_MAX_W.max(cap.max(80.0)));
                             (
                                 Rect {
@@ -905,7 +906,7 @@ impl Layout<'_> {
                         }
                         NoteSide::RightOf(c) => {
                             let cap = self.width - 10.0 - (self.xs[*c] + 10.0);
-                            let w = (single_width(&note.text.text, self.fonts) + NOTE_PAD_X * 2.0)
+                            let w = (single_width(&text, self.fonts) + NOTE_PAD_X * 2.0)
                                 .min(NOTE_MAX_W.max(cap.max(80.0)));
                             (
                                 Rect {
@@ -933,8 +934,7 @@ impl Layout<'_> {
                                     self.width - 10.0 - self.xs[a]
                                 };
                                 let room = left.min(right) - 10.0;
-                                let w = (single_width(&note.text.text, self.fonts)
-                                    + NOTE_PAD_X * 2.0)
+                                let w = (single_width(&text, self.fonts) + NOTE_PAD_X * 2.0)
                                     .min((room * 2.0).clamp(96.0, 300.0));
                                 (
                                     Rect {
@@ -960,7 +960,7 @@ impl Layout<'_> {
                         }
                     };
                     let label = wrap_text(
-                        &note.text.text,
+                        &text,
                         None,
                         self.msg_style(),
                         box_w - NOTE_PAD_X * 2.0,
@@ -988,12 +988,14 @@ impl Layout<'_> {
                     self.note_ordinal += 1;
                     self.hits.push(HitRegion {
                         node_id: format!("note-{}", self.note_ordinal),
-                        label: note.text.text.clone(),
+                        label: text.to_string(),
                         prefix: None,
                         rect,
                         can_collapse: false,
                         collapsed: false,
                         source_range: note.source_range.clone(),
+                        link_target: link.as_ref().map(|link| link.target.clone()),
+                        link_heading: link.as_ref().and_then(|link| link.heading.clone()),
                     });
                     y += height + 18.0;
                 }
@@ -1083,7 +1085,8 @@ pub fn layout_sequence(
         let SequenceRow::Message(message) = row else {
             continue;
         };
-        let mut w = single_width(&message.text.text, fonts) + 28.0;
+        let text = crate::wikilink::display(&message.text.text);
+        let mut w = single_width(&text, fonts) + 28.0;
         if diagram.autonumber {
             ordinal += 1;
             w += fonts
@@ -1117,7 +1120,8 @@ pub fn layout_sequence(
         let SequenceRow::Note(note) = row else {
             continue;
         };
-        let w = single_width(&note.text.text, fonts) + NOTE_PAD_X * 2.0;
+        let text = crate::wikilink::display(&note.text.text);
+        let w = single_width(&text, fonts) + NOTE_PAD_X * 2.0;
         match &note.side {
             NoteSide::LeftOf(c) => {
                 if *c > 0 {

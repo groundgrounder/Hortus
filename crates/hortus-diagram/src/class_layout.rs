@@ -93,7 +93,14 @@ impl Layout<'_> {
             self.palette.muted,
             15.0,
         );
-        let name = self.text(&class.label, text_limit, NAME_SIZE, 600, color, 19.0);
+        let name = self.text(
+            &crate::wikilink::display(&class.label),
+            text_limit,
+            NAME_SIZE,
+            600,
+            color,
+            19.0,
+        );
         let fields = class
             .fields
             .iter()
@@ -198,11 +205,13 @@ impl Layout<'_> {
             let mut layer = card;
             layer.width = rect.width;
             layer.height = rect.height;
-            layer.hit(
+            let link = crate::wikilink::extract(&class.label);
+            layer.hit_with_link(
                 format!("class-{}", class.id),
-                class.label.clone(),
+                crate::wikilink::display(&class.label).into_owned(),
                 rect,
                 class.source_range.clone(),
+                link.as_ref(),
             );
             return Cell {
                 layer,
@@ -269,11 +278,13 @@ impl Layout<'_> {
         };
         layer.append(card, card_at.x, card_at.y);
         let card_rect = uml::offset_rect(rect, card_at);
-        layer.hit(
+        let link = crate::wikilink::extract(&class.label);
+        layer.hit_with_link(
             format!("class-{}", class.id),
-            class.label.clone(),
+            crate::wikilink::display(&class.label).into_owned(),
             card_rect,
             class.source_range.clone(),
+            link.as_ref(),
         );
         let mut note_rects = Vec::new();
         let mut y = if beside {
@@ -829,6 +840,8 @@ pub fn layout_class(
                 can_collapse: false,
                 collapsed: false,
                 source_range: diagram.namespaces[namespace].source_range.clone(),
+                link_target: None,
+                link_heading: None,
             });
         }
     }

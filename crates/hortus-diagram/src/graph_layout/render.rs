@@ -180,12 +180,14 @@ pub(super) fn assemble_scene(
         }
         hits.push(HitRegion {
             node_id: node.id.clone(),
-            label: node.label.clone(),
+            label: boxed.display_label.clone(),
             prefix: None,
             rect: boxed.rect,
             can_collapse: false,
             collapsed: false,
             source_range: node.source_range.clone(),
+            link_target: boxed.link_target.clone(),
+            link_heading: boxed.link_heading.clone(),
         });
     }
 

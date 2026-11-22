@@ -73,6 +73,17 @@ impl Layer {
     }
 
     fn hit(&mut self, node_id: String, label: String, rect: Rect, source_range: Range<usize>) {
+        self.hit_with_link(node_id, label, rect, source_range, None);
+    }
+
+    fn hit_with_link(
+        &mut self,
+        node_id: String,
+        label: String,
+        rect: Rect,
+        source_range: Range<usize>,
+        link: Option<&crate::wikilink::WikiLink>,
+    ) {
         self.hits.push(HitRegion {
             label,
             prefix: None,
@@ -81,6 +92,8 @@ impl Layer {
             can_collapse: false,
             collapsed: false,
             source_range,
+            link_target: link.map(|link| link.target.clone()),
+            link_heading: link.and_then(|link| link.heading.clone()),
         });
     }
 

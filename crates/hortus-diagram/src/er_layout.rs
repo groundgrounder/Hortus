@@ -71,7 +71,14 @@ impl Layout<'_> {
         let (fill, stroke, color) = self.palette.card(style);
         let limit = limit.clamp(72.0, MAX_CARD);
         let text_limit = (limit - 2.0 * uml::CARD_PAD).max(60.0);
-        let title = self.text(&entity.label, text_limit, ENTITY_SIZE, 600, color, 19.0);
+        let title = self.text(
+            &crate::wikilink::display(&entity.label),
+            text_limit,
+            ENTITY_SIZE,
+            600,
+            color,
+            19.0,
+        );
         let keys: Vec<String> = entity
             .attributes
             .iter()
@@ -538,11 +545,13 @@ pub fn layout_er(
             y: content_top + position.y,
         };
         let Cell { mut layer, rect } = cell;
-        layer.hit(
+        let link = crate::wikilink::extract(&entity.label);
+        layer.hit_with_link(
             format!("entity-{}", entity.id),
-            entity.label.clone(),
+            crate::wikilink::display(&entity.label).into_owned(),
             rect,
             entity.source_range.clone(),
+            link.as_ref(),
         );
         scene.append(layer, at.x, at.y);
     }

@@ -886,7 +886,12 @@ fn parse_mindmap(source: &str, at: usize, builder: &mut Builder) -> Result<(), D
             cursor += ch.len_utf8();
         }
         let prefix = &text[..cursor];
-        let shape = parse_shape(text, &mut cursor, start)?;
+        let shape = if prefix.is_empty() && bare_wikilink(text) {
+            // 裸 `[[笔记]]` 是节点文字而不是 Mermaid 形状，标记符留给布局层清理。
+            None
+        } else {
+            parse_shape(text, &mut cursor, start)?
+        };
         let explicit_id = shape.is_some() && !prefix.is_empty();
         let (id, label) = if let Some(label) = shape {
             let id = if explicit_id {
@@ -977,6 +982,12 @@ fn annotation_start(text: &str) -> usize {
         }
     }
     text.len()
+}
+
+/// 整行只有一条裸双链时按节点文字处理，保留 `[[` `]]` 供布局清理。
+fn bare_wikilink(text: &str) -> bool {
+    let value = text[..annotation_start(text)].trim_end();
+    value.starts_with("[[") && value.ends_with("]]") && crate::wikilink::extract(value).is_some()
 }
 
 fn mindmap_annotations(

@@ -85,6 +85,8 @@ pub struct SceneHit {
     pub collapsed: bool,
     pub source_start: u64,
     pub source_end: u64,
+    pub link_target: Option<String>,
+    pub link_heading: Option<String>,
 }
 /// 调用方拥有请求身份与上一场景；解析缓存不保存它们。
 #[derive(Clone, Debug, Default, PartialEq, uniffi::Record)]
@@ -278,6 +280,8 @@ impl From<HitRegion> for SceneHit {
             collapsed: h.collapsed,
             source_start: h.source_range.start as u64,
             source_end: h.source_range.end as u64,
+            link_target: h.link_target,
+            link_heading: h.link_heading,
         }
     }
 }
@@ -416,10 +420,12 @@ impl From<Scene> for SceneData {
             .hit_regions
             .into_iter()
             .map(|h| {
-                bytes += 59
+                bytes += 61
                     + h.node_id.len()
                     + h.label.len()
-                    + h.prefix.as_ref().map_or(0, |s| 4 + s.len());
+                    + h.prefix.as_ref().map_or(0, |s| 4 + s.len())
+                    + h.link_target.as_ref().map_or(0, |s| 4 + s.len())
+                    + h.link_heading.as_ref().map_or(0, |s| 4 + s.len());
                 h.into()
             })
             .collect();

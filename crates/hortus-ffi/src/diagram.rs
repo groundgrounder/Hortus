@@ -1,6 +1,6 @@
 //! 长期存活的字体与单篇笔记解析缓存；调用方须在后台初始化及排版。
 use hortus_diagram::{
-    Diagram, DiagramError, FontMetrics, LayoutOptions, SystemFonts, layout, layout_class,
+    Diagram, DiagramError, FontMetrics, LayoutOptions, Scene, SystemFonts, layout, layout_class,
     layout_er, layout_graph, layout_sequence, layout_state, mermaid_blocks, parse_diagram_at,
 };
 use std::fmt;
@@ -164,6 +164,29 @@ impl DiagramEngine {
         )
     }
 
+    /// 直接导出与 `Scene::to_svg()` 相同的自包含矢量图；只做一次布局。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_svg(
+        &self,
+        source: String,
+        mmd: bool,
+        block: u32,
+        width: f64,
+        dark: bool,
+        collapsed: Vec<String>,
+    ) -> Result<String, DiagramFailure> {
+        let identity = crate::DiagramIdentity {
+            block,
+            dark,
+            ..crate::DiagramIdentity::default()
+        };
+        let (scene, _, _) =
+            self.render_scene(source, mmd, width, collapsed, &identity, None, Vec::new())?;
+        Ok(scene.to_svg())
+    }
+}
+
+impl DiagramEngine {
     #[allow(clippy::too_many_arguments)]
     fn render_request_impl(
         &self,
@@ -176,6 +199,42 @@ impl DiagramEngine {
         viewport: Vec<crate::DiagramViewportAnchor>,
         include_semantic_json: bool,
     ) -> Result<crate::SceneData, DiagramFailure> {
+        let (scene, previous, metrics) =
+            self.render_scene(source, mmd, width, collapsed, &identity, previous, viewport)?;
+        let semantic_json = if include_semantic_json {
+            Some(
+                serde_json::to_string(&scene.semantic_scene()).map_err(|error| {
+                    DiagramFailure::Engine {
+                        kind: format!("semantic_json:{error}"),
+                    }
+                })?,
+            )
+        } else {
+            None
+        };
+        Ok(crate::SceneData::from(scene)
+            .with_request(identity, previous, metrics)
+            .with_semantic_json(semantic_json))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_scene(
+        &self,
+        source: String,
+        mmd: bool,
+        width: f64,
+        collapsed: Vec<String>,
+        identity: &crate::DiagramIdentity,
+        previous: Option<crate::DiagramPrevious>,
+        viewport: Vec<crate::DiagramViewportAnchor>,
+    ) -> Result<
+        (
+            Scene,
+            Option<crate::DiagramPrevious>,
+            Option<crate::DiagramGraphMetrics>,
+        ),
+        DiagramFailure,
+    > {
         let mut state = self.state.lock().map_err(|_| DiagramFailure::Engine {
             kind: "poisoned".into(),
         })?;
@@ -285,20 +344,7 @@ impl DiagramEngine {
             }
         }
         .map_err(|error| DiagramFailure::Engine { kind: error.0 })?;
-        let semantic_json = if include_semantic_json {
-            Some(
-                serde_json::to_string(&scene.semantic_scene()).map_err(|error| {
-                    DiagramFailure::Engine {
-                        kind: format!("semantic_json:{error}"),
-                    }
-                })?,
-            )
-        } else {
-            None
-        };
-        Ok(crate::SceneData::from(scene)
-            .with_request(identity, previous, metrics)
-            .with_semantic_json(semantic_json))
+        Ok((scene, previous, metrics))
     }
 }
 
@@ -600,6 +646,58 @@ mod graph_wire_tests {
             assert!(!scene.graph_metrics.as_ref().unwrap().horizontal_overflow);
             previous = scene.previous;
         }
+    }
+
+    #[test]
+    fn diagram_links_and_svg_export_match_the_engine_scene() {
+        let engine = DiagramEngine::new().unwrap();
+        let source = "flowchart TB\nA[\"[[design#Section Two|Design Spec]]\"] --> B[\"[[architecture]]\"]\nC[\"![[architecture]]\"]\n";
+        let scene = engine
+            .render(source.into(), true, 1, 700.0, false, vec![])
+            .unwrap();
+        let linked = scene
+            .hit_regions
+            .iter()
+            .find(|hit| hit.link_target.as_deref() == Some("design"))
+            .unwrap();
+        assert_eq!(linked.label, "Design Spec");
+        assert_eq!(linked.link_heading.as_deref(), Some("Section Two"));
+        assert!(
+            source[linked.source_start as usize..linked.source_end as usize]
+                .contains("[[design#Section Two|Design Spec]]")
+        );
+        let plain = scene
+            .hit_regions
+            .iter()
+            .find(|hit| hit.label.contains("![[architecture]]"))
+            .unwrap();
+        assert_eq!(plain.link_target, None);
+
+        let svg = engine
+            .render_svg(source.into(), true, 1, 700.0, false, vec![])
+            .unwrap();
+        assert!(svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(svg.contains("viewBox=\"0 0 700.000"));
+        assert!(svg.contains("aria-label=\"Mermaid flowchart\""));
+        assert!(svg.contains("Design Spec"));
+        assert!(svg.contains("architecture"));
+        assert!(!svg.contains("<script"));
+
+        // 同一份源码和选项必须产出与 Scene::to_svg() 完全一致的字节。
+        let diagram = hortus_diagram::parse_diagram(source).unwrap();
+        let options = LayoutOptions {
+            width: 700.0,
+            viewport: Some(hortus_diagram::GraphViewport {
+                visible: Vec::new(),
+            }),
+            ..LayoutOptions::default()
+        };
+        let mut fonts = SystemFonts::new().unwrap();
+        let expected = match diagram {
+            Diagram::Graph(graph) => layout_graph(&graph, &options, &mut fonts).unwrap().scene,
+            _ => unreachable!(),
+        };
+        assert_eq!(svg, expected.to_svg());
     }
 
     #[test]

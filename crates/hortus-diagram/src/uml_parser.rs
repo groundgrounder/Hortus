@@ -140,8 +140,35 @@ pub(crate) fn bracket_label(text: &str, cursor: &mut usize) -> Option<(String, u
     if !text[*cursor..].starts_with('[') {
         return None;
     }
-    let close = text[*cursor..].find(']')? + *cursor;
-    let inner = text[*cursor + 1..close].trim();
+    let body = *cursor + 1;
+    let quoted = text[body..].starts_with('"');
+    let mut index = body + usize::from(quoted);
+    let mut escaped = false;
+    let close = loop {
+        let ch = text[index..].chars().next()?;
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                // 引号后紧跟外层 `]` 才算标签结束；`[[笔记]]` 里的引号不受影响。
+                let after = index + 1;
+                if text[after..].starts_with(']') {
+                    break after;
+                }
+            }
+        } else if text[index..].starts_with("[[") {
+            // 双链自身的 `]]` 不能提前关闭外层方括号。
+            let end = text[index + 2..].find("]]")?;
+            index += 2 + end + 2;
+            continue;
+        } else if ch == ']' {
+            break index;
+        }
+        index += ch.len_utf8();
+    };
+    let inner = text[body..close].trim();
     let label = inner
         .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
