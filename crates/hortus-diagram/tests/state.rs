@@ -313,6 +313,21 @@ fn crosses(a: Point, b: Point, r: Rect) -> bool {
     }
 }
 
+fn segments_overlap(a: &[Point], b: &[Point]) -> bool {
+    let (a, end_a, b, end_b) = (a[0], a[1], b[0], b[1]);
+    let overlap =
+        |a: f64, b: f64, c: f64, d: f64| a.max(b).min(c.max(d)) - a.min(b).max(c.min(d)) > 0.001;
+    let equal = |a: f64, b: f64| (a - b).abs() < 0.001;
+    (equal(a.x, end_a.x)
+        && equal(b.x, end_b.x)
+        && equal(a.x, b.x)
+        && overlap(a.y, end_a.y, b.y, end_b.y))
+        || (equal(a.y, end_a.y)
+            && equal(b.y, end_b.y)
+            && equal(a.y, b.y)
+            && overlap(a.x, end_a.x, b.x, end_b.x))
+}
+
 #[test]
 fn fixture_scenes_preserve_geometry_and_regions_in_both_themes() {
     for (name, text) in [
@@ -387,6 +402,27 @@ fn fixture_scenes_preserve_geometry_and_regions_in_both_themes() {
                             _ => None,
                         })
                         .unwrap();
+                    let path_for = |prefix: &str| {
+                        scene
+                            .primitives
+                            .iter()
+                            .find_map(|primitive| match primitive {
+                                Primitive::GraphPath {
+                                    points,
+                                    source_range,
+                                    ..
+                                } if text[source_range.clone()].starts_with(prefix) => Some(points),
+                                _ => None,
+                            })
+                            .unwrap()
+                    };
+                    let forward = path_for("Probe --> Lease");
+                    let reverse = path_for("Lease --> Probe");
+                    assert!(
+                        !forward
+                            .windows(2)
+                            .any(|a| reverse.windows(2).any(|b| segments_overlap(a, b)))
+                    );
                     assert_eq!(loop_path.len(), 4);
                     assert!((loop_path[0].x - loop_path[3].x).abs() < 1.0);
                     assert!((loop_path[0].y - loop_path[3].y).abs() > 10.0);

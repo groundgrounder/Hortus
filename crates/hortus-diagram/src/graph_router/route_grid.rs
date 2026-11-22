@@ -26,9 +26,23 @@ pub(super) fn route_grid(
         graph.direction,
         Direction::TopToBottom | Direction::LeftToRight
     );
-    let plan = plan_edges(
+    let mut plan = plan_edges(
         graph, nodes, accepted, lr_bands, vertical, positive, preferred,
     );
+    if policy.distinct_ports {
+        for (index, edge) in graph.edges.iter().enumerate() {
+            if !accepted[index]
+                && edge.from != edge.to
+                && graph
+                    .edges
+                    .iter()
+                    .any(|other| other.from == edge.to && other.to == edge.from)
+            {
+                // 逆向转换分别从节点侧面出入，主方向通道留给正向转换。
+                plan.sides[index] = (!vertical, false, !vertical, false);
+            }
+        }
+    }
     let ends = compute_ends(
         graph,
         nodes,
@@ -236,7 +250,34 @@ fn state_loops(
                 continue;
             }
             paths[index] = candidate;
-            let label = labels.place(index, &paths, &obstacles, protected, size);
+            let side_label = if let LabelSizes::Measured(sizes) = labels {
+                sizes[index].and_then(|(width, height)| {
+                    let width = width + 4.0;
+                    let rect = Rect {
+                        x: if right { x + 8.0 } else { x - width - 8.0 },
+                        y: rect.y + (rect.height - height) / 2.0,
+                        width,
+                        height,
+                    };
+                    (rect.x >= 4.0
+                        && rect.x + rect.width <= size.0 - 4.0
+                        && rect.y >= 4.0
+                        && rect.y + rect.height <= size.1 - 4.0
+                        && !obstacles
+                            .iter()
+                            .chain(protected.iter())
+                            .any(|other| rect.intersects(*other))
+                        && !paths.iter().any(|path| {
+                            path.windows(2)
+                                .any(|pair| segment_intersects(pair[0], pair[1], rect))
+                        }))
+                    .then_some(rect)
+                })
+            } else {
+                None
+            };
+            let label =
+                side_label.or_else(|| labels.place(index, &paths, &obstacles, protected, size));
             if labels.has(index) && label.is_none() {
                 paths[index].clear();
                 continue;

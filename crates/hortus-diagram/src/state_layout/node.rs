@@ -342,7 +342,7 @@ impl Layout<'_> {
             } else {
                 cell.rect.x + cell.rect.width
             };
-            let start_y = cell.rect.y + cell.rect.height / 2.0;
+            let start_y = cell.rect.y + cell.rect.height * 0.68;
             let mut y = if beside {
                 (layer.height - heights[side]) / 2.0
             } else {

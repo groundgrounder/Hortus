@@ -32,7 +32,11 @@ def cli(*args, ok=True):
 
 
 def note_for(fixture):
-    return f'# {fixture.stem}\n\n~~~mermaid\n{fixture.read_text()}~~~\n'
+    note = f'# {fixture.stem}\n\n~~~mermaid\n{fixture.read_text()}~~~\n'
+    if fixture.stem == 'composite':
+        # 图后留一个有独立阅读片段的锚点，供截图入口滚动至下半部分。
+        note += '\nThe commit cycle ends after persistence.\n'
+    return note
 
 
 def intersects(a, b, epsilon=0.01):
@@ -154,7 +158,7 @@ def check_windows(base, output, media, rendered):
                                    ['--diagram-reading', '--diagram-width=700',
                                     '--snapshot-end', f'--{theme}'], end_png)
             assert end['reading'] and end['diagrams'] == 1 and not end['reasons'], (end_tag, end)
-            assert end_png.stat().st_size > 10_000, end_tag
+            assert end_png.stat().st_size > 10_000 and end_png.read_bytes() != png.read_bytes(), end_tag
         rows.append({'fixture': note.stem, 'width': width, 'theme': theme,
                      'reading': True, 'strict_equal': True, 'scene_sha256': matrix['scene_sha256'],
                      'visible_nodes': data['visible_nodes'], 'screenshot': str(png) if png else None,
