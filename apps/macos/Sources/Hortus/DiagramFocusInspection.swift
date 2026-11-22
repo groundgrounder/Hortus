@@ -34,6 +34,22 @@ enum DiagramFocusInspection {
         var result: [String: Any] = ["path": path]
         func log(_ step: String) { fputs("P1-08 \(step)\n", stderr) }
         log("document ready")
+        if let arg = arguments.first(where: { $0.hasPrefix("--diagram-links-export=") }) {
+            result.merge(try await linkAndExportChecks(
+                workspace: workspace, window: window,
+                directory: URL(fileURLWithPath: String(arg.dropFirst("--diagram-links-export=".count)))
+            )) { _, new in new }
+            window.displayIfNeeded()
+            return result
+        }
+        if let arg = arguments.first(where: { $0.hasPrefix("--diagram-links-shot=") }) {
+            result.merge(try await linkShot(
+                String(arg.dropFirst("--diagram-links-shot=".count)),
+                workspace: workspace, window: window
+            )) { _, new in new }
+            window.displayIfNeeded()
+            return result
+        }
         if arguments.contains("--diagram-focus-only-menu") {
             if !document.reading { await workspace.toggleCurrentView() }
             _ = try await ReadingInspection.settled(true, document: document)
@@ -745,6 +761,310 @@ enum DiagramFocusInspection {
         try await Task.sleep(for: .milliseconds(220))
         window.displayIfNeeded()
         return ["scene": scene, "state": canvas.screenshotState(), "layout": focus.inspectionLayout]
+    }
+
+    // MARK: 图内双链与导出
+
+    private static func linkAndExportChecks(workspace: Workspace, window: NSWindow,
+                                            directory: URL) async throws -> [String: Any] {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var result: [String: Any] = [:]
+        let note = "diagram-links.md"
+
+        // 1. 阅读视图单击不可折叠双链节点，跳到 design.md#Section Two。
+        let (reading, _) = try await openReading(note, workspace: workspace)
+        let block = try required(reading.blocks.first(where: { $0.ordinal == 1 }))
+        let prepared = try required(block.prepared)
+        let diagram = try required(reading.diagramViews[1])
+        reveal(reading, block: block)
+        let design = try required(prepared.scene.hitRegions.first {
+            $0.linkTarget == "design" && $0.linkHeading == "Section Two"
+        })
+        result["link_scene"] = [
+            "labels": prepared.scene.hitRegions.map(\.label),
+            "targets": prepared.scene.hitRegions.map { $0.linkTarget ?? "" },
+            "headings": prepared.scene.hitRegions.map { $0.linkHeading ?? "" },
+            "design_label": design.label,
+            "design_source": NSStringFromRange(prepared.sourceRanges[design.nodeId] ?? NSRange()),
+            "width": prepared.scene.width,
+            "height": prepared.scene.height,
+        ]
+        click(diagram, hit: design, window: window)
+        let readingTarget = await waitUntil {
+            workspace.selected?.hasSuffix("design.md") == true
+        }
+        let headingMatched = await waitUntil(1200) {
+            guard let current = workspace.current?.document,
+                  current.outlineRevision == current.revision,
+                  let heading = current.headings.first(where: { $0.title == "Section Two" })
+            else { return false }
+            return current.sourceAnchor == Int(heading.start)
+        }
+        result["reading_click"] = [
+            "target": workspace.selected ?? "",
+            "heading_matched": headingMatched,
+            "anchor": workspace.current?.document?.sourceAnchor ?? -1,
+        ]
+        guard readingTarget, headingMatched else {
+            throw CocoaError(.coderValueNotFound)
+        }
+
+        // 2. 可折叠节点单击仍折叠；右键菜单打开链接笔记。
+        let (mindmap, _) = try await openReading(note, workspace: workspace)
+        let mapBlock = try required(mindmap.blocks.first(where: { $0.ordinal == 2 }))
+        let mapPrepared = try required(mapBlock.prepared)
+        let mapView = try required(mindmap.diagramViews[2])
+        reveal(mindmap, block: mapBlock)
+        let root = try required(mapPrepared.scene.hitRegions.first {
+            $0.canCollapse && $0.linkTarget == "architecture"
+        })
+        click(mapView, hit: root, window: window)
+        let collapsed = await waitUntil {
+            guard let block = mindmap.blocks.first(where: { $0.ordinal == 2 }),
+                  let hit = block.prepared?.scene.hitRegions.first(where: { $0.nodeId == root.nodeId })
+            else { return false }
+            return block.collapsed.contains(root.nodeId) && hit.collapsed
+        }
+        let mapMenu = rightClickMenu(mapView, hit: root, window: window)
+        let mapTitles = mapMenu?.items.filter { !$0.isSeparatorItem }.map(\.title) ?? []
+        var menuTarget = ""
+        if let item = mapMenu?.items.first(where: { $0.title == DiagramExportStrings.openLinkedNote }),
+           let action = item.action {
+            NSApp.sendAction(action, to: item.target, from: item)
+            _ = await waitUntil { workspace.selected?.hasSuffix("architecture.md") == true }
+            menuTarget = workspace.selected ?? ""
+        }
+        result["collapse_click"] = [
+            "node": root.nodeId,
+            "collapsed": collapsed,
+            "menu_titles": mapTitles,
+            "menu_target": menuTarget,
+        ]
+        guard collapsed, menuTarget.hasSuffix("architecture.md") else {
+            throw CocoaError(.coderValueNotFound)
+        }
+
+        // 3. ⌘-点击仍跳转到源码位置。
+        let (third, thirdDocument) = try await openReading(note, workspace: workspace)
+        let thirdBlock = try required(third.blocks.first(where: { $0.ordinal == 1 }))
+        let thirdPrepared = try required(thirdBlock.prepared)
+        let thirdView = try required(third.diagramViews[1])
+        reveal(third, block: thirdBlock)
+        let thirdHit = try required(thirdPrepared.scene.hitRegions.first { $0.linkTarget == "design" })
+        let expected = try required(thirdPrepared.sourceRanges[thirdHit.nodeId])
+        click(thirdView, hit: thirdHit, window: window, modifiers: [.command])
+        _ = await waitUntil { !(thirdDocument.reading) }
+        let editing = try await DiagramInspection.settled(document: thirdDocument)
+        let selected = editing.selectedRange()
+        result["command_click"] = [
+            "expected": NSStringFromRange(expected),
+            "selected": NSStringFromRange(selected),
+            "matches": selected == expected,
+            "left_reading": !thirdDocument.reading,
+        ]
+        guard selected == expected, !thirdDocument.reading else {
+            throw CocoaError(.coderValueNotFound)
+        }
+
+        // 4. 当前图块的右键菜单提供三种格式，且无弹窗写盘接口产出合法文件。
+        let exportBlock = try required(editing.blocks.first(where: { $0.ordinal == 1 }))
+        let exportPrepared = try required(exportBlock.prepared)
+        let exportView = try required(editing.diagramViews[1])
+        let exportHit = try required(exportPrepared.scene.hitRegions.first { $0.linkTarget == "design" })
+        let exportMenu = rightClickMenu(exportView, hit: exportHit, window: window)
+        let exportItem = exportMenu?.items.first { $0.title == DiagramExportStrings.exportDiagram }
+        let svgURL = directory.appendingPathComponent("diagram-links-1.svg")
+        let pngURL = directory.appendingPathComponent("diagram-links-1.png")
+        let pdfURL = directory.appendingPathComponent("diagram-links-1.pdf")
+        let width = exportPrepared.scene.width
+        let collapsedNodes = exportBlock.collapsed.sorted()
+        let source = editing.string
+        let request = DiagramExportRequest(prepared: exportPrepared, note: note, ordinal: 1) {
+            try await DiagramExport.renderSVG(source: source, mmd: false, block: 1, width: width,
+                                              dark: false, collapsed: collapsedNodes)
+        }
+        try await DiagramExport.export(.svg, request: request, to: svgURL)
+        try await DiagramExport.export(.png, request: request, to: pngURL)
+        try await DiagramExport.export(.pdf, request: request, to: pdfURL)
+
+        let svg = try String(contentsOf: svgURL, encoding: .utf8)
+        let png = try Data(contentsOf: pngURL)
+        let pdf = try Data(contentsOf: pdfURL)
+        let rep = try required(NSBitmapImageRep(data: png))
+        var opaque = 0
+        var colors = Set<UInt32>()
+        let stepX = max(1, rep.pixelsWide / 32)
+        let stepY = max(1, rep.pixelsHigh / 32)
+        for y in stride(from: 0, to: rep.pixelsHigh, by: stepY) {
+            for x in stride(from: 0, to: rep.pixelsWide, by: stepX) {
+                guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                if color.alphaComponent > 0.01 { opaque += 1 }
+                let r = UInt32((color.redComponent * 255).rounded())
+                let g = UInt32((color.greenComponent * 255).rounded())
+                let b = UInt32((color.blueComponent * 255).rounded())
+                colors.insert(r << 16 | g << 8 | b)
+            }
+        }
+        let pdfDocument = CGDataProvider(data: pdf as CFData).flatMap { CGPDFDocument($0) }
+        let page = pdfDocument?.page(at: 1)
+        let box = page?.getBoxRect(.mediaBox) ?? .zero
+        let pdfText = String(data: pdf, encoding: .isoLatin1) ?? ""
+        result["export"] = [
+            "svg": svgURL.path,
+            "svg_bytes": svg.utf8.count,
+            "svg_has_viewbox": svg.contains("viewBox=\""),
+            "svg_has_text": svg.contains("Design Spec") && svg.contains("architecture"),
+            "svg_has_script": svg.contains("<script"),
+            "png": pngURL.path,
+            "png_pixels": [rep.pixelsWide, rep.pixelsHigh],
+            "png_opaque_samples": opaque,
+            "png_distinct_colors": colors.count,
+            "pdf": pdfURL.path,
+            "pdf_bytes": pdf.count,
+            "pdf_pages": pdfDocument?.numberOfPages ?? 0,
+            "pdf_box": [box.width, box.height],
+            "pdf_has_image": pdfText.contains("/Subtype /Image") || pdfText.contains("/Subtype/Image"),
+            "export_menu": exportItem?.submenu?.items.map(\.title) ?? [],
+            "export_enabled": exportItem?.isEnabled ?? false,
+        ]
+
+        // 5. 专注模式：顶栏导出按钮可用，点击节点内双链自动退出并打开目标。
+        workspace.enterFocus(block: 1)
+        let focus = try await waitForFocus(window)
+        _ = await waitUntil(1500) { focus.canvas.inspectionReady }
+        focus.canvas.inspectionFit()
+        try await Task.sleep(for: .milliseconds(180))
+        let focusLinks = focus.canvas.inspectionLinkHits()
+        var focusTarget = ""
+        var focusMenu: [String] = []
+        var focusMenuTitles: [String] = []
+        if let id = focusLinks.first(where: { ($0["target"] as? String) == "design" })?["id"] as? String {
+            focusMenuTitles = focus.canvas.inspectionMenuTitles(id)
+            focusMenu = focusMenuTitles
+            focus.canvas.inspectionClick(id, modifiers: [])
+            _ = await waitUntil(1500) { workspace.focusSession == nil }
+            _ = await waitUntil(1500) { workspace.selected?.hasSuffix("design.md") == true }
+            focusTarget = workspace.selected ?? ""
+            _ = await waitUntil(1500) {
+                guard let current = workspace.current?.document,
+                      current.outlineRevision == current.revision,
+                      let heading = current.headings.first(where: { $0.title == "Section Two" })
+                else { return false }
+                return current.sourceAnchor == Int(heading.start)
+            }
+        }
+        let focusAnchor = await waitUntil(1200) {
+            guard let current = workspace.current?.document,
+                  current.outlineRevision == current.revision,
+                  let heading = current.headings.first(where: { $0.title == "Section Two" })
+            else { return false }
+            return current.sourceAnchor == Int(heading.start)
+        }
+        result["focus"] = [
+            "link_hits": focusLinks,
+            "export_present": focus.inspectionExportPresent,
+            "export_enabled": focus.inspectionExportEnabled,
+            "export_frame": NSStringFromRect(focus.inspectionExportFrame),
+            "export_titles": focus.inspectionExportTitles,
+            "menu_titles": focusMenuTitles,
+            "menu": focusMenu,
+            "exited": workspace.focusSession == nil,
+            "target": focusTarget,
+            "anchor_matched": focusAnchor,
+        ]
+        workspace.exitFocus(restore: false)
+        result["document"] = ["path": workspace.selected ?? note, "source_count": editing.string.count]
+        return result
+    }
+
+    @discardableResult
+    private static func waitUntil(_ tries: Int = 800,
+                                  _ condition: @MainActor () -> Bool) async -> Bool {
+        for _ in 0..<tries {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
+    private static func required<T>(_ value: T?) throws -> T {
+        guard let value else { throw CocoaError(.coderValueNotFound) }
+        return value
+    }
+
+    private static func openReading(_ note: String, workspace: Workspace) async throws
+        -> (DiagramTextView, NoteDocument) {
+        if workspace.selected != note {
+            workspace.openNote(note, savePrevious: false)
+            for _ in 0..<800 where workspace.selected != note {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        guard let first = workspace.current?.document else { throw CocoaError(.fileNoSuchFile) }
+        if !first.reading { await workspace.toggleCurrentView() }
+        for _ in 0..<800 where !(workspace.current?.document?.reading ?? false) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        guard let document = workspace.current?.document else { throw CocoaError(.fileNoSuchFile) }
+        let view = try await ReadingInspection.settled(true, document: document)
+        return (view, document)
+    }
+
+    private static func reveal(_ view: DiagramTextView, block: NoteDiagram) {
+        view.scrollRangeToVisible(NSRange(location: block.range.location, length: 0))
+        view.layoutSubtreeIfNeeded()
+    }
+
+    private static func click(_ diagram: DiagramView, hit: SceneHit, window: NSWindow,
+                              modifiers: NSEvent.ModifierFlags = []) {
+        let point = diagram.convert(CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY), to: nil)
+        guard let event = NSEvent.mouseEvent(with: .leftMouseDown, location: point,
+                                             modifierFlags: modifiers,
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: 1)
+        else { return }
+        diagram.mouseDown(with: event)
+    }
+
+    private static func rightClickMenu(_ diagram: DiagramView, hit: SceneHit,
+                                       window: NSWindow) -> NSMenu? {
+        let point = diagram.convert(CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY), to: nil)
+        guard let event = NSEvent.mouseEvent(with: .rightMouseDown, location: point,
+                                             modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: 1)
+        else { return nil }
+        return diagram.menu(for: event)
+    }
+
+    private static func linkShot(_ name: String, workspace: Workspace,
+                                 window: NSWindow) async throws -> [String: Any] {
+        if name.hasPrefix("focus") {
+            if workspace.selected != "diagram-links.md" {
+                workspace.openNote("diagram-links.md", savePrevious: false)
+                _ = await waitUntil { workspace.selected == "diagram-links.md" }
+            }
+            _ = await waitUntil(1500) { workspace.current?.document?.hasPreparedDiagrams == true }
+            workspace.enterFocus(block: 1)
+            let focus = try await waitForFocus(window)
+            _ = await waitUntil(1500) { focus.canvas.inspectionReady && focus.inspectionExportEnabled }
+            focus.canvas.inspectionFit()
+            try await Task.sleep(for: .milliseconds(220))
+            window.displayIfNeeded()
+            return ["shot": name, "focus": true, "layout": focus.inspectionLayout,
+                    "export": focus.inspectionExportTitles]
+        }
+        let (view, document) = try await openReading("diagram-links.md", workspace: workspace)
+        if let block = view.blocks.first(where: { $0.ordinal == 1 }) {
+            view.scrollRangeToVisible(NSRange(location: block.range.location, length: 0))
+        }
+        view.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        try await Task.sleep(for: .milliseconds(150))
+        return ["shot": name, "reading": document.reading,
+                "labels": view.blocks.first(where: { $0.ordinal == 1 })?.prepared?.scene.hitRegions.map(\.label) ?? []]
     }
 
     // MARK: 工具

@@ -304,6 +304,23 @@ struct ReadingText: NSViewRepresentable {
                 input.remember(ordinal, rendered[index].collapsed.sorted()); refresh(force: true)
             }
             view.onFocus = { [weak self] ordinal in self?.input?.onFocus?(ordinal) }
+            view.onOpenLink = { [weak self] _, target, heading in
+                self?.input?.openLink?(target, heading)
+            }
+            view.exportRequestProvider = { [weak self, weak view] ordinal in
+                guard let self, let view, let input = self.input,
+                      let block = self.rendered.first(where: { $0.ordinal == ordinal }),
+                      let prepared = block.prepared else { return nil }
+                let source = view.string
+                let mmd = input.path.lowercased().hasSuffix(".mmd")
+                let width = prepared.scene.width
+                let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                let collapsed = block.collapsed.sorted()
+                return DiagramExportRequest(prepared: prepared, note: input.path, ordinal: ordinal) {
+                    try await DiagramExport.renderSVG(source: source, mmd: mmd, block: ordinal,
+                                                      width: width, dark: dark, collapsed: collapsed)
+                }
+            }
             if tokenChanged, view.window != nil, view.hasSettledContentWidth { refresh(force: true) }
             else if (changed || indexChanged || model?.revision != input.document.revision || size != input.fontSize),
                view.window != nil, view.hasSettledContentWidth { refresh() }

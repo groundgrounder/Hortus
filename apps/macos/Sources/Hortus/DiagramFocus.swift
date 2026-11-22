@@ -80,10 +80,12 @@ struct FocusOverlay: NSViewRepresentable {
     let onJump: (NSRange) -> Void
     let onCollapse: ([String]) -> Void
     let onPersist: (Double, Double, Double) -> Void
+    let onOpenLink: (String, String?) -> Void
 
     func makeNSView(context: Context) -> FocusModeView {
         FocusModeView(session: session, core: core, fontSize: fontSize,
                       onExit: onExit, onJump: onJump, onCollapse: onCollapse, onPersist: onPersist,
+                      onOpenLink: onOpenLink,
                       revision: revision, refreshToken: refreshToken)
     }
     func updateNSView(_ view: FocusModeView, context: Context) {
@@ -103,8 +105,10 @@ final class FocusModeView: NSView {
     private let searchField = NSSearchField()
     private let matchLabel = NSTextField(labelWithString: "")
     private let hiddenButton = NSButton(title: "", target: nil, action: nil)
+    private let exportButton = NSButton(title: DiagramExportStrings.export, target: nil, action: nil)
     private let closeButton = NSButton()
     private let onExit: () -> Void
+    private let onOpenLink: (String, String?) -> Void
     private var searchVisible = false
     private var documentRevision: UInt64
     private var documentRefreshToken: Int
@@ -113,9 +117,11 @@ final class FocusModeView: NSView {
     init(session: DiagramFocusSession, core: WorkspaceCore?, fontSize: Double,
          onExit: @escaping () -> Void, onJump: @escaping (NSRange) -> Void,
          onCollapse: @escaping ([String]) -> Void, onPersist: @escaping (Double, Double, Double) -> Void,
+         onOpenLink: @escaping (String, String?) -> Void = { _, _ in },
          revision: UInt64? = nil, refreshToken: Int = 0) {
         self.session = session
         self.onExit = onExit
+        self.onOpenLink = onOpenLink
         documentRevision = revision ?? session.document.revision
         documentRefreshToken = refreshToken
         canvas = FocusCanvasView(session: session, core: core, fontSize: fontSize)
@@ -160,7 +166,16 @@ final class FocusModeView: NSView {
         closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: L10n.string("Close"))
         closeButton.target = self
         closeButton.action = #selector(close)
-        for view in [percentLabel, fitButton, actualButton, searchField, matchLabel, hiddenButton, closeButton] {
+        exportButton.bezelStyle = .inline
+        exportButton.controlSize = .small
+        exportButton.font = .systemFont(ofSize: 12)
+        exportButton.image = NSImage(systemSymbolName: "square.and.arrow.up",
+                                     accessibilityDescription: DiagramExportStrings.export)
+        exportButton.imagePosition = .imageLeading
+        exportButton.target = self
+        exportButton.action = #selector(showExportMenu(_:))
+        exportButton.isEnabled = false
+        for view in [percentLabel, fitButton, actualButton, searchField, matchLabel, hiddenButton, exportButton, closeButton] {
             bar.addSubview(view)
         }
         canvas.onScale = { [weak self] value in self?.percentLabel.stringValue = "\(Int((value * 100).rounded()))%" }
@@ -169,6 +184,11 @@ final class FocusModeView: NSView {
         canvas.onCollapsed = { nodes in onCollapse(nodes.sorted()) }
         canvas.onPersist = { scale, point in onPersist(Double(scale), Double(point.x), Double(point.y)) }
         canvas.onExit = onExit
+        canvas.onOpenLink = onOpenLink
+        canvas.onReady = { [weak self] in
+            self?.exportButton.isEnabled = true
+            self?.needsLayout = true
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     /// 外部修改或回滚后按修订号刷新画布；防抖保留用户当前缩放与视口中心。
@@ -207,10 +227,14 @@ final class FocusModeView: NSView {
         percentLabel.frame = NSRect(x: 14, y: 14, width: 52, height: 18)
         fitButton.frame = NSRect(x: 74, y: 10, width: 42, height: 24)
         actualButton.frame = NSRect(x: 118, y: 10, width: 52, height: 24)
+        exportButton.sizeToFit()
+        let exportWidth = max(64, exportButton.fittingSize.width)
+        exportButton.frame = NSRect(x: closeButton.frame.minX - 8 - exportWidth,
+                                    y: 10, width: exportWidth, height: 24)
         hiddenButton.sizeToFit()
         matchLabel.sizeToFit()
         let searchX: CGFloat = 182
-        let available = max(120, closeButton.frame.minX - 8 - searchX)
+        let available = max(120, exportButton.frame.minX - 8 - searchX)
         searchField.frame = NSRect(x: searchX, y: 9, width: min(240, available), height: 26)
         matchLabel.frame.origin = CGPoint(x: searchField.frame.maxX + 8, y: 14)
         hiddenButton.frame.origin = CGPoint(x: matchLabel.frame.maxX + 10, y: 11)
@@ -250,6 +274,24 @@ final class FocusModeView: NSView {
     @objc private func actualSize() { canvas.actualSize() }
     @objc private func close() { onExit() }
     @objc private func expandHidden() { canvas.expandHiddenMatches() }
+    @objc private func showExportMenu(_ sender: NSButton) {
+        guard canvas.canExport else { return }
+        let menu = NSMenu()
+        for format in DiagramExportFormat.allCases {
+            let item = NSMenuItem(title: format.menuTitle,
+                                  action: #selector(exportFormat(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = format.rawValue
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 4), in: sender)
+    }
+    @objc private func exportFormat(_ item: NSMenuItem) {
+        guard let raw = item.representedObject as? String,
+              let format = DiagramExportFormat(rawValue: raw),
+              let request = canvas.exportRequest() else { return }
+        DiagramExport.presentSavePanel(format: format, request: request, window: window)
+    }
     private func showSearch() {
         searchVisible = true
         searchField.isHidden = false
@@ -296,6 +338,10 @@ extension FocusModeView: NSSearchFieldDelegate {
 extension FocusModeView {
     var inspectionSearchVisible: Bool { !searchField.isHidden }
     var inspectionSearchField: NSSearchField { searchField }
+    var inspectionExportPresent: Bool { exportButton.superview != nil && !exportButton.isHidden }
+    var inspectionExportEnabled: Bool { exportButton.isEnabled }
+    var inspectionExportFrame: NSRect { exportButton.frame }
+    var inspectionExportTitles: [String] { DiagramExportFormat.allCases.map(\.menuTitle) }
     var inspectionLayout: [String: Any] {
         ["focus": NSStringFromRect(frame), "bar": NSStringFromRect(bar.frame),
          "canvas": NSStringFromRect(canvas.frame), "bounds": NSStringFromRect(bounds),
@@ -368,7 +414,24 @@ final class FocusCanvasView: NSView {
     var onCollapsed: ((Set<String>) -> Void)?
     var onPersist: ((CGFloat, CGPoint) -> Void)?
     var onExit: (() -> Void)?
+    var onOpenLink: ((String, String?) -> Void)?
     var onReady: (() -> Void)?
+    var canExport: Bool { prepared != nil }
+
+    /// 当前画布只含一张图，导出请求直接复用已排好的场景与当前折叠状态。
+    func exportRequest() -> DiagramExportRequest? {
+        guard let prepared else { return nil }
+        let source = self.source
+        let mmd = self.mmd
+        let ordinal = session.ordinal
+        let width = prepared.scene.width
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let collapsed = collapsed.sorted()
+        return DiagramExportRequest(prepared: prepared, note: session.note, ordinal: ordinal) {
+            try await DiagramExport.renderSVG(source: source, mmd: mmd, block: ordinal,
+                                              width: width, dark: dark, collapsed: collapsed)
+        }
+    }
 
     // 自检数据；常规使用时只保留第一个计数。
     private(set) var rustLayoutCalls = 0
@@ -495,6 +558,7 @@ final class FocusCanvasView: NSView {
             computeMatches()
         }
         needsDisplay = true
+        window?.invalidateCursorRects(for: self)
         displayIfNeeded()
         if firstFrameMilliseconds == nil {
             firstFrameMilliseconds = (ProcessInfo.processInfo.systemUptime - enteredAt) * 1000
@@ -698,6 +762,33 @@ final class FocusCanvasView: NSView {
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: spaceHeld ? .openHand : .arrow)
         if !minimapHidden { addCursorRect(minimapRect, cursor: .pointingHand) }
+        guard let prepared, !spaceHeld else { return }
+        for hit in prepared.scene.hitRegions where hit.canCollapse || hit.linkTarget != nil {
+            let rect = hit.rect.cgRect
+            addCursorRect(CGRect(x: rect.minX * scale + offset.x, y: rect.minY * scale + offset.y,
+                                 width: rect.width * scale, height: rect.height * scale),
+                          cursor: .pointingHand)
+        }
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let prepared else { return nil }
+        let point = convert(event.locationInWindow, from: nil)
+        let scenePoint = CGPoint(x: (point.x - offset.x) / scale, y: (point.y - offset.y) / scale)
+        guard let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(scenePoint) }),
+              let target = hit.linkTarget else { return nil }
+        let menu = NSMenu()
+        let item = NSMenuItem(title: DiagramExportStrings.openLinkedNote,
+                              action: #selector(openLinkedNoteFromMenu(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = [target, hit.linkHeading ?? ""]
+        menu.addItem(item)
+        return menu
+    }
+    @objc private func openLinkedNoteFromMenu(_ item: NSMenuItem) {
+        guard let value = item.representedObject as? [String], let target = value.first,
+              !target.isEmpty else { return }
+        let heading = value.count > 1 && !value[1].isEmpty ? value[1] : nil
+        onOpenLink?(target, heading)
     }
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
@@ -722,8 +813,17 @@ final class FocusCanvasView: NSView {
             return
         }
         if hit.canCollapse {
-            toggleNode(hit.nodeId, anchor: CGPoint(x: hit.rect.cgRect.midX * scale + offset.x,
-                                                   y: hit.rect.cgRect.midY * scale + offset.y))
+            // 可折叠节点单击继续折叠；⌥-点击才打开节点内双链。
+            if event.modifierFlags.contains(.option), let target = hit.linkTarget, let open = onOpenLink {
+                open(target, hit.linkHeading)
+            } else {
+                toggleNode(hit.nodeId, anchor: CGPoint(x: hit.rect.cgRect.midX * scale + offset.x,
+                                                       y: hit.rect.cgRect.midY * scale + offset.y))
+            }
+            return
+        }
+        if let target = hit.linkTarget, let open = onOpenLink {
+            open(target, hit.linkHeading)
             return
         }
         if let range = prepared.sourceRanges[hit.nodeId] { onJump?(range) }
@@ -1004,6 +1104,46 @@ extension FocusCanvasView {
     func inspectionCommandClick(_ id: String) {
         guard let range = prepared?.sourceRanges[id] else { return }
         onJump?(range)
+    }
+    func inspectionLinkHits() -> [[String: Any]] {
+        guard let prepared else { return [] }
+        return prepared.scene.hitRegions.compactMap { hit in
+            guard let target = hit.linkTarget else { return nil }
+            let rect = hit.rect.cgRect
+            return ["id": hit.nodeId, "label": hit.label, "target": target,
+                    "heading": hit.linkHeading ?? "", "can_collapse": hit.canCollapse,
+                    "collapsed": hit.collapsed,
+                    "view_rect": [rect.minX * scale + offset.x, rect.minY * scale + offset.y,
+                                  rect.width * scale, rect.height * scale]]
+        }
+    }
+    func inspectionMenuTitles(_ id: String) -> [String] {
+        guard let prepared,
+              let hit = prepared.scene.hitRegions.first(where: { $0.nodeId == id }),
+              let window else { return [] }
+        let rect = hit.rect.cgRect
+        let point = CGPoint(x: rect.midX * scale + offset.x, y: rect.midY * scale + offset.y)
+        guard let event = NSEvent.mouseEvent(
+            with: .rightMouseDown, location: convert(point, to: nil), modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1
+        ) else { return [] }
+        return menu(for: event)?.items.map(\.title) ?? []
+    }
+    func inspectionClick(_ id: String, modifiers: NSEvent.ModifierFlags) {
+        guard let prepared,
+              let hit = prepared.scene.hitRegions.first(where: { $0.nodeId == id }),
+              let window else { return }
+        let rect = hit.rect.cgRect
+        let point = CGPoint(x: rect.midX * scale + offset.x, y: rect.midY * scale + offset.y)
+        guard let event = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: convert(point, to: nil), modifierFlags: modifiers,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1
+        ) else { return }
+        mouseDown(with: event)
     }
     func inspectionRowCounts() -> [Int] {
         guard let prepared else { return [] }

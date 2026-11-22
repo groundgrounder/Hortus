@@ -211,6 +211,23 @@ struct NoteText: NSViewRepresentable {
             view.onEditSource = { [weak self] ordinal in self?.editSource(ordinal) }
             view.onSourceRange = { [weak self] ordinal, range in self?.locateSource(ordinal, range: range) }
             view.onFocus = { [weak self] ordinal in self?.input?.onFocus?(ordinal) }
+            view.onOpenLink = { [weak self] _, target, heading in
+                self?.input?.openLink?(target, heading)
+            }
+            view.exportRequestProvider = { [weak self, weak view] ordinal in
+                guard let self, let view, let input = self.input,
+                      let block = self.blocks.first(where: { $0.ordinal == ordinal }),
+                      let prepared = block.prepared else { return nil }
+                let source = view.string
+                let mmd = input.path.lowercased().hasSuffix(".mmd")
+                let width = prepared.scene.width
+                let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                let collapsed = block.collapsed.sorted()
+                return DiagramExportRequest(prepared: prepared, note: input.path, ordinal: ordinal) {
+                    try await DiagramExport.renderSVG(source: source, mmd: mmd, block: ordinal,
+                                                      width: width, dark: dark, collapsed: collapsed)
+                }
+            }
             view.onCompositionState = { [weak self, weak view] marked in
                 if marked { view?.linkCompletion.close() }
                 self?.document?.compositionChanged(marked)
@@ -946,6 +963,8 @@ final class DiagramTextView: NSTextView {
     var onEditSource: ((UInt32) -> Void)?
     var onSourceRange: ((UInt32, NSRange) -> Void)?
     var onFocus: ((UInt32) -> Void)?
+    var onOpenLink: ((UInt32, String, String?) -> Void)?
+    var exportRequestProvider: ((UInt32) -> DiagramExportRequest?)?
     var onCompositionState: ((Bool) -> Void)?
     var onCommit: (() -> Void)?
     /// 嵌入卡片没有外层滚动容器，文档高度变化要通知卡片同步尺寸。
@@ -1087,6 +1106,12 @@ final class DiagramTextView: NSTextView {
                 view.onEditSource = { [weak self] in self?.onEditSource?(block.ordinal) }
                 view.onSourceRange = { [weak self] range in self?.onSourceRange?(block.ordinal, range) }
                 view.onFocus = { [weak self] in self?.onFocus?(block.ordinal) }
+                view.onOpenLink = { [weak self] target, heading in
+                    self?.onOpenLink?(block.ordinal, target, heading)
+                }
+                view.exportRequestProvider = { [weak self] in
+                    self?.exportRequestProvider?(block.ordinal)
+                }
                 view.refreshHoverButtons()
                 diagramViews[block.ordinal] = view
                 addSubview(view)
@@ -1470,6 +1495,7 @@ final class DiagramTextView: NSTextView {
         cancelFindBarMonitor()
         undoManager?.removeAllActions()
         onWidthOrThemeChange = nil; onToggle = nil; onEditSource = nil; onSourceRange = nil
+        onFocus = nil; onOpenLink = nil; exportRequestProvider = nil
         onFreshRender = nil; onCompositionState = nil; onCommit = nil
         delegate = nil; textStorage?.delegate = nil
         editingCoordinator = nil; readingCoordinator = nil

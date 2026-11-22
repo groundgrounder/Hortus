@@ -8,6 +8,8 @@ final class DiagramView: NSView {
     var onSourceRange: ((NSRange) -> Void)?
     var onEditSource: (() -> Void)?
     var onFocus: (() -> Void)?
+    var onOpenLink: ((String, String?) -> Void)?
+    var exportRequestProvider: (() -> DiagramExportRequest?)?
     var highlightedNodeID: String? {
         didSet { if oldValue != highlightedNodeID { needsDisplay = true } }
     }
@@ -46,6 +48,7 @@ final class DiagramView: NSView {
         let sameContent = nodes.count == hits.count && zip(nodes, hits).allSatisfy { node, hit in
             node.hit.nodeId == hit.nodeId && node.hit.label == hit.label && node.hit.prefix == hit.prefix
                 && node.hit.canCollapse == hit.canCollapse && node.hit.collapsed == hit.collapsed
+                && node.hit.linkTarget == hit.linkTarget && node.hit.linkHeading == hit.linkHeading
         }
         if sameContent { for (node, hit) in zip(nodes, hits) { node.hit = hit } }
         else {
@@ -97,6 +100,8 @@ final class DiagramView: NSView {
         onEditSource = nil
         onSourceRange = nil
         onFocus = nil
+        onOpenLink = nil
+        exportRequestProvider = nil
         highlightedNodeID = nil
         removeFromSuperview()
     }
@@ -136,12 +141,53 @@ final class DiagramView: NSView {
         onToggle?(id)
     }
     @objc private func focusFromMenu() { onFocus?() }
+    @objc private func openLinkedNoteFromMenu(_ item: NSMenuItem) {
+        guard let value = item.representedObject as? [String], let target = value.first,
+              !target.isEmpty else { return }
+        let heading = value.count > 1 && !value[1].isEmpty ? value[1] : nil
+        onOpenLink?(target, heading)
+    }
+    @objc private func exportFromMenu(_ item: NSMenuItem) {
+        guard let raw = item.representedObject as? String,
+              let format = DiagramExportFormat(rawValue: raw),
+              let request = exportRequestProvider?() else { return }
+        DiagramExport.presentSavePanel(format: format, request: request, window: window)
+    }
     func refreshHoverButtons() { updateTrackingAreas() }
     override func draw(_ dirtyRect: NSRect) {
         let started = ProcessInfo.processInfo.systemUptime
         defer { (superview as? DiagramTextView)?.recordMainWork(since: started) }
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         SceneRenderer.draw(prepared, in: context, highlight: highlightStyle())
+        drawLinkHints(in: context)
+    }
+    /// 双链节点只在标题文字下方画一条极轻的强调色细线，不改动场景或命中区域。
+    private func drawLinkHints(in context: CGContext) {
+        let hits = prepared.scene.hitRegions.filter { $0.linkTarget != nil }
+        guard !hits.isEmpty else { return }
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        context.saveGState()
+        context.setStrokeColor(NSColor.controlAccentColor.withAlphaComponent(dark ? 0.62 : 0.50).cgColor)
+        context.setLineWidth(1)
+        for hit in hits {
+            let rect = hit.rect.cgRect.insetBy(dx: -1, dy: -1)
+            var firstBaseline: CGFloat?
+            for primitive in prepared.scene.primitives {
+                guard case let .text(span) = primitive, span.width > 0,
+                      rect.contains(span.baseline.cgPoint) else { continue }
+                firstBaseline = min(firstBaseline ?? .greatestFiniteMagnitude, span.baseline.y)
+            }
+            guard let firstBaseline else { continue }
+            for primitive in prepared.scene.primitives {
+                guard case let .text(span) = primitive, span.width > 0,
+                      abs(span.baseline.y - firstBaseline) < 0.5,
+                      rect.contains(span.baseline.cgPoint) else { continue }
+                context.move(to: CGPoint(x: span.baseline.x, y: span.baseline.y + 2.5))
+                context.addLine(to: CGPoint(x: span.baseline.x + span.width, y: span.baseline.y + 2.5))
+            }
+        }
+        context.strokePath()
+        context.restoreGState()
     }
     /// 高亮只用淡底叠加，颜色从节点文字色派生；不改动场景或排版结果。
     private func highlightStyle() -> SceneRenderer.Highlight? {
@@ -164,6 +210,13 @@ final class DiagramView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) })
         let menu = NSMenu()
+        if let hit, let target = hit.linkTarget {
+            let item = NSMenuItem(title: DiagramExportStrings.openLinkedNote,
+                                  action: #selector(openLinkedNoteFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = [target, hit.linkHeading ?? ""]
+            menu.addItem(item)
+        }
         if let range = sourceRange(at: point) {
             let item = NSMenuItem(title: L10n.string("Jump to Source"), action: #selector(jumpFromMenu(_:)), keyEquivalent: "")
             item.target = self
@@ -178,6 +231,17 @@ final class DiagramView: NSView {
             menu.addItem(item)
         }
         if !menu.items.isEmpty { menu.addItem(.separator()) }
+        let export = NSMenuItem(title: DiagramExportStrings.exportDiagram, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for format in DiagramExportFormat.allCases {
+            let item = NSMenuItem(title: format.menuTitle, action: #selector(exportFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = format.rawValue
+            submenu.addItem(item)
+        }
+        export.submenu = submenu
+        export.isEnabled = exportRequestProvider != nil
+        menu.addItem(export)
         let focus = NSMenuItem(title: L10n.string("Focus Mode"), action: #selector(focusFromMenu), keyEquivalent: "")
         focus.target = self
         focus.isEnabled = onFocus != nil
@@ -185,7 +249,9 @@ final class DiagramView: NSView {
         return menu
     }
     override func resetCursorRects() {
-        for hit in prepared.scene.hitRegions where hit.canCollapse { addCursorRect(hit.rect.cgRect, cursor: .pointingHand) }
+        for hit in prepared.scene.hitRegions where hit.canCollapse || hit.linkTarget != nil {
+            addCursorRect(hit.rect.cgRect, cursor: .pointingHand)
+        }
     }
     func sourceRange(at point: CGPoint) -> NSRange? {
         guard prepared.acceptsInteraction else { return nil }
@@ -211,14 +277,26 @@ final class DiagramView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard prepared.acceptsInteraction else { return }
         let point = convert(event.locationInWindow, from: nil)
-        // ⌘-点击优先于折叠：可折叠节点也直接跳到源码。
+        // ⌘-点击优先于折叠与链接：可折叠节点也直接跳到源码。
         if event.modifierFlags.contains(.command), let range = sourceRange(at: point) {
             onSourceRange?(range)
             return
         }
-        if let hit = prepared.scene.hitRegions.first(where: { $0.canCollapse && $0.rect.cgRect.contains(point) }) {
-            onToggle?(hit.nodeId)
-        } else if let range = sourceRange(at: point) { onSourceRange?(range) }
+        let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) })
+        if let hit, hit.canCollapse {
+            // 可折叠节点保持单击折叠；⌥-点击才打开节点内双链。
+            if event.modifierFlags.contains(.option), let target = hit.linkTarget {
+                onOpenLink?(target, hit.linkHeading)
+            } else {
+                onToggle?(hit.nodeId)
+            }
+            return
+        }
+        if let hit, let target = hit.linkTarget {
+            onOpenLink?(target, hit.linkHeading)
+            return
+        }
+        if let range = sourceRange(at: point) { onSourceRange?(range) }
     }
 }
 
@@ -267,6 +345,7 @@ private final class DiagramAccessibilityNode: NSAccessibilityElement {
     private let frameProvider: @MainActor @Sendable (SceneRect) -> NSRect
     private let press: @MainActor @Sendable (String) -> Bool
     private let jump: @MainActor @Sendable (String) -> Bool
+    private let openLink: @MainActor @Sendable (String) -> Bool
     @MainActor init(hit: DiagramHit, owner: DiagramView) {
         self.hit = hit
         parentProvider = { [weak owner] in owner }
@@ -276,16 +355,33 @@ private final class DiagramAccessibilityNode: NSAccessibilityElement {
         }
         press = { [weak owner] id in
             guard let owner, owner.prepared.acceptsInteraction else { return false }
-            if let hit = owner.prepared.scene.hitRegions.first(where: { $0.nodeId == id }), hit.canCollapse {
-                owner.onToggle?(id)
-            } else if let range = owner.prepared.sourceRanges[id], owner.onSourceRange != nil { owner.onSourceRange?(range) }
-            else { return false }
-            return true
+            if let hit = owner.prepared.scene.hitRegions.first(where: { $0.nodeId == id }) {
+                if hit.canCollapse {
+                    owner.onToggle?(id)
+                    return true
+                }
+                if let target = hit.linkTarget, let action = owner.onOpenLink {
+                    action(target, hit.linkHeading)
+                    return true
+                }
+            }
+            if let range = owner.prepared.sourceRanges[id], owner.onSourceRange != nil {
+                owner.onSourceRange?(range)
+                return true
+            }
+            return false
         }
         jump = { [weak owner] id in
             guard let owner, owner.prepared.acceptsInteraction,
                   let range = owner.prepared.sourceRanges[id], let action = owner.onSourceRange else { return false }
             action(range)
+            return true
+        }
+        openLink = { [weak owner] id in
+            guard let owner, owner.prepared.acceptsInteraction,
+                  let hit = owner.prepared.scene.hitRegions.first(where: { $0.nodeId == id }),
+                  let target = hit.linkTarget, let action = owner.onOpenLink else { return false }
+            action(target, hit.linkHeading)
             return true
         }
         super.init()
@@ -296,6 +392,7 @@ private final class DiagramAccessibilityNode: NSAccessibilityElement {
         self.hit = hit
         setAccessibilityRole(hit.canCollapse ? .disclosureTriangle : .staticText)
         setAccessibilityLabel(hit.accessibilityLabel)
+        setAccessibilityHelp(hit.linkTarget == nil ? nil : DiagramExportStrings.openLinkedNote)
         if hit.canCollapse { setAccessibilityValue(hit.collapsed ? 0 : 1) }
         if changed { NSAccessibility.post(element: self, notification: .valueChanged) }
     }
@@ -321,10 +418,17 @@ private final class DiagramAccessibilityNode: NSAccessibilityElement {
         return super.isAccessibilitySelectorAllowed(selector)
     }
     override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
-        let action = jump
+        let jumpAction = jump
+        let linkAction = openLink
         let id = hit.nodeId
-        return [NSAccessibilityCustomAction(name: L10n.string("Jump to Source")) {
-            MainActor.assumeIsolated { action(id) }
+        var actions = [NSAccessibilityCustomAction(name: L10n.string("Jump to Source")) {
+            MainActor.assumeIsolated { jumpAction(id) }
         }]
+        if hit.linkTarget != nil {
+            actions.insert(NSAccessibilityCustomAction(name: DiagramExportStrings.openLinkedNote) {
+                MainActor.assumeIsolated { linkAction(id) }
+            }, at: 0)
+        }
+        return actions
     }
 }

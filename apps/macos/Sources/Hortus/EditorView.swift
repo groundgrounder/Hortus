@@ -121,6 +121,10 @@ struct EditorView: View {
                                  onPersist: { scale, x, y in
                                      workspace.rememberDiagramFocus(note: session.note, block: session.ordinal,
                                                                     scale: scale, x: x, y: y)
+                                 },
+                                 onOpenLink: { target, heading in
+                                     workspace.exitFocus()
+                                     workspace.openLink(source: session.note, target: target, heading: heading)
                                  })
                         .id(session.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
