@@ -138,6 +138,19 @@ pub struct LinkRewrite {
     pub after: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderMove {
+    pub old_path: String,
+    pub new_path: String,
+}
+
+/// 文件夹重命名计划：先按新旧路径搬家，再按新拓扑决定哪些链接必须改写。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FolderRenamePlan {
+    pub moves: Vec<FolderMove>,
+    pub rewrites: Vec<LinkRewrite>,
+}
+
 /// Parses one note's frontmatter fields, inline tags and wiki links.
 pub fn parse_note(text: &str) -> ParsedNote {
     parse::parse_note(text)
@@ -227,6 +240,26 @@ fn without_note_extension(path: &str) -> &str {
 
 fn dirname(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(directory, _)| directory)
+}
+
+/// 只在目录边界上匹配：`docs/guide` 命中 `docs`，`docs-extra/guide` 不命中。
+fn strip_directory<'a>(path: &'a str, directory: &str) -> Option<&'a str> {
+    let prefix = path.get(..directory.len())?;
+    if !prefix.eq_ignore_ascii_case(directory) {
+        return None;
+    }
+    let rest = &path[directory.len()..];
+    rest.starts_with('/').then_some(rest)
+}
+
+/// 显式路径前缀改写；保留目标原本的空格之外写法与可选前导 `/`。
+fn rewrite_directory_prefix(target: &str, old: &str, new: &str) -> Option<String> {
+    let (leading, body) = match target.strip_prefix('/') {
+        Some(rest) => ("/", rest),
+        None => ("", target),
+    };
+    let rest = strip_directory(body, old)?;
+    Some(format!("{leading}{new}{rest}"))
 }
 
 struct NoteEntry {
@@ -524,6 +557,101 @@ impl KnowledgeIndex {
             }
         }
         broken
+    }
+
+    /// 规划文件夹整体改名：先按旧路径集合算出新路径，再在新拓扑下逐条验证。
+    /// 显式带 `old_dir/` 前缀的链接改写前缀；短名和别名只有在新拓扑下
+    /// 不再指向同一目标时才换成无歧义的根路径写法。
+    pub fn plan_folder_rename_links(&self, old_dir: &str, new_dir: &str) -> FolderRenamePlan {
+        let Some(old) = normalize_note_path(old_dir) else {
+            return FolderRenamePlan::default();
+        };
+        let Some(new) = normalize_note_path(new_dir) else {
+            return FolderRenamePlan::default();
+        };
+        if old == new {
+            return FolderRenamePlan::default();
+        }
+        let mut moves = Vec::new();
+        let mut mapping = BTreeMap::new();
+        for path in self.notes.keys() {
+            let Some(rest) = strip_directory(path, &old) else {
+                continue;
+            };
+            if !rest.starts_with('/') {
+                continue;
+            }
+            let new_path = format!("{new}{rest}");
+            mapping.insert(path.clone(), new_path.clone());
+            moves.push(FolderMove {
+                old_path: path.clone(),
+                new_path,
+            });
+        }
+        if moves.is_empty() {
+            return FolderRenamePlan::default();
+        }
+        let mapped = |path: &str| {
+            mapping
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| path.to_owned())
+        };
+        let mut next = KnowledgeIndex::new();
+        for (path, entry) in &self.notes {
+            next.upsert(mapped(path), entry.text.clone());
+        }
+        let mut rewrites = Vec::new();
+        for (source, entry) in &self.notes {
+            let next_source = mapped(source);
+            for link in &entry.parsed.links {
+                let LinkResolution::Note(target) = self.resolve(source, &link.raw_target) else {
+                    continue;
+                };
+                let expected = mapped(&target);
+                let target_text = link.raw_target.trim();
+                let replacement = if mapping.contains_key(&target)
+                    && let Some(prefixed) = rewrite_directory_prefix(target_text, &old, &new)
+                {
+                    // 显式路径即使靠词干兜底仍能解析，写入的旧路径也必须跟着改。
+                    prefixed
+                } else {
+                    if next.resolve(&next_source, &link.raw_target)
+                        == LinkResolution::Note(expected.clone())
+                    {
+                        continue;
+                    }
+                    let path = if note_extension(target_text).is_some() {
+                        expected.clone()
+                    } else {
+                        without_note_extension(&expected).to_owned()
+                    };
+                    if target_text.starts_with('/') {
+                        format!("/{path}")
+                    } else {
+                        path
+                    }
+                };
+                if replacement == target_text {
+                    continue;
+                }
+                let before = &entry.text[link.start..link.end];
+                let mut after = before.to_owned();
+                after.replace_range(
+                    link.target_range.start - link.start..link.target_range.end - link.start,
+                    &replacement,
+                );
+                rewrites.push(LinkRewrite {
+                    source: source.clone(),
+                    line: link.line,
+                    start: link.start,
+                    end: link.end,
+                    before: before.into(),
+                    after,
+                });
+            }
+        }
+        FolderRenamePlan { moves, rewrites }
     }
 
     /// Plans link rewrites for moving `old_path` to `new_path`.
@@ -846,6 +974,126 @@ mod tests {
         assert_eq!(plan[0].after, "[[新主题]]");
         assert_eq!(plan[1].after, "[[新主题#章节|别名]]");
         assert_eq!(plan[2].after, "[[笔记/新主题.md]]");
+    }
+
+    #[test]
+    fn folder_rename_rewrites_paths_without_touching_aliases_or_short_names() {
+        let index = index(&[
+            (
+                "docs/intro.md",
+                "---\naliases: [Handbook]\n---\n[[docs/sub/api]]\n",
+            ),
+            ("docs/sub/api.md", "[[docs/intro]]\n"),
+            ("docs/arch.mmd", "flowchart LR\nA --> B\n"),
+            ("docs-extra/keep.md", "# Keep\n"),
+            (
+                "root.md",
+                "[[docs/intro]]\n[[docs/sub/api#Auth|API]]\n![[docs/arch.mmd]]\n[[intro]]\n[[Handbook]]\n[[docs-extra/keep]]\n",
+            ),
+        ]);
+        let plan = index.plan_folder_rename_links("docs", "papers");
+        assert_eq!(plan.moves.len(), 3);
+        assert_eq!(
+            plan.moves
+                .iter()
+                .map(|item| (&*item.old_path, &*item.new_path))
+                .collect::<Vec<_>>(),
+            vec![
+                ("docs/arch.mmd", "papers/arch.mmd"),
+                ("docs/intro.md", "papers/intro.md"),
+                ("docs/sub/api.md", "papers/sub/api.md"),
+            ]
+        );
+        assert_eq!(plan.rewrites.len(), 5);
+        let root: Vec<_> = plan
+            .rewrites
+            .iter()
+            .filter(|rewrite| rewrite.source == "root.md")
+            .map(|rewrite| (&*rewrite.before, &*rewrite.after))
+            .collect();
+        assert_eq!(
+            root,
+            vec![
+                ("[[docs/intro]]", "[[papers/intro]]"),
+                ("[[docs/sub/api#Auth|API]]", "[[papers/sub/api#Auth|API]]"),
+                ("![[docs/arch.mmd]]", "![[papers/arch.mmd]]"),
+            ]
+        );
+        let intro = plan
+            .rewrites
+            .iter()
+            .find(|rewrite| rewrite.source == "docs/intro.md")
+            .unwrap();
+        assert_eq!(intro.before, "[[docs/sub/api]]");
+        assert_eq!(intro.after, "[[papers/sub/api]]");
+        assert_eq!(
+            index
+                .plan_folder_rename_links("docs", "papers")
+                .rewrites
+                .iter()
+                .filter(|rewrite| {
+                    ["[[intro]]", "[[Handbook]]", "[[docs-extra/keep]]"].contains(&&*rewrite.before)
+                })
+                .count(),
+            0
+        );
+        assert!(
+            index
+                .plan_folder_rename_links("", "papers")
+                .moves
+                .is_empty()
+        );
+        assert!(
+            !index
+                .plan_folder_rename_links("docs", "docs/extra")
+                .moves
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn folder_rename_keeps_unique_short_names_and_resolves_collisions() {
+        let index = index(&[
+            ("docs/guide.md", ""),
+            ("other/guide.md", ""),
+            ("docs/note.md", "[[guide]] [[docs/guide]]\n"),
+            ("outside.md", "[[guide]]\n"),
+        ]);
+        let plan = index.plan_folder_rename_links("docs", "papers");
+        // outside.md 的 [[guide]] 本来就有两个候选；已损坏的链接不擅自改写。
+        assert!(
+            !plan
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.source == "outside.md")
+        );
+        // docs/note.md 的同目录短名随文件夹整体搬家，仍解析到同一目标。
+        assert!(
+            !plan
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.source == "docs/note.md" && rewrite.before == "[[guide]]")
+        );
+        assert!(
+            plan.rewrites
+                .iter()
+                .any(|rewrite| rewrite.source == "docs/note.md"
+                    && rewrite.before == "[[docs/guide]]"
+                    && rewrite.after == "[[papers/guide]]")
+        );
+    }
+
+    #[test]
+    fn folder_rename_ignores_sibling_prefixes_and_leading_slashes_are_kept() {
+        let index = index(&[
+            ("docs/a.md", ""),
+            ("docs-extra/keep.md", "[[/docs/a]] [[docs-extra/keep]]\n"),
+        ]);
+        let plan = index.plan_folder_rename_links("docs/", "papers/");
+        assert_eq!(plan.moves.len(), 1);
+        assert_eq!(plan.rewrites.len(), 1);
+        assert_eq!(plan.rewrites[0].before, "[[/docs/a]]");
+        assert_eq!(plan.rewrites[0].after, "[[/papers/a]]");
     }
 
     #[test]

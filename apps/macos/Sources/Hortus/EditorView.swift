@@ -81,6 +81,7 @@ struct EditorView: View {
                                 knowledgeHandle: workspace.context?.handle,
                                 knowledgeVersion: workspace.context?.knowledgeVersion ?? 0,
                                 openLink: { workspace.openLink(source: path, target: $0, heading: $1) },
+                                openResolvedLink: { workspace.openResolvedLink(path: $0, heading: $1) },
                                 showTag: { workspace.showTag($0) })
                 } else {
                 NoteText(text: readable?.text ?? "", path: readable?.path ?? "", vault: workspace.root ?? "", fontSize: workspace.fontSize,

@@ -117,17 +117,18 @@ extension Workspace {
     }
 
     /// 在改名前确认引用预览；只有确认更新后才使用系统替换目录写入受影响笔记。
+    /// 文件夹与笔记走同一条预览、保护、改写与刷新闭环。
     @discardableResult
     func renameNoteWithPreview(path: String, newName: String, window: NSWindow?) async throws -> TreeEntry? {
         guard let context, let entry = entries[path] else { throw CocoaError(.fileNoSuchFile) }
-        if entry.directory { return try await renameEntry(path: path, newName: newName) }
         guard !context.renaming else { throw CoreError.Failure(kind: "knowledge.rename_busy") }
         context.renaming = true
         defer { context.renaming = false }
 
+        let isFolder = entry.directory
         let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard FileNaming.localError(name) == nil,
-              ["md", "markdown", "mmd"].contains((name as NSString).pathExtension.lowercased()) else {
+              isFolder || ["md", "markdown", "mmd"].contains((name as NSString).pathExtension.lowercased()) else {
             throw CoreError.Failure(kind: "vault.invalid_name")
         }
         let parent = entry.parent
@@ -137,21 +138,37 @@ extension Workspace {
             try await Task.sleep(for: .milliseconds(30))
             guard self.context === context else { throw CancellationError() }
         }
-        let plan = try await runFileOp { $0.planRenameLinks(oldPath: path, newPath: target) }
+        let plan = try await runFileOp {
+            isFolder
+                ? $0.planFolderRenameLinks(oldDir: path, newDir: target)
+                : $0.planRenameLinks(oldPath: path, newPath: target)
+        }
         guard plan.totalRewrites > 0 else { return try await renameEntry(path: path, newName: name) }
-        let choice = await confirmRenameLinks(plan, window: window)
+        let choice = await confirmRenameLinks(plan, window: window, folder: isFolder)
         guard self.context === context else { throw CancellationError() }
         switch choice {
         case .cancel: return nil
         case .renameOnly: return try await renameEntry(path: path, newName: name)
         case .update: break
         }
+        let prefix = isFolder ? path + "/" : nil
+        func insideRenamedFolder(_ value: String) -> Bool {
+            value == path || prefix.map({ value.hasPrefix($0) }) == true
+        }
         let candidates = Set(plan.files.map(\.sourcePath))
+        var protected = candidates
+        if isFolder {
+            for workspace in context.attachedWorkspaces {
+                for tab in workspace.tabs where insideRenamedFolder(tab.path) {
+                    protected.insert(tab.path)
+                }
+            }
+        }
         var skipped = Set<String>()
         var loadingSkipped = Set<String>()
         var locked: [NoteDocument] = []
         for workspace in context.attachedWorkspaces {
-            for tab in workspace.tabs where candidates.contains(tab.path) {
+            for tab in workspace.tabs where protected.contains(tab.path) {
                 guard let document = tab.document else {
                     // 加载中的标签既不能加锁也不能被并发改写；明确跳过并在结果中告知。
                     if tab.loading { skipped.insert(tab.path); loadingSkipped.insert(tab.path) }
@@ -188,6 +205,10 @@ extension Workspace {
                 let temporary = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask,
                                                             appropriateFor: url, create: true)
                 defer { try? FileManager.default.removeItem(at: temporary) }
+                if isFolder {
+                    return try handle.applyFolderRenameLinksIn(oldDir: path, newDir: target, skipPaths: skipPaths,
+                                                               temporary: temporary.path)
+                }
                 return try handle.applyRenameLinksIn(oldPath: path, newPath: target, skipPaths: skipPaths,
                                                      temporary: temporary.path)
             }.value)
@@ -218,12 +239,13 @@ extension Workspace {
         return moved
     }
 
-    private func confirmRenameLinks(_ plan: RenameLinkPlanInfo, window: NSWindow?) async -> RenameLinkChoice {
+    private func confirmRenameLinks(_ plan: RenameLinkPlanInfo, window: NSWindow?, folder: Bool = false) async -> RenameLinkChoice {
         #if DEBUG
         if let inspectRenameLinks { return inspectRenameLinks(plan) }
         #endif
         let alert = NSAlert()
-        alert.messageText = L10n.string("Update links to the renamed note?")
+        alert.messageText = L10n.string(folder ? "Update links to notes in the renamed folder?"
+                                               : "Update links to the renamed note?")
         let summary = L10n.string("Update %lld links in %lld notes?", Int64(plan.totalRewrites), Int64(plan.affectedNotes))
         let excerpts = plan.files.lazy.flatMap(\.edits).prefix(5).map { edit in
             let file = (edit.sourcePath as NSString).lastPathComponent

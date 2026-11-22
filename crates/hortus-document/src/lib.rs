@@ -1,6 +1,7 @@
 //! 原生文本的 UTF-16 增量镜像；全文转换、围栏扫描只由后台调用。
 use std::io;
 mod attachments;
+pub mod embeds;
 pub mod markdown;
 pub mod math;
 pub mod media;

@@ -241,9 +241,10 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
     override var isFlipped: Bool { true }
     let prepared: PreparedMedia
     let vault: String
-    let preferredSize: CGSize
+    private(set) var preferredSize: CGSize
     var onEdit: (() -> Void)?
-    private var embeddedLink: (title: String, resolved: Bool, open: () -> Void)?
+    var onSizeChange: (() -> Void)?
+    private var embeddedCard: EmbeddedNoteView?
     var onRefresh: (() -> Void)?
     var onImageDisplayed: (() -> Void)?
     private var image: CGImage?
@@ -288,26 +289,38 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         if !block.imagePath.isEmpty { watch() }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func setEmbeddedLink(title: String, resolved: Bool, open: @escaping () -> Void) {
-        embeddedLink = (title, resolved, open)
-        setAccessibilityRole(.link)
-        setAccessibilityLabel(title)
-        needsDisplay = true
+    func installEmbed(_ card: EmbeddedNoteView) {
+        embeddedCard = card
+        card.onHeightChange = { [weak self] in self?.resizeEmbed() }
+        addSubview(card)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel(card.cardAccessibilityLabel)
+        resizeEmbed(force: true)
     }
 
-    override func accessibilityPerformPress() -> Bool {
-        guard let embeddedLink else { return super.accessibilityPerformPress() }
-        embeddedLink.open()
-        return true
+    private func resizeEmbed(force: Bool = false) {
+        guard let card = embeddedCard else { return }
+        let height = max(36, card.preferredSize.height)
+        guard force || abs(preferredSize.height - height) > 0.5 else { return }
+        preferredSize = CGSize(width: preferredSize.width, height: height)
+        card.frame = CGRect(origin: .zero, size: preferredSize)
+        frame.size = preferredSize
+        onSizeChange?()
     }
 
     func detach() {
         decoding?.cancel(); decoding = nil
+        embeddedCard?.cancel()
         watchers.forEach { $0.cancel() }; watchers = []
         if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.dataSource === self {
             panel.orderOut(nil); panel.dataSource = nil
         }
     }
+
+    #if DEBUG
+    var inspectionEmbeddedCard: EmbeddedNoteView? { embeddedCard }
+    #endif
 
     var tableCanvasView: NSView? { tableCanvas }
     var tableInspectionCells: [[String: Any]] { tableCanvas?.inspectionCells ?? [] }
@@ -346,7 +359,7 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         }
     }
     override func draw(_ dirtyRect: NSRect) {
-        guard prepared.block.columns.isEmpty else { return }
+        guard prepared.block.columns.isEmpty, embeddedCard == nil else { return }
         if let image, let context = NSGraphicsContext.current?.cgContext {
             context.saveGState()
             context.translateBy(x: 0, y: preferredSize.height - 12); context.scaleBy(x: 1, y: -1)
@@ -355,14 +368,6 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         } else {
             let block = prepared.block
             let reason = decodeFailed ? (block.imagePath.lowercased().hasSuffix(".svg") ? "image.svg_unsupported" : "image.decode_failed") : prepared.reason
-            if let embeddedLink {
-                (embeddedLink.title as NSString).draw(
-                    with: CGRect(x: 0, y: 4, width: bounds.width, height: 20),
-                    options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin],
-                    attributes: [.font: NSFont.systemFont(ofSize: 13),
-                                 .foregroundColor: embeddedLink.resolved ? NSColor.linkColor : NSColor.secondaryLabelColor])
-                return
-            }
             if reason.hasPrefix("embed.") {
                 (L10n.string(reason, block.imageTarget) as NSString).draw(
                     with: CGRect(x: 0, y: 4, width: bounds.width, height: 20),
@@ -383,7 +388,7 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         }
     }
     override func mouseDown(with event: NSEvent) {
-        if let embeddedLink { embeddedLink.open(); return }
+        if embeddedCard != nil { return }
         if let onEdit { onEdit(); return }
         if prepared.reason == "image.remote", let url = URL(string: prepared.block.imageTarget),
            ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
@@ -406,7 +411,12 @@ struct NoteMedia {
 }
 
 extension DiagramTextView {
-    func installMedia(_ next: [NoteMedia], width: Double, size: Double, vault: String, refresh: @escaping () -> Void) {
+    #if DEBUG
+    var inspectionEmbeddedCards: [EmbeddedNoteView] { mediaViews.compactMap(\.inspectionEmbeddedCard) }
+    #endif
+
+    func installMedia(_ next: [NoteMedia], width: Double, size: Double, vault: String, refresh: @escaping () -> Void,
+                      prepare: ((NoteMedia, MediaView) -> Void)? = nil) {
         guard !next.isEmpty || !mediaBlocks.isEmpty else { return }
         let oldSizes = mediaViews.map(\.preferredSize), oldProjection = mediaProjection
         mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
@@ -415,7 +425,9 @@ extension DiagramTextView {
         mediaViews = next.map { item in
             let media = MediaView(item.prepared, width: width, size: size, vault: vault)
             media.isHidden = true; media.onRefresh = refresh
+            media.onSizeChange = { [weak self] in self?.invalidateMediaLayout() }
             media.onImageDisplayed = { [weak self] in self?.recordMediaDisplay() }
+            prepare?(item, media)
             if !isReading {
                 media.onEdit = { [weak self, weak media] in
                     guard let self, let media, !compositionActive,

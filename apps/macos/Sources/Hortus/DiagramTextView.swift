@@ -753,14 +753,25 @@ final class DiagramTextView: NSTextView {
     private var tableFormulaAccessibility: [TableMathIdentity: TableFormulaAccessibilityElement] = [:]
     private var accessibilityChildrenBuilt = false
     private(set) var formulaAccessibilityBuildCount = 0
-    var formulaScrollerStyle: NSScroller.Style { enclosingScrollView?.scrollerStyle ?? NSScroller.preferredScrollerStyle }
+    /// 嵌入卡片里的正文没有自己的滚动容器，不能借用宿主窗口的滚动几何。
+    var isEmbedded = false
+    private var hostScroll: DiagramScrollView? {
+        guard !isEmbedded, let scroll = enclosingScrollView as? DiagramScrollView else { return nil }
+        return scroll
+    }
+    var formulaScrollerStyle: NSScroller.Style {
+        isEmbedded ? NSScroller.preferredScrollerStyle
+            : enclosingScrollView?.scrollerStyle ?? NSScroller.preferredScrollerStyle
+    }
     var layoutContentWidth: CGFloat {
-        let available = (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? bounds.width
+        let available = isEmbedded ? bounds.width
+            : (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? bounds.width
         return max(120, available - textContainerInset.width * 2)
     }
     /// 滚动容器和正文都完成排布后才排图；真实窄宽度同样满足，不会永久等待。
     var hasSettledContentWidth: Bool {
         guard bounds.width > 0.5 else { return false }
+        if isEmbedded { return true }
         return (enclosingScrollView as? DiagramScrollView)?.hasSettledWidth ?? true
     }
     var formulaTooltips: [NSView.ToolTipTag: String] = [:]
@@ -937,6 +948,8 @@ final class DiagramTextView: NSTextView {
     var onFocus: ((UInt32) -> Void)?
     var onCompositionState: ((Bool) -> Void)?
     var onCommit: (() -> Void)?
+    /// 嵌入卡片没有外层滚动容器，文档高度变化要通知卡片同步尺寸。
+    var onDocumentHeightChange: (() -> Void)?
     var expanded: Set<UInt32> = []
     private var installedExpanded: Set<UInt32> = []
     private var settingMarked = false
@@ -1011,7 +1024,7 @@ final class DiagramTextView: NSTextView {
     }
 
     override func setFrameSize(_ newSize: NSSize) {
-        let stableWidth = (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? newSize.width
+        let stableWidth = hostScroll?.stableContentWidth ?? newSize.width
         let changed = abs(stableWidth - lastStableContentWidth) > 0.25
         let frameChanged = abs(frame.width - newSize.width) > 0.25
         super.setFrameSize(newSize)
@@ -1129,7 +1142,7 @@ final class DiagramTextView: NSTextView {
     private func restoreDiagramViewport() {
         guard let anchor = diagramViewportAnchor else { return }
         diagramViewportAnchor = nil
-        guard let diagram = diagramViews[anchor.ordinal], !diagram.isHidden, let window,
+        guard !isEmbedded, let diagram = diagramViews[anchor.ordinal], !diagram.isHidden, let window,
               let scroll = enclosingScrollView,
               let hit = diagram.prepared.scene.hitRegions.first(where: { $0.nodeId == anchor.nodeID }) else { return }
         let current = diagram.convert(CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY), to: self)
@@ -1205,8 +1218,9 @@ final class DiagramTextView: NSTextView {
             // 末块没有后续正文，只需更新图与滚动尺寸，无需重新排版所有原生段落。
             contentHeight = max(view.frame.maxY + textContainerInset.height, usageHeight)
         } else { contentHeight = usageHeight }
-        let width = (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? frame.width
-        let height = max(enclosingScrollView?.contentView.bounds.height ?? 0, contentHeight,
+        let width = isEmbedded ? frame.width
+            : (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? frame.width
+        let height = max(isEmbedded ? 0 : enclosingScrollView?.contentView.bounds.height ?? 0, contentHeight,
                          minimumDocumentHeightForTesting)
         if abs(frame.height - height) > 0.5 {
             DiagramInspection.recordScrollStability(event: "document_resize", view: self,
@@ -1215,6 +1229,7 @@ final class DiagramTextView: NSTextView {
         }
         if abs(frame.width - width) > 0.5 || abs(frame.height - height) > 0.5 {
             setFrameSize(NSSize(width: width, height: height))
+            if abs(frame.height - height) <= 0.5 { onDocumentHeightChange?() }
         }
     }
     private func enumerateVisibleFragments(_ body: (NSTextLayoutFragment) -> Void) {

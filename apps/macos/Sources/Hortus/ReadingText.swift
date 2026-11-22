@@ -189,6 +189,7 @@ struct ReadingText: NSViewRepresentable {
     var knowledgeHandle: VaultHandle? = nil
     var knowledgeVersion = 0
     var openLink: ((String, String?) -> Void)? = nil
+    var openResolvedLink: ((String, String?) -> Void)? = nil
     var showTag: ((String) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
@@ -494,14 +495,25 @@ struct ReadingText: NSViewRepresentable {
                 return NoteMedia(range: NSRange(location: ranges[index].location + local, length: Int(item.block.displayLength)), prepared: item)
             }
             view.installMedia(items, width: width, size: input.fontSize, vault: input.vault, refresh: { [weak self] in self?.refresh(force: true) })
-            let embeds = Dictionary(uniqueKeysWithValues: (knowledge?.links ?? [])
-                .filter { $0.embed && !$0.attachment && !$0.inDiagram }.map { ($0.startUtf16, $0) })
+            let embeds = (knowledge?.links ?? []).filter {
+                $0.embed && !$0.attachment && !$0.inDiagram
+            }
             for (item, media) in zip(items, view.mediaViews) {
-                guard item.prepared.block.imageWiki, let link = embeds[item.prepared.block.sourceStart] else { continue }
-                let label = link.alias ?? (link.target.isEmpty ? link.heading ?? "" : link.target)
-                media.setEmbeddedLink(title: label, resolved: link.resolvedPath != nil) { [weak self] in
-                    self?.input?.openLink?(link.target, link.heading)
-                }
+                guard item.prepared.block.imageWiki, item.prepared.reason.hasPrefix("embed."),
+                      let handle = input.knowledgeHandle,
+                      let offset = Self.utf16Offset(byte: Int(item.prepared.block.sourceStart), in: live),
+                      let link = embeds.first(where: {
+                          UInt64(offset) >= $0.startUtf16 && UInt64(offset) < $0.startUtf16 + $0.lengthUtf16
+                      }) else { continue }
+                let request = EmbedRequest(source: input.path, target: link.target, heading: link.heading,
+                                           alias: link.alias, ancestors: [input.path], depth: 0,
+                                           handle: handle, vault: input.vault, width: width, size: input.fontSize,
+                                           dark: dark, service: input.service, mathService: input.mathService)
+                let card = EmbeddedNoteView(request)
+                card.onOpen = { [weak self] path, heading in self?.input?.openResolvedLink?(path, heading) }
+                card.onOpenLink = { [weak self] path, heading in self?.input?.openResolvedLink?(path, heading) }
+                card.onShowTag = { [weak self] tag in self?.input?.showTag?(tag) }
+                media.installEmbed(card)
             }
             view.installMath(formulas, width: width, size: input.fontSize)
             view.installFormulaAccessibility(formulas)
@@ -888,6 +900,13 @@ struct ReadingText: NSViewRepresentable {
                 let start = Int($0.startUtf16)
                 return start..<(start + Int($0.lengthUtf16))
             } ?? []
+        }
+
+        static func utf16Offset(byte: Int, in text: String) -> Int? {
+            guard byte >= 0, byte <= text.utf8.count else { return nil }
+            let utf8 = text.utf8
+            guard let end = utf8.index(utf8.startIndex, offsetBy: byte, limitedBy: utf8.endIndex) else { return nil }
+            return String(decoding: utf8[utf8.startIndex..<end], as: UTF8.self).utf16.count
         }
 
         func clickKnowledge(_ event: NSEvent) -> Bool {

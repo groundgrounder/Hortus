@@ -565,13 +565,7 @@ final class Workspace {
             let link = await Task.detached { handle.resolveLink(sourcePath: source, rawTarget: target) }.value
             guard !Task.isCancelled, let self, self.context === context, self.selected == source else { return }
             if let path = link.resolvedPath {
-                knowledgeMessage = nil
-                let owner = application?.owner(of: path, from: self)
-                let workspace = owner?.workspace ?? self
-                workspace.pendingLinkHeading = heading.map { (path, $0) }
-                workspace.openNote(path, savePrevious: false)
-                workspace.revealPendingLinkHeading()
-                if let owner, workspace !== self { application?.activate(owner) }
+                openResolvedLink(path: path, heading: heading)
             } else if link.resolutionKind == "ambiguous" {
                 showKnowledgeMessage(L10n.string("Several notes match “%@”: %@", target,
                                                  link.candidates.prefix(3).joined(separator: ", ")))
@@ -579,6 +573,18 @@ final class Workspace {
                 showKnowledgeMessage(L10n.string("No note found for “%@”", target))
             }
         }
+    }
+
+    /// 已由内核解析出的路径（嵌入卡片正文里的链接）直接打开，不再按宿主笔记重新解析。
+    func openResolvedLink(path: String, heading: String?) {
+        guard context != nil else { return }
+        knowledgeMessage = nil
+        let owner = application?.owner(of: path, from: self)
+        let workspace = owner?.workspace ?? self
+        workspace.pendingLinkHeading = heading.map { (path, $0) }
+        workspace.openNote(path, savePrevious: false)
+        workspace.revealPendingLinkHeading()
+        if let owner, workspace !== self { application?.activate(owner) }
     }
 
     private func revealPendingLinkHeading() {
