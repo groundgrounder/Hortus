@@ -226,6 +226,164 @@ fn upsert_replaces_and_remove_clears_derived_indexes() {
 }
 
 #[test]
+fn mermaid_comments_directives_and_quotes_keep_following_links() {
+    let text = concat!(
+        "```mermaid\n",
+        "flowchart TB\n",
+        "%% ordinary comment\n",
+        "A[\"[[AfterComment]]\"] --> B\n",
+        "%%{init: {'theme': 'dark'}}%%\n",
+        "C[\"[[AfterDirective]]\"] --> D\n",
+        "E[\"quoted %% stays [[InsideQuote]]\"] --> F\n",
+        "%%{init:\n",
+        "  'theme': 'dark'\n",
+        "}%%\n",
+        "G[\"[[AfterMultilineDirective]]\"] --> H\n",
+        "%% trailing comment\n",
+        "```\n",
+        "[[Outside]]\n",
+    );
+    let note = parse_note(text);
+    assert_eq!(
+        note.links
+            .iter()
+            .map(|link| (link.raw_target.as_str(), link.in_diagram))
+            .collect::<Vec<_>>(),
+        vec![
+            ("AfterComment", true),
+            ("AfterDirective", true),
+            ("InsideQuote", true),
+            ("AfterMultilineDirective", true),
+            ("Outside", false),
+        ]
+    );
+}
+
+#[test]
+fn state_pseudo_choice_is_not_a_wiki_link() {
+    let text = concat!(
+        "```mermaid\n",
+        "stateDiagram-v2\n",
+        "state check [[choice]]\n",
+        "state \"[[Target]]\" as T\n",
+        "[*] --> check\n",
+        "check --> T\n",
+        "```\n",
+    );
+    let note = parse_note(text);
+    assert_eq!(note.links.len(), 1);
+    assert_eq!(note.links[0].raw_target, "Target");
+    assert!(note.links[0].in_diagram);
+    let mut index = index(&[("choice.md", ""), ("Target.md", "")]);
+    index.upsert("source.md", text);
+    let plan = index.plan_rename_links("choice.md", "renamed-choice.md");
+    assert!(plan.is_empty(), "{plan:?}");
+    let links = index.links("source.md").unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        links[0].resolution,
+        LinkResolution::Note("Target.md".into())
+    );
+    assert!(index.broken_links().is_empty());
+    let plan = index.plan_rename_links("Target.md", "Renamed.md");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(&text[plan[0].start..plan[0].end], "[[Target]]");
+    assert_eq!(plan[0].after, "[[Renamed]]");
+}
+
+#[test]
+fn container_fences_mask_code_and_mark_mermaid_links() {
+    let text = concat!(
+        "> ```rust\n",
+        "> [[not-a-link]] #not-a-tag\n",
+        "> ```\n\n",
+        "> [!note]\n",
+        "> ```mermaid\n",
+        "> flowchart TB\n",
+        "> %% ordinary comment\n",
+        "> A[\"[[QuotedDiagram]]\"] --> B\n",
+        "> #mermaid-tag\n",
+        "> ```\n\n",
+        "1. item\n\n",
+        "    ```rust\n",
+        "    [[list-code]] #list-tag\n",
+        "    ```\n\n",
+        "2. second\n\n",
+        "    ```mermaid\n",
+        "    flowchart TB\n",
+        "    C[\"[[ListDiagram]]\"] --> D\n",
+        "    ```\n\n",
+        "[[Outside]] #outside-tag\n",
+    );
+    let note = parse_note(text);
+    assert_eq!(
+        note.links
+            .iter()
+            .map(|link| (link.raw_target.as_str(), link.in_diagram))
+            .collect::<Vec<_>>(),
+        vec![
+            ("QuotedDiagram", true),
+            ("ListDiagram", true),
+            ("Outside", false),
+        ]
+    );
+    assert_eq!(
+        note.tags
+            .iter()
+            .map(|tag| tag.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["outside-tag"]
+    );
+
+    let mut index = index(&[
+        ("QuotedDiagram.md", ""),
+        ("ListDiagram.md", ""),
+        ("Outside.md", ""),
+    ]);
+    index.upsert("source.md", text);
+    let plan = index.plan_rename_links("QuotedDiagram.md", "Renamed.md");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(&text[plan[0].start..plan[0].end], "[[QuotedDiagram]]");
+    assert_eq!(plan[0].after, "[[Renamed]]");
+    assert!(index.backlinks("ListDiagram.md").unwrap()[0].in_diagram);
+}
+
+#[test]
+fn dotted_note_names_resolve_before_attachments() {
+    let index = index(&[
+        ("notes/v1.2-release.md", ""),
+        ("notes/meeting-2026.03.md", ""),
+        (
+            "source.md",
+            "[[v1.2-release]] ![[meeting-2026.03]] ![[diagram.png]] [[spec.pdf]]",
+        ),
+    ]);
+    let links = index.links("source.md").unwrap();
+    assert_eq!(
+        links
+            .iter()
+            .map(|link| link.resolution.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            LinkResolution::Note("notes/v1.2-release.md".into()),
+            LinkResolution::Note("notes/meeting-2026.03.md".into()),
+            LinkResolution::Attachment,
+            LinkResolution::Attachment,
+        ]
+    );
+    assert!(index.broken_links().is_empty());
+    assert_eq!(index.backlinks("notes/v1.2-release.md").unwrap().len(), 1);
+    assert_eq!(
+        index.backlinks("notes/meeting-2026.03.md").unwrap().len(),
+        1
+    );
+    let plan = index.plan_rename_links("notes/v1.2-release.md", "notes/v1.3-release.md");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].before, "[[v1.2-release]]");
+    assert_eq!(plan[0].after, "[[v1.3-release]]");
+}
+
+#[test]
 fn utf8_and_emoji_boundaries_are_safe_for_every_prefix() {
     let text = concat!(
         "---\n",

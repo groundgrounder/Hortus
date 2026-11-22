@@ -426,9 +426,6 @@ impl KnowledgeIndex {
         let mut backlinks = Vec::new();
         for (source, entry) in &self.notes {
             for link in &entry.parsed.links {
-                if link.is_attachment() {
-                    continue;
-                }
                 if matches!(self.resolve(source, &link.raw_target), LinkResolution::Note(target) if target == path)
                 {
                     backlinks.push(Backlink {
@@ -563,9 +560,6 @@ impl KnowledgeIndex {
         let mut rewrites = Vec::new();
         for (source, entry) in &self.notes {
             for link in &entry.parsed.links {
-                if link.is_attachment() {
-                    continue;
-                }
                 if !matches!(self.resolve(source, &link.raw_target), LinkResolution::Note(target) if target == old)
                 {
                     continue;
@@ -592,13 +586,10 @@ impl KnowledgeIndex {
                         new_stem.to_owned()
                     }
                 };
-                if is_attachment_target(&target)
-                    || self.notes.keys().any(|path| {
-                        path != &old
-                            && without_note_extension(path)
-                                .eq_ignore_ascii_case(new_without_extension)
-                    })
-                {
+                if self.notes.keys().any(|path| {
+                    path != &old
+                        && without_note_extension(path).eq_ignore_ascii_case(new_without_extension)
+                }) {
                     target = new.clone();
                 }
                 if link.raw_target.starts_with('/') {
@@ -627,15 +618,16 @@ impl KnowledgeIndex {
     }
 
     pub fn resolve(&self, source: &str, target: &str) -> LinkResolution {
-        if is_attachment_target(target) {
-            return LinkResolution::Attachment;
-        }
         let target = target.trim();
         if target.is_empty() {
             return LinkResolution::Note(source.to_owned());
         }
         let Some(normalized) = normalize_note_path(target) else {
-            return LinkResolution::Broken;
+            return if is_attachment_target(target) {
+                LinkResolution::Attachment
+            } else {
+                LinkResolution::Broken
+            };
         };
         let mut forms = vec![normalized.clone()];
         if note_extension(&normalized).is_none() {
@@ -679,6 +671,11 @@ impl KnowledgeIndex {
                 return LinkResolution::Note(paths.iter().next().cloned().unwrap_or_default());
             }
             return LinkResolution::Ambiguous(paths.iter().cloned().collect());
+        }
+
+        // 笔记查找全部落空后才把非笔记扩展名视为附件。
+        if is_attachment_target(target) {
+            return LinkResolution::Attachment;
         }
 
         LinkResolution::Broken

@@ -5,6 +5,7 @@
 //! replace exactly the target text and nothing else.
 
 use crate::{Link, ParsedNote, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag as MarkdownTag, TagEnd};
 use std::collections::BTreeSet;
 use std::ops::Range;
 
@@ -136,6 +137,16 @@ fn line_end(text: &str, offset: usize) -> usize {
         .map_or(text.len(), |index| offset + index)
 }
 
+fn line_start(text: &str, offset: usize) -> usize {
+    text[..offset.min(text.len())]
+        .rfind('\n')
+        .map_or(0, |index| index + 1)
+}
+
+fn next_line_start(text: &str, offset: usize) -> usize {
+    (line_end(text, offset) + 1).min(text.len())
+}
+
 fn next_char_len(text: &str, index: usize) -> usize {
     text.get(index..)
         .and_then(|rest| rest.chars().next())
@@ -172,143 +183,58 @@ fn mask_blocks(
     ignored: &mut [bool],
     diagrams: &mut Vec<Range<usize>>,
 ) {
-    struct Fence {
-        byte: u8,
-        length: usize,
+    struct OpenBlock {
+        start: usize,
+        body_start: usize,
+        last_text_end: usize,
         mermaid: bool,
-        open: usize,
-        body: usize,
     }
-    let mut fence: Option<Fence> = None;
-    let mut list_base: Option<usize> = None;
-    let mut line_start = body_start.min(text.len());
-    while line_start < text.len() {
-        let end_with_newline = line_end(text, line_start)
-            .checked_add(1)
-            .filter(|end| *end <= text.len())
-            .unwrap_or_else(|| line_end(text, line_start));
-        let end = if text.as_bytes().get(end_with_newline.wrapping_sub(1)) == Some(&b'\n') {
-            end_with_newline - 1
-        } else {
-            end_with_newline
-        };
-        let line = text.get(line_start..end).unwrap_or("");
-        if let Some(state) = &fence {
-            if closing_fence(line, state.byte, state.length) {
-                mark(ignored, state.open..end_with_newline);
-                if state.mermaid {
-                    diagrams.push(state.body..line_start);
+    let begin = body_start.min(text.len());
+    let mut open: Option<OpenBlock> = None;
+    let events = Parser::new_ext(&text[begin..], Options::empty())
+        .into_offset_iter()
+        .map(|(event, range)| (event, begin + range.start..begin + range.end));
+    for (event, range) in events {
+        match event {
+            Event::Start(MarkdownTag::CodeBlock(kind)) => {
+                let (body_start, mermaid) = match &kind {
+                    CodeBlockKind::Fenced(info) => (
+                        next_line_start(text, range.start),
+                        info.split_whitespace().next() == Some("mermaid"),
+                    ),
+                    CodeBlockKind::Indented => (range.start, false),
+                };
+                open = Some(OpenBlock {
+                    start: range.start,
+                    body_start,
+                    last_text_end: body_start,
+                    mermaid,
+                });
+            }
+            Event::Text(_) => {
+                if let Some(block) = &mut open {
+                    block.last_text_end = range.end;
                 }
-                fence = None;
             }
-            line_start = end_with_newline;
-            continue;
-        }
-        if let Some((byte, length, info)) = opening_fence(line) {
-            mark(ignored, line_start..end_with_newline);
-            fence = Some(Fence {
-                byte,
-                length,
-                mermaid: info.split_whitespace().next() == Some("mermaid"),
-                open: line_start,
-                body: end_with_newline,
-            });
-            line_start = end_with_newline;
-            continue;
-        }
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            let indent = line
-                .chars()
-                .take_while(|character| *character == ' ' || *character == '\t')
-                .map(|character| if character == '\t' { 4 } else { 1 })
-                .sum::<usize>();
-            if is_list_item(line) {
-                list_base = Some(indent);
-            } else if indent == 0 {
-                list_base = None;
+            Event::End(TagEnd::CodeBlock) => {
+                let Some(block) = open.take() else {
+                    continue;
+                };
+                mark(ignored, block.start..range.end);
+                if block.mermaid {
+                    // 有闭合围栏时正文止于围栏行首；未闭合时止于块的实际结尾。
+                    let closed = range.end > block.last_text_end;
+                    let body_end = if closed {
+                        line_start(text, range.end.saturating_sub(1))
+                    } else {
+                        range.end
+                    };
+                    diagrams.push(block.body_start.min(body_end)..body_end);
+                }
             }
-            if list_base.is_none() && (line.starts_with("    ") || line.starts_with('\t')) {
-                mark(ignored, line_start..end_with_newline);
-            }
-        }
-        line_start = end_with_newline;
-    }
-    if let Some(state) = fence {
-        mark(ignored, state.open..text.len());
-        if state.mermaid {
-            diagrams.push(state.body..text.len());
+            _ => {}
         }
     }
-}
-
-fn opening_fence(line: &str) -> Option<(u8, usize, &str)> {
-    let trimmed = line.trim_start_matches(' ');
-    if line.len() - trimmed.len() > 3 {
-        return None;
-    }
-    let byte = *trimmed.as_bytes().first()?;
-    if byte != b'`' && byte != b'~' {
-        return None;
-    }
-    let length = trimmed
-        .as_bytes()
-        .iter()
-        .take_while(|candidate| **candidate == byte)
-        .count();
-    if length < 3 {
-        return None;
-    }
-    let info = trimmed.get(length..)?.trim();
-    if byte == b'`' && info.contains('`') {
-        return None;
-    }
-    Some((byte, length, info))
-}
-
-fn closing_fence(line: &str, byte: u8, length: usize) -> bool {
-    let trimmed = line.trim_start_matches(' ');
-    if line.len() - trimmed.len() > 3 {
-        return false;
-    }
-    let run = trimmed
-        .as_bytes()
-        .iter()
-        .take_while(|candidate| **candidate == byte)
-        .count();
-    run >= length
-        && trimmed
-            .get(run..)
-            .is_some_and(|rest| rest.trim().is_empty())
-}
-
-fn is_list_item(line: &str) -> bool {
-    let trimmed = line.trim_start_matches(' ');
-    if line.len() - trimmed.len() > 3 {
-        return false;
-    }
-    let bytes = trimmed.as_bytes();
-    let Some(first) = bytes.first() else {
-        return false;
-    };
-    if matches!(first, b'-' | b'*' | b'+') {
-        return bytes
-            .get(1)
-            .is_some_and(|byte| *byte == b' ' || *byte == b'\t');
-    }
-    if first.is_ascii_digit() {
-        let digits = bytes
-            .iter()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count();
-        return bytes
-            .get(digits)
-            .is_some_and(|byte| *byte == b'.' || *byte == b')')
-            && bytes
-                .get(digits + 1)
-                .is_some_and(|byte| *byte == b' ' || *byte == b'\t');
-    }
-    false
 }
 
 fn mask_inline(text: &str, ignored: &mut [bool]) {
@@ -484,8 +410,23 @@ fn scan_diagram_links(text: &str, range: Range<usize>, lines: &Lines) -> Vec<Lin
     let mut links = Vec::new();
     let mut index = range.start.min(text.len());
     let end = range.end.min(text.len());
-    while index + 1 < end {
-        if text.as_bytes()[index] == b'\\' {
+    let mut quoted = false;
+    let mut escaped = false;
+    while index < end {
+        let Some(character) = text[index..].chars().next() else {
+            break;
+        };
+        if escaped {
+            escaped = false;
+            index += character.len_utf8();
+            continue;
+        }
+        if character == '\\' {
+            if quoted {
+                escaped = true;
+                index += 1;
+                continue;
+            }
             if let Some(next) = escaped_link_end(text, index, end) {
                 index = next;
             } else {
@@ -496,23 +437,79 @@ fn scan_diagram_links(text: &str, range: Range<usize>, lines: &Lines) -> Vec<Lin
             }
             continue;
         }
-        if text[index..].starts_with("%%") {
-            index = text[index + 2..end]
-                .find("%%")
-                .map_or(end, |position| index + 2 + position + 2);
+        if character == '"' {
+            quoted = !quoted;
+            index += 1;
             continue;
         }
-        let embed = text[index..].starts_with("![[");
-        if (embed || text[index..].starts_with("[["))
+        if !quoted && text[index..end].starts_with("%%") {
+            index = skip_diagram_comment(text, index, end);
+            continue;
+        }
+        let embed = text[index..end].starts_with("![[");
+        if (embed || text[index..end].starts_with("[["))
             && let Some(link) = parse_link_at(text, index, embed, true, lines)
         {
+            if link.end > end {
+                break;
+            }
             index = link.end;
+            if is_state_pseudo_link(text, &link) {
+                continue;
+            }
             links.push(link);
             continue;
         }
-        index += next_char_len(text, index);
+        index += character.len_utf8();
     }
     links
+}
+
+/// Mermaid 的 `%%` 到行尾结束；`%%{...}%%` 指令才跨行配对。
+fn skip_diagram_comment(text: &str, start: usize, end: usize) -> usize {
+    let rest = &text[start + 2..end];
+    if rest.starts_with('{') {
+        if let Some(position) = rest.find("}%%") {
+            return start + 2 + position + 3;
+        }
+        if let Some(position) = rest.find("%%") {
+            return start + 2 + position + 2;
+        }
+        return end;
+    }
+    text[start..end]
+        .find('\n')
+        .map_or(end, |position| start + position)
+}
+
+/// `state X [[choice]]` 等状态伪状态后缀不是 Wiki 链接。
+fn is_state_pseudo_link(text: &str, link: &Link) -> bool {
+    if !matches!(link.raw_target.as_str(), "choice" | "fork" | "join")
+        || link.heading.is_some()
+        || link.alias.is_some()
+    {
+        return false;
+    }
+    let start = line_start(text, link.start);
+    let end = line_end(text, link.end);
+    let prefix = strip_container_prefix(&text[start..link.start]);
+    let Some(rest) = prefix.strip_prefix("state") else {
+        return false;
+    };
+    let suffix = text[link.end..end].trim_start();
+    rest.starts_with(char::is_whitespace)
+        && (suffix.is_empty() || suffix.starts_with("%%") || suffix.starts_with(':'))
+}
+
+fn strip_container_prefix(mut line: &str) -> &str {
+    loop {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('>') {
+            line = rest;
+        } else {
+            return trimmed;
+        }
+    }
 }
 
 fn parse_link_at(
@@ -793,5 +790,15 @@ mod tests {
         let note = parse_note("```mermaid\nflowchart TB\nA[#not-a-tag] --> B[\"[[Note]]\"]\n```\n");
         assert!(note.tags.is_empty());
         assert_eq!(note.links[0].raw_target, "Note");
+    }
+
+    #[test]
+    fn mermaid_comment_at_eof_keeps_earlier_links() {
+        let note = parse_note(
+            "```mermaid\nflowchart TB\nA[\"[[Kept]]\"] --> B\n%% trailing without newline",
+        );
+        assert_eq!(note.links.len(), 1);
+        assert_eq!(note.links[0].raw_target, "Kept");
+        assert!(note.links[0].in_diagram);
     }
 }

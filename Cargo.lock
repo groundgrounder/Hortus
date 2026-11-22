@@ -401,6 +401,9 @@ dependencies = [
 [[package]]
 name = "hortus-links"
 version = "0.3.0"
+dependencies = [
+ "pulldown-cmark",
+]
 
 [[package]]
 name = "hortus-math"
