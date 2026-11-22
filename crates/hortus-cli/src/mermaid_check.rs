@@ -11,29 +11,38 @@ pub fn run(input: &Path, block: Option<usize>) -> Result<bool, String> {
     let bytes = std::fs::read(input)
         .map_err(|error| format!("unable to read {}: {error}", input.display()))?;
     let (_format, text, _valid) = Format::decode(&bytes);
+    let (valid, report) = evaluate(&text, &input.display().to_string(), block)?;
+    emit(&report)?;
+    Ok(valid)
+}
+
+/// 对已解码的正文执行同一套校验；MCP 与命令行共用，避免两套解析。
+pub fn evaluate(text: &str, file: &str, block: Option<usize>) -> Result<(bool, Value), String> {
     let mut entries = Vec::new();
     if let Some(requested) = block {
-        let block = mermaid_block(&text, requested).map_err(|error| match error {
+        let block = mermaid_block(text, requested).map_err(|error| match error {
             DiagramError::MissingBlock { requested } => {
                 format!("MissingBlock: requested={requested}")
             }
             other => other.to_string(),
         })?;
-        entries.push(report(&text, requested, &block));
+        entries.push(report(text, requested, &block));
     } else {
-        for (index, block) in mermaid_blocks(&text).iter().enumerate() {
-            entries.push(report(&text, index + 1, block));
+        for (index, block) in mermaid_blocks(text).iter().enumerate() {
+            entries.push(report(text, index + 1, block));
         }
     }
     let valid = entries
         .iter()
         .all(|entry| entry["valid"].as_bool().unwrap_or(false));
-    emit(&json!({
-        "file": input.display().to_string(),
-        "valid": valid,
-        "blocks": entries,
-    }))?;
-    Ok(valid)
+    Ok((
+        valid,
+        json!({
+            "file": file,
+            "valid": valid,
+            "blocks": entries,
+        }),
+    ))
 }
 
 fn report(text: &str, number: usize, block: &hortus_diagram::MermaidBlock<'_>) -> Value {

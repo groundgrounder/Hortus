@@ -1,3 +1,4 @@
+mod mcp;
 mod mermaid_check;
 mod query;
 
@@ -10,6 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const USAGE: &str = "Usage: hortus guide
+       hortus mcp [--vault DIR]
        hortus mermaid render <note.md> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json] [--scene scene.json]
        hortus mermaid check <note.md> [--block N]
        hortus search <query> [--vault DIR] [--limit N]
@@ -23,6 +25,9 @@ const USAGE: &str = "Usage: hortus guide
 enum Command {
     Usage,
     Guide,
+    Mcp {
+        vault: Option<PathBuf>,
+    },
     Render(Box<Arguments>),
     Search {
         query: String,
@@ -78,6 +83,20 @@ fn arguments() -> Result<Command, String> {
                 return Err(format!("unknown argument {extra}"));
             }
             return Ok(Command::Guide);
+        }
+        "mcp" => {
+            let mut vault = None;
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--help" | "-h" => return Ok(Command::Usage),
+                    "--vault" => {
+                        let value = args.next().ok_or("--vault requires a value")?;
+                        vault = Some(PathBuf::from(value));
+                    }
+                    other => return Err(format!("unknown option {other}")),
+                }
+            }
+            return Ok(Command::Mcp { vault });
         }
         "mermaid" => {
             let Some(subcommand) = args.next() else {
@@ -282,14 +301,13 @@ fn check_command(args: Vec<String>) -> Result<Command, String> {
 
 /// 写出有效指南原文；只读取配置目录，不创建目录、不迁移旧数据。
 fn run_guide() -> std::io::Result<()> {
-    let directories = hortus_config::Directories::resolve_from_env()?;
-    let guide = hortus_config::effective_guide(&directories.config)?;
+    let guide = mcp::guide_text().map_err(std::io::Error::other)?;
     let mut output = std::io::stdout().lock();
     output.write_all(guide.as_bytes())?;
     output.flush()
 }
 
-fn describe(error: &std::io::Error) -> String {
+pub(crate) fn describe(error: &std::io::Error) -> String {
     match error.to_string().as_str() {
         "guide.invalid_utf8" => "agent-guide.md is not valid UTF-8".into(),
         "guide.empty" => "agent-guide.md is empty".into(),
@@ -397,6 +415,13 @@ fn main() -> std::process::ExitCode {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{}", describe(&error));
+                std::process::ExitCode::FAILURE
+            }
+        },
+        Ok(Command::Mcp { vault }) => match mcp::run(vault.as_deref()) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
                 std::process::ExitCode::FAILURE
             }
         },

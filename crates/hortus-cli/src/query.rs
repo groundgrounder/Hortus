@@ -22,20 +22,7 @@ impl Vault {
     /// Resolves the vault root, scans notes and decodes them exactly like the
     /// editor. Nothing is ever written to the vault.
     pub fn load(explicit: Option<&Path>) -> Result<Self, String> {
-        let root = match explicit {
-            Some(path) => path.to_path_buf(),
-            None => match std::env::var_os("HORTUS_VAULT").filter(|value| !value.is_empty()) {
-                Some(value) => PathBuf::from(value),
-                None => std::env::current_dir()
-                    .map_err(|error| format!("unable to read current directory: {error}"))?,
-            },
-        };
-        let root = root
-            .canonicalize()
-            .map_err(|error| format!("unable to read vault: {error}"))?;
-        if !root.is_dir() {
-            return Err(format!("vault is not a directory: {}", root.display()));
-        }
+        let root = resolve_root(explicit)?;
         let mut notes = BTreeMap::new();
         scan(&root, &root, true, &mut notes)?;
         Ok(Self { root, notes })
@@ -118,6 +105,25 @@ impl Vault {
             None
         }
     }
+}
+
+/// 锁定库根：显式参数优先，其次 HORTUS_VAULT，最后当前目录；始终返回规范路径。
+pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, String> {
+    let root = match explicit {
+        Some(path) => path.to_path_buf(),
+        None => match std::env::var_os("HORTUS_VAULT").filter(|value| !value.is_empty()) {
+            Some(value) => PathBuf::from(value),
+            None => std::env::current_dir()
+                .map_err(|error| format!("unable to read current directory: {error}"))?,
+        },
+    };
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("unable to read vault: {error}"))?;
+    if !root.is_dir() {
+        return Err(format!("vault is not a directory: {}", root.display()));
+    }
+    Ok(root)
 }
 
 fn scan(
@@ -246,6 +252,10 @@ fn resolution_json(resolution: &LinkResolution) -> Value {
 
 pub fn search(explicit: Option<&Path>, query: &str, limit: usize) -> Result<(), String> {
     let vault = Vault::load(explicit)?;
+    emit(&search_value(&vault, query, limit))
+}
+
+pub fn search_value(vault: &Vault, query: &str, limit: usize) -> Value {
     let mut index = SearchIndex::new();
     for (path, note) in &vault.notes {
         index.upsert(path.clone(), note.text.clone());
@@ -269,18 +279,22 @@ pub fn search(explicit: Option<&Path>, query: &str, limit: usize) -> Result<(), 
             })
         })
         .collect::<Vec<_>>();
-    emit(&json!({
-        "vault": vault_path(&vault),
+    json!({
+        "vault": vault_path(vault),
         "query": query,
         "total_notes": total_notes,
         "results": results,
-    }))
+    })
 }
 
 pub fn backlinks(explicit: Option<&Path>, note: &str) -> Result<(), String> {
     let vault = Vault::load(explicit)?;
+    emit(&backlinks_value(&vault, note)?)
+}
+
+pub fn backlinks_value(vault: &Vault, note: &str) -> Result<Value, String> {
     let note = vault.resolve_note(note)?;
-    let index = knowledge(&vault);
+    let index = knowledge(vault);
     let backlinks = index
         .backlinks(&note)
         .ok_or_else(|| format!("note not found: {note}"))?;
@@ -299,8 +313,8 @@ pub fn backlinks(explicit: Option<&Path>, note: &str) -> Result<(), String> {
             })
         })
         .collect::<Vec<_>>();
-    emit(&json!({
-        "vault": vault_path(&vault),
+    Ok(json!({
+        "vault": vault_path(vault),
         "note": note,
         "count": items.len(),
         "backlinks": items,
@@ -309,8 +323,12 @@ pub fn backlinks(explicit: Option<&Path>, note: &str) -> Result<(), String> {
 
 pub fn links(explicit: Option<&Path>, note: &str) -> Result<(), String> {
     let vault = Vault::load(explicit)?;
+    emit(&links_value(&vault, note)?)
+}
+
+pub fn links_value(vault: &Vault, note: &str) -> Result<Value, String> {
     let note = vault.resolve_note(note)?;
-    let index = knowledge(&vault);
+    let index = knowledge(vault);
     let links = index
         .links(&note)
         .ok_or_else(|| format!("note not found: {note}"))?;
@@ -330,8 +348,8 @@ pub fn links(explicit: Option<&Path>, note: &str) -> Result<(), String> {
             })
         })
         .collect::<Vec<_>>();
-    emit(&json!({
-        "vault": vault_path(&vault),
+    Ok(json!({
+        "vault": vault_path(vault),
         "note": note,
         "count": items.len(),
         "links": items,
@@ -340,15 +358,19 @@ pub fn links(explicit: Option<&Path>, note: &str) -> Result<(), String> {
 
 pub fn tags(explicit: Option<&Path>, tag: Option<&str>) -> Result<(), String> {
     let vault = Vault::load(explicit)?;
-    let index = knowledge(&vault);
+    emit(&tags_value(&vault, tag))
+}
+
+pub fn tags_value(vault: &Vault, tag: Option<&str>) -> Value {
+    let index = knowledge(vault);
     if let Some(tag) = tag {
         let notes = index.notes_with_tag(tag);
-        return emit(&json!({
-            "vault": vault_path(&vault),
+        return json!({
+            "vault": vault_path(vault),
             "tag": tag_key(tag),
             "count": notes.len(),
             "notes": notes,
-        }));
+        });
     }
     let tags = index.tags();
     let count = tags.len();
@@ -362,15 +384,19 @@ pub fn tags(explicit: Option<&Path>, tag: Option<&str>) -> Result<(), String> {
             })
         })
         .collect::<Vec<_>>();
-    emit(&json!({
-        "vault": vault_path(&vault),
+    json!({
+        "vault": vault_path(vault),
         "count": count,
         "tags": items,
-    }))
+    })
 }
 
 pub fn outline(explicit: Option<&Path>, note: &str) -> Result<(), String> {
     let vault = Vault::load(explicit)?;
+    emit(&outline_value(&vault, note)?)
+}
+
+pub fn outline_value(vault: &Vault, note: &str) -> Result<Value, String> {
     let note = vault.resolve_note(note)?;
     let Some(file) = vault.notes.get(&note) else {
         return Err(format!("note not found: {note}"));
@@ -390,8 +416,8 @@ pub fn outline(explicit: Option<&Path>, note: &str) -> Result<(), String> {
             })
         })
         .collect::<Vec<_>>();
-    emit(&json!({
-        "vault": vault_path(&vault),
+    Ok(json!({
+        "vault": vault_path(vault),
         "note": note,
         "headings": headings,
     }))
@@ -420,18 +446,26 @@ fn utf16_to_byte(text: &str, units: usize) -> Option<usize> {
 
 pub fn orphans(explicit: Option<&Path>) -> Result<(), String> {
     let vault = Vault::load(explicit)?;
-    let index = knowledge(&vault);
+    emit(&orphans_value(&vault))
+}
+
+pub fn orphans_value(vault: &Vault) -> Value {
+    let index = knowledge(vault);
     let orphans = index.orphans();
-    emit(&json!({
-        "vault": vault_path(&vault),
+    json!({
+        "vault": vault_path(vault),
         "count": orphans.len(),
         "orphans": orphans,
-    }))
+    })
 }
 
 pub fn broken_links(explicit: Option<&Path>) -> Result<(), String> {
     let vault = Vault::load(explicit)?;
-    let index = knowledge(&vault);
+    emit(&broken_links_value(&vault))
+}
+
+pub fn broken_links_value(vault: &Vault) -> Value {
+    let index = knowledge(vault);
     let broken = index.broken_links();
     let items = broken
         .into_iter()
@@ -449,9 +483,9 @@ pub fn broken_links(explicit: Option<&Path>) -> Result<(), String> {
             })
         })
         .collect::<Vec<_>>();
-    emit(&json!({
-        "vault": vault_path(&vault),
+    json!({
+        "vault": vault_path(vault),
         "count": items.len(),
         "broken_links": items,
-    }))
+    })
 }

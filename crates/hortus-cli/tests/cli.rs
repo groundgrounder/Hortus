@@ -131,7 +131,8 @@ fn errors_have_nonzero_exit_codes_and_do_not_write_output() {
     assert!(help.status.success());
     let stdout = String::from_utf8_lossy(&help.stdout);
     assert!(stdout.starts_with("Usage: hortus"), "{stdout}");
-    assert!(stdout.contains("hortus guide") && stdout.contains("hortus mermaid render"));
+    assert!(stdout.contains("hortus guide") && stdout.contains("hortus mcp [--vault DIR]"));
+    assert!(stdout.contains("hortus mermaid render"));
     assert!(
         !contains_han(&stdout),
         "CLI help output must be English: {stdout}"
@@ -142,6 +143,11 @@ fn errors_have_nonzero_exit_codes_and_do_not_write_output() {
             .status
             .success()
     );
+    for arguments in [vec!["mcp", "--bogus"], vec!["mcp", "--vault"]] {
+        let error = sandbox.invoke(&arguments);
+        assert!(!error.status.success(), "{arguments:?}");
+        assert!(String::from_utf8_lossy(&error.stderr).is_ascii());
+    }
 }
 
 #[test]
