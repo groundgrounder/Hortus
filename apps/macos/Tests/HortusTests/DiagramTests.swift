@@ -226,7 +226,8 @@ struct DiagramTests {
                                                     width: 700, dark: false)
         let first = try #require(firstResult.first?.prepared)
         let ids = first.scene.hitRegions.map(\.nodeId)
-        #expect(ids.count > Set(ids).count, "高时序图应出现顶部/底部镜像胶囊")
+        #expect(Set(ids).count == ids.count, "高时序图镜像胶囊应使用独立 nodeId")
+        #expect(ids.contains("U#mirror") && ids.contains("M#mirror"), "高时序图应出现顶部/底部镜像胶囊")
         let secondBlocks = try await secondService.blocks(source: changed, mmd: true, vault: "test",
                                                           note: "seq.mmd", core: nil)
         let secondResult = await secondService.render(source: changed, mmd: true, blocks: secondBlocks,
@@ -235,7 +236,30 @@ struct DiagramTests {
         let view = DiagramView(prepared: first)
         view.update(second)
         #expect(view.accessibilityNodeCount == second.scene.hitRegions.count)
-        #expect(Set(second.scene.hitRegions.map(\.nodeId)).count < second.scene.hitRegions.count)
+        #expect(Set(second.scene.hitRegions.map(\.nodeId)).count == second.scene.hitRegions.count)
+
+        // 即使上游场景出现重复 nodeId，Swift 侧更新也必须去重而不触发运行时陷阱。
+        func duplicateMirrorIDs(_ prepared: PreparedScene) throws -> PreparedScene {
+            let hits = prepared.scene.hitRegions.map { hit in
+                var copy = hit
+                if copy.nodeId.hasSuffix("#mirror") {
+                    copy.nodeId = String(copy.nodeId.dropLast("#mirror".count))
+                }
+                return copy
+            }
+            let data = SceneData(schemaVersion: 2, identity: prepared.scene.identity, previous: nil,
+                                 graphMetrics: prepared.scene.graphMetrics, width: prepared.scene.width,
+                                 height: prepared.scene.height, primitives: prepared.scene.primitives,
+                                 hitRegions: hits, wireBytes: 0, layoutMs: 0, semanticJson: nil)
+            return PreparedScene(scene: try DiagramScene(data), sourceRanges: prepared.sourceRanges,
+                                 edgeRanges: prepared.edgeRanges, edgeLabels: prepared.edgeLabels)
+        }
+        let dupFirst = try duplicateMirrorIDs(first)
+        let dupSecond = try duplicateMirrorIDs(second)
+        #expect(Set(dupFirst.scene.hitRegions.map(\.nodeId)).count < dupFirst.scene.hitRegions.count)
+        let dupView = DiagramView(prepared: dupFirst)
+        dupView.update(dupSecond)
+        #expect(dupView.accessibilityNodeCount == dupSecond.scene.hitRegions.count)
     }
 
     @Test func stateDiagramsRenderNativelyWithSourceRanges() async throws {
