@@ -468,6 +468,52 @@ fn absolute_note_paths_inside_the_vault_resolve() {
 }
 
 #[test]
+fn mermaid_check_infers_types_after_comments_and_directives() {
+    let fixture = Fixture::new();
+    let vault = fixture.vault();
+    write(
+        &vault.join("commented.md"),
+        concat!(
+            "```mermaid\n%% note\nflowchart TB\nsubgraph G\nA --> B\nend\n```\n\n",
+            "```mermaid\n%%{init: {'theme': 'dark'}}%%\nsequenceDiagram\nA->>B: x\n```\n\n",
+            "```mermaid\n%% note\nmindmap\n  Root\n```\n\n",
+            "```mermaid\n%%{init:\n  'theme': 'dark'\n}%%\nstateDiagram-v2\n[*] --> A\n```\n\n",
+            "```mermaid\n%% note\nflowchart TB\nA[unclosed\n```\n\n",
+            "```mermaid\n%%{init:\n  'theme': 'dark'\n}%%\nsequenceDiagram\nA->>B: x\nB ??? C\n```\n\n",
+            "```mermaid\n%%{init:\n  'theme': 'dark'\n}%%\nmindmap\n  Root\n```\n\n",
+            "```mermaid\n%%{init:\n  'theme': 'dark'\n}%%\nstateDiagram-v2\n状态 --> --> B\n```\n",
+        ),
+    );
+    let result = run(&vault, &["mermaid", "check", "commented.md"], &[]);
+    assert!(!result.status.success());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let blocks = report["blocks"].as_array().unwrap();
+    let types = blocks
+        .iter()
+        .map(|block| block["diagram_type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        types,
+        [
+            "flowchart",
+            "sequence",
+            "tree",
+            "state",
+            "flowchart",
+            "sequence",
+            "tree",
+            "state"
+        ]
+    );
+    for block in &blocks[..4] {
+        assert_eq!(block["valid"], true, "{block}");
+    }
+    for block in &blocks[4..] {
+        assert_eq!(block["valid"], false, "{block}");
+    }
+}
+
+#[test]
 fn mermaid_check_classifies_valid_and_invalid_state_fences() {
     let fixture = Fixture::new();
     let vault = fixture.vault();

@@ -63,14 +63,7 @@ pub fn diagram_blocks(note: String) -> Vec<DiagramBlock> {
             fence_end: b.fence_range.end as u64,
             source_start: b.source_range.start as u64,
             source_end: b.source_range.end as u64,
-            diagram_type: b
-                .source
-                .lines()
-                .map(str::trim)
-                .find(|s| !s.is_empty() && !s.starts_with("%%"))
-                .unwrap_or("")
-                .split_whitespace()
-                .next()
+            diagram_type: hortus_diagram::infer_diagram_header(&b.source)
                 .unwrap_or("")
                 .into(),
         })
@@ -319,6 +312,31 @@ mod tests {
             assert!(block.source_end <= block.fence_end);
         }
         assert_eq!(blocks[1].fence_end as usize, source.len());
+    }
+
+    #[test]
+    fn block_types_skip_comments_and_directives() {
+        let source = concat!(
+            "```mermaid\n%% comment\nflowchart TB\nA --> B\n```\n\n",
+            "```mermaid\n%%{init:\n  'theme': 'dark'\n}%%\nsequenceDiagram\nA->>B: x\n```\n\n",
+            "```mermaid\n%%{init: {'theme': 'dark'}}%%\nmindmap\n  Root\n```\n\n",
+            "```mermaid\n%% comment\n%%{init: {'theme': 'base'}}%%\nstateDiagram-v2\n[*] --> A\n```\n\n",
+            "```mermaid\n%% comment\nflowchart TB\nA[unclosed\n```\n",
+        );
+        let types = diagram_blocks(source.into())
+            .iter()
+            .map(|block| block.diagram_type.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            types,
+            [
+                "flowchart",
+                "sequenceDiagram",
+                "mindmap",
+                "stateDiagram-v2",
+                "flowchart"
+            ]
+        );
     }
 
     #[test]

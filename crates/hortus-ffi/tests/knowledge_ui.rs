@@ -134,6 +134,71 @@ fn shared_queries_use_the_editor_projection_and_update_together() {
 }
 
 #[test]
+fn container_fences_and_mermaid_comments_share_the_masking() {
+    let source = concat!(
+        "> ```rust\n",
+        "> [[not-a-link]] #not-a-tag\n",
+        "> ```\n\n",
+        "> [!note]\n",
+        "> ```mermaid\n",
+        "> flowchart TB\n",
+        "> %% ordinary comment\n",
+        "> A[\"[[design]]\"] --> B\n",
+        "> #mermaid-tag\n",
+        "> ```\n\n",
+        "```mermaid\n",
+        "%% comment\n",
+        "flowchart TB\n",
+        "C[\"[[design]]\"] --> D\n",
+        "```\n\n",
+        "[[design]]\n",
+    );
+    let (_temporary, _root, handle) =
+        fixture(&[("design.md", b""), ("probe.md", source.as_bytes())]);
+    let links = handle.links("probe.md".into());
+    assert_eq!(links.len(), 3);
+    assert!(links[0].in_diagram && links[1].in_diagram);
+    assert!(!links[2].in_diagram);
+    assert_eq!(handle.tags().len(), 0);
+    assert_eq!(handle.backlinks("design.md".into()).len(), 3);
+
+    let code_at = source.find("[[not-a-link]]").unwrap() as u64;
+    assert!(
+        handle
+            .link_completions_at(source.into(), code_at, "des".into(), 5)
+            .is_empty()
+    );
+    let diagram_at = source.find("[[design]]").unwrap() as u64;
+    assert!(
+        handle
+            .link_completions_at(source.into(), diagram_at, "des".into(), 5)
+            .is_empty()
+    );
+    let outside_at = source.rfind("[[design]]").unwrap() as u64;
+    assert_eq!(
+        handle
+            .link_completions_at(source.into(), outside_at, "des".into(), 5)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn malformed_inputs_do_not_poison_following_queries() {
+    let (_temporary, _root, handle) = fixture(&[("a.md", b"[[b]] #tag"), ("b.md", b"")]);
+    let _ = handle.knowledge_markup("missing.md".into(), "[[".into());
+    let _ = handle.knowledge_markup("a.md".into(), "![[".into());
+    let _ = handle.link_completions_at("[[".into(), u64::MAX, "x".into(), 0);
+    let _ = handle.link_completions_at(String::new(), 0, "x".into(), 0);
+    let _ = handle.resolve_link("a.md".into(), String::new());
+    let _ = handle.resolve_link("a.md".into(), "../outside".into());
+    let _ = handle.plan_rename_links("missing.md".into(), "x.md".into());
+    assert_eq!(handle.backlinks("b.md".into()).len(), 1);
+    assert_eq!(handle.tags().len(), 1);
+    assert!(!handle.link_completions("b".into(), 5).is_empty());
+}
+
+#[test]
 fn confirmed_rename_rewrites_exact_bytes_and_reports_skips() {
     let target = b"---\naliases: [Blueprint]\n---\n";
     let source = "\u{feff}中文🔬\r\n![[ design # Section Two | Index ]] and [[design.md]]\n[[Blueprint]]\r\n";

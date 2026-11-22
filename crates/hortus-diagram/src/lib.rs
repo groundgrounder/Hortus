@@ -32,8 +32,8 @@ pub use graph_layout::{GraphMetrics, GraphScene, layout_graph};
 pub use graph_state::{EdgeAnchor, GraphAnchor, GraphViewport, PreviousGraph, ViewportAnchor};
 pub use layout::{LayoutError, LayoutOptions, layout, partition};
 pub use parser::{
-    ClassStyle, DiagramError, MermaidBlock, Node, Tree, mermaid_block, mermaid_blocks, parse,
-    parse_at, parse_diagram, parse_diagram_at,
+    ClassStyle, DiagramError, MermaidBlock, Node, Tree, infer_diagram_header, mermaid_block,
+    mermaid_blocks, parse, parse_at, parse_diagram, parse_diagram_at,
 };
 pub use scene::{HitRegion, Metrics, Point, Primitive, Rect, Scene, TextSpan, Theme};
 pub use sequence::{

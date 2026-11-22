@@ -76,20 +76,13 @@ fn diagram_type(diagram: &Diagram) -> &'static str {
 }
 
 fn infer_type(source: &str) -> String {
-    if hortus_diagram::is_state_diagram(source) {
-        return "state".into();
-    }
-    let first = source
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .trim();
-    match first.split_whitespace().next().unwrap_or("") {
-        "mindmap" => "tree".into(),
-        "flowchart" | "graph" => "flowchart".into(),
-        "sequenceDiagram" => "sequence".into(),
-        "" => "unknown".into(),
-        other => other.to_owned(),
+    match hortus_diagram::infer_diagram_header(source) {
+        Some("stateDiagram" | "stateDiagram-v2") => "state".into(),
+        Some("mindmap") => "tree".into(),
+        Some("flowchart" | "graph") => "flowchart".into(),
+        Some("sequenceDiagram") => "sequence".into(),
+        Some(other) => other.to_owned(),
+        None => "unknown".into(),
     }
 }
 

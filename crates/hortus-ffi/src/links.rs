@@ -4,6 +4,15 @@ use hortus_links::{LinkResolution, LinkRewrite, ResolvedLink};
 use hortus_vault::note::{self, WriteFailure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+
+/// 单次异常只丢失当前调用的结果，后续查询仍可继续使用索引。
+fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(|poisoned| {
+        lock.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 #[derive(Debug, uniffi::Record)]
 pub struct BacklinkInfo {
@@ -199,8 +208,8 @@ impl VaultHandle {
         &self,
         updates: impl IntoIterator<Item = (String, Option<String>)>,
     ) {
-        let mut search = self.search.lock().unwrap();
-        let mut links = self.links.lock().unwrap();
+        let mut search = recover_lock(&self.search);
+        let mut links = recover_lock(&self.links);
         for (path, text) in updates {
             if let Some(text) = text {
                 if links.text(&path) == Some(&text) {
@@ -239,11 +248,8 @@ impl VaultHandle {
         {
             return Err(CoreError::failure("knowledge.rename_required"));
         }
-        let _update = self.index_update.lock().unwrap();
-        let preview = self
-            .rename_plans
-            .lock()
-            .unwrap()
+        let _update = recover_lock(&self.index_update);
+        let preview = recover_lock(&self.rename_plans)
             .pending
             .remove(&(old_path.clone(), new_path.clone()))
             .ok_or_else(|| CoreError::failure("knowledge.rename_plan_missing"))?;
@@ -344,21 +350,21 @@ impl VaultHandle {
 #[uniffi::export]
 impl VaultHandle {
     pub fn backlinks(&self, path: String) -> Vec<BacklinkInfo> {
-        let index = self.links.lock().unwrap();
+        let index = recover_lock(&self.links);
         let mut offsets = UTF16Offset::default();
         let mut source = String::new();
         index
             .backlinks(&path)
             .unwrap_or_default()
             .into_iter()
-            .map(|link| {
+            .filter_map(|link| {
                 if source != link.source {
                     source.clone_from(&link.source);
                     offsets = UTF16Offset::default();
                 }
-                let text = index.text(&source).expect("indexed backlink source");
+                let text = index.text(&source)?;
                 let (start_utf16, length_utf16) = offsets.range(text, link.start, link.end);
-                BacklinkInfo {
+                Some(BacklinkInfo {
                     source: link.source,
                     target: link.target,
                     heading: link.heading,
@@ -369,13 +375,13 @@ impl VaultHandle {
                     line: link.line as u64,
                     start_utf16,
                     length_utf16,
-                }
+                })
             })
             .collect()
     }
 
     pub fn links(&self, path: String) -> Vec<ResolvedLinkInfo> {
-        let index = self.links.lock().unwrap();
+        let index = recover_lock(&self.links);
         resolved_links(
             index.text(&path).unwrap_or_default(),
             index.links(&path).unwrap_or_default(),
@@ -383,7 +389,7 @@ impl VaultHandle {
     }
 
     pub fn knowledge_markup(&self, path: String, text: String) -> KnowledgeMarkupInfo {
-        let (links, tags) = self.links.lock().unwrap().markup(&path, &text);
+        let (links, tags) = recover_lock(&self.links).markup(&path, &text);
         let mut offsets = UTF16Offset::default();
         let tags = tags
             .into_iter()
@@ -403,9 +409,7 @@ impl VaultHandle {
     }
 
     pub fn tags(&self) -> Vec<TagSummaryInfo> {
-        self.links
-            .lock()
-            .unwrap()
+        recover_lock(&self.links)
             .tags()
             .into_iter()
             .map(|tag| TagSummaryInfo {
@@ -418,13 +422,11 @@ impl VaultHandle {
     }
 
     pub fn notes_with_tag(&self, tag: String) -> Vec<String> {
-        self.links.lock().unwrap().notes_with_tag(&tag)
+        recover_lock(&self.links).notes_with_tag(&tag)
     }
 
     pub fn resolve_link(&self, source_path: String, raw_target: String) -> LinkResolutionInfo {
-        self.links
-            .lock()
-            .unwrap()
+        recover_lock(&self.links)
             .resolve(&source_path, &raw_target)
             .into()
     }
@@ -451,9 +453,7 @@ impl VaultHandle {
     }
 
     pub fn link_completions(&self, query: String, limit: u32) -> Vec<LinkCompletionInfo> {
-        self.links
-            .lock()
-            .unwrap()
+        recover_lock(&self.links)
             .completions(&query, limit as usize)
             .into_iter()
             .map(|hit| LinkCompletionInfo {
@@ -466,20 +466,20 @@ impl VaultHandle {
     }
 
     pub fn plan_rename_links(&self, old_path: String, new_path: String) -> RenameLinkPlanInfo {
-        let index = self.links.lock().unwrap();
-        let mut plans = self.rename_plans.lock().unwrap();
+        let index = recover_lock(&self.links);
+        let mut plans = recover_lock(&self.rename_plans);
         let mut planned: BTreeMap<String, PlannedFile> = BTreeMap::new();
         if note::note_path(self.vault.root(), &old_path).is_ok()
             && note::note_path(self.vault.root(), &new_path).is_ok()
         {
             for edit in index.plan_rename_links(&old_path, &new_path) {
+                let Some(text) = index.text(&edit.source) else {
+                    continue;
+                };
                 planned
                     .entry(edit.source.clone())
                     .or_insert_with(|| PlannedFile {
-                        text: index
-                            .text(&edit.source)
-                            .expect("indexed rewrite source")
-                            .into(),
+                        text: text.to_owned(),
                         edits: vec![],
                     })
                     .edits
@@ -550,5 +550,86 @@ impl VaultHandle {
         temporary: String,
     ) -> Result<RenameLinksResultInfo, CoreError> {
         self.rewrite_rename(old_path, new_path, skip_paths, Path::new(&temporary))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn poison<T>(lock: &Mutex<T>) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = lock.lock().unwrap();
+            panic!("inject lock poison");
+        }));
+        assert!(lock.is_poisoned());
+    }
+
+    #[test]
+    fn poisoned_vault_locks_recover_for_queries_and_rename() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("vault");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.md"), "[[b]] #tag").unwrap();
+        std::fs::write(root.join("b.md"), "").unwrap();
+        let core = crate::WorkspaceCore::in_directories(
+            temporary.path().join("config").to_string_lossy().into(),
+            temporary.path().join("cache").to_string_lossy().into(),
+        )
+        .unwrap();
+        let handle = core
+            .open_vault(root.to_string_lossy().into_owned())
+            .unwrap();
+        handle.update_search_index(vec!["a.md".into(), "b.md".into()], vec![]);
+
+        poison(&handle.search);
+        poison(&handle.links);
+        poison(&handle.index_update);
+        poison(&handle.rename_plans);
+
+        assert_eq!(handle.backlinks("b.md".into()).len(), 1);
+        assert_eq!(handle.links("a.md".into()).len(), 1);
+        assert_eq!(
+            handle
+                .knowledge_markup("a.md".into(), "[[b]] #fresh".into())
+                .tags
+                .len(),
+            1
+        );
+        assert_eq!(handle.tags().len(), 1);
+        assert_eq!(handle.notes_with_tag("tag".into()), vec!["a.md"]);
+        assert_eq!(
+            handle
+                .resolve_link("a.md".into(), "b".into())
+                .resolved_path
+                .as_deref(),
+            Some("b.md")
+        );
+        assert_eq!(handle.link_completions("b".into(), 5).len(), 1);
+        assert_eq!(
+            handle
+                .link_completions_at("[[b]]".into(), 0, "b".into(), 5)
+                .len(),
+            1
+        );
+
+        let plan = handle.plan_rename_links("b.md".into(), "c.md".into());
+        assert_eq!(plan.total_rewrites, 1);
+        handle.rename_entry("b.md".into(), "c.md".into()).unwrap();
+        let result = handle
+            .apply_rename_links("b.md".into(), "c.md".into(), vec![])
+            .unwrap();
+        assert_eq!(result.updated, vec!["a.md"]);
+        assert_eq!(result.total_rewrites, 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.md")).unwrap(),
+            "[[c]] #tag"
+        );
+        assert!(!handle.search.is_poisoned());
+        assert!(!handle.links.is_poisoned());
+        assert!(!handle.index_update.is_poisoned());
+        assert!(!handle.rename_plans.is_poisoned());
+        handle.close();
     }
 }

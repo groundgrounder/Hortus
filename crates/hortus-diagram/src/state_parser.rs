@@ -76,21 +76,12 @@ fn statement<'a>(mut line: Line<'a>, directive: &mut bool) -> Line<'a> {
     }
 }
 
-fn header(line: &str) -> bool {
-    matches!(
-        line.split(|ch: char| ch.is_whitespace() || ch == ';')
-            .next(),
-        Some("stateDiagram" | "stateDiagram-v2")
-    )
-}
-
 /// 使用与状态图解析相同的注释和指令规则识别图头。
 pub fn is_state_diagram(source: &str) -> bool {
-    let mut directive = false;
-    lines(source)
-        .map(|line| statement(line, &mut directive))
-        .find(|line| !line.text.is_empty())
-        .is_some_and(|line| header(line.text))
+    matches!(
+        crate::parser::infer_diagram_header(source),
+        Some("stateDiagram" | "stateDiagram-v2")
+    )
 }
 
 #[derive(Default)]

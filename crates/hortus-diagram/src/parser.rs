@@ -295,6 +295,34 @@ pub fn parse_diagram_at(source: &str, offset: usize) -> Result<Diagram, DiagramE
     }
 }
 
+/// 跳过单行 `%%` 注释与跨行 `%%{...}%%` 指令后的图头词。
+///
+/// 返回值是第一条有效语句的首个空白分隔词，例如 `flowchart`、
+/// `sequenceDiagram` 或 `stateDiagram-v2`；全篇只有注释或指令时为 `None`。
+pub fn infer_diagram_header(source: &str) -> Option<&str> {
+    let mut rest = source;
+    loop {
+        rest = rest.trim_start_matches(|ch: char| ch.is_whitespace() || ch == ';');
+        if rest.is_empty() {
+            return None;
+        }
+        if let Some(directive) = rest.strip_prefix("%%{") {
+            let end = directive.find("}%%")?;
+            rest = &directive[end + 3..];
+            continue;
+        }
+        if let Some(comment) = rest.strip_prefix("%%") {
+            let end = comment.find('\n')?;
+            rest = &comment[end + 1..];
+            continue;
+        }
+        let end = rest
+            .find(|ch: char| ch.is_whitespace() || ch == ';')
+            .unwrap_or(rest.len());
+        return Some(&rest[..end]);
+    }
+}
+
 fn parse_diagram_relative(source: &str) -> Result<Diagram, DiagramError> {
     let first = crate::syntax::first_statement(source, TREE_STATEMENTS)
         .map(|(_, statement)| statement)
@@ -970,5 +998,46 @@ fn mindmap_annotations(
                 "unrecognized_mindmap_suffix",
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::infer_diagram_header;
+
+    #[test]
+    fn header_inference_skips_single_line_comments_and_blank_statements() {
+        assert_eq!(
+            infer_diagram_header("flowchart TB\nA --> B"),
+            Some("flowchart")
+        );
+        assert_eq!(
+            infer_diagram_header("%% note; still comment\n\n;;sequenceDiagram\nA->>B: x"),
+            Some("sequenceDiagram")
+        );
+        assert_eq!(infer_diagram_header("  %% a\n\n;;graph LR"), Some("graph"));
+        assert_eq!(infer_diagram_header("%% only a comment"), None);
+        assert_eq!(infer_diagram_header(" \n\t;"), None);
+    }
+
+    #[test]
+    fn header_inference_skips_single_and_multi_line_directives() {
+        assert_eq!(
+            infer_diagram_header("%%{init: {'theme': 'dark'}}%%\nmindmap\n  Root"),
+            Some("mindmap")
+        );
+        assert_eq!(
+            infer_diagram_header(
+                "%%{init:\n  'theme': 'dark',\n  'flowchart': {'curve': 'basis'}\n}%%\nflowchart LR\nA --> B"
+            ),
+            Some("flowchart")
+        );
+        assert_eq!(
+            infer_diagram_header(
+                "%% comment\n%%{init: {'theme': 'base'}}%%\nstateDiagram-v2\n[*] --> A"
+            ),
+            Some("stateDiagram-v2")
+        );
+        assert_eq!(infer_diagram_header("%%{init: {'theme': 'dark'}"), None);
     }
 }
