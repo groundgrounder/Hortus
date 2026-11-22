@@ -63,6 +63,7 @@ struct EditorView: View {
     var body: some View {
         let note = workspace.current
         let readable = note?.loading == false && note?.error == nil ? note : nil
+        let path = readable?.path ?? ""
         VStack(spacing: 0) {
             if let document = readable?.document { DocumentNotice(document: document) }
             ZStack {
@@ -76,7 +77,11 @@ struct EditorView: View {
                                     if let path = readable?.path { workspace.rememberDiagram(note: path, block: ordinal, collapsed: nodes) }
                                 },
                                 onFocus: { workspace.enterFocus(block: $0) },
-                                refreshToken: workspace.diagramRefreshToken)
+                                refreshToken: workspace.diagramRefreshToken,
+                                knowledgeHandle: workspace.context?.handle,
+                                knowledgeVersion: workspace.context?.knowledgeVersion ?? 0,
+                                openLink: { workspace.openLink(source: path, target: $0, heading: $1) },
+                                showTag: { workspace.showTag($0) })
                 } else {
                 NoteText(text: readable?.text ?? "", path: readable?.path ?? "", vault: workspace.root ?? "", fontSize: workspace.fontSize,
                          service: workspace.diagrams, core: workspace.diagramCore, document: readable?.document,
@@ -84,7 +89,10 @@ struct EditorView: View {
                              if let path = readable?.path { workspace.rememberDiagram(note: path, block: ordinal, collapsed: nodes) }
                          },
                          onFocus: { workspace.enterFocus(block: $0) },
-                         refreshToken: workspace.diagramRefreshToken)
+                         refreshToken: workspace.diagramRefreshToken,
+                         knowledgeHandle: workspace.context?.handle,
+                         knowledgeLocked: workspace.context?.knowledgeRewritePaths.contains(path) == true,
+                         openLink: { workspace.openLink(source: path, target: $0, heading: $1) })
                 .opacity(readable == nil ? 0 : 1)
                 .allowsHitTesting(readable != nil)
                 .accessibilityHidden(readable == nil)
@@ -114,6 +122,13 @@ struct EditorView: View {
                         .id(session.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+            }
+            if let message = workspace.knowledgeMessage {
+                Text(message).font(.callout).foregroundStyle(.secondary)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.bar)
+                    .accessibilityIdentifier("knowledge-message")
             }
         }
         .background(ContentFrameProbe(name: "editor-column"))

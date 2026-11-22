@@ -10,6 +10,10 @@ struct PanelContent: View {
             files
         case .tool(.search):
             SearchPanel()
+        case .tool(.tags):
+            TagsPanel()
+        case .tool(.backlinks):
+            BacklinksPanel()
         case .tool(.outline):
             OutlinePanel()
         case .tool(.changes):
@@ -20,8 +24,6 @@ struct PanelContent: View {
             } else {
                 terminalEmptyState
             }
-        case .legacy:
-            EmptyView()
         }
     }
 

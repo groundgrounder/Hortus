@@ -63,7 +63,7 @@ struct ShellView: View {
 
     /// 拖动时，隐藏或空着的区域在窗口边缘显示落点
     @ViewBuilder private var edgeDropZones: some View {
-        if layout.dragging?.isAvailable == true {
+        if layout.dragging != nil {
             ZStack {
                 ForEach(Region.allCases.filter { !layout.isShown($0) }) { edgeZone($0) }
             }

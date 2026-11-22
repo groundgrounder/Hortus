@@ -59,6 +59,10 @@ enum FileNaming {
     }
 }
 
+enum RenameLinkChoice {
+    case update, renameOnly, cancel
+}
+
 /// 文件管理交互：新建笔记/文件夹、重命名与移到废纸篓。
 /// I/O 在后台线程执行；树缓存、标签与搜索索引立即同步。
 extension Workspace {
@@ -110,6 +114,128 @@ extension Workspace {
         let entry = try await runFileOp { try $0.renameEntry(path: path, newName: newName) }
         finishRename(oldPath: path, entry: entry)
         return entry
+    }
+
+    /// 在改名前确认引用预览；只有确认更新后才使用系统替换目录写入受影响笔记。
+    @discardableResult
+    func renameNoteWithPreview(path: String, newName: String, window: NSWindow?) async throws -> TreeEntry? {
+        guard let context, let entry = entries[path] else { throw CocoaError(.fileNoSuchFile) }
+        if entry.directory { return try await renameEntry(path: path, newName: newName) }
+        guard !context.renaming else { throw CoreError.Failure(kind: "knowledge.rename_busy") }
+        context.renaming = true
+        defer { context.renaming = false }
+
+        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard FileNaming.localError(name) == nil,
+              ["md", "markdown", "mmd"].contains((name as NSString).pathExtension.lowercased()) else {
+            throw CoreError.Failure(kind: "vault.invalid_name")
+        }
+        let parent = entry.parent
+        let target = parent.isEmpty ? name : parent + "/" + name
+        // 初次扫描完成前可能还没发现全部入链。
+        while context.searchIndexReadyMilliseconds == nil {
+            try await Task.sleep(for: .milliseconds(30))
+            guard self.context === context else { throw CancellationError() }
+        }
+        let plan = try await runFileOp { $0.planRenameLinks(oldPath: path, newPath: target) }
+        guard plan.totalRewrites > 0 else { return try await renameEntry(path: path, newName: name) }
+        let choice = await confirmRenameLinks(plan, window: window)
+        guard self.context === context else { throw CancellationError() }
+        switch choice {
+        case .cancel: return nil
+        case .renameOnly: return try await renameEntry(path: path, newName: name)
+        case .update: break
+        }
+        let candidates = Set(plan.files.map(\.sourcePath))
+        var skipped = Set<String>()
+        var locked: [NoteDocument] = []
+        for workspace in context.attachedWorkspaces {
+            for tab in workspace.tabs where candidates.contains(tab.path) {
+                guard let document = tab.document else { continue }
+                if document.dirty || document.marked || document.issue == .conflict || document.issue == .recovery {
+                    skipped.insert(tab.path)
+                } else {
+                    locked.append(document)
+                    document.knowledgeRenameLocked = true
+                    if document.mountedTextView?.isReading == false { document.mountedTextView?.isEditable = false }
+                }
+            }
+        }
+        context.knowledgeRewritePaths = candidates.union([target])
+        defer {
+            context.knowledgeRewritePaths = []
+            for document in locked {
+                document.knowledgeRenameLocked = false
+                document.onStateChange?()
+            }
+        }
+
+        let skipPaths = skipped.sorted()
+        let handle = context.handle
+        let moved = try await Task.detached { try handle.renameEntry(path: path, newName: name) }.value
+        application?.entryRenamed(root: context.root, oldPath: path, entry: moved)
+        let result: Result<RenameLinksResultInfo, Error>
+        do {
+            result = .success(try await Task.detached {
+                let url = URL(fileURLWithPath: handle.root()).appendingPathComponent(moved.path)
+                let temporary = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                                            appropriateFor: url, create: true)
+                defer { try? FileManager.default.removeItem(at: temporary) }
+                return try handle.applyRenameLinksIn(oldPath: path, newPath: target, skipPaths: skipPaths,
+                                                     temporary: temporary.path)
+            }.value)
+        } catch { result = .failure(error) }
+        switch result {
+        case .success(let report):
+            context.didRewriteLinks(Set(report.updated))
+            let excluded = report.skipped.map(\.path)
+            let failed = report.failed.map(\.path)
+            if !excluded.isEmpty || !failed.isEmpty {
+                var messages: [String] = []
+                if !excluded.isEmpty {
+                    messages.append(L10n.string("Links left unchanged in notes with unsaved edits: %@",
+                                                excluded.joined(separator: ", ")))
+                }
+                if !failed.isEmpty {
+                    messages.append(L10n.string("Links could not be updated in: %@", failed.joined(separator: ", ")))
+                }
+                showKnowledgeMessage(messages.joined(separator: "\n"))
+            }
+        case .failure(let error):
+            showKnowledgeMessage(L10n.string("Note renamed. Links could not be updated: %@", L10n.error(error)))
+        }
+        return moved
+    }
+
+    private func confirmRenameLinks(_ plan: RenameLinkPlanInfo, window: NSWindow?) async -> RenameLinkChoice {
+        #if DEBUG
+        if let inspectRenameLinks { return inspectRenameLinks(plan) }
+        #endif
+        let alert = NSAlert()
+        alert.messageText = L10n.string("Update links to the renamed note?")
+        let summary = L10n.string("Update %lld links in %lld notes?", Int64(plan.totalRewrites), Int64(plan.affectedNotes))
+        let excerpts = plan.files.lazy.flatMap(\.edits).prefix(5).map { edit in
+            let file = (edit.sourcePath as NSString).lastPathComponent
+            return "\(file):\(edit.line)  \(String(edit.before.prefix(80))) → \(String(edit.after.prefix(80)))"
+        }
+        alert.informativeText = ([summary] + excerpts).joined(separator: "\n")
+        alert.addButton(withTitle: L10n.string("Rename and Update Links"))
+        alert.addButton(withTitle: L10n.string("Rename Only"))
+        alert.addButton(withTitle: L10n.string("Cancel"))
+        alert.buttons[2].keyEquivalent = "\u{1b}"
+        let response: NSApplication.ModalResponse
+        if let window {
+            response = await withCheckedContinuation { continuation in
+                alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+            }
+        } else {
+            response = alert.runModal()
+        }
+        switch response {
+        case .alertFirstButtonReturn: return .update
+        case .alertSecondButtonReturn: return .renameOnly
+        default: return .cancel
+        }
     }
 
     /// 确认后的移到废纸篓核心流程：安全解析、系统废纸篓并同步树与索引。
@@ -212,7 +338,7 @@ extension Workspace {
             await self.runNamingFlow(window: window, title: L10n.string("Rename"), target: path,
                                       suggested: entry.name, note: !entry.directory,
                                       button: L10n.string("Rename")) { _, name in
-                _ = try await self.renameEntry(path: path, newName: name)
+                _ = try await self.renameNoteWithPreview(path: path, newName: name, window: window)
             }
         }
     }

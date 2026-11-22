@@ -106,6 +106,8 @@ final class NoteDocument {
     var sourceAnchor = 0
     var sourceSelectionLength = 0
     var marked = false
+    var knowledgeRenameLocked = false
+    @ObservationIgnored private var completingLink = false
     @ObservationIgnored weak var viewOwner: AnyObject?
     /// 当前挂载这篇文档的正文视图；由视图协调器在挂载时登记，生产代码不遍历窗口。
     @ObservationIgnored var mountedTextView: DiagramTextView? {
@@ -122,6 +124,8 @@ final class NoteDocument {
     @ObservationIgnored var onClosing: (() -> Void)?
     @ObservationIgnored var onStateChange: (() -> Void)?
     @ObservationIgnored var onDiagramAvailabilityChange: (() -> Void)?
+    @ObservationIgnored var onSaved: (() -> Void)?
+    @ObservationIgnored var onOutlineReady: (() -> Void)?
     @ObservationIgnored var onCopy: ((String) -> Void)?
     @ObservationIgnored private var autoSave: Task<Void, Never>?
     @ObservationIgnored private var outlineTask: Task<Void, Never>?
@@ -153,6 +157,7 @@ final class NoteDocument {
                 guard !Task.isCancelled, let self, !closed, revision == expected, value.0.revision == expected else { return }
                 headings = value.0.headings; outlineRevision = expected
                 outlineMilliseconds = value.1; outlineReadyAt = ProcessInfo.processInfo.systemUptime
+                onOutlineReady?()
             } catch {}
         }
     }
@@ -169,9 +174,16 @@ final class NoteDocument {
         if marked { autoSave?.cancel() }
         else { scheduleSave(); if refreshAgain { refresh() } }
     }
+    func linkCompletionChanged(_ active: Bool) {
+        guard completingLink != active else { return }
+        completingLink = active
+        if active { autoSave?.cancel() }
+        else { scheduleSave() }
+    }
+
     private func scheduleSave(delay: Duration = .seconds(1)) {
         autoSave?.cancel()
-        guard dirty, !marked, !closed else { return }
+        guard dirty, !marked, !completingLink, !closed else { return }
         autoSave = Task { [weak self] in
             do { try await Task.sleep(for: delay) } catch { return }
             await self?.saveNow()
@@ -183,6 +195,7 @@ final class NoteDocument {
         do {
             let update = try await io.save(choice)
             apply(update)
+            if update.issue == .none && !update.dirty { onSaved?() }
             if issue == .saveFailed { scheduleSave(delay: .seconds(2)) }
         } catch { message = "document.save_failed"; issue = .saveFailed; scheduleSave(delay: .seconds(2)) }
     }

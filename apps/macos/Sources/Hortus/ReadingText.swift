@@ -170,6 +170,7 @@ private struct ReadingRefreshResult: Sendable {
     let snapshot: DocumentSnapshot?
     let media: [PreparedMedia]
     var math: [PreparedMathBlock] = []
+    var knowledge: KnowledgeMarkupInfo? = nil
     var phases: [String: Double]
 }
 
@@ -185,6 +186,10 @@ struct ReadingText: NSViewRepresentable {
     let remember: (UInt32, [String]) -> Void
     var onFocus: ((UInt32) -> Void)? = nil
     var refreshToken: Int = 0
+    var knowledgeHandle: VaultHandle? = nil
+    var knowledgeVersion = 0
+    var openLink: ((String, String?) -> Void)? = nil
+    var showTag: ((String) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = DiagramScrollView()
@@ -214,6 +219,7 @@ struct ReadingText: NSViewRepresentable {
             let size: Double
             let scrollerStyle: Int
             let forcedGeneration: UInt64
+            let knowledgeVersion: Int
         }
 
         weak var view: DiagramTextView?
@@ -236,6 +242,9 @@ struct ReadingText: NSViewRepresentable {
         private var size = 0.0
         private var scrollerStyle: NSScroller.Style?
         private var source = ""
+        private var knowledge: KnowledgeMarkupInfo?
+        private var installedKnowledgeVersion = 0
+        private var pendingRevealLength = 0
         private var fallbacks: [Bool] = []
         var displayedAt = 0.0
         var firstRefreshStartedAt = 0.0
@@ -252,6 +261,7 @@ struct ReadingText: NSViewRepresentable {
         func update(_ input: ReadingText) {
             let changed = self.input?.document !== input.document
             let tokenChanged = self.input?.refreshToken != input.refreshToken
+            let indexChanged = self.input?.knowledgeVersion != input.knowledgeVersion && input.document.text.contains("[[")
             if changed { detach(); model = nil; ranges = []; fallbacks = []; rendered = []; initial = true }
             self.input = input
             guard let view else { return }
@@ -288,7 +298,7 @@ struct ReadingText: NSViewRepresentable {
             }
             view.onFocus = { [weak self] ordinal in self?.input?.onFocus?(ordinal) }
             if tokenChanged, view.window != nil, view.hasSettledContentWidth { refresh(force: true) }
-            else if (changed || model?.revision != input.document.revision || size != input.fontSize),
+            else if (changed || indexChanged || model?.revision != input.document.revision || size != input.fontSize),
                view.window != nil, view.hasSettledContentWidth { refresh() }
         }
         func detach() {
@@ -302,7 +312,7 @@ struct ReadingText: NSViewRepresentable {
                 input?.document.onStateChange = nil; input?.document.viewOwner = nil
             }
             input = nil; model = nil; ranges = []; fallbacks = []; rendered = []; source = ""
-            preparedMath = []
+            preparedMath = []; knowledge = nil
             pendingInitialSource = nil; pendingAnchor = nil
             pendingRevealSource = nil
         }
@@ -312,8 +322,11 @@ struct ReadingText: NSViewRepresentable {
             guard view.hasSettledContentWidth else { return }
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             if force { forcedGeneration &+= 1 }
+            let sourceText = input.document.text
+            let hasLinks = sourceText.contains("[[")
+            let version = hasLinks ? input.knowledgeVersion : 0
             let key = RefreshKey(revision: input.document.revision, width: width, dark: dark,
-                                 size: input.fontSize, scrollerStyle: view.formulaScrollerStyle.rawValue, forcedGeneration: forcedGeneration)
+                                 size: input.fontSize, scrollerStyle: view.formulaScrollerStyle.rawValue, forcedGeneration: forcedGeneration, knowledgeVersion: version)
             if let inFlightKey {
                 guard key != inFlightKey, !refreshQueued else { return }
                 refreshQueued = true
@@ -333,6 +346,9 @@ struct ReadingText: NSViewRepresentable {
             let oldMath = size == input.fontSize ? preparedMath : []
             let oldTableMath = size == input.fontSize ? view.mediaBlocks.flatMap { $0.prepared.math.flatMap { $0 } } : []
             let oldModel = model
+            let cachedKnowledge = model?.revision == input.document.revision && installedKnowledgeVersion == version ? knowledge : nil
+            let handle = input.knowledgeHandle
+            let scanKnowledge = hasLinks || sourceText.contains("#")
             let modelRevision = model?.revision ?? UInt64.max
             let io = input.document.io
             let queuedAt = ProcessInfo.processInfo.systemUptime
@@ -357,8 +373,10 @@ struct ReadingText: NSViewRepresentable {
                     let snapshot = model.blocks.contains(where: \.diagram) || !math.isEmpty ? try session.snapshot() : nil
                     let workerEnd = ProcessInfo.processInfo.systemUptime
                     let media = try session.mediaBlocks(width: width, size: input.fontSize)
+                    let knowledge = cachedKnowledge ?? (scanKnowledge
+                        ? handle?.knowledgeMarkup(path: input.path, text: snapshot?.text ?? sourceText) : nil)
                     return (model, snapshot, modelTime, (workerEnd - snapshotStart) * 1000,
-                            modelStart, workerEnd, media, math)
+                            modelStart, workerEnd, media, math, knowledge)
                 }, completion: { [weak self, weak view] result in
                     guard let self, self.inFlightToken == token else { return }
                     guard let view, let input = self.input else { self.finishRefresh(token); return }
@@ -371,7 +389,7 @@ struct ReadingText: NSViewRepresentable {
                             "io_queue_ms": (reading.4 - queuedAt) * 1000,
                             "io_resume_ms": (ProcessInfo.processInfo.systemUptime - reading.5) * 1000,
                         ]
-                        let value = ReadingRefreshResult(model: reading.0, snapshot: reading.1, media: [], phases: phases)
+                        var value = ReadingRefreshResult(model: reading.0, snapshot: reading.1, media: [], knowledge: reading.8, phases: phases)
                         if !reading.6.isEmpty || !reading.7.isEmpty || reading.1?.blocks.isEmpty == false {
                             self.task = Task { [weak self, weak view, oldRendered] in
                                 do {
@@ -394,7 +412,7 @@ struct ReadingText: NSViewRepresentable {
                                     }
                                     let media = await LocalImageCache.shared.prepare(reading.6, vault: input.vault,
                                         size: input.fontSize, mathService: input.mathService, previousMath: oldTableMath)
-                                    var completed = ReadingRefreshResult(model: value.model, snapshot: value.snapshot, media: media, phases: value.phases)
+                                    var completed = ReadingRefreshResult(model: value.model, snapshot: value.snapshot, media: media, knowledge: value.knowledge, phases: value.phases)
                                     if !reading.7.isEmpty {
                                         completed.math = await input.mathService.prepare(reading.7, source: reading.1?.text ?? "", size: input.fontSize, width: width,
                                             displayText: value.model.text, previous: oldMath)
@@ -418,6 +436,7 @@ struct ReadingText: NSViewRepresentable {
                             }
                         } else {
                             phases["diagrams_ms"] = 0
+                            value.phases = phases
                             self.install(value, diagrams: [], width: width, dark: dark,
                                          themeChanged: themeChanged, token: token, began: began)
                         }
@@ -448,7 +467,12 @@ struct ReadingText: NSViewRepresentable {
             self.width = width; self.dark = dark; size = input.fontSize; source = input.document.text
             scrollerStyle = view.formulaScrollerStyle
             let installStart = ProcessInfo.processInfo.systemUptime
-            let formulas = install(result.model, diagrams: diagrams, math: result.math, width: width, themeChanged: themeChanged)
+            let oldUnresolved = unresolvedRanges(knowledge)
+            knowledge = result.knowledge
+            installedKnowledgeVersion = inFlightKey?.knowledgeVersion ?? 0
+            let restyle = oldUnresolved != unresolvedRanges(knowledge) && model?.revision == result.model.revision
+            let formulas = install(result.model, diagrams: diagrams, math: result.math, width: width,
+                                   themeChanged: themeChanged || restyle)
             let blockIndices = Dictionary(uniqueKeysWithValues: result.model.blocks.enumerated().map { ($0.element.id, $0.offset) })
             let items = result.media.compactMap { item -> NoteMedia? in
                 guard let index = blockIndices[item.block.blockId], index < ranges.count else { return nil }
@@ -457,6 +481,15 @@ struct ReadingText: NSViewRepresentable {
                 return NoteMedia(range: NSRange(location: ranges[index].location + local, length: Int(item.block.displayLength)), prepared: item)
             }
             view.installMedia(items, width: width, size: input.fontSize, vault: input.vault, refresh: { [weak self] in self?.refresh(force: true) })
+            let embeds = Dictionary(uniqueKeysWithValues: (knowledge?.links ?? [])
+                .filter { $0.embed && !$0.attachment && !$0.inDiagram }.map { ($0.startUtf16, $0) })
+            for (item, media) in zip(items, view.mediaViews) {
+                guard item.prepared.block.imageWiki, let link = embeds[item.prepared.block.sourceStart] else { continue }
+                let label = link.alias ?? (link.target.isEmpty ? link.heading ?? "" : link.target)
+                media.setEmbeddedLink(title: label, resolved: link.resolvedPath != nil) { [weak self] in
+                    self?.input?.openLink?(link.target, link.heading)
+                }
+            }
             view.installMath(formulas, width: width, size: input.fontSize)
             view.installFormulaAccessibility(formulas)
             preparedMath = result.math
@@ -472,12 +505,13 @@ struct ReadingText: NSViewRepresentable {
                 pendingInitialSource = nil
                 // 先让滚动容器按新内容增高，再迁移视口；否则文末 reveal 没有可滚动距离。
                 view.layoutSubtreeIfNeeded()
-                reveal(source: pending)
+                reveal(source: pending, length: pendingRevealLength)
             } else if let source = pendingInitialSource {
                 pendingInitialSource = nil
                 // 新视图已在文首；避免为零锚点重复迁移视口、重排首屏。
                 view.layoutSubtreeIfNeeded()
-                if source != 0 || view.visibleRect.minY > 0.5 { reveal(source: source) }
+                let length = input.document.sourceSelectionLength
+                if source != 0 || length > 0 || view.visibleRect.minY > 0.5 { reveal(source: source, length: length) }
                 if AnchorInspection.isActive {
                     var details = AnchorInspection.snapshot(view, document: input.document)
                     details["source"] = source
@@ -553,6 +587,7 @@ struct ReadingText: NSViewRepresentable {
                 }
                 displayShift += blockLengths[index] - originalLength
             }
+            let unresolved = unresolvedRanges(knowledge)
             var nextRanges: [NSRange] = [], nextDiagrams: [NoteDiagram] = [], runs: [SourceStyleRun] = []
             nextRanges.reserveCapacity(next.blocks.count)
             var offset = 0
@@ -579,7 +614,11 @@ struct ReadingText: NSViewRepresentable {
                                 start += labelDeltas[index]
                             }
                         }
-                        runs.append(SourceStyleRun(start: UInt64(offset + start), length: UInt64(runLength), mask: run.mask))
+                        let sourceStart = Int(block.sourceStart + run.sourceStart)
+                        var mask = run.mask
+                        if mask & (1 << 18) != 0, let index = unresolved.firstIndex(endingAfter: sourceStart),
+                           unresolved[index].contains(sourceStart) { mask |= 1 << 19 }
+                        runs.append(SourceStyleRun(start: UInt64(offset + start), length: UInt64(runLength), mask: mask))
                     }
                 }
                 offset += length
@@ -718,7 +757,7 @@ struct ReadingText: NSViewRepresentable {
             let adjustment = run.map { $0.length == $0.sourceLength ? max(0, local - Int($0.sourceStart)) : 0 } ?? 0
             return min(view.sourceUTF16Length, ranges[index].location + Int(run?.start ?? 0) + adjustment)
         }
-        func reveal(source: Int) {
+        func reveal(source: Int, length: Int = 0) {
             guard let view else { return }
             revealGeneration += 1
             let request = revealGeneration
@@ -726,6 +765,7 @@ struct ReadingText: NSViewRepresentable {
             let before = inspect ? AnchorInspection.snapshot(view, document: input?.document) : [:]
             guard model != nil, !ranges.isEmpty else {
                 pendingRevealSource = source
+                pendingRevealLength = length
                 if inspect {
                     var details = before
                     details["source"] = source
@@ -736,6 +776,7 @@ struct ReadingText: NSViewRepresentable {
             }
             guard view.window != nil, let clip = view.enclosingScrollView?.contentView else {
                 pendingRevealSource = source
+                pendingRevealLength = length
                 if inspect {
                     var details = before
                     details["source"] = source
@@ -758,6 +799,10 @@ struct ReadingText: NSViewRepresentable {
                 clip.scroll(to: CGPoint(x: clip.bounds.origin.x, y: max(0, clip.bounds.origin.y + delta)))
                 view.enclosingScrollView?.reflectScrolledClipView(clip)
             }
+            if length > 0 {
+                let end = min(view.sourceUTF16Length, max(position + 1, displayPosition(source: source + length)))
+                if end > position { view.showFindIndicator(for: NSRange(location: position, length: end - position)) }
+            }
             if inspect {
                 var details = AnchorInspection.snapshot(view, document: input?.document)
                 details["source"] = source
@@ -779,7 +824,7 @@ struct ReadingText: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.revealGeneration == request,
                       let source = self.pendingRevealSource, self.view?.window != nil else { return }
-                self.reveal(source: source)
+                self.reveal(source: source, length: self.pendingRevealLength)
             }
         }
         func rect(at position: Int) -> CGRect {
@@ -822,6 +867,36 @@ struct ReadingText: NSViewRepresentable {
             }) else { return Int(block.sourceStart + block.sourceLength) }
             return Int(block.sourceStart + run.sourceStart) + (run.sourceLength == run.length ? local - Int(run.start) + 1 : Int(run.sourceLength))
         }
+        private func unresolvedRanges(_ knowledge: KnowledgeMarkupInfo?) -> [Range<Int>] {
+            knowledge?.links.compactMap {
+                guard !$0.inDiagram, !$0.attachment, $0.resolvedPath == nil else { return nil }
+                let start = Int($0.startUtf16)
+                return start..<(start + Int($0.lengthUtf16))
+            } ?? []
+        }
+
+        func clickKnowledge(_ event: NSEvent) -> Bool {
+            guard let view, let input, !pending, let knowledge,
+                  model?.revision == input.document.revision,
+                  let position = view.knowledgeCharacter(at: event),
+                  let source = sourcePosition(at: position) else { return false }
+            let mask = styling.mask(at: position)
+            if mask & (1 << 18) != 0, let link = knowledge.links.first(where: {
+                !$0.inDiagram && !$0.attachment && UInt64(source) >= $0.startUtf16
+                    && UInt64(source) < $0.startUtf16 + $0.lengthUtf16
+            }) {
+                input.openLink?(link.target, link.heading)
+                return true
+            }
+            if mask & 512 != 0, let tag = knowledge.tags.first(where: {
+                UInt64(source) >= $0.startUtf16 && UInt64(source) < $0.startUtf16 + $0.lengthUtf16
+            }) {
+                input.showTag?(tag.tag)
+                return true
+            }
+            return false
+        }
+
         func clickTask(_ event: NSEvent) -> Bool {
             guard let view, let input, input.document.readOnlyReason == nil, !input.document.dirty, !pending, let model else { return false }
             let position = view.characterIndexForInsertion(at: view.convert(event.locationInWindow, from: nil))
@@ -844,5 +919,17 @@ struct ReadingText: NSViewRepresentable {
             if let content = manager.textContentManager { view?.configure(fragment, at: content.offset(from: content.documentRange.location, to: location)) }
             return fragment
         }
+    }
+}
+
+private extension Array where Element == Range<Int> {
+    func firstIndex(endingAfter position: Int) -> Int? {
+        var low = 0, high = count
+        while low < high {
+            let mid = low + (high - low) / 2
+            if self[mid].upperBound <= position { low = mid + 1 }
+            else { high = mid }
+        }
+        return low < count ? low : nil
     }
 }

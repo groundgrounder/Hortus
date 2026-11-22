@@ -242,12 +242,16 @@ final class SourceStyling {
         var color = NSColor.textColor
         if mask & (128 | 256 | 512 | 8192) != 0 { color = .controlAccentColor }
         if mask & (64 | 2048 | 16384) != 0 { color = .secondaryLabelColor }
+        if mask & 512 != 0 { color = .secondaryLabelColor }
+        if mask & (1 << 18) != 0 { color = .linkColor }
+        if mask & (1 << 19) != 0 { color = .secondaryLabelColor }
         if mask & 1 != 0 { color = contrast ? .secondaryLabelColor : .tertiaryLabelColor }
         var result: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color,
             .paragraphStyle: paragraph, .sourceStyle: mask]
         if mask & 4 != 0 && !font.fontDescriptor.symbolicTraits.contains(.italic) { result[.obliqueness] = 0.12 }
         if mask & 8 != 0 { result[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
         if mask & 16 != 0 { result[.backgroundColor] = NSColor.quaternaryLabelColor.withAlphaComponent(0.10) }
+        if mask & 512 != 0 { result[.backgroundColor] = NSColor.controlAccentColor.withAlphaComponent(0.08) }
         if mask & 1024 != 0 { result[.backgroundColor] = NSColor.systemYellow.withAlphaComponent(0.19) }
         attributes[mask] = result
         return result

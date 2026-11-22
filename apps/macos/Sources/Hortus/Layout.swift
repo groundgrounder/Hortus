@@ -2,13 +2,15 @@ import SwiftUI
 
 /// 当前可用的静态工具。终端实例不属于这里，由 `ToolID.terminal` 表示。
 enum StaticTool: String, CaseIterable, Identifiable, Codable {
-    case files, search, outline, changes
+    case files, search, tags, outline, backlinks, changes
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .files: L10n.string("Files")
         case .search: L10n.string("Search")
+        case .tags: L10n.string("Tags")
+        case .backlinks: L10n.string("Backlinks")
         case .outline: L10n.string("Outline")
         case .changes: L10n.string("Changes")
         }
@@ -18,15 +20,12 @@ enum StaticTool: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .files: "folder"
         case .search: "magnifyingglass"
+        case .tags: "tag"
+        case .backlinks: "link"
         case .outline: "list.bullet.indent"
         case .changes: "arrow.left.arrow.right.square"
         }
     }
-}
-
-/// 旧布局里已停用的视图。只用于读取磁盘上的兼容数据，永远不进入界面或 + 菜单。
-enum LegacyTool: String, Codable {
-    case tags, backlinks
 }
 
 /// 一个工具标签：静态工具或带稳定 UUID 的终端实例。
@@ -34,19 +33,12 @@ enum LegacyTool: String, Codable {
 enum ToolID: Hashable, Identifiable {
     case tool(StaticTool)
     case terminal(UUID)
-    case legacy(LegacyTool)
 
     var id: String {
         switch self {
         case .tool(let tool): "tool:" + tool.rawValue
         case .terminal(let id): "terminal:" + id.uuidString
-        case .legacy(let tool): "legacy:" + tool.rawValue
         }
-    }
-
-    var isAvailable: Bool {
-        if case .legacy = self { return false }
-        return true
     }
 
     var staticTool: StaticTool? {
@@ -64,7 +56,6 @@ enum ToolID: Hashable, Identifiable {
         switch self {
         case .tool(let tool): tool.rawValue
         case .terminal(let id): "terminal:" + id.uuidString
-        case .legacy(let tool): tool.rawValue
         }
     }
 
@@ -72,7 +63,6 @@ enum ToolID: Hashable, Identifiable {
         switch self {
         case .tool(let tool): "panel-tab-" + tool.rawValue
         case .terminal(let id): "panel-tab-terminal-" + id.uuidString
-        case .legacy(let tool): "panel-tab-legacy-" + tool.rawValue
         }
     }
 
@@ -132,8 +122,8 @@ final class Layout {
     init() {
         let terminalID = UUID()
         groups = [
-            .left: [PanelGroup(tabs: [.tool(.files), .tool(.search)], selected: .tool(.files))],
-            .right: [PanelGroup(tabs: [.tool(.outline), .tool(.changes)], selected: .tool(.outline))],
+            .left: [PanelGroup(tabs: [.tool(.files), .tool(.search), .tool(.tags)], selected: .tool(.files))],
+            .right: [PanelGroup(tabs: [.tool(.outline), .tool(.backlinks), .tool(.changes)], selected: .tool(.outline))],
             .bottom: [PanelGroup(tabs: [.terminal(terminalID)], selected: .terminal(terminalID))],
         ]
         visible = [.left: true, .right: true, .bottom: false]
@@ -146,8 +136,8 @@ final class Layout {
     func reset() {
         let terminalID = UUID()
         groups = [
-            .left: [PanelGroup(tabs: [.tool(.files), .tool(.search)], selected: .tool(.files))],
-            .right: [PanelGroup(tabs: [.tool(.outline), .tool(.changes)], selected: .tool(.outline))],
+            .left: [PanelGroup(tabs: [.tool(.files), .tool(.search), .tool(.tags)], selected: .tool(.files))],
+            .right: [PanelGroup(tabs: [.tool(.outline), .tool(.backlinks), .tool(.changes)], selected: .tool(.outline))],
             .bottom: [PanelGroup(tabs: [.terminal(terminalID)], selected: .terminal(terminalID))],
         ]
         visible = [.left: true, .right: true, .bottom: false]
@@ -160,9 +150,9 @@ final class Layout {
 
     func groups(in region: Region) -> [PanelGroup] { groups[region] ?? [] }
 
-    func availableTabs(_ group: PanelGroup) -> [ToolID] { group.tabs.filter(\.isAvailable) }
+    func availableTabs(_ group: PanelGroup) -> [ToolID] { group.tabs }
 
-    /// 只过滤显示投影；持久化仍保留旧版本的隐藏视图。
+    /// 过滤空组，并为不可见的选中项恢复一个可用标签。
     func availableGroups(in region: Region) -> [PanelGroup] {
         groups(in: region).compactMap { group in
             let tabs = availableTabs(group)
@@ -224,7 +214,7 @@ final class Layout {
     // MARK: 选中与显示
 
     func select(_ tool: ToolID, in groupID: UUID) {
-        guard tool.isAvailable, let (region, index) = locate(groupID: groupID),
+        guard let (region, index) = locate(groupID: groupID),
               groups(in: region)[index].tabs.contains(tool) else { return }
         groups[region]![index].selected = tool
         noteSelection(tool)
@@ -233,7 +223,7 @@ final class Layout {
     /// 显示并激活窗口内的工具；找不到时返回 false。
     @discardableResult
     func reveal(_ tool: ToolID) -> Bool {
-        guard tool.isAvailable, let (region, index) = locateTool(tool) else { return false }
+        guard let (region, index) = locateTool(tool) else { return false }
         groups[region]![index].selected = tool
         visible[region] = true
         noteSelection(tool)
@@ -255,8 +245,8 @@ final class Layout {
         visible[region] = true
         guard availableGroups(in: region).isEmpty else { return nil }
         let preferred: [StaticTool] = switch region {
-        case .left: [.files, .search, .outline, .changes]
-        case .right: [.outline, .changes, .files, .search]
+        case .left: [.files, .search, .tags, .outline, .backlinks, .changes]
+        case .right: [.outline, .backlinks, .changes, .files, .search, .tags]
         case .bottom: []
         }
         let present = Set(staticTools)
@@ -273,13 +263,13 @@ final class Layout {
     // MARK: 落点是否有效（无效的位置不高亮）
 
     func canMerge(_ tool: ToolID?, into group: PanelGroup) -> Bool {
-        guard let tool, tool.isAvailable, locateTool(tool) != nil, locate(groupID: group.id) != nil else { return false }
+        guard let tool, locateTool(tool) != nil, locate(groupID: group.id) != nil else { return false }
         return !availableTabs(group).isEmpty && !group.tabs.contains(tool)
     }
 
     /// 在这一组后面新开一组：把一组里唯一的工具拆到它自己后面，没有意义。
     func canSplit(_ tool: ToolID?, after group: PanelGroup) -> Bool {
-        guard let tool, tool.isAvailable, locateTool(tool) != nil, locate(groupID: group.id) != nil else { return false }
+        guard let tool, locateTool(tool) != nil, locate(groupID: group.id) != nil else { return false }
         return !availableTabs(group).isEmpty && availableTabs(group) != [tool]
     }
 
@@ -288,7 +278,6 @@ final class Layout {
     /// 添加工具：静态工具在窗口内唯一，重复添加只显示已有项。
     @discardableResult
     func add(_ tool: ToolID, to groupID: UUID? = nil) -> Bool {
-        guard tool.isAvailable else { return false }
         if let staticTool = tool.staticTool, let existing = staticTools.first(where: { $0 == staticTool }) {
             reveal(.tool(existing))
             return false
@@ -312,7 +301,6 @@ final class Layout {
 
     @discardableResult
     func add(_ tool: ToolID, in region: Region) -> Bool {
-        guard tool.isAvailable else { return false }
         var list = groups(in: region)
         list.append(PanelGroup(tabs: [tool], selected: tool))
         groups[region] = list
@@ -323,7 +311,7 @@ final class Layout {
 
     /// 拖到某组的标签栏：并入该组。
     func move(_ tool: ToolID, into groupID: UUID) {
-        guard tool.isAvailable, locateTool(tool) != nil, locate(groupID: groupID) != nil else { return }
+        guard locateTool(tool) != nil, locate(groupID: groupID) != nil else { return }
         if let (region, index) = locate(groupID: groupID), groups(in: region)[index].tabs.contains(tool) {
             groups[region]![index].selected = tool
             noteSelection(tool)
@@ -338,7 +326,7 @@ final class Layout {
 
     /// 拖到某组的内容区或窗口边缘：在该区域新开一组（侧栏里上下分开，底部左右分开）。
     func split(_ tool: ToolID, to region: Region, after groupID: UUID? = nil) {
-        guard tool.isAvailable, locateTool(tool) != nil else { return }
+        guard locateTool(tool) != nil else { return }
         if let id = groupID {
             guard let (targetRegion, index) = locate(groupID: id), targetRegion == region,
                   availableTabs(groups(in: targetRegion)[index]) != [tool] else { return }
@@ -354,7 +342,7 @@ final class Layout {
 
     /// "移动到…"菜单：并入目标区域最后一组；区域为空时新开一组。
     func moveToRegion(_ tool: ToolID, _ region: Region) {
-        guard tool.isAvailable, locateTool(tool) != nil else { return }
+        guard locateTool(tool) != nil else { return }
         if let last = availableGroups(in: region).last { move(tool, into: last.id) } else { split(tool, to: region) }
         visible[region] = true
     }
@@ -457,12 +445,12 @@ struct LayoutState: Codable, Equatable {
 
 extension Layout {
     /// 写入 layout.toml 的默认模板：只有静态工具和默认终端位置。
-    var persistedState: LayoutState { encodedState(includeLegacy: false, includeVisible: false) }
+    var persistedState: LayoutState { encodedState(includeVisible: false) }
 
     /// 会话里的每窗口布局：保留静态工具、隐藏兼容项、可见性和尺寸。
-    var state: LayoutState { encodedState(includeLegacy: true, includeVisible: true) }
+    var state: LayoutState { encodedState(includeVisible: true) }
 
-    private func encodedState(includeLegacy: Bool, includeVisible: Bool) -> LayoutState {
+    private func encodedState(includeVisible: Bool) -> LayoutState {
         var encoded: [String: LayoutState.RegionState] = [:]
         var terminalWritten = false
         for region in Region.allCases {
@@ -478,11 +466,9 @@ extension Layout {
                             terminalWritten = true
                             tabs.append("terminal")
                         }
-                    case .legacy(let legacy):
-                        if includeLegacy { tabs.append(legacy.rawValue) }
                     }
                 }
-                guard !tabs.isEmpty, let selected = encodedSelection(group.selected, in: tabs, tabs: group.tabs) else { continue }
+                guard !tabs.isEmpty, let selected = encodedSelection(group.selected, in: tabs) else { continue }
                 list.append(LayoutState.Group(id: group.id, tabs: tabs, selected: selected))
             }
             encoded[region.rawValue] = LayoutState.RegionState(
@@ -495,9 +481,8 @@ extension Layout {
         return LayoutState(regions: encoded)
     }
 
-    private func encodedSelection(_ selected: ToolID, in tabs: [String], tabs tools: [ToolID]) -> String? {
+    private func encodedSelection(_ selected: ToolID, in tabs: [String]) -> String? {
         if case .terminal = selected, tabs.contains("terminal") { return "terminal" }
-        if case .legacy(let legacy) = selected, tabs.contains(legacy.rawValue) { return legacy.rawValue }
         if let staticTool = selected.staticTool, tabs.contains(staticTool.rawValue) { return staticTool.rawValue }
         return tabs.first
     }
@@ -530,7 +515,6 @@ extension Layout {
         var restored: [Region: [PanelGroup]] = [:]
         var usedTerminal = false
         var seenStatic = Set<StaticTool>()
-        var seenLegacy = Set<LegacyTool>()
         for region in Region.allCases {
             guard let value = state.regions[region.rawValue] else { continue }
             var list: [PanelGroup] = []
@@ -544,18 +528,30 @@ extension Layout {
                             usedTerminal = true
                             tabs.append(.terminal(UUID()))
                         }
-                    } else if let legacy = LegacyTool(rawValue: raw) {
-                        if seenLegacy.insert(legacy).inserted { tabs.append(.legacy(legacy)) }
                     }
                 }
                 guard !tabs.isEmpty else { continue }
                 let selected = tabs.first { persistedName($0) == group.selected }
-                    ?? tabs.first(where: \.isAvailable) ?? tabs[0]
+                    ?? tabs[0]
                 list.append(PanelGroup(id: group.id, tabs: tabs, selected: selected))
             }
             if !list.isEmpty { restored[region] = list }
             if let shown = value.visible { visible[region] = shown }
             size[region] = CGFloat(value.size)
+        }
+        for (tool, region) in [(StaticTool.tags, Region.left), (.backlinks, .right)]
+            where !seenStatic.contains(tool) {
+            let tab = ToolID.tool(tool)
+            if var regionGroups = restored[region], !regionGroups.isEmpty {
+                if tool == .backlinks, let index = regionGroups[0].tabs.firstIndex(of: .tool(.outline)) {
+                    regionGroups[0].tabs.insert(tab, at: index + 1)
+                } else {
+                    regionGroups[0].tabs.append(tab)
+                }
+                restored[region] = regionGroups
+            } else {
+                restored[region] = [PanelGroup(tabs: [tab], selected: tab)]
+            }
         }
         groups = restored
         lastTerminalID = terminalIDs.first
@@ -568,7 +564,6 @@ extension Layout {
         switch tool {
         case .terminal: "terminal"
         case .tool(let staticTool): staticTool.rawValue
-        case .legacy(let legacy): legacy.rawValue
         }
     }
 }

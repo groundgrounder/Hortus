@@ -37,6 +37,8 @@ enum L10n {
             return string("The selected folder contains Hortus configuration or cache files")
         case "vault.outside_root", "vault.invalid_path", "note.invalid_path":
             return string("The selected note path is invalid")
+        case "knowledge.rename_busy":
+            return string("Another note is being renamed")
         case "vault.invalid_name":
             return string("The name is invalid")
         case "vault.not_found":

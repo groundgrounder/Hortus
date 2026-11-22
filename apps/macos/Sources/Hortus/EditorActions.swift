@@ -217,7 +217,13 @@ extension DiagramTextView {
         findBarMonitor = nil
     }
     override func mouseDown(with event: NSEvent) {
-        if isReading, readingCoordinator?.clickTask(event) == true { return }
+        if isReading, readingCoordinator?.clickKnowledge(event) == true || readingCoordinator?.clickTask(event) == true { return }
+        if !isReading, !compositionActive, event.modifierFlags.contains(.command),
+           let position = knowledgeCharacter(at: event), let onCommandLink,
+           (sourceStyling?.mask(at: position) ?? 0) & (1 << 18) != 0 {
+            onCommandLink(position)
+            return
+        }
         if !editorActions.clickTask(in: self, event: event) { super.mouseDown(with: event) }
     }
     override func menu(for event: NSEvent) -> NSMenu? {

@@ -51,6 +51,9 @@ final class VaultContext {
     let handle: VaultHandle
     var entries: [String: TreeEntry] = [:]
     var treeVersion = 0
+    var knowledgeVersion = 0
+    var knowledgeRewritePaths: Set<String> = []
+    var renaming = false
     var scanning = true
     var scanMicros: UInt64 = 0
     var searchIndexReadyMilliseconds: Double?
@@ -90,6 +93,8 @@ final class VaultContext {
         }
     }
 
+    var attachedWorkspaces: [Workspace] { windows.values.compactMap(\.value) }
+
     func detach(_ workspace: Workspace) { windows.removeValue(forKey: workspace.id) }
     var windowCount: Int { windows.values.filter { $0.value != nil }.count }
     var listenerCount: Int { subscription == nil ? 0 : 1 }
@@ -108,12 +113,7 @@ final class VaultContext {
     func upsert(_ entry: TreeEntry) {
         entries[entry.path] = entry
         treeVersion += 1
-        let handle = handle
-        if !entry.directory {
-            DispatchQueue.global(qos: .userInitiated).async {
-                handle.updateSearchIndex(upserted: [entry.path], removed: [])
-            }
-        }
+        if !entry.directory { updateIndices(upserted: [entry.path]) }
     }
 
     /// 重命名成功后的立即迁移：条目、父目录与搜索索引按新旧路径同步搬家，
@@ -144,12 +144,7 @@ final class VaultContext {
             entries[item.path] = item
         }
         treeVersion += 1
-        let upsertedNotes = movedNotes
-        let removedNotePaths = Array(removedNotes)
-        let handle = handle
-        DispatchQueue.global(qos: .userInitiated).async {
-            handle.updateSearchIndex(upserted: upsertedNotes, removed: removedNotePaths)
-        }
+        updateIndices(upserted: movedNotes, removed: removedNotes)
     }
 
     /// 移到废纸篓成功后的立即移除：条目与搜索索引同步清理。
@@ -159,13 +154,27 @@ final class VaultContext {
         let removedNotes = affected.filter { entries[$0]?.directory == false }
         for key in affected { entries.removeValue(forKey: key) }
         treeVersion += 1
+        updateIndices(removed: removedNotes)
+    }
+
+    func refreshSavedNote(_ path: String) { updateIndices(upserted: [path]) }
+
+    private func updateIndices(upserted: [String] = [], removed: [String] = []) {
+        guard !upserted.isEmpty || !removed.isEmpty else { return }
         let handle = handle
-        DispatchQueue.global(qos: .userInitiated).async {
-            handle.updateSearchIndex(upserted: [], removed: removedNotes)
+        Task { [weak self] in
+            await Task.detached { handle.updateSearchIndex(upserted: upserted, removed: removed) }.value
+            self?.indexed(changed: true, scanFinished: false)
         }
     }
 
+    func didRewriteLinks(_ paths: Set<String>) {
+        indexed(changed: true, scanFinished: false)
+        for workspace in attachedWorkspaces { workspace.refreshAfterRollback(paths) }
+    }
+
     private func indexed(changed: Bool, scanFinished: Bool) {
+        if changed || scanFinished { knowledgeVersion &+= 1 }
         if scanFinished {
             let elapsed = openedAt.duration(to: .now).components
             searchIndexReadyMilliseconds = Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15

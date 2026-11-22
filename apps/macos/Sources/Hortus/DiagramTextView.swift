@@ -52,6 +52,9 @@ struct NoteText: NSViewRepresentable {
     var onFocus: ((UInt32) -> Void)? = nil
     var refreshToken: Int = 0
 
+    var knowledgeHandle: VaultHandle? = nil
+    var knowledgeLocked = false
+    var openLink: ((String, String?) -> Void)? = nil
     func makeCoordinator() -> Host { Host() }
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
@@ -159,6 +162,7 @@ struct NoteText: NSViewRepresentable {
         private var changeScheduled = false
 
         func detach() {
+            view?.linkCompletion.close()
             view?.finishComposition()
             task?.cancel(); task = nil; generation += 1
             styling.reset()
@@ -177,7 +181,7 @@ struct NoteText: NSViewRepresentable {
             let changed = self.input?.path != input.path || self.input?.vault != input.vault
                 || self.input?.document !== input.document || (input.document == nil && self.input?.text != input.text)
             let tokenChanged = self.input?.refreshToken != input.refreshToken
-            if changed { view?.finishComposition() }
+            if changed { view?.linkCompletion.close(); view?.finishComposition() }
             if changed, self.input?.document?.viewOwner === self {
                 self.input?.document?.onReload = nil
                 self.input?.document?.onClosing = nil; self.input?.document?.onStateChange = nil
@@ -191,7 +195,8 @@ struct NoteText: NSViewRepresentable {
             view.representedDocument = input.document.map(ObjectIdentifier.init)
             view.delegate = self; view.textStorage?.delegate = self; view.textLayoutManager?.delegate = self
             if changed { view.font = .systemFont(ofSize: input.fontSize) }
-            view.isEditable = input.document != nil && input.document?.readOnlyReason == nil && input.document?.issue != .recovery && !loading
+            view.isEditable = input.document != nil && input.document?.readOnlyReason == nil && input.document?.issue != .recovery
+                && input.document?.knowledgeRenameLocked == false && !input.knowledgeLocked && !loading
             view.setAccessibilityLabel(view.isEditable ? L10n.string("Note") : L10n.string("Note, read-only"))
             view.onWidthOrThemeChange = { [weak self] in self?.schedule(); self?.scheduleStyles(force: true) }
             view.onFreshRender = { [weak self] in
@@ -204,13 +209,35 @@ struct NoteText: NSViewRepresentable {
             view.onEditSource = { [weak self] ordinal in self?.editSource(ordinal) }
             view.onSourceRange = { [weak self] ordinal, range in self?.locateSource(ordinal, range: range) }
             view.onFocus = { [weak self] ordinal in self?.input?.onFocus?(ordinal) }
-            view.onCompositionState = { [weak self] marked in self?.document?.compositionChanged(marked) }
+            view.onCompositionState = { [weak self, weak view] marked in
+                if marked { view?.linkCompletion.close() }
+                self?.document?.compositionChanged(marked)
+            }
+            view.onLinkCompletionState = { [weak self] active in self?.document?.linkCompletionChanged(active) }
+            view.onCommandLink = { [weak self] position in
+                guard let self, let input = self.input, let handle = input.knowledgeHandle,
+                      let view = self.view else { return }
+                let text = view.string
+                let path = input.path
+                Task { [weak self, weak view] in
+                    let link = await Task.detached {
+                        handle.knowledgeMarkup(path: path, text: text).links.first {
+                            !$0.inDiagram && UInt64(position) >= $0.startUtf16
+                                && UInt64(position) < $0.startUtf16 + $0.lengthUtf16
+                        }
+                    }.value
+                    guard let link, let view, view.representedPath == path, view.string == text,
+                          self?.input?.path == path else { return }
+                    self?.input?.openLink?(link.target, link.heading)
+                }
+            }
             view.onCommit = { [weak self] in self?.textDidChange(Notification(name: NSText.didChangeNotification)) }
             input.document?.onReload = { [weak self] text in self?.reload(text, preserve: true) }
             input.document?.onClosing = { [weak view] in view?.isEditable = false }
             input.document?.onStateChange = { [weak self, weak view] in
                 guard let self, let view else { return }
                 view.isEditable = document?.readOnlyReason == nil && document?.issue != .recovery
+                    && document?.knowledgeRenameLocked == false && self.input?.knowledgeLocked == false && !loading
             }
             if changed {
                 styling.reset()
@@ -252,6 +279,7 @@ struct NoteText: NSViewRepresentable {
             view.enclosingScrollView?.contentView.scroll(to: preserve ? origin : .zero)
             suppress = false; suppressSelection = false
             view.isEditable = document != nil && document?.readOnlyReason == nil && document?.issue != .recovery
+                && document?.knowledgeRenameLocked == false && input?.knowledgeLocked == false
             if !preserve, let document,
                (document.sourceSelectionLength > 0 || document.sourceAnchor > 0) {
                 let location = min(document.sourceAnchor, view.sourceUTF16Length)
@@ -294,12 +322,14 @@ struct NoteText: NSViewRepresentable {
             guard !suppress, let view else { return }
             document?.compositionChanged(view.compositionActive)
             guard !view.compositionActive else { return }
+            view.linkCompletion.update(view: view, handle: input?.knowledgeHandle, edited: true)
             selectionChanged()
             scheduleStyles()
             schedule(force: true, debounce: true)
         }
         func textViewDidChangeSelection(_ notification: Notification) {
             guard !suppressSelection, !suppress, !loading, view?.compositionActive == false else { return }
+            if let view { view.linkCompletion.update(view: view, handle: input?.knowledgeHandle, edited: false) }
             selectionChanged()
         }
         private func selectionChanged() {
@@ -637,6 +667,28 @@ final class TableFormulaAccessibilityElement: NSAccessibilityElement {
 
 @MainActor
 final class DiagramTextView: NSTextView {
+    let linkCompletion = LinkCompletion()
+    var onLinkCompletionState: ((Bool) -> Void)?
+    var onCommandLink: ((Int) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if !isReading, linkCompletion.keyDown(event, in: self) { return }
+        if event.modifierFlags.contains(.command) { linkCompletion.close() }
+        super.keyDown(with: event)
+    }
+
+    func knowledgeCharacter(at event: NSEvent) -> Int? {
+        let point = convert(event.locationInWindow, from: nil)
+        let insertion = characterIndexForInsertion(at: point)
+        guard let window, insertion != NSNotFound else { return nil }
+        let screenPoint = window.convertPoint(toScreen: event.locationInWindow)
+        for position in [insertion, insertion - 1] where (0..<sourceUTF16Length).contains(position) {
+            let rect = firstRect(forCharacterRange: NSRange(location: position, length: 1), actualRange: nil)
+            if rect.insetBy(dx: 0, dy: -1).contains(screenPoint) { return position }
+        }
+        return nil
+    }
+
     private let noteUndo = UndoManager()
     override var undoManager: UndoManager? { isReading ? super.undoManager : noteUndo }
     override func copy(_ sender: Any?) {
@@ -668,6 +720,7 @@ final class DiagramTextView: NSTextView {
         return accepted
     }
     override func resignFirstResponder() -> Bool {
+        linkCompletion.close()
         // 组合中输入法把标记文本留在存储里；交还第一响应者时先结束组合，
         // 否则 hasMarkedText() 不再变化，文档会停在 marked 并拒绝保存。
         finishComposition()

@@ -51,6 +51,9 @@ final class Workspace {
     /// 测试注入的未保存提示；生产环境使用原生 NSAlert。
     @ObservationIgnored var promptUnsaved: (([String], Bool) -> UnsavedDecision)?
     /// 测试注入的移到废纸篓确认；生产环境使用原生 NSAlert。
+    #if DEBUG
+    @ObservationIgnored var inspectRenameLinks: ((RenameLinkPlanInfo) -> RenameLinkChoice)?
+    #endif
     @ObservationIgnored var promptTrash: (([String], String) -> Bool)?
     @ObservationIgnored var noteOpenStartedAt = 0.0
     @ObservationIgnored var noteOpenPhases: [String: Double] = [:]
@@ -102,6 +105,12 @@ final class Workspace {
     var searchFocusRequest = 0
     var searchResults: [SearchResult] = []
     var searchLoading = false
+    var tagFilter = ""
+    var selectedTag: String?
+    var knowledgeMessage: String?
+    @ObservationIgnored private var knowledgeNavigation: Task<Void, Never>?
+    @ObservationIgnored private var knowledgeMessageTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingLinkHeading: (path: String, heading: String)?
     @ObservationIgnored var core: WorkspaceCore?
     @ObservationIgnored private var epoch = UUID()
     @ObservationIgnored private var openingRequest = UUID()
@@ -310,6 +319,8 @@ final class Workspace {
         await terminals.setRootAndWait(nil)
         changes.reset()
         quickOpenTask?.cancel(); searchTask?.cancel(); searchCancellation?.cancel()
+        knowledgeNavigation?.cancel(); knowledgeMessageTask?.cancel()
+        knowledgeMessage = nil; selectedTag = nil; tagFilter = ""; pendingLinkHeading = nil
         context?.detach(self)
         context = nil
         tabs = []; selected = nil; loads = [:]
@@ -355,11 +366,11 @@ final class Workspace {
         if !searchMarked, !searchQuery.isEmpty { updateSearch(query: searchQuery, marked: false) }
     }
 
-    func openNote(_ path: String) {
+    func openNote(_ path: String, savePrevious: Bool = true) {
         folderSelection = nil
         guard vault != nil, !releasing, !preparingClose else { return }
         if let owner = application?.owner(of: path, from: self), owner.workspace !== self {
-            owner.workspace.openNote(path)
+            owner.workspace.openNote(path, savePrevious: savePrevious)
             application?.activate(owner)
             return
         }
@@ -368,7 +379,8 @@ final class Workspace {
             noteOpenPhases = [:]
         }
         if selected != path, focusSession != nil { exitFocus(restore: false) }
-        if selected != path, let previous = current?.document { Task { await previous.saveNow() } }
+        if selected != path, savePrevious, let previous = current?.document { Task { await previous.saveNow() } }
+        if let pendingLinkHeading, pendingLinkHeading.path != path { self.pendingLinkHeading = nil }
         if !tabs.contains(where: { $0.path == path }) {
             tabs.append(NoteTab(path: path))
             load(path)
@@ -462,9 +474,9 @@ final class Workspace {
         await searchTask?.value
     }
 
-    func openSearchResult(path: String, start: Int, length: Int) {
+    func openSearchResult(path: String, start: Int, length: Int, savePrevious: Bool = true) {
         if let owner = application?.owner(of: path, from: self), owner.workspace !== self {
-            owner.workspace.openSearchResult(path: path, start: start, length: length)
+            owner.workspace.openSearchResult(path: path, start: start, length: length, savePrevious: savePrevious)
             application?.activate(owner)
             return
         }
@@ -472,13 +484,72 @@ final class Workspace {
         if selected == path, let document = current?.document {
             revealSearch(document: document, start: start, length: length)
         } else {
-            openNote(path)
+            openNote(path, savePrevious: savePrevious)
             if let document = tabs.first(where: { $0.path == path })?.document {
                 Task { @MainActor in
                     await Task.yield()
                     self.revealSearch(document: document, start: start, length: length)
                 }
             }
+        }
+    }
+
+    func showTag(_ tag: String) {
+        knowledgeMessage = nil
+        selectedTag = tag
+        tagFilter = ""
+        showStaticTool(.tags)
+    }
+
+    func openBacklink(_ entry: BacklinkInfo) {
+        openSearchResult(path: entry.source, start: Int(entry.startUtf16),
+                         length: Int(entry.lengthUtf16), savePrevious: false)
+    }
+
+    func openLink(source: String, target: String, heading: String?) {
+        guard let context else { return }
+        let handle = context.handle
+        knowledgeNavigation?.cancel()
+        knowledgeNavigation = Task { [weak self] in
+            let link = await Task.detached { handle.resolveLink(sourcePath: source, rawTarget: target) }.value
+            guard !Task.isCancelled, let self, self.context === context, self.selected == source else { return }
+            if let path = link.resolvedPath {
+                knowledgeMessage = nil
+                let owner = application?.owner(of: path, from: self)
+                let workspace = owner?.workspace ?? self
+                workspace.pendingLinkHeading = heading.map { (path, $0) }
+                workspace.openNote(path, savePrevious: false)
+                workspace.revealPendingLinkHeading()
+                if let owner, workspace !== self { application?.activate(owner) }
+            } else if link.resolutionKind == "ambiguous" {
+                showKnowledgeMessage(L10n.string("Several notes match “%@”: %@", target,
+                                                 link.candidates.prefix(3).joined(separator: ", ")))
+            } else if link.resolutionKind == "broken" {
+                showKnowledgeMessage(L10n.string("No note found for “%@”", target))
+            }
+        }
+    }
+
+    private func revealPendingLinkHeading() {
+        guard let request = pendingLinkHeading, selected == request.path, let document = current?.document,
+              document.outlineRevision == document.revision else { return }
+        pendingLinkHeading = nil
+        let title = request.heading.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let heading = document.headings.first(where: {
+            $0.title.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(title) == .orderedSame
+        }) {
+            openSearchResult(path: request.path, start: Int(heading.start), length: 0, savePrevious: false)
+        } else {
+            showKnowledgeMessage(L10n.string("No heading found for “%@”", title))
+        }
+    }
+
+    func showKnowledgeMessage(_ message: String) {
+        knowledgeMessageTask?.cancel()
+        knowledgeMessage = message
+        knowledgeMessageTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            self?.knowledgeMessage = nil
         }
     }
 
@@ -499,10 +570,11 @@ final class Workspace {
         document.sourceSelectionLength = length
         guard let view = document.mountedTextView else { return }
         if document.reading {
-            view.readingCoordinator?.reveal(source: start)
+            view.readingCoordinator?.reveal(source: start, length: length)
         } else {
-            view.revealCharacter(at: start)
-            view.setSelectedRange(NSRange(location: start, length: min(length, max(0, view.sourceUTF16Length - start))))
+            let location = max(0, min(start, view.sourceUTF16Length))
+            view.revealCharacter(at: location)
+            view.setSelectedRange(NSRange(location: location, length: min(length, view.sourceUTF16Length - location)))
         }
     }
 
@@ -562,6 +634,7 @@ final class Workspace {
                 document.reading = reading
                 self.bind(document)
                 self.tabs[index].document = document; self.tabs[index].error = nil
+                self.revealPendingLinkHeading()
                 self.scheduleSessionSave()
                 self.noteOpenPhases = ["load_task_wait_ms": max(0, loaded.4 - queuedAt - loaded.2 - loaded.3) * 1000,
                                        "open_document_ms": loaded.2 * 1000,
@@ -732,6 +805,13 @@ final class Workspace {
     var diagramRefreshToken = 0
 
     func bind(_ document: NoteDocument) {
+        document.onSaved = { [weak self, weak document] in
+            guard let self, let document else { return }
+            if let path = self.tabs.first(where: { $0.document === document })?.path {
+                self.context?.refreshSavedNote(path)
+            }
+        }
+        document.onOutlineReady = { [weak self] in self?.revealPendingLinkHeading() }
         document.onCopy = { [weak self] copy in self?.openNote(copy) }
         document.onDiagramAvailabilityChange = { [weak self, weak document] in
             guard let self, document === self.current?.document else { return }

@@ -243,6 +243,7 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
     let vault: String
     let preferredSize: CGSize
     var onEdit: (() -> Void)?
+    private var embeddedLink: (title: String, resolved: Bool, open: () -> Void)?
     var onRefresh: (() -> Void)?
     var onImageDisplayed: (() -> Void)?
     private var image: CGImage?
@@ -287,6 +288,19 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         if !block.imagePath.isEmpty { watch() }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func setEmbeddedLink(title: String, resolved: Bool, open: @escaping () -> Void) {
+        embeddedLink = (title, resolved, open)
+        setAccessibilityRole(.link)
+        setAccessibilityLabel(title)
+        needsDisplay = true
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let embeddedLink else { return super.accessibilityPerformPress() }
+        embeddedLink.open()
+        return true
+    }
+
     func detach() {
         decoding?.cancel(); decoding = nil
         watchers.forEach { $0.cancel() }; watchers = []
@@ -341,6 +355,14 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         } else {
             let block = prepared.block
             let reason = decodeFailed ? (block.imagePath.lowercased().hasSuffix(".svg") ? "image.svg_unsupported" : "image.decode_failed") : prepared.reason
+            if let embeddedLink {
+                (embeddedLink.title as NSString).draw(
+                    with: CGRect(x: 0, y: 4, width: bounds.width, height: 20),
+                    options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin],
+                    attributes: [.font: NSFont.systemFont(ofSize: 13),
+                                 .foregroundColor: embeddedLink.resolved ? NSColor.linkColor : NSColor.secondaryLabelColor])
+                return
+            }
             if reason.hasPrefix("embed.") {
                 (L10n.string(reason, block.imageTarget) as NSString).draw(
                     with: CGRect(x: 0, y: 4, width: bounds.width, height: 20),
@@ -361,6 +383,7 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         }
     }
     override func mouseDown(with event: NSEvent) {
+        if let embeddedLink { embeddedLink.open(); return }
         if let onEdit { onEdit(); return }
         if prepared.reason == "image.remote", let url = URL(string: prepared.block.imageTarget),
            ["http", "https"].contains(url.scheme?.lowercased() ?? "") {

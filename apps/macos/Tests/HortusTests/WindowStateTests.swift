@@ -205,6 +205,8 @@ struct WindowStateTests {
     @Test func windowLayoutsAreIndependentButTemplatesAreReusable() throws {
         let a = Layout(), b = Layout()
         a.split(.tool(.search), to: .right)
+        a.moveToRegion(.tool(.tags), .right)
+        a.moveToRegion(.tool(.backlinks), .bottom)
         #expect(a.region(containing: .tool(.search)) == .right)
         #expect(b.region(containing: .tool(.search)) == .left)
         let group = try #require(a.availableGroups(in: .right).last)
@@ -217,6 +219,8 @@ struct WindowStateTests {
         let c = Layout()
         c.restore(a.persistedState)
         #expect(c.size[.left] == 350)
+        #expect(c.region(containing: .tool(.tags)) == .right)
+        #expect(c.region(containing: .tool(.backlinks)) == .bottom)
         #expect(Set(c.staticTools) == Set(a.staticTools))
         #expect(c.terminalIDs.count == 1)
         let json = String(decoding: try JSONEncoder().encode(a.persistedState), as: UTF8.self)

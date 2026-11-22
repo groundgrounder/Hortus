@@ -4,12 +4,12 @@ import Testing
 
 @Suite @MainActor
 struct LayoutTests {
-    @Test func defaultLayoutHasFourStaticToolsAndOneTerminal() {
+    @Test func defaultLayoutHasSixStaticToolsAndOneTerminal() {
         let layout = Layout()
         #expect(Set(layout.staticTools) == Set(StaticTool.allCases))
         #expect(layout.terminalIDs.count == 1)
-        #expect(layout.availableGroups(in: .left).first?.tabs == [.tool(.files), .tool(.search)])
-        #expect(layout.availableTabs(layout.availableGroups(in: .right)[0]) == [.tool(.outline), .tool(.changes)])
+        #expect(layout.availableGroups(in: .left).first?.tabs == [.tool(.files), .tool(.search), .tool(.tags)])
+        #expect(layout.availableTabs(layout.availableGroups(in: .right)[0]) == [.tool(.outline), .tool(.backlinks), .tool(.changes)])
         #expect(layout.availableGroups(in: .right)[0].selected == .tool(.outline))
     }
 
@@ -21,7 +21,7 @@ struct LayoutTests {
         #expect(layout.availableGroups(in: .left)[0].selected == .terminal(terminal))
         #expect(layout.terminalIDs == [terminal])
         #expect(layout.terminalIDs.count == 1)
-        #expect(Set(layout.staticTools).count == 4)
+        #expect(Set(layout.staticTools).count == 6)
     }
 
     @Test func splitPreservesSelectionAndRemovesEmptySource() {
@@ -42,10 +42,10 @@ struct LayoutTests {
         layout.moveToRegion(.tool(.files), .bottom)
         #expect(layout.isShown(.bottom))
         layout.moveToRegion(.tool(.outline), .left)
-        #expect(layout.availableGroups(in: .right).map(\.tabs) == [[.tool(.changes)]])
+        #expect(layout.availableGroups(in: .right).map(\.tabs) == [[.tool(.backlinks), .tool(.changes)]])
         layout.moveToRegion(.terminal(layout.terminalIDs[0]), .right)
         #expect(layout.isShown(.right))
-        #expect(layout.availableGroups(in: .right)[0].tabs == [.tool(.changes), .terminal(layout.terminalIDs[0])])
+        #expect(layout.availableGroups(in: .right)[0].tabs == [.tool(.backlinks), .tool(.changes), .terminal(layout.terminalIDs[0])])
     }
 
     @Test func staticToolIsUniqueAndCanBeClosedAndReadded() {
@@ -140,11 +140,11 @@ struct LayoutTests {
         #expect(templateRestored.terminalIDs.count == 1)
         #expect(template.regions.values.allSatisfy { $0.visible == nil })
         #expect(template.regions.values.flatMap(\.groups).flatMap(\.tabs).allSatisfy {
-            ["files", "search", "outline", "changes", "terminal"].contains($0)
+            ["files", "search", "tags", "outline", "backlinks", "changes", "terminal"].contains($0)
         })
     }
 
-    @Test func legacyLayoutMigratesTerminalAndPreservesHiddenCompatibilityData() throws {
+    @Test func legacyLayoutRestoresKnowledgeToolsInTheirSavedPositions() throws {
         let legacy = LayoutState(regions: [
             "left": .init(groups: [.init(id: UUID(), tabs: ["tags", "files", "search"], selected: "tags")], visible: false, size: 300),
             "right": .init(groups: [
@@ -155,23 +155,15 @@ struct LayoutTests {
         ])
         let restored = Layout()
         restored.restore(try JSONDecoder().decode(LayoutState.self, from: JSONEncoder().encode(legacy)))
-        #expect(restored.availableGroups(in: .left).map(\.tabs) == [[.tool(.files), .tool(.search)]])
-        #expect(restored.availableGroups(in: .right).map(\.tabs) == [[.tool(.outline), .tool(.changes)]])
+        #expect(restored.availableGroups(in: .left).map(\.tabs) == [[.tool(.tags), .tool(.files), .tool(.search)]])
+        #expect(restored.availableGroups(in: .right).map(\.tabs) == [[.tool(.backlinks)], [.tool(.outline), .tool(.changes)]])
         #expect(restored.terminalIDs.count == 1)
         #expect(restored.region(containing: .terminal(restored.terminalIDs[0])) == .bottom)
         #expect(restored.visible[.left] == false && restored.visible[.bottom] == true)
         #expect(restored.size[.left] == 300)
-        // 隐藏的空壳仍在兼容数据里，但不可显示、不可拖动或加入菜单。
-        #expect(restored.state.regions["left"]?.groups.first?.tabs.contains("tags") == true)
-        let group = restored.availableGroups(in: .left)[0]
-        for hidden in [LegacyTool.tags, .backlinks] {
-            #expect(!restored.canMerge(.legacy(hidden), into: group))
-            #expect(!restored.canSplit(.legacy(hidden), after: group))
-            restored.select(.legacy(hidden), in: group.id)
-            restored.move(.legacy(hidden), into: group.id)
-            restored.moveToRegion(.legacy(hidden), .left)
-        }
-        #expect(restored.region(containing: .legacy(.tags)) == .left)
+        #expect(restored.persistedState.regions["left"]?.groups.first?.selected == "tags")
+        #expect(restored.region(containing: .tool(.tags)) == .left)
+        #expect(restored.availableGroups(in: .right).first?.selected == .tool(.backlinks))
         #expect(restored.region(containing: .tool(.changes)) == .right)
     }
 
