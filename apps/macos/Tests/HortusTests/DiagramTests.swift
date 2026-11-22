@@ -214,6 +214,25 @@ struct DiagramTests {
         #expect(dark[0].prepared != nil && dark[0].reason == nil)
     }
 
+    @Test func stateDiagramsRenderNativelyWithSourceRanges() async throws {
+        let source = "序😀\r\n\r\n> ~~~mermaid\r\n> stateDiagram-v2\r\n> state \"TCP 租借\" as Lease\r\n> [*] --> Lease\r\n> Lease --> [*] : FIN\r\n> ~~~\r\n"
+        let service = DiagramService()
+        let blocks = try await service.blocks(source: source, mmd: false, vault: "test", note: "state.md", core: nil)
+        let result = await service.render(source: source, mmd: false, blocks: blocks, width: 700, dark: true)
+        let block = try #require(result.first)
+        let prepared = try #require(block.prepared, "\(block.reason ?? "No diagnostic")")
+        #expect(block.sceneVersion == 2)
+        #expect(prepared.acceptsInteraction)
+        #expect(prepared.scene.hitRegions.count == 5)
+        #expect(prepared.scene.hitRegions.allSatisfy { !$0.canCollapse })
+        let diagram = DiagramView(prepared: prepared)
+        #expect(diagram.accessibilityNodeCount == 5)
+        #expect(diagram.accessibilityEdgeCount == 2)
+        let hit = try #require(prepared.scene.hitRegions.first(where: { $0.nodeId == "state-Lease" }))
+        let range = try #require(diagram.sourceRange(at: CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY)))
+        #expect((source as NSString).substring(with: range) == "state \"TCP 租借\" as Lease")
+    }
+
     @Test func graphSourceRangesAccessibilityAndFailureRetention() async throws {
         let source = "前言😀\r\n\r\n```mermaid\r\nflowchart LR\r\nA[中文😀 é] -->|是| C{决定}\r\nB(备用) --> C\r\nC -.-> A\r\n```\r\n"
         let service = DiagramService()

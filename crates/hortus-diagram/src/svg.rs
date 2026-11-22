@@ -68,6 +68,7 @@ impl Scene {
             "tree" => "Mermaid tree",
             "flowchart" => "Mermaid flowchart",
             "sequence" => "Mermaid sequence diagram",
+            "state" => "Mermaid state diagram",
             _ => "Mermaid diagram",
         };
         let mut output = format!(

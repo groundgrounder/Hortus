@@ -1,0 +1,31 @@
+stateDiagram-v2
+title 分片提交状态机
+[*] --> Commit
+state "提交事务" as Commit {
+    direction TB
+    [*] --> Fanout
+    state Fanout <<fork>>
+    Fanout --> Quorum
+    Fanout --> Journal
+    state "多数派校验" as Quorum {
+        direction TB
+        [*] --> Vote
+        state Vote <<choice>>
+        Vote --> Ack : 满足 quorum
+        Vote --> Nack : RPC 超时
+        Ack --> [*]
+        Nack --> [*]
+    }
+    state "WAL 刷盘" as Journal
+    Quorum --> Barrier
+    Journal --> Barrier
+    state Barrier <<join>>
+    Barrier --> [*]
+    --
+    direction TB
+    [*] --> Renew
+    state "续租 epoch" as Renew
+    Renew --> [*]
+}
+Commit --> Archived : fsync / 持久化
+Archived --> [*]

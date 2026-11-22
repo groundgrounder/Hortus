@@ -13,6 +13,9 @@ mod scene;
 mod sequence;
 mod sequence_layout;
 mod shape;
+mod state;
+mod state_layout;
+mod state_parser;
 mod svg;
 mod syntax;
 mod text;
@@ -38,3 +41,8 @@ pub use sequence::{
     SequenceRow, SequenceText,
 };
 pub use sequence_layout::layout_sequence;
+pub use state::{
+    StateDiagram, StateKind, StateNode, StateNote, StateNoteSide, StateRegion, StateTransition,
+};
+pub use state_layout::layout_state;
+pub use state_parser::is_state_diagram;

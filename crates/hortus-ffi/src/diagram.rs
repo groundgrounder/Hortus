@@ -1,7 +1,7 @@
 //! 长期存活的字体与单篇笔记解析缓存；调用方须在后台初始化及排版。
 use hortus_diagram::{
     Diagram, DiagramError, FontMetrics, LayoutOptions, SystemFonts, layout, layout_graph,
-    layout_sequence, mermaid_blocks, parse_diagram_at,
+    layout_sequence, layout_state, mermaid_blocks, parse_diagram_at,
 };
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -281,6 +281,9 @@ impl DiagramEngine {
             }
             Diagram::Sequence(sequence) => layout_sequence(sequence, &options, &mut state.fonts)
                 .map(|scene| (scene, None, None)),
+            Diagram::State(diagram) => {
+                layout_state(diagram, &options, &mut state.fonts).map(|scene| (scene, None, None))
+            }
         }
         .map_err(|error| DiagramFailure::Engine { kind: error.0 })?;
         let semantic_json = if include_semantic_json {
@@ -395,6 +398,36 @@ mod tests {
             2
         );
     }
+    #[test]
+    fn state_diagrams_render_schema_two_scenes_with_source_ranges() {
+        let source = "序😀\r\n\r\n> ~~~mermaid\r\n> stateDiagram-v2\r\n> state \"TCP 租借\" as Lease\r\n> [*] --> Lease\r\n> Lease --> [*] : FIN\r\n> ~~~\r\n";
+        let engine = DiagramEngine::new().unwrap();
+        let scene = engine
+            .render(source.into(), false, 1, 700.0, true, vec![])
+            .unwrap();
+        assert_eq!(scene.schema_version, 2);
+        assert_eq!(scene.hit_regions.len(), 5);
+        assert!(scene.hit_regions.iter().all(|hit| !hit.can_collapse));
+        let lease = scene
+            .hit_regions
+            .iter()
+            .find(|hit| hit.node_id == "state-Lease")
+            .unwrap();
+        let range = lease.source_start as usize..lease.source_end as usize;
+        assert_eq!(&source[range], "state \"TCP 租借\" as Lease");
+        assert!(matches!(
+            engine.render(
+                "stateDiagram-v2\n状态 --> --> B".into(),
+                true,
+                1,
+                700.0,
+                false,
+                vec![]
+            ),
+            Err(DiagramFailure::Syntax { line: 2, .. })
+        ));
+    }
+
     #[test]
     fn sequence_diagrams_render_schema_two_scenes_with_semantic_json() {
         let source = include_str!("../../../fixtures/mermaid/sequence/agent-workflow.mmd");

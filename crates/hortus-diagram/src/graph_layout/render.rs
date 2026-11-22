@@ -71,6 +71,7 @@ pub(super) fn assemble_scene(
                 .map(|node| (node.rect, node.shape))
                 .collect::<Vec<_>>(),
             crate::graph_router::RoutePolicy {
+                distinct_ports: false,
                 accepted: &accepted,
                 lr_bands,
             },

@@ -466,3 +466,22 @@ fn absolute_note_paths_inside_the_vault_resolve() {
     let value = json(&output);
     assert_eq!(value["note"], "guides/intro.md");
 }
+
+#[test]
+fn mermaid_check_classifies_valid_and_invalid_state_fences() {
+    let fixture = Fixture::new();
+    let vault = fixture.vault();
+    write(
+        &vault.join("state.md"),
+        "序😀\r\n\r\n> ~~~mermaid\r\n> %%{init: {} }%%\r\n> stateDiagram-v2\r\n> [*] --> 队列\r\n> ~~~\r\n\r\n~~~mermaid\n%% comment\nstateDiagram\n状态 --> --> B\n~~~\n",
+    );
+    let result = run(&vault, &["mermaid", "check", "state.md"], &[]);
+    assert!(!result.status.success());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["blocks"][0]["diagram_type"], "state");
+    assert_eq!(report["blocks"][0]["valid"], true);
+    assert_eq!(report["blocks"][1]["diagram_type"], "state");
+    assert_eq!(report["blocks"][1]["valid"], false);
+    assert_eq!(report["blocks"][1]["error_kind"], "syntax");
+    assert_eq!(report["blocks"][1]["line"], 12);
+}

@@ -18,19 +18,20 @@ mod scene;
 use column::column_tree_layout;
 use container::layout_container_graph;
 use place::{build_boxes, place_nodes};
-use rank::{align_feedback_ranks, assign_ranks, order_ranks, permutations_of};
+use rank::{align_feedback_ranks, permutations_of};
+pub(crate) use rank::{assign_ranks, order_ranks};
 use render::{LayoutState, assemble_scene};
 use retain::retain_positions;
 #[cfg(test)]
 use retain::vertical_bands;
 #[cfg(all(test, target_os = "macos"))]
 use scene::marker_clearance;
-pub(crate) use scene::place_edge_label;
 use scene::{
     container_title_height, container_title_lines, contrast_text_color, count_edge_crossings,
     count_node_overlaps, push_dashed_outline, scene_content_bounds, scene_paths,
     translated_primitive, wrap_label,
 };
+pub(crate) use scene::{place_edge_label, place_sized_edge_label};
 
 const NODE_GAP: f64 = 28.0;
 const RANK_GAP_COMPACT: f64 = 28.0;

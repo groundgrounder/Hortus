@@ -1,7 +1,6 @@
 //! 网格路由主循环：网格构建、端点短段预约、候选路径与 A* 回退。
 
 use super::*;
-use crate::graph_layout::place_edge_label;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
@@ -10,7 +9,7 @@ pub(super) fn route_grid(
     nodes: &[(Rect, Shape)],
     policy: RoutePolicy<'_>,
     size: (f64, f64),
-    label_widths: &[Option<f64>],
+    label_sizes: LabelSizes<'_>,
     seeds: &[Option<Vec<Point>>],
     preferred: Option<(usize, usize)>,
 ) -> Result<Routes, LayoutError> {
@@ -30,12 +29,32 @@ pub(super) fn route_grid(
     let plan = plan_edges(
         graph, nodes, accepted, lr_bands, vertical, positive, preferred,
     );
-    let ends = compute_ends(graph, nodes, accepted, lr_bands, &plan);
+    let ends = compute_ends(
+        graph,
+        nodes,
+        accepted,
+        lr_bands,
+        &plan,
+        policy.distinct_ports,
+    );
     let edge_sides = &plan.sides;
     let mut seeds = seeds.to_vec();
     fill_parallel_paths(
         graph, nodes, &ends, edge_sides, accepted, lr_bands, &mut seeds,
     );
+    let rects = nodes.iter().map(|(rect, _)| *rect).collect::<Vec<_>>();
+    let (mut label_rects, mut protected) = (vec![None; ends.len()], Vec::new());
+    if policy.distinct_ports {
+        state_loops(
+            graph,
+            nodes,
+            size,
+            label_sizes,
+            &mut seeds,
+            &mut label_rects,
+            &mut protected,
+        );
+    }
     let mut grid = RouteGrid::new(nodes, width, height, &ends, &seeds)?;
     grid.pre_register_stubs(&ends, &seeds, graph);
     grid.pre_register_seeds(&seeds, graph);
@@ -43,29 +62,23 @@ pub(super) fn route_grid(
         .iter()
         .map(|p| p.clone().unwrap_or_default())
         .collect::<Vec<_>>();
-    let mut label_rects = vec![None; ends.len()];
-    let rects = nodes.iter().map(|(rect, _)| *rect).collect::<Vec<_>>();
-    let mut protected = Vec::<Rect>::new();
     let mut routing_order = (0..ends.len())
         .filter(|i| seeds[*i].is_none())
         .collect::<Vec<_>>();
     routing_order.sort_by(|a, b| {
-        label_widths[*a]
-            .is_none()
-            .cmp(&label_widths[*b].is_none())
-            .then_with(|| {
-                if nodes.len() > 48 {
-                    return a.cmp(b);
-                }
-                let distance = |i: usize| {
-                    let ((_, a), (_, b)) = ends[i];
-                    (a.x - b.x).abs() + (a.y - b.y).abs()
-                };
-                (Some(*a) == preferred.map(|(i, _)| i))
-                    .cmp(&(Some(*b) == preferred.map(|(i, _)| i)))
-                    .then_with(|| distance(*a).total_cmp(&distance(*b)))
-                    .then(a.cmp(b))
-            })
+        label_sizes.has(*b).cmp(&label_sizes.has(*a)).then_with(|| {
+            if nodes.len() > 48 {
+                return a.cmp(b);
+            }
+            let distance = |i: usize| {
+                let ((_, a), (_, b)) = ends[i];
+                (a.x - b.x).abs() + (a.y - b.y).abs()
+            };
+            (Some(*a) == preferred.map(|(i, _)| i))
+                .cmp(&(Some(*b) == preferred.map(|(i, _)| i)))
+                .then_with(|| distance(*a).total_cmp(&distance(*b)))
+                .then(a.cmp(b))
+        })
     });
     for edge_index in routing_order {
         let (source, a) = clear_label_port(
@@ -91,14 +104,14 @@ pub(super) fn route_grid(
                 continue;
             };
             let mut valid = true;
-            if let Some(label_width) = label_widths[edge_index] {
+            if label_sizes.has(edge_index) {
                 let mut points = vec![source];
                 points.extend(candidate.iter().copied().map(|index| grid.point(index)));
                 points.push(target);
                 result[edge_index] = simplify(points);
-                valid =
-                    place_edge_label(edge_index, label_width, &result, &rects, &protected, width)
-                        .is_some();
+                valid = label_sizes
+                    .place(edge_index, &result, &rects, &protected, size)
+                    .is_some();
                 result[edge_index].clear();
             }
             if valid && best.as_ref().is_none_or(|(old, _)| score < *old) {
@@ -107,7 +120,7 @@ pub(super) fn route_grid(
         }
         let indices = if let Some((_, indices)) = best.filter(|(score, _)| {
             // 小图遇到已有边的独占通道时扩大搜索，不能仅因少弯候选可达就接受交叉。
-            *score < 4_000.0 || nodes.len() > 48 || label_widths[edge_index].is_some()
+            *score < 4_000.0 || nodes.len() > 48 || label_sizes.has(edge_index)
         }) {
             indices
         } else {
@@ -134,9 +147,9 @@ pub(super) fn route_grid(
                         a,
                         b,
                         target,
-                        label_widths,
+                        label_sizes,
                         &rects,
-                        width,
+                        size,
                     )? {
                         continue;
                     }
@@ -152,12 +165,10 @@ pub(super) fn route_grid(
         points.extend(indices.into_iter().map(|index| grid.point(index)));
         points.push(target);
         result[edge_index] = simplify(points);
-        if let Some(label_width) = label_widths[edge_index] {
-            let rect =
-                place_edge_label(edge_index, label_width, &result, &rects, &protected, width)
-                    .ok_or_else(|| {
-                        LayoutError(format!("No label channel for edge {}", current.id))
-                    })?;
+        if label_sizes.has(edge_index) {
+            let rect = label_sizes
+                .place(edge_index, &result, &rects, &protected, size)
+                .ok_or_else(|| LayoutError(format!("No label channel for edge {}", current.id)))?;
             label_rects[edge_index] = Some(rect);
             protected.push(Rect {
                 x: rect.x - 3.0,
@@ -171,6 +182,73 @@ pub(super) fn route_grid(
         paths: result,
         labels: label_rects,
     })
+}
+
+/// 自环优先沿状态侧边闭合，并提前为其文字保留空间。
+fn state_loops(
+    graph: &Graph,
+    nodes: &[(Rect, Shape)],
+    size: (f64, f64),
+    labels: LabelSizes<'_>,
+    seeds: &mut [Option<Vec<Point>>],
+    label_rects: &mut [Option<Rect>],
+    protected: &mut Vec<Rect>,
+) {
+    let obstacles: Vec<_> = nodes.iter().map(|(rect, _)| *rect).collect();
+    let mut paths = vec![Vec::new(); graph.edges.len()];
+    for (index, edge) in graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, edge)| edge.from == edge.to)
+    {
+        let (rect, shape) = nodes[edge.from];
+        if rect.height < 18.0 {
+            continue;
+        }
+        for right in [true, false] {
+            let source = crate::shape::port(shape, rect, false, rect.y + rect.height * 0.73, right);
+            let target = crate::shape::port(shape, rect, false, rect.y + rect.height * 0.27, right);
+            let x = if right {
+                rect.x + rect.width + 27.0
+            } else {
+                rect.x - 27.0
+            };
+            if x < 8.0 || x > size.0 - 8.0 {
+                continue;
+            }
+            let candidate = vec![
+                source,
+                Point { x, y: source.y },
+                Point { x, y: target.y },
+                target,
+            ];
+            let blocked = candidate.windows(2).any(|pair| {
+                obstacles
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != edge.from)
+                    .map(|(_, obstacle)| obstacle)
+                    .chain(protected.iter())
+                    .any(|obstacle| segment_intersects(pair[0], pair[1], *obstacle))
+            });
+            if blocked || paths.iter().any(|path| path == &candidate) {
+                continue;
+            }
+            paths[index] = candidate;
+            let label = labels.place(index, &paths, &obstacles, protected, size);
+            if labels.has(index) && label.is_none() {
+                paths[index].clear();
+                continue;
+            }
+            if let Some(label) = label {
+                protected.push(label);
+                label_rects[index] = Some(label);
+            }
+            seeds[index] = Some(paths[index].clone());
+            break;
+        }
+    }
 }
 
 /// 同一对节点在 LR 容器内的重复边按 band 方向单独编排通道：端口顺序与
@@ -381,9 +459,9 @@ fn fallback_elbow(
     a: Point,
     b: Point,
     target: Point,
-    label_widths: &[Option<f64>],
+    label_sizes: LabelSizes<'_>,
     rects: &[Rect],
-    width: f64,
+    size: (f64, f64),
 ) -> Result<bool, LayoutError> {
     // 通道占用可能把相邻的短边完全封死，但只要两段折线不穿过
     // 其它节点，就仍然是可读的有效路径。仅在完整搜索无路时启用。
@@ -406,8 +484,9 @@ fn fallback_elbow(
         return Ok(false);
     };
     result[edge_index] = simplify(vec![source, a, *elbow, b, target]);
-    if let Some(label_width) = label_widths[edge_index] {
-        let rect = place_edge_label(edge_index, label_width, result, rects, protected, width)
+    if label_sizes.has(edge_index) {
+        let rect = label_sizes
+            .place(edge_index, result, rects, protected, size)
             .ok_or_else(|| LayoutError(format!("No label channel for edge {}", current.id)))?;
         label_rects[edge_index] = Some(rect);
         protected.push(rect);

@@ -531,6 +531,29 @@ struct ReadingTests {
         await f.close()
     }
 
+    @Test func stateDiagramsRenderNativelyInTheReadingView() async throws {
+        let source = "序😀\n\n~~~mermaid\nstateDiagram-v2\n[*] --> Lease\nLease --> [*] : FIN\n~~~\n"
+        let f = try Fixture(source)
+        try await f.start()
+        let block = try #require(f.view.blocks.first)
+        #expect(block.reason == nil)
+        #expect(block.sceneVersion == 2)
+        #expect(f.view.diagramViews.count == 1)
+        let manager = try #require(f.view.textLayoutManager)
+        let content = try #require(manager.textContentManager)
+        manager.ensureLayout(for: content.documentRange)
+        var heights: [CGFloat] = []
+        manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
+            if let replacement = (fragment as? NoteLayoutFragment)?.replacement {
+                heights.append(replacement.height)
+            }
+            return true
+        }
+        #expect(heights.count == 1 && heights[0] > 40)
+        #expect(!f.view.string.contains("stateDiagram-v2"))
+        await f.close()
+    }
+
     @Test func externalMiddleChangeRebuildsOneBlockAndKeepsAnchor() async throws {
         let source = (0..<600).map { "Paragraph \($0) **bold** 中文😀.\n\n" }.joined()
         let f = try Fixture(source); try await f.start()

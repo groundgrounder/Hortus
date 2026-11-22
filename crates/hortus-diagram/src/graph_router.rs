@@ -63,6 +63,73 @@ pub(crate) struct Routes {
 pub(crate) struct RoutePolicy<'a> {
     pub accepted: &'a [bool],
     pub lr_bands: Option<&'a [usize]>,
+    pub distinct_ports: bool,
+}
+
+/// 状态已按区域分层，直接使用共享的障碍网格和多行标签尺寸。
+pub(crate) fn route_state(
+    graph: &Graph,
+    nodes: &[(Rect, Shape)],
+    accepted: &[bool],
+    size: (f64, f64),
+    labels: &[Option<(f64, f64)>],
+) -> Result<Routes, LayoutError> {
+    route_grid(
+        graph,
+        nodes,
+        RoutePolicy {
+            accepted,
+            lr_bands: None,
+            distinct_ports: true,
+        },
+        size,
+        LabelSizes::Measured(labels),
+        &vec![None; graph.edges.len()],
+        None,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum LabelSizes<'a> {
+    SingleLine(&'a [Option<f64>]),
+    Measured(&'a [Option<(f64, f64)>]),
+}
+
+impl LabelSizes<'_> {
+    fn has(self, index: usize) -> bool {
+        match self {
+            Self::SingleLine(labels) => labels[index].is_some(),
+            Self::Measured(labels) => labels[index].is_some(),
+        }
+    }
+
+    fn place(
+        self,
+        index: usize,
+        paths: &[Vec<Point>],
+        nodes: &[Rect],
+        labels: &[Rect],
+        size: (f64, f64),
+    ) -> Option<Rect> {
+        match self {
+            Self::SingleLine(widths) => crate::graph_layout::place_edge_label(
+                index,
+                widths[index]?,
+                paths,
+                nodes,
+                labels,
+                size.0,
+            ),
+            Self::Measured(sizes) => crate::graph_layout::place_sized_edge_label(
+                index,
+                sizes[index]?,
+                paths,
+                nodes,
+                labels,
+                size,
+            ),
+        }
+    }
 }
 
 pub(crate) fn route(
@@ -91,7 +158,7 @@ pub(crate) fn route(
             nodes,
             policy,
             (width, height),
-            label_widths,
+            LabelSizes::SingleLine(label_widths),
             &seeds,
             None,
         );
@@ -108,7 +175,7 @@ pub(crate) fn route(
         nodes,
         policy,
         (width, height),
-        label_widths,
+        LabelSizes::SingleLine(label_widths),
         &seeds,
         None,
     )?;
@@ -136,7 +203,7 @@ pub(crate) fn route(
                         nodes,
                         policy,
                         (width, height),
-                        label_widths,
+                        LabelSizes::SingleLine(label_widths),
                         &fixed,
                         Some((edge, side)),
                     ) {
@@ -176,7 +243,7 @@ pub(crate) fn route(
                         nodes,
                         policy,
                         (width, height),
-                        label_widths,
+                        LabelSizes::SingleLine(label_widths),
                         &fixed,
                         Some((*edge, side)),
                     ) {

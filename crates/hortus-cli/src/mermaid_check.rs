@@ -71,10 +71,14 @@ fn diagram_type(diagram: &Diagram) -> &'static str {
         Diagram::Tree(_) => "tree",
         Diagram::Graph(_) => "flowchart",
         Diagram::Sequence(_) => "sequence",
+        Diagram::State(_) => "state",
     }
 }
 
 fn infer_type(source: &str) -> String {
+    if hortus_diagram::is_state_diagram(source) {
+        return "state".into();
+    }
     let first = source
         .lines()
         .find(|line| !line.trim().is_empty())

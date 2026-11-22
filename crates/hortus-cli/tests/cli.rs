@@ -281,3 +281,47 @@ fn sequence_diagrams_render_with_svg_metrics_and_scene() {
         std::fs::read_to_string(sandbox.0.join("second-scene.json")).unwrap()
     );
 }
+
+#[test]
+fn state_diagrams_render_with_svg_metrics_and_scene() {
+    let sandbox = Sandbox::new();
+    let fixture = include_str!("../../../fixtures/mermaid/state/lifecycle.mmd");
+    std::fs::write(
+        sandbox.0.join("note.md"),
+        format!("\x60\x60\x60mermaid\n{fixture}\x60\x60\x60\n"),
+    )
+    .unwrap();
+    let result = sandbox.invoke(&[
+        "mermaid",
+        "render",
+        "note.md",
+        "--width",
+        "700",
+        "--theme",
+        "dark",
+        "--out",
+        "diagram.svg",
+        "--metrics",
+        "metrics.json",
+        "--scene",
+        "scene.json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let svg = std::fs::read_to_string(sandbox.0.join("diagram.svg")).unwrap();
+    assert!(svg.contains("aria-label=\"Mermaid state diagram\"") && svg.contains("套接字"));
+    let json_file = |name| {
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(sandbox.0.join(name)).unwrap())
+            .unwrap()
+    };
+    let metrics = json_file("metrics.json");
+    assert_eq!(metrics["diagram_kind"], "state");
+    assert_eq!(metrics["horizontal_overflow"], false);
+    assert_eq!(metrics["node_overlaps"], 0);
+    let scene = json_file("scene.json");
+    assert_eq!(scene["metrics"]["layout_ms"], 0.0);
+    assert_eq!(scene["hit_regions"].as_array().unwrap().len(), 11);
+}

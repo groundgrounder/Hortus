@@ -1,0 +1,13 @@
+stateDiagram-v2
+title TCP 连接状态
+[*] --> Probe
+state "TCP 探测" as Probe
+Probe : 探测间隔由 EWMA 控制
+Probe : 达到阈值则驱逐连接
+Probe --> Lease : SYN-ACK / 正常租借
+state "租借中" as Lease
+Lease --> Probe : FIN / 等待重连
+Lease --> Lease : EAGAIN / 指数退避
+Lease --> Drain : TLS alert / 归还套接字
+state "Drain" as Drain
+Drain --> [*]

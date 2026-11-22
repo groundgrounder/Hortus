@@ -1,0 +1,19 @@
+%%{init: {"theme": "neutral"}}%%
+stateDiagram
+direction LR
+title DMA 描述符队列
+state "分配描述符<br/>Descriptor" as Alloc
+state "提交 DMA" as Dispatch
+state "回收环形缓冲区" as Reap
+[*] --> Alloc
+Alloc --> Dispatch:::busy : doorbell<br/>内核批量提交 DMA 描述符
+Dispatch --> Reap : IRQ / 校验设备写回的状态位，随后释放映射页
+Reap --> [*]
+note left of Alloc : IOMMU 映射对齐到页边界
+note right of Reap
+    先确认 DMA fence，再移动 head 指针。
+    环形缓冲区采用 acquire 屏障。
+end note
+classDef busy fill:#c1e8ff,stroke:#3485ae,color:#154b65
+classDef ring fill:#e4edda,stroke:#6b893d,color:#3d5628
+class Reap ring

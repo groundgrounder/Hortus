@@ -199,6 +199,7 @@ pub(super) fn compute_ends(
     accepted: &[bool],
     lr_bands: Option<&[usize]>,
     plan: &EdgePlan,
+    distinct_ports: bool,
 ) -> Vec<Ends> {
     let edge_sides = &plan.sides;
     let peer_counts = &plan.peer_counts;
@@ -265,7 +266,8 @@ pub(super) fn compute_ends(
                         && graph.edges[*index].to == graph.edges[*other].to
                 })
             });
-        if !lr_container_sink
+        if !distinct_ports
+            && !lr_container_sink
             && !repeated
             && (nodes.len() > 48
                 || (incident.len() > 2
@@ -287,7 +289,9 @@ pub(super) fn compute_ends(
             .iter()
             .all(|index| graph.edges[*index].label.is_none());
         let span = (if is_vertical { rect.width } else { rect.height }) * PORT_SPAN_RATIO;
-        let spacing = if !unlabeled || count < 2 || span >= MIN_PORT_GAP * (count as f64 - 2.0) {
+        let spacing = if distinct_ports && count > 1 {
+            (2.0 * span / (count - 1) as f64).min(12.0)
+        } else if !unlabeled || count < 2 || span >= MIN_PORT_GAP * (count as f64 - 2.0) {
             12.0
         } else {
             (2.0 * span / (count - 1) as f64).min(12.0)

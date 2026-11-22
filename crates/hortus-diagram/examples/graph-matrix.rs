@@ -269,6 +269,9 @@ fn render(
         Diagram::Sequence(_) => Err(LayoutError(
             "sequence diagrams are outside the graph matrix".into(),
         )),
+        Diagram::State(_) => Err(LayoutError(
+            "state diagrams are outside the graph matrix".into(),
+        )),
     }
     .map_err(|e| e.to_string())
 }

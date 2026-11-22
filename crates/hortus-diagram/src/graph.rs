@@ -129,6 +129,7 @@ pub enum Diagram {
     Tree(Tree),
     Graph(Graph),
     Sequence(crate::sequence::SequenceDiagram),
+    State(crate::StateDiagram),
 }
 
 impl Graph {

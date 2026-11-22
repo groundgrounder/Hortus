@@ -341,6 +341,24 @@ pub(crate) fn place_edge_label(
     labels: &[Rect],
     canvas_width: f64,
 ) -> Option<Rect> {
+    place_sized_edge_label(
+        index,
+        (width, EDGE_LABEL_HEIGHT),
+        paths,
+        nodes,
+        labels,
+        (canvas_width, f64::INFINITY),
+    )
+}
+
+pub(crate) fn place_sized_edge_label(
+    index: usize,
+    (width, height): (f64, f64),
+    paths: &[Vec<Point>],
+    nodes: &[Rect],
+    labels: &[Rect],
+    (canvas_width, canvas_height): (f64, f64),
+) -> Option<Rect> {
     let mut candidates = Vec::new();
     for (segment, pair) in paths[index].windows(2).enumerate() {
         let length = (pair[1].x - pair[0].x).abs() + (pair[1].y - pair[0].y).abs();
@@ -365,11 +383,15 @@ pub(crate) fn place_edge_label(
                 };
                 let rect = Rect {
                     x: center.x + dx - width / 2.0 - EDGE_LABEL_PAD_X,
-                    y: center.y + dy - EDGE_LABEL_HEIGHT / 2.0,
+                    y: center.y + dy - height / 2.0,
                     width: width + EDGE_LABEL_PAD_X * 2.0,
-                    height: EDGE_LABEL_HEIGHT,
+                    height,
                 };
-                if rect.x < 4.0 || rect.x + rect.width > canvas_width - 4.0 || rect.y < 4.0 {
+                if rect.x < 4.0
+                    || rect.x + rect.width > canvas_width - 4.0
+                    || rect.y < 4.0
+                    || rect.y + rect.height > canvas_height - 4.0
+                {
                     continue;
                 }
                 let margin = Rect {

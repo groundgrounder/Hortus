@@ -771,7 +771,7 @@ fn parse_inline_class(text: &str, cursor: &mut usize) -> Option<String> {
     (start < *cursor).then(|| text[start..*cursor].into())
 }
 
-fn parse_style(
+pub(crate) fn parse_style(
     text: &str,
     at: usize,
     mut warnings: Option<&mut Vec<(Range<usize>, String)>>,

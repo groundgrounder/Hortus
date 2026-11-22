@@ -15,7 +15,7 @@ pub(super) fn permutations_of(values: &mut [usize], start: usize, output: &mut V
     }
 }
 
-pub(super) fn assign_ranks(graph: &Graph) -> (Vec<usize>, usize, Vec<bool>) {
+pub(crate) fn assign_ranks(graph: &Graph) -> (Vec<usize>, usize, Vec<bool>) {
     let count = graph.nodes.len();
     let mut dag = vec![Vec::new(); count];
     let mut accepted = vec![false; graph.edges.len()];
@@ -67,7 +67,7 @@ fn reachable(adjacency: &[Vec<usize>], start: usize, target: usize) -> bool {
     false
 }
 
-pub(super) fn order_ranks(graph: &Graph, ranks: &[usize], count: usize) -> Vec<Vec<usize>> {
+pub(crate) fn order_ranks(graph: &Graph, ranks: &[usize], count: usize) -> Vec<Vec<usize>> {
     let mut order = vec![Vec::new(); count];
     for (node, rank) in ranks.iter().enumerate() {
         order[*rank].push(node);
