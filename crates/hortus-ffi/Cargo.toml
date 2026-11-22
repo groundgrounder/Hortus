@@ -21,6 +21,7 @@ hortus-document = { path = "../hortus-document" }
 hortus-diagram = { path = "../hortus-diagram" }
 hortus-vault = { path = "../hortus-vault" }
 hortus-config = { path = "../hortus-config" }
+hortus-links = { path = "../hortus-links" }
 hortus-search = { path = "../hortus-search" }
 hortus-history = { path = "../hortus-history" }
 serde_json.workspace = true

@@ -120,6 +120,14 @@ pub enum BrokenReason {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkCompletion {
+    pub path: String,
+    pub title: String,
+    pub insert_target: String,
+    pub matched_alias: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkRewrite {
     pub source: String,
     pub line: usize,
@@ -304,6 +312,103 @@ impl KnowledgeIndex {
         }
     }
 
+    pub fn markup(&self, path: &str, text: &str) -> (Vec<ResolvedLink>, Vec<Tag>) {
+        let parsed = parse::parse_occurrences(text);
+        (
+            parsed
+                .links
+                .iter()
+                .map(|link| self.resolve_link(path, link))
+                .collect(),
+            parsed
+                .tags
+                .into_iter()
+                .filter(|tag| !tag.frontmatter)
+                .collect(),
+        )
+    }
+
+    pub fn completions(&self, query: &str, limit: usize) -> Vec<LinkCompletion> {
+        let query = query.trim().to_lowercase();
+        let mut matches = Vec::new();
+        for (path, note) in &self.notes {
+            let title = stem_of(path);
+            let folded_title = title.to_lowercase();
+            let folded_path = path.to_lowercase();
+            let name_rank = if folded_title == query {
+                Some(0)
+            } else if folded_title.starts_with(&query) {
+                Some(2)
+            } else if folded_path.starts_with(&query) {
+                Some(4)
+            } else if folded_title.contains(&query) || folded_path.contains(&query) {
+                Some(5)
+            } else {
+                None
+            };
+            let alias = if query.is_empty() {
+                None
+            } else {
+                note.parsed
+                    .aliases
+                    .iter()
+                    .filter_map(|alias| {
+                        let folded = alias.to_lowercase();
+                        let rank = if folded == query {
+                            1
+                        } else if folded.starts_with(&query) {
+                            3
+                        } else if folded.contains(&query) {
+                            6
+                        } else {
+                            return None;
+                        };
+                        Some((rank, alias))
+                    })
+                    .min()
+            };
+            let Some(rank) = name_rank
+                .into_iter()
+                .chain(alias.map(|(rank, _)| rank))
+                .min()
+            else {
+                continue;
+            };
+            let short = self
+                .by_stem
+                .get(&folded_title)
+                .is_some_and(|paths| paths.len() == 1)
+                && !is_attachment_target(title)
+                && matches!(self.resolve("", title), LinkResolution::Note(found) if found == *path);
+            let full = without_note_extension(path);
+            let insert_target = if short {
+                title
+            } else if !is_attachment_target(full)
+                && matches!(self.resolve("", full), LinkResolution::Note(found) if found == *path)
+            {
+                full
+            } else {
+                path
+            };
+            matches.push((
+                rank,
+                folded_title,
+                LinkCompletion {
+                    path: path.clone(),
+                    title: title.into(),
+                    insert_target: insert_target.into(),
+                    matched_alias: alias.map(|(_, alias)| alias.clone()),
+                },
+            ));
+        }
+        matches.sort_by(|a, b| (&a.0, &a.1, &a.2.path).cmp(&(&b.0, &b.1, &b.2.path)));
+        matches
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, hit)| hit)
+            .collect()
+    }
+
     pub fn links(&self, path: &str) -> Option<Vec<ResolvedLink>> {
         let entry = self.notes.get(path)?;
         Some(
@@ -472,46 +577,48 @@ impl KnowledgeIndex {
                 if !old_names.contains(&key) && old_aliases.contains(&key) {
                     continue;
                 }
-                let target = if let Some(extension) = note_extension(&link.raw_target) {
-                    format!("{new_without_extension}.{extension}")
+                let mut target = if note_extension(&link.raw_target).is_some() {
+                    new.clone()
                 } else if link.raw_target.contains('/') {
-                    if link.raw_target.starts_with('/') {
-                        format!("/{new_without_extension}")
-                    } else {
-                        new_without_extension.to_owned()
-                    }
+                    new_without_extension.to_owned()
                 } else {
-                    new_stem.to_owned()
+                    let collisions = self
+                        .by_stem
+                        .get(&new_stem.to_lowercase())
+                        .is_some_and(|paths| paths.iter().any(|path| path != &old));
+                    if collisions {
+                        new_without_extension.to_owned()
+                    } else {
+                        new_stem.to_owned()
+                    }
                 };
+                if is_attachment_target(&target)
+                    || self.notes.keys().any(|path| {
+                        path != &old
+                            && without_note_extension(path)
+                                .eq_ignore_ascii_case(new_without_extension)
+                    })
+                {
+                    target = new.clone();
+                }
+                if link.raw_target.starts_with('/') {
+                    target.insert(0, '/');
+                }
                 if target == link.raw_target {
                     continue;
                 }
-                let mut after = String::new();
-                if link.embed {
-                    after.push('!');
-                }
-                after.push_str("[[");
-                after.push_str(&target);
-                if let Some(heading) = &link.heading {
-                    after.push('#');
-                    after.push_str(heading);
-                }
-                if let Some(alias) = &link.alias {
-                    after.push('|');
-                    after.push_str(alias);
-                }
-                after.push_str("]]");
-                let before = entry
-                    .text
-                    .get(link.start..link.end)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| reconstruct_link(link));
+                let before = &entry.text[link.start..link.end];
+                let mut after = before.to_owned();
+                after.replace_range(
+                    link.target_range.start - link.start..link.target_range.end - link.start,
+                    &target,
+                );
                 rewrites.push(LinkRewrite {
                     source: source.clone(),
                     line: link.line,
                     start: link.start,
                     end: link.end,
-                    before,
+                    before: before.into(),
                     after,
                 });
             }
@@ -519,7 +626,7 @@ impl KnowledgeIndex {
         rewrites
     }
 
-    fn resolve(&self, source: &str, target: &str) -> LinkResolution {
+    pub fn resolve(&self, source: &str, target: &str) -> LinkResolution {
         if is_attachment_target(target) {
             return LinkResolution::Attachment;
         }
@@ -592,25 +699,6 @@ impl KnowledgeIndex {
             resolution: self.resolve(source, &link.raw_target),
         }
     }
-}
-
-fn reconstruct_link(link: &Link) -> String {
-    let mut text = String::new();
-    if link.embed {
-        text.push('!');
-    }
-    text.push_str("[[");
-    text.push_str(&link.raw_target);
-    if let Some(heading) = &link.heading {
-        text.push('#');
-        text.push_str(heading);
-    }
-    if let Some(alias) = &link.alias {
-        text.push('|');
-        text.push_str(alias);
-    }
-    text.push_str("]]");
-    text
 }
 
 #[cfg(test)]

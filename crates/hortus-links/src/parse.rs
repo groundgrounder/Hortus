@@ -11,6 +11,13 @@ use std::ops::Range;
 const CONTEXT_LIMIT: usize = 160;
 
 pub(crate) fn parse_note(text: &str) -> ParsedNote {
+    let mut note = parse_occurrences(text);
+    let mut seen = BTreeSet::new();
+    note.tags.retain(|tag| seen.insert(tag.key.clone()));
+    note
+}
+
+pub(crate) fn parse_occurrences(text: &str) -> ParsedNote {
     let frontmatter = crate::frontmatter::parse(text);
     let body_start = frontmatter.as_ref().map_or(0, |front| front.end);
     let lines = Lines::new(text);
@@ -45,7 +52,7 @@ pub(crate) fn parse_note(text: &str) -> ParsedNote {
         mark(&mut ignored, link.start..link.end);
     }
 
-    scan_tags(text, &ignored, body_start, &lines, &mut tags, &mut seen);
+    scan_tags(text, &ignored, body_start, &lines, &mut tags);
 
     ParsedNote {
         tags,
@@ -566,14 +573,7 @@ fn parse_link_at(
     })
 }
 
-fn scan_tags(
-    text: &str,
-    ignored: &[bool],
-    body_start: usize,
-    lines: &Lines,
-    tags: &mut Vec<Tag>,
-    seen: &mut BTreeSet<String>,
-) {
+fn scan_tags(text: &str, ignored: &[bool], body_start: usize, lines: &Lines, tags: &mut Vec<Tag>) {
     let mut index = body_start.min(text.len());
     while index < text.len() {
         if ignored.get(index).copied().unwrap_or(false) {
@@ -629,16 +629,14 @@ fn scan_tags(
         let raw = &text[index + 1..cursor];
         if !raw.chars().all(|character| character.is_ascii_digit()) {
             let key = raw.to_ascii_lowercase();
-            if seen.insert(key.clone()) {
-                tags.push(Tag {
-                    raw: raw.to_owned(),
-                    key,
-                    start: index,
-                    end: cursor,
-                    line: lines.line_of(index),
-                    frontmatter: false,
-                });
-            }
+            tags.push(Tag {
+                raw: raw.to_owned(),
+                key,
+                start: index,
+                end: cursor,
+                line: lines.line_of(index),
+                frontmatter: false,
+            });
         }
         index = cursor;
     }

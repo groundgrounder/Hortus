@@ -1,6 +1,7 @@
 //! Swift 只通过这层调用 Rust；目录 I/O 和扫描在 Swift 后台任务及 Rust 工作线程执行。
 use hortus_config::{Directories, LayoutState, Store, VaultState};
 use hortus_history as history;
+use hortus_links::KnowledgeIndex;
 use hortus_search::SearchIndex;
 use hortus_vault::Vault;
 use std::fmt;
@@ -8,11 +9,13 @@ use std::sync::{Arc, Mutex};
 
 mod diagram;
 mod document;
+mod links;
 mod math;
 mod media;
 mod scene;
 pub use diagram::*;
 pub use document::*;
+pub use links::*;
 pub use math::*;
 pub use scene::*;
 
@@ -901,6 +904,9 @@ impl WorkspaceCore {
         Ok(Arc::new(VaultHandle {
             vault: Vault::open(path)?,
             search: Mutex::new(SearchIndex::new()),
+            links: Mutex::new(KnowledgeIndex::new()),
+            index_update: Mutex::new(()),
+            rename_plans: Mutex::new(Default::default()),
         }))
     }
 
@@ -1116,6 +1122,9 @@ fn tree_entry(entry: hortus_vault::Entry) -> TreeEntry {
 pub struct VaultHandle {
     vault: Vault,
     search: Mutex<SearchIndex>,
+    links: Mutex<KnowledgeIndex>,
+    index_update: Mutex<()>,
+    rename_plans: Mutex<links::RenamePlans>,
 }
 
 #[uniffi::export]
@@ -1176,24 +1185,14 @@ impl VaultHandle {
     }
 
     pub fn update_search_index(&self, upserted: Vec<String>, removed: Vec<String>) {
-        // 首次扫描与监听增量都经过这里；read_note 返回与 DocumentSession 相同的规范化正文。
-        let updates = upserted
-            .into_iter()
-            .map(|path| {
-                let text = self.vault.read_note(&path).ok();
-                (path, text)
-            })
-            .collect::<Vec<_>>();
-        let mut search = self.search.lock().unwrap();
-        for path in removed {
-            search.remove(&path);
-        }
-        for (path, text) in updates {
-            if let Some(text) = text {
-                search.upsert(path, text);
-            } else {
-                search.remove(&path);
-            }
+        let _update = self.index_update.lock().unwrap();
+        self.index_paths(upserted, removed);
+    }
+
+    pub fn upsert_note_content(&self, path: String, text: String) {
+        let _update = self.index_update.lock().unwrap();
+        if hortus_vault::note::note_path(self.vault.root(), &path).is_ok() {
+            self.index_contents([(path, Some(text))]);
         }
     }
 

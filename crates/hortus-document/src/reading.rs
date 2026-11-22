@@ -932,8 +932,13 @@ fn render_full_inner(
                     );
                 }
                 Kind::WikiLink | Kind::Embed => {
-                    if let Some(pipe) = text[r.clone()].find('|') {
-                        suppress[r.start..r.start + pipe + 1].fill(true);
+                    let inner = &text[r.clone()];
+                    if let Some(pipe) = inner.find('|') {
+                        if inner[pipe + 1..].trim().is_empty() {
+                            suppress[r.start + pipe..r.end].fill(true);
+                        } else {
+                            suppress[r.start..r.start + pipe + 1].fill(true);
+                        }
                     }
                 }
                 Kind::Callout => {

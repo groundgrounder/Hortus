@@ -80,8 +80,10 @@ impl Kind {
             Self::InlineCode => 16,
             Self::CodeBlock => 32,
             Self::Quote => 64,
-            Self::Link | Self::WikiLink => 128,
-            Self::Image | Self::Embed => 256,
+            Self::Link => 128,
+            Self::WikiLink => 128 | (1 << 18),
+            Self::Image => 256,
+            Self::Embed => 256 | (1 << 18),
             Self::Tag => 512,
             Self::Highlight => 1024,
             Self::Comment => 2048,
@@ -638,6 +640,8 @@ fn analyze_into(
                 && let Some(end) = rest[open.len()..]
                     .find(close)
                     .map(|n| i + open.len() + n + close.len())
+                && (kind == Kind::Highlight
+                    || !line[i + open.len()..end - close.len()].trim().is_empty())
                 && !protected[base + i..base + end].iter().any(|&p| p)
             {
                 wrapped(spans, kind, base + i..base + end, open.len(), close.len());
@@ -645,18 +649,22 @@ fn analyze_into(
                 continue;
             }
             if bytes[i] == b'#'
+                && rest[1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
                 && (i == 0
                     || line[..i]
                         .chars()
                         .next_back()
-                        .is_some_and(|c| c.is_whitespace() || matches!(c, '(' | '（')))
+                        .is_some_and(|c| !c.is_alphanumeric() && !matches!(c, '_' | '/' | '\\')))
             {
                 let len: usize = rest[1..]
                     .chars()
                     .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/'))
                     .map(char::len_utf8)
                     .sum();
-                if len > 0 {
+                if len > 0 && !rest[1..1 + len].bytes().all(|byte| byte.is_ascii_digit()) {
                     push(spans, Kind::Marker, base + i..base + i + 1);
                     push(spans, Kind::Tag, base + i + 1..base + i + 1 + len);
                     i += len + 1;
