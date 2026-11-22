@@ -499,7 +499,7 @@ def scenarios(base, output):
     vault = base / 'errors'
     vault.mkdir()
     cases = [
-        ('unsupported', 'classDiagram\nA <|-- B', '暂不支持', 'Unsupported'),
+        ('unsupported', 'gantt\ntitle 计划', '暂不支持', 'Unsupported'),
         ('not-tree', 'flowchart TB\nA --> C\nB --> C', None, None),
         ('syntax', 'flowchart TB\nA --> B\nB ??? C', '第 3 行语法错误', 'Syntax'),
         ('unsupported-subgraph',

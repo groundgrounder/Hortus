@@ -191,7 +191,7 @@ def error_paths(base, output):
     vault.mkdir()
     cases = [
         ('syntax', note_for(FIXTURES / 'syntax-errors.mmd'), 'Syntax'),
-        ('unsupported', '```mermaid\nclassDiagram\nA <|-- B\n```\n', 'Unsupported'),
+        ('unsupported', '```mermaid\ngantt\ntitle 计划\n```\n', 'Unsupported'),
     ]
     rows = []
     for name, content, diagnostic in cases:

@@ -184,7 +184,7 @@ struct DiagramTests {
 
     @Test func unsupportedAndMalformedDiagramsKeepSource() async throws {
         let service = DiagramService()
-        for (source, reason) in [("classDiagram\nA <|-- B", L10n.string("Unsupported %@ diagram; showing source", "classDiagram")),
+        for (source, reason) in [("gantt\ntitle 计划", L10n.string("Unsupported %@ diagram; showing source", "gantt")),
                                  ("flowchart TB\nA --> B\nB ??? C", L10n.string("Syntax error on line %d; showing source", 3))] {
             let blocks = try await service.blocks(source: source, mmd: true, vault: "test", note: "x.mmd", core: nil)
             let result = await service.render(source: source, mmd: true, blocks: blocks, width: 700, dark: false)
@@ -260,6 +260,48 @@ struct DiagramTests {
         let dupView = DiagramView(prepared: dupFirst)
         dupView.update(dupSecond)
         #expect(dupView.accessibilityNodeCount == dupSecond.scene.hitRegions.count)
+    }
+
+    @Test func classAndErDiagramsRenderNativelyWithSourceRanges() async throws {
+        let source = "序😀\r\n\r\n```mermaid\r\nclassDiagram\r\nclass Order {\r\n  +id: UUID\r\n}\r\nOrder \"1\" *-- \"1..*\" LineItem : contains\r\n```\r\n\r\n```mermaid\r\nerDiagram\r\nUSER ||--o{ ORDER : places\r\n```\r\n"
+        let service = DiagramService()
+        let blocks = try await service.blocks(source: source, mmd: false, vault: "test", note: "uml.md", core: nil)
+        let result = await service.render(source: source, mmd: false, blocks: blocks, width: 700, dark: true)
+        #expect(result.count == 2)
+        for block in result {
+            let prepared = try #require(block.prepared, "\(block.reason ?? "No diagnostic")")
+            #expect(block.sceneVersion == 2)
+            #expect(prepared.acceptsInteraction)
+            #expect(prepared.scene.hitRegions.allSatisfy { !$0.canCollapse })
+            let ids = prepared.scene.hitRegions.map(\.nodeId)
+            #expect(Set(ids).count == ids.count, "UML 图全部命中区域必须使用唯一 nodeId")
+            #expect(ids.contains { $0.hasPrefix("relation-") })
+        }
+        let classPrepared = try #require(result[0].prepared)
+        let classView = DiagramView(prepared: classPrepared)
+        let order = try #require(classPrepared.scene.hitRegions.first(where: { $0.nodeId == "class-Order" }))
+        let orderRange = try #require(classView.sourceRange(at: CGPoint(x: order.rect.cgRect.midX, y: order.rect.cgRect.midY)))
+        #expect((source as NSString).substring(with: orderRange) == "class Order {")
+        let relation = try #require(classPrepared.scene.hitRegions.first(where: { $0.nodeId == "relation-0" }))
+        let relationRange = try #require(classView.sourceRange(at: CGPoint(x: relation.rect.cgRect.midX, y: relation.rect.cgRect.midY)))
+        #expect((source as NSString).substring(with: relationRange).contains("contains"))
+        let erPrepared = try #require(result[1].prepared)
+        let erView = DiagramView(prepared: erPrepared)
+        let user = try #require(erPrepared.scene.hitRegions.first(where: { $0.nodeId == "entity-USER" }))
+        let userRange = try #require(erView.sourceRange(at: CGPoint(x: user.rect.cgRect.midX, y: user.rect.cgRect.midY)))
+        #expect((source as NSString).substring(with: userRange) == "USER")
+
+        let editor = try EditingTests.Fixture(source)
+        try await editor.ready()
+        let live = try #require(editor.view.diagramViews.values.first { $0.prepared.sourceRanges["class-Order"] != nil })
+        let classRange = try #require(live.prepared.sourceRanges["class-Order"])
+        editor.view.applySourceHighlight(caret: classRange.location)
+        #expect(live.highlightedNodeID == "class-Order")
+        editor.view.applySourceHighlight(caret: (editor.view.string as NSString).range(of: "contains").location)
+        #expect(live.highlightedNodeID == "relation-0")
+        editor.view.applySourceHighlight(caret: 0)
+        #expect(live.highlightedNodeID == nil)
+        await editor.close()
     }
 
     @Test func stateDiagramsRenderNativelyWithSourceRanges() async throws {

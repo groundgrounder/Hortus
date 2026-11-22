@@ -538,7 +538,7 @@ struct ReadingTests {
     }
 
     @Test func diagramHeightFallbackAndContinuousQuoteBars() async throws {
-        let source = "> Line one\n> Line two\n> Line three\n\n> [!note] Title\n> Line two\n> Line three\n\n" + EditingTests.source + "\n\n~~~mermaid\nclassDiagram\nA <|-- B\n~~~\n"
+        let source = "> Line one\n> Line two\n> Line three\n\n> [!note] Title\n> Line two\n> Line three\n\n" + EditingTests.source + "\n\n~~~mermaid\ngantt\ntitle 计划\n~~~\n"
         let f = try Fixture(source); try await f.start()
         #expect(f.view.diagramStorage?.diagrams.isEmpty == true)
         #expect(f.view.diagramViews.count == 1)
@@ -557,7 +557,7 @@ struct ReadingTests {
         #expect(quotes.map(\.quoteHead) == [true, false, false, true, false, false])
         #expect(quotes.map(\.quoteTail) == [false, false, true, false, false, true])
         #expect(diagrams == 1 && failures == 1)
-        #expect(f.view.string.contains("classDiagram"))
+        #expect(f.view.string.contains("gantt"))
         await f.close()
     }
 
@@ -607,6 +607,38 @@ struct ReadingTests {
         }
         #expect(heights.count == 1 && heights[0] > 40)
         #expect(!f.view.string.contains("stateDiagram-v2"))
+        await f.close()
+    }
+
+    @Test func classAndErDiagramsRenderNativelyInTheReadingView() async throws {
+        let source = "序😀\n\n~~~mermaid\nclassDiagram\nclass Order {\n  +id: UUID\n}\nOrder \"1\" *-- \"1..*\" LineItem : contains\n~~~\n\n~~~mermaid\nerDiagram\nUSER ||--o{ ORDER : places\n~~~\n"
+        let f = try Fixture(source)
+        try await f.start()
+        let blocks = f.view.blocks
+        #expect(blocks.count == 2)
+        #expect(blocks.allSatisfy { $0.reason == nil && $0.sceneVersion == 2 })
+        #expect(f.view.diagramViews.count == 2)
+        let manager = try #require(f.view.textLayoutManager)
+        let content = try #require(manager.textContentManager)
+        manager.ensureLayout(for: content.documentRange)
+        var diagrams = 0, failures = 0, tall = false
+        manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
+            if let fragment = fragment as? NoteLayoutFragment {
+                if let size = fragment.replacement {
+                    diagrams += 1
+                    if size.height > 40 { tall = true }
+                }
+                if fragment.reason != nil { failures += 1 }
+            }
+            return true
+        }
+        #expect(diagrams == 2 && failures == 0)
+        #expect(tall)
+        #expect(!f.view.string.contains("classDiagram") && !f.view.string.contains("erDiagram"))
+        for (_, view) in f.view.diagramViews {
+            let ids = view.prepared.scene.hitRegions.map(\.nodeId)
+            #expect(Set(ids).count == ids.count)
+        }
         await f.close()
     }
 

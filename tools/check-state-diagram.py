@@ -118,8 +118,8 @@ def error_paths(base):
         ('stateDiagram-v2\nstate Ring\n}', 6, 'state_unexpected_close', 'syntax'),
         ('stateDiagram-v2\nnote left of Ring\nDMA fence', 5, 'state_unclosed_note', 'syntax'),
         ('stateDiagram\n队列 --> --> Rx', 5, 'state_invalid_transition', 'syntax'),
-        ('classDiagram\nA <|-- B', 2, 'Unsupported', 'unsupported'),
-        ('erDiagram\nA ||--|| B : x', 2, 'Unsupported', 'unsupported'),
+        ('gantt\ntitle 计划', 2, 'Unsupported', 'unsupported'),
+        ('pie\n"A": 1', 2, 'Unsupported', 'unsupported'),
     ]:
         note.write_text(f'序😀\n> ~~~mermaid\n> %% 注释\n' + ''.join(f'> {s}\n' for s in source.splitlines()) + '> ~~~\n')
         report = json.loads(cli('check', note, ok=False).stdout)['blocks'][0]
