@@ -72,12 +72,16 @@ fn diagram_type(diagram: &Diagram) -> &'static str {
         Diagram::Graph(_) => "flowchart",
         Diagram::Sequence(_) => "sequence",
         Diagram::State(_) => "state",
+        Diagram::Class(_) => "class",
+        Diagram::Er(_) => "er",
     }
 }
 
 fn infer_type(source: &str) -> String {
     match hortus_diagram::infer_diagram_header(source) {
         Some("stateDiagram" | "stateDiagram-v2") => "state".into(),
+        Some("classDiagram" | "classDiagram-v2") => "class".into(),
+        Some("erDiagram") => "er".into(),
         Some("mindmap") => "tree".into(),
         Some("flowchart" | "graph") => "flowchart".into(),
         Some("sequenceDiagram") => "sequence".into(),

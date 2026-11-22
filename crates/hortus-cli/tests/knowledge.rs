@@ -274,6 +274,8 @@ fn mermaid_check_reports_types_errors_and_block_selection() {
             "```mermaid\nmindmap\n  Root\n    Child\n```\n\n",
             "```mermaid\nflowchart TB\nsubgraph G\nA --> B\nend\n```\n\n",
             "```mermaid\nsequenceDiagram\nA->>B: hello\n```\n",
+            "```mermaid\nclassDiagram\nOrder \"1\" *-- \"1..*\" LineItem : contains\n```\n",
+            "```mermaid\nerDiagram\nUSER ||--o{ ORDER : places\n```\n",
         ),
     );
     let output = run(&vault, &["mermaid", "check", "diagrams.md"], &[]);
@@ -282,10 +284,12 @@ fn mermaid_check_reports_types_errors_and_block_selection() {
     assert_eq!(report["file"], "diagrams.md");
     assert_eq!(report["valid"], true);
     let blocks = report["blocks"].as_array().unwrap();
-    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks.len(), 5);
     assert_eq!(blocks[0]["diagram_type"], "tree");
     assert_eq!(blocks[1]["diagram_type"], "flowchart");
     assert_eq!(blocks[2]["diagram_type"], "sequence");
+    assert_eq!(blocks[3]["diagram_type"], "class");
+    assert_eq!(blocks[4]["diagram_type"], "er");
     assert!(blocks.iter().all(|block| block["valid"] == true));
     assert!(
         blocks
@@ -323,7 +327,7 @@ fn mermaid_check_reports_types_errors_and_block_selection() {
 
     write(
         &vault.join("unsupported.md"),
-        "```mermaid\nclassDiagram\nA <|-- B\n```\n",
+        "```mermaid\ngantt\ntitle 计划\n```\n",
     );
     let unsupported = run(&vault, &["mermaid", "check", "unsupported.md"], &[]);
     assert!(!unsupported.status.success());

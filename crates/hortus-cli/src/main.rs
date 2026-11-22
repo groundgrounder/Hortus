@@ -2,8 +2,8 @@ mod mermaid_check;
 mod query;
 
 use hortus_diagram::{
-    Diagram, LayoutOptions, SystemFonts, Theme, layout, layout_graph, layout_sequence,
-    layout_state, mermaid_block,
+    Diagram, LayoutOptions, SystemFonts, Theme, layout, layout_class, layout_er, layout_graph,
+    layout_sequence, layout_state, mermaid_block,
 };
 use std::collections::HashSet;
 use std::io::Write;
@@ -343,6 +343,8 @@ fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
         Diagram::Graph(graph) => layout_graph(&graph, &args.options, &mut fonts)?.scene,
         Diagram::Sequence(sequence) => layout_sequence(&sequence, &args.options, &mut fonts)?,
         Diagram::State(state) => layout_state(&state, &args.options, &mut fonts)?,
+        Diagram::Class(class) => layout_class(&class, &args.options, &mut fonts)?,
+        Diagram::Er(er) => layout_er(&er, &args.options, &mut fonts)?,
     };
     std::fs::write(out, scene.to_svg())?;
     if let Some(path) = metrics_path {

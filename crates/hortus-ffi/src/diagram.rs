@@ -1,7 +1,7 @@
 //! 长期存活的字体与单篇笔记解析缓存；调用方须在后台初始化及排版。
 use hortus_diagram::{
-    Diagram, DiagramError, FontMetrics, LayoutOptions, SystemFonts, layout, layout_graph,
-    layout_sequence, layout_state, mermaid_blocks, parse_diagram_at,
+    Diagram, DiagramError, FontMetrics, LayoutOptions, SystemFonts, layout, layout_class,
+    layout_er, layout_graph, layout_sequence, layout_state, mermaid_blocks, parse_diagram_at,
 };
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -277,6 +277,12 @@ impl DiagramEngine {
             Diagram::State(diagram) => {
                 layout_state(diagram, &options, &mut state.fonts).map(|scene| (scene, None, None))
             }
+            Diagram::Class(diagram) => {
+                layout_class(diagram, &options, &mut state.fonts).map(|scene| (scene, None, None))
+            }
+            Diagram::Er(diagram) => {
+                layout_er(diagram, &options, &mut state.fonts).map(|scene| (scene, None, None))
+            }
         }
         .map_err(|error| DiagramFailure::Engine { kind: error.0 })?;
         let semantic_json = if include_semantic_json {
@@ -365,7 +371,7 @@ mod tests {
             engine.render(source.into(), true, 1, 700.0, false, collapsed)
         };
         assert!(matches!(
-            render("classDiagram\nA <|-- B", vec![]),
+            render("gantt\ntitle 计划", vec![]),
             Err(DiagramFailure::Unsupported { .. })
         ));
         let graph = render("flowchart TB\nB & C --> D", vec![]).unwrap();
@@ -443,6 +449,65 @@ mod tests {
                 vec![]
             ),
             Err(DiagramFailure::Syntax { line: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn class_and_er_diagrams_render_schema_two_scenes_with_source_ranges() {
+        let source = "序😀\r\n\r\n```mermaid\r\nclassDiagram\r\nclass Order {\r\n  +id: UUID\r\n}\r\nOrder \"1\" *-- \"1..*\" LineItem : contains\r\n```\r\n\r\n```mermaid\r\nerDiagram\r\nUSER ||--o{ ORDER : places\r\n```\r\n";
+        let engine = DiagramEngine::new().unwrap();
+        let class = engine
+            .render(source.into(), false, 1, 700.0, true, vec![])
+            .unwrap();
+        assert_eq!(class.schema_version, 2);
+        assert_eq!(class.hit_regions.len(), 3);
+        let ids = class
+            .hit_regions
+            .iter()
+            .map(|hit| hit.node_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), class.hit_regions.len());
+        let order = class
+            .hit_regions
+            .iter()
+            .find(|hit| hit.node_id == "class-Order")
+            .unwrap();
+        let range = order.source_start as usize..order.source_end as usize;
+        assert_eq!(&source[range], "class Order {");
+        let relation = class
+            .hit_regions
+            .iter()
+            .find(|hit| hit.node_id == "relation-0")
+            .unwrap();
+        let range = relation.source_start as usize..relation.source_end as usize;
+        assert!(source[range].contains("contains"));
+
+        let er = engine
+            .render(source.into(), false, 2, 1100.0, false, vec![])
+            .unwrap();
+        assert_eq!(er.schema_version, 2);
+        assert_eq!(er.hit_regions.len(), 3);
+        let ids = er
+            .hit_regions
+            .iter()
+            .map(|hit| hit.node_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), er.hit_regions.len());
+        assert!(
+            er.hit_regions
+                .iter()
+                .any(|hit| hit.node_id == "entity-ORDER")
+        );
+        assert!(matches!(
+            engine.render(
+                "erDiagram\nUSER {\nbigint\n}".into(),
+                true,
+                1,
+                700.0,
+                false,
+                vec![]
+            ),
+            Err(DiagramFailure::Syntax { line: 3, .. })
         ));
     }
 

@@ -88,7 +88,7 @@ fn render_selects_block_theme_width_and_collapsed_nodes() {
 fn errors_have_nonzero_exit_codes_and_do_not_write_output() {
     let sandbox = Sandbox::new();
     for (source, diagnostic) in [
-        ("classDiagram\nA <|-- B", "Unsupported"),
+        ("gantt\ntitle 计划", "Unsupported"),
         (
             "flowchart TB\nsubgraph G\nsubgraph H\nA --> B\nend\nend",
             "Unsupported",
@@ -324,4 +324,109 @@ fn state_diagrams_render_with_svg_metrics_and_scene() {
     let scene = json_file("scene.json");
     assert_eq!(scene["metrics"]["layout_ms"], 0.0);
     assert_eq!(scene["hit_regions"].as_array().unwrap().len(), 11);
+}
+
+#[test]
+fn class_diagrams_render_with_svg_metrics_and_scene() {
+    let sandbox = Sandbox::new();
+    let fixture = include_str!("../../../fixtures/mermaid/class/domain-model.mmd");
+    std::fs::write(
+        sandbox.0.join("note.md"),
+        format!("\x60\x60\x60mermaid\n{fixture}\x60\x60\x60\n"),
+    )
+    .unwrap();
+    let result = sandbox.invoke(&[
+        "mermaid",
+        "render",
+        "note.md",
+        "--width",
+        "700",
+        "--theme",
+        "light",
+        "--out",
+        "diagram.svg",
+        "--metrics",
+        "metrics.json",
+        "--scene",
+        "scene.json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let svg = std::fs::read_to_string(sandbox.0.join("diagram.svg")).unwrap();
+    assert!(
+        svg.contains("aria-label=\"Mermaid class diagram\"") && svg.contains("OrderRepository")
+    );
+    let json_file = |name| {
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(sandbox.0.join(name)).unwrap())
+            .unwrap()
+    };
+    let metrics = json_file("metrics.json");
+    assert_eq!(metrics["diagram_kind"], "class");
+    assert_eq!(metrics["horizontal_overflow"], false);
+    assert_eq!(metrics["node_overlaps"], 0);
+    assert!(metrics["min_font_px"].as_f64().unwrap() >= 12.5);
+    let scene = json_file("scene.json");
+    assert_eq!(scene["metrics"]["layout_ms"], 0.0);
+    let hits = scene["hit_regions"].as_array().unwrap();
+    let ids = hits
+        .iter()
+        .map(|hit| hit["node_id"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), hits.len());
+    assert!(hits.iter().any(|hit| hit["node_id"] == "class-Order"));
+    assert!(hits.iter().any(|hit| hit["node_id"] == "relation-0"));
+}
+
+#[test]
+fn er_diagrams_render_with_svg_metrics_and_scene() {
+    let sandbox = Sandbox::new();
+    let fixture = include_str!("../../../fixtures/mermaid/er/order-schema.mmd");
+    std::fs::write(
+        sandbox.0.join("note.md"),
+        format!("\x60\x60\x60mermaid\n{fixture}\x60\x60\x60\n"),
+    )
+    .unwrap();
+    let result = sandbox.invoke(&[
+        "mermaid",
+        "render",
+        "note.md",
+        "--width",
+        "1100",
+        "--theme",
+        "dark",
+        "--out",
+        "diagram.svg",
+        "--metrics",
+        "metrics.json",
+        "--scene",
+        "scene.json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let svg = std::fs::read_to_string(sandbox.0.join("diagram.svg")).unwrap();
+    assert!(svg.contains("aria-label=\"Mermaid entity-relationship diagram\""));
+    let json_file = |name| {
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(sandbox.0.join(name)).unwrap())
+            .unwrap()
+    };
+    let metrics = json_file("metrics.json");
+    assert_eq!(metrics["diagram_kind"], "er");
+    assert_eq!(metrics["horizontal_overflow"], false);
+    assert_eq!(metrics["node_overlaps"], 0);
+    assert!(metrics["min_font_px"].as_f64().unwrap() >= 12.5);
+    let scene = json_file("scene.json");
+    assert_eq!(scene["metrics"]["layout_ms"], 0.0);
+    let hits = scene["hit_regions"].as_array().unwrap();
+    let ids = hits
+        .iter()
+        .map(|hit| hit["node_id"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), hits.len());
+    assert!(hits.iter().any(|hit| hit["node_id"] == "entity-ORDER-ITEM"));
 }
