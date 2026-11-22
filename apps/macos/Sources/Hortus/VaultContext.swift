@@ -148,21 +148,24 @@ final class VaultContext {
     }
 
     /// 移到废纸篓成功后的立即移除：条目与搜索索引同步清理。
-    func removeTrashed(_ path: String, directory: Bool) {
+    /// 返回索引任务，调用方可在关闭标签前等索引真正去掉该路径。
+    @discardableResult
+    func removeTrashed(_ path: String, directory: Bool) -> Task<Void, Never>? {
         let prefix = directory ? path + "/" : nil
         let affected = entries.keys.filter { key in key == path || prefix.map({ key.hasPrefix($0) }) == true }
         let removedNotes = affected.filter { entries[$0]?.directory == false }
         for key in affected { entries.removeValue(forKey: key) }
         treeVersion += 1
-        updateIndices(removed: removedNotes)
+        return updateIndices(removed: removedNotes)
     }
 
     func refreshSavedNote(_ path: String) { updateIndices(upserted: [path]) }
 
-    private func updateIndices(upserted: [String] = [], removed: [String] = []) {
-        guard !upserted.isEmpty || !removed.isEmpty else { return }
+    @discardableResult
+    private func updateIndices(upserted: [String] = [], removed: [String] = []) -> Task<Void, Never>? {
+        guard !upserted.isEmpty || !removed.isEmpty else { return nil }
         let handle = handle
-        Task { [weak self] in
+        return Task { [weak self] in
             await Task.detached { handle.updateSearchIndex(upserted: upserted, removed: removed) }.value
             self?.indexed(changed: true, scanFinished: false)
         }

@@ -41,7 +41,8 @@ struct ReadingTests {
         var view: DiagramTextView { editing.view }
         var document: NoteDocument { editing.document }
         init(_ source: String) throws { editing = try EditingTests.Fixture(source) }
-        func start(mathService: MathService = .shared, size: Double = 15) async throws {
+        func start(mathService: MathService = .shared, size: Double = 15,
+                   knowledgeHandle: VaultHandle? = nil) async throws {
             try await editing.ready()
             editing.coordinator.task?.cancel(); editing.coordinator.styling.reset()
             view.delegate = nil; view.textStorage?.delegate = nil
@@ -49,7 +50,8 @@ struct ReadingTests {
             view.isReading = true; view.isEditable = false; view.isRichText = true; view.allowsUndo = false
             view.readingCoordinator = coordinator; coordinator.view = view
             coordinator.update(ReadingText(mathService: mathService, document: document, path: "note.md", vault: editing.vault.path,
-                fontSize: size, service: editing.service, core: editing.core, openSource: openSource) { _, _ in })
+                fontSize: size, service: editing.service, core: editing.core, openSource: openSource,
+                remember: { _, _ in }, knowledgeHandle: knowledgeHandle))
             try await ready()
         }
         func ready() async throws {
@@ -479,6 +481,60 @@ struct ReadingTests {
         #expect(saved == source.replacingOccurrences(of: "[ ]", with: "[x]"))
         #expect(zip(source.utf16, saved.utf16).filter { $0 != $1 }.count == 1)
         await f.close()
+    }
+
+    @Test func editedSourceRefreshesBrokenDiagramTasksLinksAndCopy() async throws {
+        let initial = "开头\n"
+        let fixture = try Fixture(initial)
+        let addition = "\n```mermaid\nflowchart TB\nA[开始] --> \n```\n\n- [ ] 新任务\n\n[[Broken]]\n"
+        fixture.document.edited(range: NSRange(location: (initial as NSString).length, length: 0),
+                                replacement: addition)
+        await fixture.document.saveNow()
+        // 保存只推进修订号，镜像正文仍是打开时的短文本；阅读视图必须取会话实时正文。
+        #expect(fixture.document.textRevision != fixture.document.revision)
+        let handle = try fixture.editing.core.openVault(path: fixture.editing.vault.path)
+        defer { handle.close() }
+        try await fixture.start(knowledgeHandle: handle)
+
+        let live = try await fixture.document.io.perform { try $0.snapshot().text }
+        #expect(fixture.coordinator.inspectionSource == live)
+        #expect(fixture.view.blocks.contains { $0.reason != nil })
+        #expect(fixture.view.string.contains("flowchart TB"))
+        #expect(fixture.view.string.contains("新任务"))
+        #expect(fixture.view.string.contains("Broken"))
+
+        let brokenRange = (live as NSString).range(of: "[[Broken]]")
+        let knowledge = try #require(fixture.coordinator.inspectionKnowledge)
+        let broken = try #require(knowledge.links.first { $0.target == "Broken" })
+        #expect(Int(broken.startUtf16) == brokenRange.location)
+        let display = fixture.coordinator.displayPosition(source: brokenRange.location)
+        #expect(fixture.coordinator.styling.mask(at: display) & (1 << 19) != 0)
+
+        fixture.view.setSelectedRange(NSRange(location: 0, length: fixture.view.sourceUTF16Length))
+        fixture.coordinator.copyMarkdown()
+        #expect(NSPasteboard.general.string(forType: .string) == live)
+
+        func clickCheckbox(_ marker: String) throws -> Bool {
+            let range = (fixture.view.string as NSString).range(of: marker)
+            let rect = fixture.view.firstRect(forCharacterRange: range, actualRange: nil)
+            let point = fixture.editing.window.convertPoint(fromScreen: CGPoint(x: rect.minX + 2, y: rect.midY))
+            let event = try #require(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+                timestamp: 0, windowNumber: fixture.editing.window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 1))
+            return fixture.coordinator.clickTask(event)
+        }
+        #expect(try clickCheckbox("☐"))
+        try await eventually {
+            !fixture.document.dirty && !fixture.coordinator.pending && fixture.view.string.contains("☑")
+        }
+        #expect(try clickCheckbox("☑"))
+        try await eventually {
+            !fixture.document.dirty && !fixture.coordinator.pending
+        }
+        let finalText = try await fixture.document.io.perform { try $0.snapshot().text }
+        #expect(finalText.contains("- [ ] 新任务"))
+        #expect(!finalText.contains("- [x] 新任务"))
+        await fixture.close()
     }
 
     @Test func diagramHeightFallbackAndContinuousQuoteBars() async throws {

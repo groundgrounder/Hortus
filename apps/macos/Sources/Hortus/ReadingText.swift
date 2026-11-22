@@ -257,11 +257,17 @@ struct ReadingText: NSViewRepresentable {
         private var revealGeneration = 0
         private var pendingAnchor: (id: UInt64, source: Int, offset: Double)?
         var revealPending: Bool { pendingRevealSource != nil }
+        #if DEBUG
+        var inspectionSource: String { source }
+        var inspectionKnowledge: KnowledgeMarkupInfo? { knowledge }
+        #endif
 
         func update(_ input: ReadingText) {
             let changed = self.input?.document !== input.document
             let tokenChanged = self.input?.refreshToken != input.refreshToken
-            let indexChanged = self.input?.knowledgeVersion != input.knowledgeVersion && input.document.text.contains("[[")
+            let staleText = input.document.textRevision != input.document.revision
+            let indexChanged = self.input?.knowledgeVersion != input.knowledgeVersion
+                && (staleText || input.document.text.contains("[["))
             if changed { detach(); model = nil; ranges = []; fallbacks = []; rendered = []; initial = true }
             self.input = input
             guard let view else { return }
@@ -323,7 +329,9 @@ struct ReadingText: NSViewRepresentable {
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             if force { forcedGeneration &+= 1 }
             let sourceText = input.document.text
-            let hasLinks = sourceText.contains("[[")
+            // 编辑后镜像正文可能落后于 Rust 会话；此时不能按旧正文剪枝知识扫描。
+            let staleText = input.document.textRevision != input.document.revision
+            let hasLinks = staleText || sourceText.contains("[[")
             let version = hasLinks ? input.knowledgeVersion : 0
             let key = RefreshKey(revision: input.document.revision, width: width, dark: dark,
                                  size: input.fontSize, scrollerStyle: view.formulaScrollerStyle.rawValue, forcedGeneration: forcedGeneration, knowledgeVersion: version)
@@ -348,7 +356,7 @@ struct ReadingText: NSViewRepresentable {
             let oldModel = model
             let cachedKnowledge = model?.revision == input.document.revision && installedKnowledgeVersion == version ? knowledge : nil
             let handle = input.knowledgeHandle
-            let scanKnowledge = hasLinks || sourceText.contains("#")
+            let scanKnowledge = staleText || hasLinks || sourceText.contains("#")
             let modelRevision = model?.revision ?? UInt64.max
             let io = input.document.io
             let queuedAt = ProcessInfo.processInfo.systemUptime
@@ -370,7 +378,9 @@ struct ReadingText: NSViewRepresentable {
                     let modelTime = (ProcessInfo.processInfo.systemUptime - modelStart) * 1000
                     let snapshotStart = ProcessInfo.processInfo.systemUptime
                     let math = try session.mathBlocks()
-                    let snapshot = model.blocks.contains(where: \.diagram) || !math.isEmpty ? try session.snapshot() : nil
+                    // 镜像正文过时或存在图/公式时，快照提供与修订对齐的 Markdown 原文。
+                    let snapshot = staleText || model.blocks.contains(where: \.diagram) || !math.isEmpty
+                        ? try session.snapshot() : nil
                     let workerEnd = ProcessInfo.processInfo.systemUptime
                     let media = try session.mediaBlocks(width: width, size: input.fontSize)
                     let knowledge = cachedKnowledge ?? (scanKnowledge
@@ -464,7 +474,10 @@ struct ReadingText: NSViewRepresentable {
                 refresh()
                 return
             }
-            self.width = width; self.dark = dark; size = input.fontSize; source = input.document.text
+            // 阅读模型的 text 是显示文本；源码、任务与知识偏移必须用同一修订的快照原文。
+            let live = result.snapshot?.text ?? input.document.text
+            self.width = width; self.dark = dark; size = input.fontSize; source = live
+            input.document.adoptReadingText(live, revision: result.model.revision)
             scrollerStyle = view.formulaScrollerStyle
             let installStart = ProcessInfo.processInfo.systemUptime
             let oldUnresolved = unresolvedRanges(knowledge)
@@ -568,7 +581,9 @@ struct ReadingText: NSViewRepresentable {
                 let displayStart = Int(block.displayStart) + displayShift
                 if fallback[index] {
                     let sourceRange = NSRange(location: Int(block.sourceStart), length: Int(block.sourceLength))
-                    let replacement = sourceText.substring(with: sourceRange)
+                    // 旧正文或损坏的块范围不能越过当前权威正文，宁可显示空块也不能抛 NSRangeException。
+                    let replacement = NSMaxRange(sourceRange) <= sourceText.length
+                        ? sourceText.substring(with: sourceRange) : ""
                     let mutable: NSMutableString
                     if let existing = mutableDisplayText { mutable = existing }
                     else { mutable = NSMutableString(string: next.text); mutableDisplayText = mutable }
@@ -909,7 +924,9 @@ struct ReadingText: NSViewRepresentable {
             let rect = view.firstRect(forCharacterRange: checkRange, actualRange: nil)
             guard let window = view.window, rect.insetBy(dx: -2, dy: -2).contains(window.convertPoint(toScreen: event.locationInWindow)) else { return false }
             let sourcePosition = Int(model.blocks[i].sourceStart + run.sourceStart) + 1
-            let character = (source as NSString).substring(with: NSRange(location: sourcePosition, length: 1))
+            let sourceText = source as NSString
+            guard sourcePosition >= 0, sourcePosition < sourceText.length else { return false }
+            let character = sourceText.substring(with: NSRange(location: sourcePosition, length: 1))
             input.document.edited(range: NSRange(location: sourcePosition, length: 1), replacement: character == " " ? "x" : " ")
             Task { await input.document.saveNow(); refresh() }
             return true

@@ -310,11 +310,22 @@ final class ApplicationWorkspace {
 
     /// 重命名成功后的同库全局迁移：全部窗口的标签、选中、视图记录与文档会话
     /// 一次性搬到新路径，文件树与搜索索引立即同步，不等文件监听批次。
-    func entryRenamed(root: String, oldPath: String, entry: TreeEntry) {
+    @discardableResult
+    func entryRenamed(root: String, oldPath: String, entry: TreeEntry) -> [Task<Void, Never>] {
+        var relocations: [Task<Void, Never>] = []
         for record in records where record.workspace.root == root {
-            record.workspace.applyRename(oldPath: oldPath, entry: entry)
+            relocations += record.workspace.applyRename(oldPath: oldPath, entry: entry)
         }
         contexts[root]?.entryRenamed(oldPath: oldPath, entry: entry)
+        if let core {
+            let newPath = entry.path
+            let directory = entry.directory
+            Task.detached {
+                try? core.renameDiagramState(vault: root, oldPath: oldPath, newPath: newPath,
+                                             directory: directory)
+            }
+        }
+        return relocations
     }
     func recordDuplicate(_ path: String, window: Workspace) {
         let message = "Hortus session: duplicate note skipped in window \(records.first { $0.workspace === window }?.id ?? "?"): \(path)"

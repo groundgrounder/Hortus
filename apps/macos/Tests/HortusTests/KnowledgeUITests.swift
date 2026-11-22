@@ -38,6 +38,55 @@ struct KnowledgeUITests {
     }
 
     #if DEBUG
+    @Test func renameSelfReferenceWaitsForRelocationAndSkipsLoadingTabs() async throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = temporary.appendingPathComponent("vault")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try "[[journal]]\n\n正文\n".write(to: root.appendingPathComponent("journal.md"),
+                                        atomically: true, encoding: .utf8)
+        try "[[journal]]\n".write(to: root.appendingPathComponent("loader.md"),
+                                  atomically: true, encoding: .utf8)
+        let core = try WorkspaceCore.inDirectories(config: temporary.appendingPathComponent("config").path,
+                                                    cache: temporary.appendingPathComponent("cache").path)
+        let application = ApplicationWorkspace()
+        application.core = core
+        let first = application.initial
+        application.configure(first)
+        let context = VaultContext(handle: try core.openVault(path: root.path))
+        application.contexts[context.root] = context
+        await first.workspace.attach(context, state: nil)
+        defer {
+            first.workspace.discardTabForTrash("renamed.md")
+            first.workspace.discardTabForTrash("loader.md")
+            context.handle.close()
+            try? FileManager.default.removeItem(at: temporary)
+        }
+        first.workspace.openNote("journal.md")
+        let deadline = ContinuousClock.now + .seconds(5)
+        while (first.workspace.current?.document == nil || context.searchIndexReadyMilliseconds == nil),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        // 仍在加载的候选标签必须被安全跳过，而不是未加锁地并发改写。
+        first.workspace.tabs.append(NoteTab(path: "loader.md"))
+        first.workspace.inspectRenameLinks = { _ in .update }
+        let renamed = try await first.workspace.renameNoteWithPreview(path: "journal.md",
+                                                                     newName: "renamed.md", window: nil)
+        #expect(renamed?.path == "renamed.md")
+        let document = try #require(first.workspace.current?.document)
+        let refreshDeadline = ContinuousClock.now + .seconds(3)
+        while !document.text.contains("[[renamed]]"), ContinuousClock.now < refreshDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(document.text.contains("[[renamed]]"))
+        #expect(document.issue != .missing)
+        let content = try String(contentsOf: root.appendingPathComponent("renamed.md"), encoding: .utf8)
+        #expect(content.hasPrefix("[[renamed]]"))
+        #expect(first.workspace.knowledgeMessage?.contains("loader.md") == true)
+        let untouched = try String(contentsOf: root.appendingPathComponent("loader.md"), encoding: .utf8)
+        #expect(untouched == "[[journal]]\n")
+    }
+
     @Test func renamePreviewHonorsCancelAndSkipsUnsavedNotesAcrossWindows() async throws {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let root = temporary.appendingPathComponent("vault")

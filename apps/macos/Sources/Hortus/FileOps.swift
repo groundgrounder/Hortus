@@ -148,10 +148,15 @@ extension Workspace {
         }
         let candidates = Set(plan.files.map(\.sourcePath))
         var skipped = Set<String>()
+        var loadingSkipped = Set<String>()
         var locked: [NoteDocument] = []
         for workspace in context.attachedWorkspaces {
             for tab in workspace.tabs where candidates.contains(tab.path) {
-                guard let document = tab.document else { continue }
+                guard let document = tab.document else {
+                    // 加载中的标签既不能加锁也不能被并发改写；明确跳过并在结果中告知。
+                    if tab.loading { skipped.insert(tab.path); loadingSkipped.insert(tab.path) }
+                    continue
+                }
                 if document.dirty || document.marked || document.issue == .conflict || document.issue == .recovery {
                     skipped.insert(tab.path)
                 } else {
@@ -173,7 +178,9 @@ extension Workspace {
         let skipPaths = skipped.sorted()
         let handle = context.handle
         let moved = try await Task.detached { try handle.renameEntry(path: path, newName: name) }.value
-        application?.entryRenamed(root: context.root, oldPath: path, entry: moved)
+        // 先让全部受影响文档会话迁到新路径，再改写链接并触发刷新，避免自引用按旧路径读盘误报 Missing。
+        let relocations = application?.entryRenamed(root: context.root, oldPath: path, entry: moved) ?? []
+        for relocation in relocations { await relocation.value }
         let result: Result<RenameLinksResultInfo, Error>
         do {
             result = .success(try await Task.detached {
@@ -190,7 +197,7 @@ extension Workspace {
             context.didRewriteLinks(Set(report.updated))
             let excluded = report.skipped.map(\.path)
             let failed = report.failed.map(\.path)
-            if !excluded.isEmpty || !failed.isEmpty {
+            if !excluded.isEmpty || !failed.isEmpty || !loadingSkipped.isEmpty {
                 var messages: [String] = []
                 if !excluded.isEmpty {
                     messages.append(L10n.string("Links left unchanged in notes with unsaved edits: %@",
@@ -198,6 +205,10 @@ extension Workspace {
                 }
                 if !failed.isEmpty {
                     messages.append(L10n.string("Links could not be updated in: %@", failed.joined(separator: ", ")))
+                }
+                if !loadingSkipped.isEmpty {
+                    messages.append(L10n.string("Links left unchanged in notes that were still loading: %@",
+                                                loadingSkipped.sorted().joined(separator: ", ")))
                 }
                 showKnowledgeMessage(messages.joined(separator: "\n"))
             }
@@ -244,12 +255,22 @@ extension Workspace {
     func trashEntry(path: String) async throws -> String? {
         guard let handle = context?.handle, let entry = entries[path] else { return nil }
         let absolute = try await Task.detached { try handle.resolveTrashTarget(path: path) }.value
+        let mover = moveToTrash
         let resulting = try await Task.detached { () -> String? in
+            if let mover { return try mover(URL(fileURLWithPath: absolute))?.path }
             var moved: NSURL?
             try FileManager.default.trashItem(at: URL(fileURLWithPath: absolute), resultingItemURL: &moved)
             return moved?.path
         }.value
-        context?.removeTrashed(path, directory: entry.directory)
+        if let context, let indexTask = context.removeTrashed(path, directory: entry.directory) {
+            await indexTask.value
+        }
+        if let root, let core {
+            let directory = entry.directory
+            Task.detached {
+                try? core.removeDiagramState(vault: root, path: path, directory: directory)
+            }
+        }
         if let focus = folderSelection, focus == path || (entry.directory && focus.hasPrefix(path + "/")) {
             folderSelection = nil
         }
@@ -361,15 +382,21 @@ extension Workspace {
         var unsaved: [String] = []
         for (record, tabPath) in affected {
             guard let document = record.workspace.tabs.first(where: { $0.path == tabPath })?.document else { continue }
-            if document.dirty || document.marked || document.issue == .conflict {
+            if document.dirty || document.marked || document.issue == .conflict
+                || document.issue == .recovery || document.issue == .saveFailed
+                || document.persistence != .persisted {
                 unsaved.append(URL(fileURLWithPath: tabPath).lastPathComponent)
             }
         }
         guard decideTrash(unsaved: unsaved, target: entry.name) else { return }
-        for (record, tabPath) in affected { record.workspace.discardTabForTrash(tabPath) }
+        // 先完成磁盘移动再丢弃内存状态：失败时标签、正文与恢复稿必须原样保留。
         Task { @MainActor in
-            do { _ = try await trashEntry(path: path) }
-            catch { self.error = L10n.string("Moving to the Trash failed") }
+            do {
+                _ = try await trashEntry(path: path)
+                for (record, tabPath) in affected { record.workspace.discardTabForTrash(tabPath) }
+            } catch {
+                self.error = L10n.string("Moving to the Trash failed")
+            }
         }
     }
 

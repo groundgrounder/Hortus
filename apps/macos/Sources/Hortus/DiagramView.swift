@@ -50,7 +50,9 @@ final class DiagramView: NSView {
         if sameContent { for (node, hit) in zip(nodes, hits) { node.hit = hit } }
         else {
             // 折叠后保留仍可见节点的对象，让辅助技术继续持有当前焦点。
-            let previous = Dictionary(uniqueKeysWithValues: nodes.map { ($0.hit.nodeId, $0) })
+            // 场景可能为镜像胶囊复用 nodeId；这里必须去重，不能让运行时陷阱终结应用。
+            let previous = Dictionary(nodes.map { ($0.hit.nodeId, $0) },
+                                      uniquingKeysWith: { first, _ in first })
             nodes = hits.map { hit in
                 let node = previous[hit.nodeId] ?? DiagramAccessibilityNode(hit: hit, owner: self)
                 node.update(hit)
@@ -58,11 +60,11 @@ final class DiagramView: NSView {
             }
             if !previous.isEmpty { NSAccessibility.post(element: self, notification: .layoutChanged) }
         }
-        let previousEdges = Dictionary(uniqueKeysWithValues: edges.map { ($0.id, $0) })
-        let labelBounds: [UInt64: CGRect] = Dictionary(uniqueKeysWithValues: prepared.scene.primitives.compactMap { primitive -> (UInt64, CGRect)? in
+        let previousEdges = Dictionary(edges.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let labelBounds: [UInt64: CGRect] = Dictionary(prepared.scene.primitives.compactMap { primitive -> (UInt64, CGRect)? in
             guard case let .labelBackground(id, rect, _) = primitive else { return nil }
             return (id, rect.cgRect)
-        })
+        }, uniquingKeysWith: { first, _ in first })
         edges = prepared.scene.primitives.compactMap { primitive -> DiagramAccessibilityEdge? in
             guard case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive,
                   let first = points.first else { return nil }

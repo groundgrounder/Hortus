@@ -592,7 +592,7 @@ impl WorkspaceCore {
     pub fn layout_json(&self) -> Result<Option<String>, CoreError> {
         self.store
             .lock()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .layout()?
             .map(|value| serde_json::to_string(&value).map_err(Into::into))
             .transpose()
@@ -600,23 +600,41 @@ impl WorkspaceCore {
 
     pub fn save_layout(&self, json: String) -> Result<(), CoreError> {
         let state: LayoutState = serde_json::from_str(&json)?;
-        Ok(self.store.lock().unwrap().save_layout(&state)?)
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_layout(&state)?)
     }
 
     pub fn session_json(&self) -> Result<String, CoreError> {
         Ok(serde_json::to_string(
-            &self.store.lock().unwrap().session()?,
+            &self
+                .store
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .session()?,
         )?)
     }
 
     /// 完整窗口列表只由应用协调器写入，不能由单个窗口覆盖。
     pub fn save_window_session(&self, json: String) -> Result<(), CoreError> {
         let snapshot: hortus_config::SessionState = serde_json::from_str(&json)?;
-        Ok(self.store.lock().unwrap().save_windows(snapshot)?)
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_windows(snapshot)?)
     }
 
     pub fn default_view(&self) -> Result<String, CoreError> {
-        Ok(match self.store.lock().unwrap().settings()?.default_view {
+        Ok(match self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .settings()?
+            .default_view
+        {
             hortus_config::ViewMode::Reading => "reading",
             hortus_config::ViewMode::Editing => "editing",
         }
@@ -627,7 +645,7 @@ impl WorkspaceCore {
         vault: String,
         views: std::collections::HashMap<String, String>,
     ) -> Result<(), CoreError> {
-        let store = self.store.lock().unwrap();
+        let store = self.store.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(mut state) = store
             .session()?
             .recent
@@ -653,16 +671,30 @@ impl WorkspaceCore {
     }
 
     pub fn font_size(&self) -> Result<f64, CoreError> {
-        Ok(self.store.lock().unwrap().settings()?.font_size)
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .settings()?
+            .font_size)
     }
 
     pub fn terminal_font(&self) -> Result<Option<String>, CoreError> {
-        Ok(self.store.lock().unwrap().settings()?.terminal_font)
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .settings()?
+            .terminal_font)
     }
 
     /// 完整设置快照：配置路径、原始字节指纹、已知字段与稳定诊断键。
     pub fn editable_config(&self) -> Result<EditableConfigInfo, CoreError> {
-        let config = self.store.lock().unwrap().editable_config()?;
+        let config = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .editable_config()?;
         Ok(editable_config_info(config))
     }
 
@@ -677,18 +709,22 @@ impl WorkspaceCore {
             "editing" => hortus_config::ViewMode::Editing,
             _ => return Err(CoreError::failure("config.default_view_invalid")),
         };
-        let saved = self.store.lock().unwrap().save_config(
-            &hortus_config::EditableConfigInput {
-                settings: hortus_config::Settings {
-                    font_size: input.font_size,
-                    default_view,
-                    terminal_font: input.terminal_font,
+        let saved = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_config(
+                &hortus_config::EditableConfigInput {
+                    settings: hortus_config::Settings {
+                        font_size: input.font_size,
+                        default_view,
+                        terminal_font: input.terminal_font,
+                    },
+                    agent_command: input.agent_command,
+                    agent_args: input.agent_args,
                 },
-                agent_command: input.agent_command,
-                agent_args: input.agent_args,
-            },
-            expected_digest.as_deref(),
-        )?;
+                expected_digest.as_deref(),
+            )?;
         Ok(editable_config_info(saved))
     }
 
@@ -704,11 +740,15 @@ impl WorkspaceCore {
         args: Vec<String>,
         login_path: Option<String>,
     ) -> AgentProbeInfo {
-        let status = self.store.lock().unwrap().probe_agent_command_with_paths(
-            &command,
-            &args,
-            login_path.as_deref().map(std::ffi::OsStr::new),
-        );
+        let status = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .probe_agent_command_with_paths(
+                &command,
+                &args,
+                login_path.as_deref().map(std::ffi::OsStr::new),
+            );
         AgentProbeInfo {
             available: status.available,
             executable: status.executable,
@@ -720,7 +760,7 @@ impl WorkspaceCore {
     pub fn discover_agents(&self, login_path: Option<String>) -> Vec<DiscoveredAgentInfo> {
         self.store
             .lock()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .discover_agents_in(login_path.as_deref().map(std::ffi::OsStr::new))
             .into_iter()
             .map(|agent| DiscoveredAgentInfo {
@@ -737,25 +777,36 @@ impl WorkspaceCore {
     pub fn effective_agent_path(&self, login_path: Option<String>) -> String {
         self.store
             .lock()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .effective_agent_path(login_path.as_deref().map(std::ffi::OsStr::new))
             .to_string_lossy()
             .into_owned()
     }
 
     pub fn agent_guide_state(&self) -> Result<AgentGuideInfo, CoreError> {
-        Ok(agent_guide_info(self.store.lock().unwrap().guide_state()?))
+        Ok(agent_guide_info(
+            self.store
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .guide_state()?,
+        ))
     }
 
     pub fn save_agent_guide(&self, content: String) -> Result<AgentGuideInfo, CoreError> {
         Ok(agent_guide_info(
-            self.store.lock().unwrap().save_agent_guide(&content)?,
+            self.store
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .save_agent_guide(&content)?,
         ))
     }
 
     pub fn reset_agent_guide(&self) -> Result<AgentGuideInfo, CoreError> {
         Ok(agent_guide_info(
-            self.store.lock().unwrap().reset_agent_guide()?,
+            self.store
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .reset_agent_guide()?,
         ))
     }
 
@@ -765,7 +816,7 @@ impl WorkspaceCore {
         tabs: Vec<String>,
         selected: Option<String>,
     ) -> Result<(), CoreError> {
-        let store = self.store.lock().unwrap();
+        let store = self.store.lock().unwrap_or_else(|error| error.into_inner());
         store.validate_vault(std::path::Path::new(&path))?;
         // 只改标签与选择时保留已存的视图模式，避免覆盖成空表。
         let views = store
@@ -793,7 +844,7 @@ impl WorkspaceCore {
         selected: Option<String>,
         views: std::collections::HashMap<String, String>,
     ) -> Result<(), CoreError> {
-        let store = self.store.lock().unwrap();
+        let store = self.store.lock().unwrap_or_else(|error| error.into_inner());
         store.validate_vault(std::path::Path::new(&path))?;
         store.remember(VaultState {
             path,
@@ -826,7 +877,7 @@ impl WorkspaceCore {
         Ok(self
             .store
             .lock()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .session()?
             .diagrams
             .into_iter()
@@ -842,7 +893,7 @@ impl WorkspaceCore {
         block: u32,
         collapsed: Vec<String>,
     ) -> Result<(), CoreError> {
-        let store = self.store.lock().unwrap();
+        let store = self.store.lock().unwrap_or_else(|error| error.into_inner());
         store.validate_vault(std::path::Path::new(&vault))?;
         Ok(store.remember_diagram(hortus_config::DiagramState {
             vault,
@@ -853,6 +904,35 @@ impl WorkspaceCore {
         })?)
     }
 
+    /// 笔记或文件夹重命名后迁移 `session.toml` 的折叠与专注视口记录。
+    pub fn rename_diagram_state(
+        &self,
+        vault: String,
+        old_path: String,
+        new_path: String,
+        directory: bool,
+    ) -> Result<(), CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .rename_diagram_state(&vault, &old_path, &new_path, directory)?)
+    }
+
+    /// 移到废纸篓成功后清理该笔记或文件夹前缀下的图缓存。
+    pub fn remove_diagram_state(
+        &self,
+        vault: String,
+        path: String,
+        directory: bool,
+    ) -> Result<(), CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove_diagram_state(&vault, &path, directory)?)
+    }
+
     /// 读取专注模式保存的缩放与平移；从未进入过专注模式时返回空。
     pub fn diagram_focus(
         &self,
@@ -860,7 +940,11 @@ impl WorkspaceCore {
         note: String,
         block: u32,
     ) -> Result<Option<DiagramFocus>, CoreError> {
-        let session = self.store.lock().unwrap().session()?;
+        let session = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .session()?;
         Ok(session
             .diagrams
             .into_iter()
@@ -884,7 +968,7 @@ impl WorkspaceCore {
         offset_x: f64,
         offset_y: f64,
     ) -> Result<(), CoreError> {
-        let store = self.store.lock().unwrap();
+        let store = self.store.lock().unwrap_or_else(|error| error.into_inner());
         store.validate_vault(std::path::Path::new(&vault))?;
         Ok(store.remember_diagram_focus(
             vault,
@@ -899,7 +983,7 @@ impl WorkspaceCore {
     pub fn open_vault(&self, path: String) -> Result<Arc<VaultHandle>, CoreError> {
         self.store
             .lock()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .validate_vault(std::path::Path::new(&path))?;
         Ok(Arc::new(VaultHandle {
             vault: Vault::open(path)?,
@@ -921,7 +1005,7 @@ impl WorkspaceCore {
         let launch = self
             .store
             .lock()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .agent_launch_with_paths(login_path.as_deref().map(std::ffi::OsStr::new))?;
         Ok(AgentSpec {
             executable: launch.executable,
@@ -932,7 +1016,7 @@ impl WorkspaceCore {
     pub fn data_directory(&self) -> String {
         self.store
             .lock()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .data_root()
             .to_string_lossy()
             .into_owned()
@@ -942,7 +1026,7 @@ impl WorkspaceCore {
     /// 只在锁内校验库并复制数据根，遍历、复制与会话写入都在锁外进行。
     pub fn begin_agent_session(&self, vault: String) -> Result<AgentSessionInfo, CoreError> {
         let data = {
-            let store = self.store.lock().unwrap();
+            let store = self.store.lock().unwrap_or_else(|error| error.into_inner());
             store.validate_vault(std::path::Path::new(&vault))?;
             store.data_root().to_path_buf()
         };
@@ -959,7 +1043,7 @@ impl WorkspaceCore {
     ) -> Result<(), CoreError> {
         let state = history::SessionState::parse(&state)
             .ok_or_else(|| CoreError::failure("history.invalid_state"))?;
-        let store = self.store.lock().unwrap();
+        let store = self.store.lock().unwrap_or_else(|error| error.into_inner());
         let history = history::HistoryStore::new(store.data_root());
         match state {
             history::SessionState::Running => history.mark_running(&id)?,
@@ -972,7 +1056,12 @@ impl WorkspaceCore {
         &self,
         vault: Option<String>,
     ) -> Result<Vec<AgentSessionInfo>, CoreError> {
-        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let data = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .data_root()
+            .to_path_buf();
         let history = history::HistoryStore::new(data.clone());
         let canonical = vault
             .map(|vault| {
@@ -990,7 +1079,7 @@ impl WorkspaceCore {
 
     /// 应用启动时调用：上次仍标为准备中/运行中的会话转为中断。
     pub fn recover_agent_sessions(&self) -> Result<u32, CoreError> {
-        let store = self.store.lock().unwrap();
+        let store = self.store.lock().unwrap_or_else(|error| error.into_inner());
         Ok(history::HistoryStore::new(store.data_root()).recover()? as u32)
     }
 
@@ -1000,7 +1089,12 @@ impl WorkspaceCore {
         id: String,
         cancellation: Arc<ReviewCancellation>,
     ) -> Result<SessionReviewSummary, CoreError> {
-        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let data = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .data_root()
+            .to_path_buf();
         let history = history::HistoryStore::new(data);
         let summary = history.review(&id, Some(cancellation.flag()))?;
         Ok(review_summary(summary))
@@ -1015,7 +1109,12 @@ impl WorkspaceCore {
         old_path: Option<String>,
         cancellation: Arc<ReviewCancellation>,
     ) -> Result<ReviewEntryDetail, CoreError> {
-        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let data = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .data_root()
+            .to_path_buf();
         let history = history::HistoryStore::new(data);
         let detail =
             history.review_entry(&id, &path, old_path.as_deref(), Some(cancellation.flag()))?;
@@ -1035,7 +1134,12 @@ impl WorkspaceCore {
         temporary: Option<String>,
         cancellation: Arc<ReviewCancellation>,
     ) -> Result<(), CoreError> {
-        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let data = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .data_root()
+            .to_path_buf();
         let history = history::HistoryStore::new(data);
         let record = history.record(&id)?;
         let temporary = rollback_temporary(std::path::Path::new(&record.vault), temporary)?;
@@ -1062,7 +1166,12 @@ impl WorkspaceCore {
         temporary: Option<String>,
         cancellation: Arc<ReviewCancellation>,
     ) -> Result<(), CoreError> {
-        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let data = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .data_root()
+            .to_path_buf();
         let history = history::HistoryStore::new(data);
         let record = history.record(&id)?;
         let temporary = rollback_temporary(std::path::Path::new(&record.vault), temporary)?;
@@ -1084,7 +1193,12 @@ impl WorkspaceCore {
         temporary: Option<String>,
         cancellation: Arc<ReviewCancellation>,
     ) -> Result<SessionRollbackReportInfo, CoreError> {
-        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let data = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .data_root()
+            .to_path_buf();
         let history = history::HistoryStore::new(data);
         let record = history.record(&id)?;
         let temporary = rollback_temporary(std::path::Path::new(&record.vault), temporary)?;
@@ -1103,7 +1217,12 @@ impl WorkspaceCore {
 
     /// 显式删除会话快照；活动会话（Preparing/Running）与用户库都不会被触碰。
     pub fn delete_agent_session(&self, id: String) -> Result<(), CoreError> {
-        let data = self.store.lock().unwrap().data_root().to_path_buf();
+        let data = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .data_root()
+            .to_path_buf();
         history::HistoryStore::new(data).delete_session(&id)?;
         Ok(())
     }
@@ -1185,12 +1304,18 @@ impl VaultHandle {
     }
 
     pub fn update_search_index(&self, upserted: Vec<String>, removed: Vec<String>) {
-        let _update = self.index_update.lock().unwrap();
+        let _update = self
+            .index_update
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.index_paths(upserted, removed);
     }
 
     pub fn upsert_note_content(&self, path: String, text: String) {
-        let _update = self.index_update.lock().unwrap();
+        let _update = self
+            .index_update
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if hortus_vault::note::note_path(self.vault.root(), &path).is_ok() {
             self.index_contents([(path, Some(text))]);
         }
@@ -1199,7 +1324,7 @@ impl VaultHandle {
     pub fn quick_open(&self, query: String, limit: u32) -> Vec<QuickOpenHit> {
         self.search
             .lock()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .quick_open(&query, limit as usize)
             .into_iter()
             .map(|hit| QuickOpenHit {
@@ -1233,7 +1358,7 @@ impl VaultHandle {
     ) -> Vec<SearchResult> {
         self.search
             .lock()
-            .unwrap()
+            .unwrap_or_else(|error| error.into_inner())
             .search_cancelled(
                 &query,
                 max_matches_per_note as usize,

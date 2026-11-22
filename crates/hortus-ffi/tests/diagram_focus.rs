@@ -85,3 +85,60 @@ fn focus_state_round_trips_across_restarts_and_keeps_collapsed_nodes() {
         "focus state must never be written into the vault"
     );
 }
+
+#[test]
+fn diagram_state_migrates_with_renames_and_trash() {
+    let temporary = tempfile::tempdir().unwrap();
+    let vault = temporary.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    fs::create_dir(vault.join("docs")).unwrap();
+    fs::write(vault.join("note.md"), "# Note\n").unwrap();
+    fs::write(vault.join("docs/inside.md"), "# Inside\n").unwrap();
+    let root = vault.to_string_lossy().into_owned();
+    let core = WorkspaceCore::in_directories(
+        temporary.path().join("config").to_string_lossy().into(),
+        temporary.path().join("cache").to_string_lossy().into(),
+    )
+    .unwrap();
+    core.remember_diagram(root.clone(), "note.md".into(), 1, vec!["A".into()])
+        .unwrap();
+    core.remember_diagram(root.clone(), "docs/inside.md".into(), 1, vec!["B".into()])
+        .unwrap();
+    core.remember_diagram_focus(root.clone(), "docs/inside.md".into(), 1, 2.0, 3.0, 4.0)
+        .unwrap();
+
+    core.rename_diagram_state(root.clone(), "note.md".into(), "renamed.md".into(), false)
+        .unwrap();
+    core.rename_diagram_state(root.clone(), "docs".into(), "papers".into(), true)
+        .unwrap();
+    assert_eq!(
+        core.collapsed_nodes(root.clone(), "renamed.md".into(), 1)
+            .unwrap(),
+        vec!["A"]
+    );
+    assert_eq!(
+        core.collapsed_nodes(root.clone(), "papers/inside.md".into(), 1)
+            .unwrap(),
+        vec!["B"]
+    );
+    let focus = core
+        .diagram_focus(root.clone(), "papers/inside.md".into(), 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (focus.scale, focus.offset_x, focus.offset_y),
+        (2.0, 3.0, 4.0)
+    );
+
+    core.remove_diagram_state(root.clone(), "papers".into(), true)
+        .unwrap();
+    assert!(
+        core.collapsed_nodes(root.clone(), "papers/inside.md".into(), 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        core.collapsed_nodes(root, "renamed.md".into(), 1).unwrap(),
+        vec!["A"]
+    );
+}

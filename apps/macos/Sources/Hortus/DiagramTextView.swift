@@ -178,10 +178,12 @@ struct NoteText: NSViewRepresentable {
         }
 
         func update(_ input: NoteText) {
-            let changed = self.input?.path != input.path || self.input?.vault != input.vault
+            let pathChanged = self.input?.path != input.path
+            let changed = self.input?.vault != input.vault
                 || self.input?.document !== input.document || (input.document == nil && self.input?.text != input.text)
             let tokenChanged = self.input?.refreshToken != input.refreshToken
             if changed { view?.linkCompletion.close(); view?.finishComposition() }
+            else if pathChanged { view?.linkCompletion.close() }
             if changed, self.input?.document?.viewOwner === self {
                 self.input?.document?.onReload = nil
                 self.input?.document?.onClosing = nil; self.input?.document?.onStateChange = nil
@@ -260,8 +262,9 @@ struct NoteText: NSViewRepresentable {
                     }
                 } else { reload(input.text, preserve: false) }
             } else {
-                if tokenChanged { schedule(force: true) } else { schedule() }
-                scheduleStyles()
+                // 仅路径变化：保持正文、撤销栈、选区与滚动位置，只刷新依赖路径的解析结果。
+                if pathChanged || tokenChanged { schedule(force: true) } else { schedule() }
+                scheduleStyles(force: pathChanged)
             }
         }
         private func reload(_ text: String, preserve: Bool) {

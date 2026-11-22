@@ -1117,6 +1117,82 @@ impl Store {
         write_toml(&self.directories.cache.join("session.toml"), &session)
     }
 
+    /// 重命名笔记或文件夹后迁移图缓存：精确路径与文件夹前缀一起搬到新路径。
+    /// 目标图块已有记录时合并折叠节点，并优先采用迁移条目的专注视口。
+    pub fn rename_diagram_state(
+        &self,
+        vault: &str,
+        old_path: &str,
+        new_path: &str,
+        directory: bool,
+    ) -> io::Result<()> {
+        if old_path == new_path {
+            return Ok(());
+        }
+        let mut session = self.session()?;
+        let original = session.diagrams.clone();
+        let prefix = directory.then(|| format!("{old_path}/"));
+        let remapped = original
+            .iter()
+            .map(|state| {
+                let mut next = state.clone();
+                if state.vault == vault {
+                    if state.note == old_path {
+                        next.note = new_path.to_owned();
+                    } else if let Some(prefix) = &prefix
+                        && let Some(suffix) = state.note.strip_prefix(prefix)
+                    {
+                        next.note = format!("{new_path}/{suffix}");
+                    }
+                }
+                next
+            })
+            .collect::<Vec<_>>();
+        let mut merged: Vec<DiagramState> = Vec::with_capacity(remapped.len());
+        for state in remapped {
+            if let Some(existing) = merged
+                .iter_mut()
+                .find(|s| s.vault == state.vault && s.note == state.note && s.block == state.block)
+            {
+                existing.collapsed.extend(state.collapsed);
+                existing.collapsed.sort();
+                existing.collapsed.dedup();
+                if state.focus_scale.is_some() {
+                    existing.focus_scale = state.focus_scale;
+                    existing.focus_offset_x = state.focus_offset_x;
+                    existing.focus_offset_y = state.focus_offset_y;
+                }
+            } else {
+                merged.push(state);
+            }
+        }
+        if merged == original {
+            return Ok(());
+        }
+        session.diagrams = merged;
+        write_toml(&self.directories.cache.join("session.toml"), &session)
+    }
+
+    /// 笔记或文件夹进入废纸篓后清理图缓存：同时删除文件夹前缀下的全部条目。
+    pub fn remove_diagram_state(&self, vault: &str, path: &str, directory: bool) -> io::Result<()> {
+        let mut session = self.session()?;
+        let prefix = directory.then(|| format!("{path}/"));
+        let before = session.diagrams.len();
+        session.diagrams.retain(|state| {
+            if state.vault != vault {
+                return true;
+            }
+            state.note != path
+                && !prefix
+                    .as_ref()
+                    .is_some_and(|prefix| state.note.starts_with(prefix))
+        });
+        if session.diagrams.len() == before {
+            return Ok(());
+        }
+        write_toml(&self.directories.cache.join("session.toml"), &session)
+    }
+
     /// 只更新专注模式的缩放与平移，保留同一图块的折叠状态。
     pub fn remember_diagram_focus(
         &self,
@@ -1556,6 +1632,112 @@ mod tests {
         let entry = diagram_entry(&store, "/v", "n.md", 1).expect("focus keeps the entry");
         assert!(entry.collapsed.is_empty());
         assert_eq!(entry.focus_scale, Some(2.5));
+    }
+
+    #[test]
+    fn diagram_state_migrates_with_note_and_folder_renames() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        for (note, block, collapsed) in [
+            ("note.md", 1, vec!["a".to_owned()]),
+            ("docs/inside.md", 2, vec!["b".to_owned()]),
+            ("docs/deep/leaf.md", 3, vec!["c".to_owned()]),
+            ("other.md", 1, vec!["d".to_owned()]),
+        ] {
+            store
+                .remember_diagram(DiagramState {
+                    vault: "/v".into(),
+                    note: note.into(),
+                    block,
+                    collapsed,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        store
+            .remember_diagram_focus(
+                "/v".into(),
+                "docs/inside.md".into(),
+                2,
+                Some(2.0),
+                Some(10.0),
+                Some(-4.0),
+            )
+            .unwrap();
+
+        store
+            .rename_diagram_state("/v", "note.md", "renamed.md", false)
+            .unwrap();
+        assert!(diagram_entry(&store, "/v", "note.md", 1).is_none());
+        assert_eq!(
+            diagram_entry(&store, "/v", "renamed.md", 1)
+                .unwrap()
+                .collapsed,
+            vec!["a"]
+        );
+
+        store
+            .rename_diagram_state("/v", "docs", "papers", true)
+            .unwrap();
+        let inside = diagram_entry(&store, "/v", "papers/inside.md", 2).unwrap();
+        assert_eq!(inside.collapsed, vec!["b"]);
+        assert_eq!(inside.focus_scale, Some(2.0));
+        assert_eq!(
+            diagram_entry(&store, "/v", "papers/deep/leaf.md", 3)
+                .unwrap()
+                .collapsed,
+            vec!["c"]
+        );
+        assert!(diagram_entry(&store, "/v", "docs/inside.md", 2).is_none());
+        // 其他笔记不被文件夹迁移影响。
+        assert!(diagram_entry(&store, "/v", "other.md", 1).is_some());
+
+        store.remove_diagram_state("/v", "papers", true).unwrap();
+        assert!(diagram_entry(&store, "/v", "papers/inside.md", 2).is_none());
+        assert!(diagram_entry(&store, "/v", "papers/deep/leaf.md", 3).is_none());
+        assert!(diagram_entry(&store, "/v", "renamed.md", 1).is_some());
+        assert!(diagram_entry(&store, "/v", "other.md", 1).is_some());
+    }
+
+    #[test]
+    fn renamed_diagram_state_merges_an_existing_target_entry() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        store
+            .remember_diagram(DiagramState {
+                vault: "/v".into(),
+                note: "old.md".into(),
+                block: 1,
+                collapsed: vec!["a".into(), "b".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .remember_diagram(DiagramState {
+                vault: "/v".into(),
+                note: "new.md".into(),
+                block: 1,
+                collapsed: vec!["b".into(), "c".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .remember_diagram_focus(
+                "/v".into(),
+                "new.md".into(),
+                1,
+                Some(1.5),
+                Some(4.0),
+                Some(8.0),
+            )
+            .unwrap();
+        store
+            .rename_diagram_state("/v", "old.md", "new.md", false)
+            .unwrap();
+        let merged = diagram_entry(&store, "/v", "new.md", 1).unwrap();
+        assert_eq!(merged.collapsed, vec!["a", "b", "c"]);
+        assert_eq!(merged.focus_scale, Some(1.5));
+        assert!(diagram_entry(&store, "/v", "old.md", 1).is_none());
     }
 
     #[test]

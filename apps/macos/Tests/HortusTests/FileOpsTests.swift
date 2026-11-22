@@ -60,7 +60,9 @@ struct FileOpsTests {
         ]
         workspace.tabs = [NoteTab(path: "docs/inside.md", loading: false), NoteTab(path: "docs/deep/leaf.md", loading: false)]
         workspace.selected = "docs/inside.md"
-        workspace.restoredViews = ["docs/inside.md": "editing", "docs/deep/leaf.md": "reading"]
+        workspace.restoredViews = ["docs/inside.md": "editing", "docs/deep/leaf.md": "reading",
+                                   "docs/closed.md": "editing"]
+        workspace.closingTabs = ["docs/closed.md"]
         workspace.folderSelection = "docs/deep"
         let moved = TreeEntry(path: "papers", parent: "", name: "papers", directory: true)
         workspace.applyRename(oldPath: "docs", entry: moved)
@@ -68,6 +70,8 @@ struct FileOpsTests {
         #expect(workspace.selected == "papers/inside.md")
         #expect(workspace.restoredViews["papers/inside.md"] == "editing")
         #expect(workspace.restoredViews["papers/deep/leaf.md"] == "reading")
+        #expect(workspace.restoredViews["papers/closed.md"] == "editing")
+        #expect(workspace.closingTabs == ["papers/closed.md"])
         #expect(workspace.folderSelection == "papers/deep")
         // 单文件重命名不影响同目录其他标签。
         let single = TreeEntry(path: "papers/inbox.md", parent: "papers", name: "inbox.md", directory: false)
@@ -250,19 +254,137 @@ struct FileOpsIntegrationTests {
 
         fixture.workspace.promptTrash = { _, _ in true }
         fixture.workspace.requestTrash(path: "note.md")
-        #expect(fixture.workspace.tabs.isEmpty)
-        // 确认后文件进入系统废纸篓；记录 resultingItemURL 并在清理时删除。
+        // 磁盘移动成功后才关闭标签；记录 resultingItemURL 并在清理时删除。
         var resulting: String?
         for _ in 0..<300 {
             resulting = (FileOpsOutcome.lastTrashResult?["resulting"]) ?? nil
             if resulting != nil { break }
             try await Task.sleep(for: .milliseconds(10))
         }
+        for _ in 0..<300 where !fixture.workspace.tabs.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fixture.workspace.tabs.isEmpty)
         #expect(resulting != nil)
         #expect(FileManager.default.fileExists(atPath: resulting!))
         fixture.trashed.append(URL(fileURLWithPath: resulting!))
         #expect(!FileManager.default.fileExists(atPath: fixture.vault.appendingPathComponent("note.md").path))
         #expect(fixture.workspace.entries["note.md"] == nil)
         #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.recoveryDirectory.path).isEmpty)
+    }
+
+    @Test func focusExitsOnRenameTrashAndSameNoteNavigation() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let document = try fixture.openDocument("note.md")
+        fixture.workspace.tabs = [NoteTab(path: "note.md", document: document, loading: false)]
+        fixture.workspace.selected = "note.md"
+        func session(note: String = "note.md") -> DiagramFocusSession {
+            DiagramFocusSession(note: note, vault: fixture.vault.path, ordinal: 1, document: document,
+                                reading: true, selection: NSRange(location: 0, length: 0),
+                                scroll: .zero, initial: nil)
+        }
+
+        fixture.workspace.focusSession = session()
+        fixture.workspace.openSearchResult(path: "note.md", start: 0, length: 0)
+        #expect(fixture.workspace.focusSession == nil)
+
+        fixture.workspace.focusSession = session()
+        fixture.workspace.applyRename(oldPath: "note.md",
+                                      entry: TreeEntry(path: "renamed.md", parent: "", name: "renamed.md",
+                                                       directory: false))
+        #expect(fixture.workspace.focusSession == nil)
+
+        fixture.workspace.focusSession = session(note: "renamed.md")
+        fixture.workspace.discardTabForTrash("renamed.md")
+        #expect(fixture.workspace.focusSession == nil)
+    }
+
+    @Test func trashPromptIncludesRecoveryDrafts() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let document = try fixture.openDocument("note.md")
+        document.issue = .recovery
+        fixture.workspace.tabs = [NoteTab(path: "note.md", document: document, loading: false)]
+        fixture.workspace.selected = "note.md"
+        var prompted: [String] = []
+        fixture.workspace.promptTrash = { unsaved, target in
+            prompted = unsaved
+            #expect(target == "note.md")
+            return false
+        }
+        fixture.workspace.requestTrash(path: "note.md")
+        #expect(prompted == ["note.md"])
+        #expect(fixture.workspace.tabs.map(\.path) == ["note.md"])
+    }
+
+    @Test func trashFailureKeepsTabsLiveTextAndRecoveryDraft() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let document = try fixture.openDocument("note.md")
+        fixture.workspace.tabs = [NoteTab(path: "note.md", document: document, loading: false)]
+        fixture.workspace.selected = "note.md"
+        document.edited(range: NSRange(location: 0, length: 0), replacement: "草稿 ")
+        await document.checkpoint()
+        #expect(!(try FileManager.default.contentsOfDirectory(atPath: fixture.recoveryDirectory.path).isEmpty))
+        fixture.workspace.promptTrash = { _, _ in true }
+        fixture.workspace.moveToTrash = { _ in throw CocoaError(.fileWriteUnknown) }
+        fixture.workspace.requestTrash(path: "note.md")
+        for _ in 0..<300 where fixture.workspace.error == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fixture.workspace.error != nil)
+        #expect(fixture.workspace.tabs.map(\.path) == ["note.md"])
+        #expect(FileManager.default.fileExists(atPath: fixture.vault.appendingPathComponent("note.md").path))
+        let live = try await document.io.perform { try $0.snapshot() }
+        #expect(live.text.hasPrefix("草稿 "))
+        #expect(!(try FileManager.default.contentsOfDirectory(atPath: fixture.recoveryDirectory.path).isEmpty))
+    }
+
+    @Test func dirtyBacklinkUsesLiveOffsets() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        try "prefix\n\n[[note|Alias]]\n".write(to: fixture.vault.appendingPathComponent("source.md"),
+                                             atomically: true, encoding: .utf8)
+        let document = try fixture.openDocument("source.md")
+        fixture.workspace.tabs = [NoteTab(path: "source.md", document: document, loading: false)]
+        fixture.workspace.selected = "source.md"
+        document.edited(range: NSRange(location: 0, length: 0), replacement: "插入\n")
+        #expect(document.dirty)
+        let live = try await document.io.perform { try $0.snapshot().text }
+        let linkRange = (live as NSString).range(of: "[[note|Alias]]")
+        let stale = ("prefix\n\n" as NSString).length
+        let entry = BacklinkInfo(source: "source.md", line: 3, target: "note", heading: nil,
+                                 alias: "Alias", embed: false, inDiagram: false, context: "",
+                                 startUtf16: UInt64(stale), lengthUtf16: UInt64(linkRange.length))
+        fixture.workspace.openBacklink(entry)
+        for _ in 0..<300 where document.sourceAnchor != linkRange.location {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(document.sourceAnchor == linkRange.location)
+        #expect(document.sourceSelectionLength == linkRange.length)
+        fixture.workspace.discardTabForTrash("source.md")
+    }
+
+    @Test func renameDuringAsyncCloseRemapsTheCloseRequest() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let document = try fixture.openDocument("note.md")
+        fixture.workspace.tabs = [NoteTab(path: "note.md", document: document, loading: false)]
+        fixture.workspace.selected = "note.md"
+        fixture.workspace.closeTab()
+        #expect(fixture.workspace.closingTabs == ["note.md"])
+
+        try FileManager.default.moveItem(at: fixture.vault.appendingPathComponent("note.md"),
+                                         to: fixture.vault.appendingPathComponent("renamed.md"))
+        fixture.workspace.applyRename(oldPath: "note.md",
+                                      entry: TreeEntry(path: "renamed.md", parent: "", name: "renamed.md",
+                                                       directory: false))
+        #expect(fixture.workspace.closingTabs == ["renamed.md"])
+        for _ in 0..<300 where !fixture.workspace.tabs.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fixture.workspace.tabs.isEmpty)
+        #expect(fixture.workspace.closingTabs.isEmpty)
     }
 }

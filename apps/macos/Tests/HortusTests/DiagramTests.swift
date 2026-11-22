@@ -214,6 +214,30 @@ struct DiagramTests {
         #expect(dark[0].prepared != nil && dark[0].reason == nil)
     }
 
+    @Test func mirroredParticipantDuplicateNodeIDsDoNotCrashUpdate() async throws {
+        let messages = (0..<40).map { "U->>M: 第\($0)步" }.joined(separator: "\n")
+        let source = "sequenceDiagram\nparticipant U as 你\nparticipant M as Hortus\n" + messages + "\n"
+        let changed = source.replacingOccurrences(of: "participant M as Hortus", with: "participant M as 宿主")
+        let firstService = DiagramService()
+        let secondService = DiagramService()
+        let firstBlocks = try await firstService.blocks(source: source, mmd: true, vault: "test",
+                                                        note: "seq.mmd", core: nil)
+        let firstResult = await firstService.render(source: source, mmd: true, blocks: firstBlocks,
+                                                    width: 700, dark: false)
+        let first = try #require(firstResult.first?.prepared)
+        let ids = first.scene.hitRegions.map(\.nodeId)
+        #expect(ids.count > Set(ids).count, "高时序图应出现顶部/底部镜像胶囊")
+        let secondBlocks = try await secondService.blocks(source: changed, mmd: true, vault: "test",
+                                                          note: "seq.mmd", core: nil)
+        let secondResult = await secondService.render(source: changed, mmd: true, blocks: secondBlocks,
+                                                      width: 700, dark: false)
+        let second = try #require(secondResult.first?.prepared)
+        let view = DiagramView(prepared: first)
+        view.update(second)
+        #expect(view.accessibilityNodeCount == second.scene.hitRegions.count)
+        #expect(Set(second.scene.hitRegions.map(\.nodeId)).count < second.scene.hitRegions.count)
+    }
+
     @Test func stateDiagramsRenderNativelyWithSourceRanges() async throws {
         let source = "序😀\r\n\r\n> ~~~mermaid\r\n> stateDiagram-v2\r\n> state \"TCP 租借\" as Lease\r\n> [*] --> Lease\r\n> Lease --> [*] : FIN\r\n> ~~~\r\n"
         let service = DiagramService()

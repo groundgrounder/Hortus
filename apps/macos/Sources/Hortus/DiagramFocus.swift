@@ -46,12 +46,18 @@ enum FocusKeyCommand: Equatable {
 /// SwiftUI 的 CommandMenu 不随正文图块的异步排版重建；显式同步原生菜单项。
 @MainActor
 enum FocusMenuState {
+    #if DEBUG
+    static var inspectionItem: NSMenuItem?
+    #endif
     static func setEnabled(_ enabled: Bool) {
         guard let item = menuItem(), item.isEnabled != enabled else { return }
         item.isEnabled = enabled
     }
 
     private static func menuItem() -> NSMenuItem? {
+        #if DEBUG
+        if let inspectionItem { return inspectionItem }
+        #endif
         func visit(_ menu: NSMenu) -> NSMenuItem? {
             for item in menu.items {
                 let modifiers = item.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask)
@@ -68,6 +74,8 @@ struct FocusOverlay: NSViewRepresentable {
     let session: DiagramFocusSession
     let core: WorkspaceCore?
     let fontSize: Double
+    let revision: UInt64
+    let refreshToken: Int
     let onExit: () -> Void
     let onJump: (NSRange) -> Void
     let onCollapse: ([String]) -> Void
@@ -75,9 +83,12 @@ struct FocusOverlay: NSViewRepresentable {
 
     func makeNSView(context: Context) -> FocusModeView {
         FocusModeView(session: session, core: core, fontSize: fontSize,
-                      onExit: onExit, onJump: onJump, onCollapse: onCollapse, onPersist: onPersist)
+                      onExit: onExit, onJump: onJump, onCollapse: onCollapse, onPersist: onPersist,
+                      revision: revision, refreshToken: refreshToken)
     }
-    func updateNSView(_ view: FocusModeView, context: Context) {}
+    func updateNSView(_ view: FocusModeView, context: Context) {
+        view.updateDocument(revision: revision, refreshToken: refreshToken)
+    }
 }
 
 /// 专注模式：顶栏克制操作区 + 可缩放平移的矢量画布。
@@ -95,12 +106,18 @@ final class FocusModeView: NSView {
     private let closeButton = NSButton()
     private let onExit: () -> Void
     private var searchVisible = false
+    private var documentRevision: UInt64
+    private var documentRefreshToken: Int
+    private var revisionTask: Task<Void, Never>?
 
     init(session: DiagramFocusSession, core: WorkspaceCore?, fontSize: Double,
          onExit: @escaping () -> Void, onJump: @escaping (NSRange) -> Void,
-         onCollapse: @escaping ([String]) -> Void, onPersist: @escaping (Double, Double, Double) -> Void) {
+         onCollapse: @escaping ([String]) -> Void, onPersist: @escaping (Double, Double, Double) -> Void,
+         revision: UInt64? = nil, refreshToken: Int = 0) {
         self.session = session
         self.onExit = onExit
+        documentRevision = revision ?? session.document.revision
+        documentRefreshToken = refreshToken
         canvas = FocusCanvasView(session: session, core: core, fontSize: fontSize)
         super.init(frame: .zero)
         wantsLayer = true
@@ -154,6 +171,18 @@ final class FocusModeView: NSView {
         canvas.onExit = onExit
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    /// 外部修改或回滚后按修订号刷新画布；防抖保留用户当前缩放与视口中心。
+    func updateDocument(revision: UInt64, refreshToken: Int) {
+        guard revision != documentRevision || refreshToken != documentRefreshToken else { return }
+        documentRevision = revision
+        documentRefreshToken = refreshToken
+        revisionTask?.cancel()
+        revisionTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled, let self else { return }
+            self.canvas.reloadPreservingViewport()
+        }
+    }
     override var isFlipped: Bool { true }
     override func draw(_ dirtyRect: NSRect) {
         NSColor.textBackgroundColor.setFill()
@@ -199,6 +228,12 @@ final class FocusModeView: NSView {
         super.viewWillMove(toWindow: newWindow)
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // 专注快捷键只属于本覆盖层内的第一响应者；侧栏、终端与 QuickOpen 保持各自行为。
+        guard let responder = window?.firstResponder as? NSView,
+              responder.isDescendant(of: self) else {
+            // 专注命令一律不处理；其他键仍交给响应链与系统菜单。
+            return FocusKeyCommand.resolve(event) == nil ? super.performKeyEquivalent(with: event) : false
+        }
         switch FocusKeyCommand.resolve(event) {
         case .search?: showSearch(); return true
         case .exit?: onExit(); return true
@@ -260,6 +295,7 @@ extension FocusModeView: NSSearchFieldDelegate {
 #if DEBUG
 extension FocusModeView {
     var inspectionSearchVisible: Bool { !searchField.isHidden }
+    var inspectionSearchField: NSSearchField { searchField }
     var inspectionLayout: [String: Any] {
         ["focus": NSStringFromRect(frame), "bar": NSStringFromRect(bar.frame),
          "canvas": NSStringFromRect(canvas.frame), "bounds": NSStringFromRect(bounds),
@@ -382,6 +418,11 @@ final class FocusCanvasView: NSView {
     private var mmd: Bool { session.note.lowercased().hasSuffix(".mmd") }
     private var viewport: CGRect { bounds }
 
+    /// 文档修订变化后的刷新入口：保留当前缩放和平移中心。
+    func reloadPreservingViewport() {
+        guard window != nil, bounds.width > 1 else { return }
+        reload(preserve: centerScenePoint())
+    }
     func reload(preserve: CGPoint? = nil, anchorNode: String? = nil) {
         guard bounds.width > 1 else { return }
         generation += 1
@@ -730,6 +771,15 @@ final class FocusCanvasView: NSView {
         computeMatches()
         needsDisplay = true
     }
+    /// 时序图底部的镜像胶囊与顶部胶囊共享源码范围；搜索计数按参与者去重。
+    private func deduplicated(_ hits: [SceneHit], sourceRanges: [String: NSRange]) -> [SceneHit] {
+        var seen = Set<String>()
+        return hits.filter { hit in
+            let range = sourceRanges[hit.nodeId]
+            let key = range.map { "\($0.location):\($0.length):\(hit.label)" } ?? "id:\(hit.nodeId)"
+            return seen.insert(key).inserted
+        }
+    }
     private func computeMatches() {
         guard let prepared else { visibleMatches = []; hiddenMatches = []; publishMatches(); return }
         let query = matchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -737,16 +787,18 @@ final class FocusCanvasView: NSView {
         func matches(_ value: String) -> Bool {
             value.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }
-        visibleMatches = prepared.scene.hitRegions.filter {
+        visibleMatches = deduplicated(prepared.scene.hitRegions.filter {
             matches($0.label) || matches($0.prefix ?? "")
-        }
+        }, sourceRanges: prepared.sourceRanges)
         if collapsed.isEmpty {
             hiddenMatches = []
         } else if let allPrepared {
             let visible = Set(prepared.scene.hitRegions.map(\.nodeId))
-            hiddenMatches = allPrepared.scene.hitRegions.filter { hit in
+            hiddenMatches = deduplicated(allPrepared.scene.hitRegions.filter { hit in
                 !visible.contains(hit.nodeId) && (matches(hit.label) || matches(hit.prefix ?? ""))
-            }.map { hit in (hit, collapsedAncestors(of: hit, all: allPrepared, visible: prepared)) }
+            }, sourceRanges: allPrepared.sourceRanges).map { hit in
+                (hit, collapsedAncestors(of: hit, all: allPrepared, visible: prepared))
+            }
         } else {
             requestAllHits()
         }
@@ -947,6 +999,7 @@ extension FocusCanvasView {
         return CGPoint(x: rect.midX * scale + offset.x, y: rect.midY * scale + offset.y)
     }
     func inspectionSceneScale() -> CGFloat { scale }
+    var inspectionViewportCenter: CGPoint? { centerScenePoint() }
     func inspectionExpandHidden() { expandHiddenMatches() }
     func inspectionCommandClick(_ id: String) {
         guard let range = prepared?.sourceRanges[id] else { return }

@@ -161,6 +161,12 @@ final class NoteDocument {
             } catch {}
         }
     }
+    /// 阅读视图拿到的权威正文与当前修订对齐时回填镜像，供复制源码与任务点击使用。
+    func adoptReadingText(_ text: String, revision: UInt64) {
+        guard revision == self.revision else { return }
+        if self.text != text { self.text = text }
+        textRevision = revision
+    }
     func edited(range: NSRange, replacement: String) {
         revision += 1
         if !dirty { dirty = true }

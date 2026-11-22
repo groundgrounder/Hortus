@@ -55,6 +55,8 @@ final class Workspace {
     @ObservationIgnored var inspectRenameLinks: ((RenameLinkPlanInfo) -> RenameLinkChoice)?
     #endif
     @ObservationIgnored var promptTrash: (([String], String) -> Bool)?
+    /// 测试注入的系统废纸篓移动；生产代码使用 FileManager。
+    @ObservationIgnored var moveToTrash: (@Sendable (URL) throws -> URL?)?
     @ObservationIgnored var noteOpenStartedAt = 0.0
     @ObservationIgnored var noteOpenPhases: [String: Double] = [:]
     var diagramCore: WorkspaceCore? { core }
@@ -480,6 +482,8 @@ final class Workspace {
             application?.activate(owner)
             return
         }
+        // 同篇搜索结果与反链也必须在正文层可见，专注覆盖层不能吞掉这次定位。
+        if focusSession != nil { exitFocus(restore: false) }
         pendingSearchReveals[path] = (start, length)
         if selected == path, let document = current?.document {
             revealSearch(document: document, start: start, length: length)
@@ -502,8 +506,55 @@ final class Workspace {
     }
 
     func openBacklink(_ entry: BacklinkInfo) {
-        openSearchResult(path: entry.source, start: Int(entry.startUtf16),
-                         length: Int(entry.lengthUtf16), savePrevious: false)
+        let path = entry.source
+        let owner = application?.owner(of: path, from: self)?.workspace ?? self
+        guard let document = owner.tabs.first(where: { $0.path == path })?.document,
+              document.dirty else {
+            openSearchResult(path: path, start: Int(entry.startUtf16),
+                             length: Int(entry.lengthUtf16), savePrevious: false)
+            return
+        }
+        // 索引偏移来自保存时的快照；脏文档必须按实时正文重新定位，避免跳到旧位置。
+        let handle = context?.handle
+        let target = entry.target, heading = entry.heading, alias = entry.alias
+        let embed = entry.embed, inDiagram = entry.inDiagram, line = entry.line
+        let original = Int(entry.startUtf16)
+        Task { @MainActor [weak self] in
+            guard let self, self.context != nil else { return }
+            let text = (try? await document.io.perform { try $0.snapshot().text }) ?? document.text
+            var start = original
+            var length = Int(entry.lengthUtf16)
+            if let handle {
+                let markup = await Task.detached {
+                    handle.knowledgeMarkup(path: path, text: text)
+                }.value
+                let candidates = markup.links.filter {
+                    $0.target == target && $0.heading == heading && $0.alias == alias
+                        && $0.embed == embed && $0.inDiagram == inDiagram
+                }
+                let link = candidates.first(where: { Int($0.line) == Int(line) })
+                    ?? candidates.min { abs(Int($0.startUtf16) - original) < abs(Int($1.startUtf16) - original) }
+                if let link {
+                    start = Int(link.startUtf16)
+                    length = Int(link.lengthUtf16)
+                } else {
+                    start = Self.lineStart(line, in: text)
+                    length = 0
+                }
+            }
+            self.openSearchResult(path: path, start: start, length: length, savePrevious: false)
+        }
+    }
+
+    private static func lineStart(_ line: UInt64, in text: String) -> Int {
+        let source = text as NSString
+        guard line > 1 else { return 0 }
+        var location = 0
+        for _ in 1..<line {
+            guard location < source.length else { return source.length }
+            location = NSMaxRange(source.lineRange(for: NSRange(location: location, length: 0)))
+        }
+        return min(location, source.length)
     }
 
     func openLink(source: String, target: String, heading: String?) {
@@ -665,20 +716,24 @@ final class Workspace {
     private func closeTabWhenPersisted(_ target: String, _ document: NoteDocument, epoch: UUID) {
         Task { [weak self] in
             guard let self, self.epoch == epoch,
-                  self.tabs.contains(where: { $0.path == target && $0.document === document }) else { return }
+                  self.tabs.contains(where: { $0.document === document }) else { return }
             let persistence = await document.prepareToClose()
+            // 重命名可能在等待持久化期间改掉路径；关闭请求以文档身份为准。
             guard self.epoch == epoch,
-                  let index = self.tabs.firstIndex(where: { $0.path == target && $0.document === document })
+                  let index = self.tabs.firstIndex(where: { $0.document === document })
             else { return }
+            let current = self.tabs[index].path
             if persistence != .unsaved {
                 self.tabs[index].document?.stopForShutdown()
-                self.removeTab(target)
+                self.removeTab(current)
                 return
             }
-            switch self.decideUnsaved([target], quitting: false) {
-            case .retry: self.closeTabWhenPersisted(target, document, epoch: epoch)
-            case .discard: document.abandon(); self.removeTab(target)
-            case .cancel: self.closingTabs.remove(target)
+            switch self.decideUnsaved([current], quitting: false) {
+            case .retry:
+                self.closingTabs.insert(current)
+                self.closeTabWhenPersisted(current, document, epoch: epoch)
+            case .discard: document.abandon(); self.removeTab(current)
+            case .cancel: self.closingTabs.remove(current)
             }
         }
     }
@@ -747,7 +802,8 @@ final class Workspace {
 
     /// 重命名成功后的本窗口迁移：标签路径、选中状态、视图记录与文档会话
     /// 一次性搬到新路径；文件树与搜索索引由 VaultContext 同步。
-    func applyRename(oldPath: String, entry: TreeEntry) {
+    @discardableResult
+    func applyRename(oldPath: String, entry: TreeEntry) -> [Task<Void, Never>] {
         let prefix = entry.directory ? oldPath + "/" : nil
         func remap(_ path: String) -> String {
             if path == oldPath { return entry.path }
@@ -756,6 +812,12 @@ final class Workspace {
             }
             return path
         }
+        // 旧路径的专注会话会持续写旧缓存并持有已迁移文档，先退出再搬标签。
+        if let session = focusSession,
+           session.note == oldPath || prefix.map({ session.note.hasPrefix($0) }) == true {
+            exitFocus(restore: false)
+        }
+        var relocations: [Task<Void, Never>] = []
         for index in tabs.indices {
             let old = tabs[index].path
             let newPath = remap(old)
@@ -769,23 +831,36 @@ final class Workspace {
             } else {
                 tabs[index].path = newPath
                 if let document = tabs[index].document {
-                    Task { await document.relocate(root: root ?? "", to: newPath) }
+                    let root = root ?? ""
+                    relocations.append(Task { await document.relocate(root: root, to: newPath) })
                 }
             }
             if selected == old { selected = newPath }
-            if let view = restoredViews.removeValue(forKey: old) { restoredViews[newPath] = view }
-            if let reveal = pendingSearchReveals.removeValue(forKey: old) { pendingSearchReveals[newPath] = reveal }
-            closingTabs.remove(old)
         }
+        // 未打开标签的视图记录、待定位与关闭中路径也必须按精确/前缀一起搬家。
+        func remapKeys<T>(_ values: inout [String: T]) {
+            var next: [String: T] = [:]
+            next.reserveCapacity(values.count)
+            for (key, value) in values { next[remap(key)] = value }
+            values = next
+        }
+        remapKeys(&restoredViews)
+        remapKeys(&pendingSearchReveals)
+        closingTabs = Set(closingTabs.map(remap))
         if let focus = folderSelection, focus == oldPath || prefix.map({ focus.hasPrefix($0) }) == true {
             folderSelection = remap(focus)
         }
         scheduleSessionSave()
+        return relocations
     }
 
     /// 移到废纸篓流程专用：会话已由调用方停止，直接移除标签，不触发未保存提示。
     func discardTabForTrash(_ path: String) {
         guard let index = tabs.firstIndex(where: { $0.path == path }) else { return }
+        if let document = tabs[index].document,
+           focusSession?.note == path || focusSession?.document === document {
+            exitFocus(restore: false)
+        }
         if let document = tabs[index].document { document.abandon() }
         loadTasks.removeValue(forKey: path)?.cancel()
         loads.removeValue(forKey: path)
@@ -820,7 +895,11 @@ final class Workspace {
     }
 
     /// SwiftUI 的 CommandMenu 不随图块异步排版或专注会话变化重建；显式同步原生菜单项。
-    func syncFocusDiagramMenu() { FocusMenuState.setEnabled(canFocusDiagram) }
+    /// 只有当前活跃窗口能写全局菜单，背景窗口的排版完成不能覆盖前台状态。
+    func syncFocusDiagramMenu() {
+        if let application, application.active?.workspace !== self { return }
+        FocusMenuState.setEnabled(canFocusDiagram)
+    }
 
     /// 转移不停止文档队列，也不按路径重新载入。原生编辑表面携带正文与撤销栈。
     func takeTab(_ path: String) -> NoteTab? {

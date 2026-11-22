@@ -1091,3 +1091,77 @@ fn guide_state_supports_override_save_and_reset() {
     assert!(!store.directories.config.join("agent-guide.md").exists());
     assert!(!store.reset_agent_guide().unwrap().overridden);
 }
+
+#[test]
+fn diagram_state_migrates_and_is_removed_with_the_note_tree() {
+    let root = TempDir::new().unwrap();
+    let store = store(&root);
+    for (note, block, collapsed) in [
+        ("note.md", 1, vec!["a".to_owned()]),
+        ("docs/inside.md", 1, vec!["b".to_owned()]),
+        ("docs/deep/leaf.md", 2, vec!["c".to_owned()]),
+        ("other.md", 1, vec!["d".to_owned()]),
+    ] {
+        store
+            .remember_diagram(DiagramState {
+                vault: "/v".into(),
+                note: note.into(),
+                block,
+                collapsed,
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    store
+        .rename_diagram_state("/v", "note.md", "renamed.md", false)
+        .unwrap();
+    store
+        .rename_diagram_state("/v", "docs", "papers", true)
+        .unwrap();
+    let session = store.session().unwrap();
+    assert!(
+        session
+            .diagrams
+            .iter()
+            .any(|state| state.note == "renamed.md" && state.collapsed == ["a"])
+    );
+    assert!(
+        session
+            .diagrams
+            .iter()
+            .any(|state| state.note == "papers/inside.md" && state.collapsed == ["b"])
+    );
+    assert!(
+        session
+            .diagrams
+            .iter()
+            .any(|state| state.note == "papers/deep/leaf.md" && state.collapsed == ["c"])
+    );
+    assert!(
+        !session
+            .diagrams
+            .iter()
+            .any(|state| state.note.starts_with("docs/"))
+    );
+
+    store.remove_diagram_state("/v", "papers", true).unwrap();
+    let session = store.session().unwrap();
+    assert!(
+        !session
+            .diagrams
+            .iter()
+            .any(|state| state.note.starts_with("papers/"))
+    );
+    assert!(
+        session
+            .diagrams
+            .iter()
+            .any(|state| state.note == "renamed.md")
+    );
+    assert!(
+        session
+            .diagrams
+            .iter()
+            .any(|state| state.note == "other.md")
+    );
+}

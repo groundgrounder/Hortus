@@ -13,17 +13,20 @@ struct EditingTests {
         let scroll: DiagramScrollView
         let view: DiagramTextView
         let window: NSWindow
+        let path: String
         let coordinator = NoteText.EditorCoordinator()
         let service = DiagramService()
-        init(_ source: String) throws {
+        init(_ source: String, path: String = "note.md") throws {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             vault = directory.appendingPathComponent("vault")
             try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
-            let url = vault.appendingPathComponent("note.md")
+            let url = vault.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data(source.utf8).write(to: url)
+            self.path = path
             core = try WorkspaceCore.inDirectories(config: directory.appendingPathComponent("config").path,
                                                    cache: directory.appendingPathComponent("cache").path)
-            let session = try core.openDocument(vault: vault.path, path: "note.md")
+            let session = try core.openDocument(vault: vault.path, path: path)
             document = NoteDocument(io: DocumentIO(session: session, url: url), initial: try session.initial(), prepareSourceStyles: true)
             scroll = DiagramScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 540))
             scroll.hasVerticalScroller = true
@@ -44,7 +47,7 @@ struct EditingTests {
             window.contentView?.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
             coordinator.view = view
-            coordinator.update(NoteText(text: source, path: "note.md", vault: vault.path, fontSize: 15,
+            coordinator.update(NoteText(text: source, path: self.path, vault: vault.path, fontSize: 15,
                                         service: service, core: nil, document: document) { _, _ in })
         }
         func ready() async throws {
@@ -127,6 +130,61 @@ struct EditingTests {
         try await fixture.ready()
         #expect(fixture.view.string == "新内容😀" + Self.source)
         #expect(try await fixture.text() == fixture.view.string)
+        await fixture.close()
+    }
+
+    @Test func renamePreservesUndoSelectionAndScrollAcrossNoteAndFolder() async throws {
+        let source = (0..<200).map { "Line \($0)\n" }.joined()
+        let fixture = try Fixture(source, path: "folder/note.md")
+        try await fixture.ready()
+        fixture.view.setSelectedRange(NSRange(location: 0, length: 0))
+        fixture.view.insertText("可撤销 ", replacementRange: NSRange(location: 0, length: 0))
+        let expected = "可撤销 " + source
+        let selection = NSRange(location: 5, length: 3)
+        fixture.view.setSelectedRange(selection)
+        fixture.scroll.contentView.scroll(to: CGPoint(x: 0, y: 140))
+        fixture.scroll.reflectScrolledClipView(fixture.scroll.contentView)
+        let origin = fixture.scroll.contentView.bounds.origin
+        #expect(fixture.view.undoManager?.canUndo == true)
+
+        let workspace = Workspace()
+        let handle = try fixture.core.openVault(path: fixture.vault.path)
+        let context = VaultContext(handle: handle)
+        defer { handle.close() }
+        workspace.context = context
+        workspace.tabs = [NoteTab(path: fixture.path, document: fixture.document, loading: false)]
+        workspace.selected = fixture.path
+
+        let note = fixture.vault.appendingPathComponent("folder/note.md")
+        let renamed = fixture.vault.appendingPathComponent("folder/renamed.md")
+        try FileManager.default.moveItem(at: note, to: renamed)
+        workspace.applyRename(oldPath: "folder/note.md",
+                              entry: TreeEntry(path: "folder/renamed.md", parent: "folder",
+                                               name: "renamed.md", directory: false))
+        for _ in 0..<300 where fixture.document.io.url.lastPathComponent != "renamed.md" {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fixture.document.io.url.lastPathComponent == "renamed.md")
+
+        try FileManager.default.moveItem(at: fixture.vault.appendingPathComponent("folder"),
+                                         to: fixture.vault.appendingPathComponent("papers"))
+        workspace.applyRename(oldPath: "folder",
+                              entry: TreeEntry(path: "papers", parent: "", name: "papers", directory: true))
+        for _ in 0..<300 where fixture.document.io.url.lastPathComponent != "renamed.md"
+            || !fixture.document.io.url.path.contains("/papers/") {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fixture.document.io.url.path.contains("/papers/renamed.md"))
+        #expect(workspace.tabs.map(\.path) == ["papers/renamed.md"])
+
+        // SwiftUI 下一次 body 求值会把新路径送入编辑表面；它只能更新路径，不能整篇重载。
+        fixture.coordinator.update(NoteText(text: expected, path: "papers/renamed.md", vault: fixture.vault.path,
+                                            fontSize: 15, service: fixture.service, core: nil,
+                                            document: fixture.document) { _, _ in })
+        #expect(fixture.view.string == expected)
+        #expect(fixture.view.selectedRange() == selection)
+        #expect(fixture.scroll.contentView.bounds.origin == origin)
+        #expect(fixture.view.undoManager?.canUndo == true)
         await fixture.close()
     }
 

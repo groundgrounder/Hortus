@@ -109,6 +109,8 @@ struct EditorView: View {
                 }
                 if let session = workspace.focusSession {
                     FocusOverlay(session: session, core: workspace.diagramCore, fontSize: workspace.fontSize,
+                                 revision: session.document.revision,
+                                 refreshToken: workspace.diagramRefreshToken,
                                  onExit: { workspace.exitFocus() },
                                  onJump: { workspace.jumpFromFocus(range: $0) },
                                  onCollapse: { nodes in

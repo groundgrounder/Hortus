@@ -176,4 +176,184 @@ struct DiagramFocusTests {
         }
         #expect(focused)
     }
+
+    /// 专注覆盖层的真实窗口夹具：正文、会话和画布都走生产路径。
+    @MainActor
+    private final class FocusFixture {
+        final class Flag { var value = false }
+        let editing: EditingTests.Fixture
+        let document: NoteDocument
+        let session: DiagramFocusSession
+        let focus: FocusModeView
+        let window: NSWindow
+        let flag: Flag
+
+        init(_ source: String, ordinal: UInt32 = 1) throws {
+            let exitFlag = Flag()
+            flag = exitFlag
+            editing = try EditingTests.Fixture(source, path: "note.mmd")
+            document = editing.document
+            session = DiagramFocusSession(
+                note: editing.path, vault: editing.vault.path, ordinal: ordinal, document: document,
+                reading: false, selection: NSRange(location: 0, length: 0), scroll: .zero, initial: nil)
+            focus = FocusModeView(session: session, core: editing.core, fontSize: 15,
+                                  onExit: { exitFlag.value = true },
+                                  onJump: { _ in }, onCollapse: { _ in }, onPersist: { _, _, _ in })
+            window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+            window.contentView = container
+            container.addSubview(focus)
+            focus.frame = container.bounds
+            focus.autoresizingMask = [.width, .height]
+            window.makeKeyAndOrderFront(nil)
+            window.makeKey()
+            focus.needsLayout = true
+            focus.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+        }
+
+        func ready() async throws {
+            for _ in 0..<800 {
+                window.contentView?.layoutSubtreeIfNeeded()
+                focus.layoutSubtreeIfNeeded()
+                if focus.canvas.inspectionReady { return }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            Issue.record("专注画布未就绪: focus=\(NSStringFromRect(focus.frame)) canvas=\(NSStringFromRect(focus.canvas.frame)) scene=\(focus.canvas.inspectionSceneSize)")
+        }
+
+        func close() async {
+            window.close()
+            await editing.close()
+        }
+    }
+
+    private static let tallSequence: String = {
+        let messages = (0..<40).map { "U->>M: 第\($0)步" }.joined(separator: "\n")
+        return "sequenceDiagram\nparticipant U as 你\nparticipant M as Hortus\nparticipant C as 孤独者\n"
+            + messages + "\n"
+    }()
+
+    @Test func focusSearchCountsMirroredParticipantsOnce() async throws {
+        let fixture = try FocusFixture(Self.tallSequence)
+        try await fixture.ready()
+        // 该参与者不出现在任何消息前缀里，搜索只能命中顶部与底部两个镜像胶囊。
+        fixture.focus.canvas.inspectionSearch("孤独者")
+        #expect(fixture.focus.canvas.inspectionMatches["visible"] as? Int == 1)
+        await fixture.close()
+    }
+
+    @Test func focusDocumentRevisionReloadsAndKeepsViewport() async throws {
+        var source = Self.tallSequence
+        let fixture = try FocusFixture(source)
+        try await fixture.ready()
+        let canvas = fixture.focus.canvas
+        canvas.inspectionZoom(2)
+        canvas.inspectionPan(30, -20)
+        let center = try #require(canvas.inspectionViewportCenter)
+        let before = canvas.inspectionRustLayoutCalls
+        canvas.inspectionSearch("Hortus")
+        #expect((canvas.inspectionMatches["visible"] as? Int ?? 0) > 0)
+
+        source += "M-->>U: 外部修改\n"
+        try Data(source.utf8).write(to: fixture.document.io.url)
+        fixture.document.refresh()
+        let deadline = ContinuousClock.now + .seconds(3)
+        while fixture.document.text != source, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fixture.document.text == source)
+        fixture.focus.updateDocument(revision: fixture.document.revision, refreshToken: 0)
+        for _ in 0..<300 where canvas.inspectionRustLayoutCalls <= before {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(canvas.inspectionRustLayoutCalls > before)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(abs(canvas.inspectionSceneScale() - 2) < 0.001)
+        let after = try #require(canvas.inspectionViewportCenter)
+        #expect(hypot(after.x - center.x, after.y - center.y) < 1)
+        #expect((canvas.inspectionMatches["visible"] as? Int ?? 0) > 0)
+        await fixture.close()
+    }
+
+    @Test func focusShortcutsOnlyApplyInsideTheOverlay() async throws {
+        let fixture = try FocusFixture(Self.tallSequence)
+        try await fixture.ready()
+        let previousMenu = NSApp.mainMenu
+        NSApp.mainMenu = NSMenu()
+        defer { NSApp.mainMenu = previousMenu }
+
+        final class ResponderView: NSView {
+            override var acceptsFirstResponder: Bool { true }
+        }
+        let external = ResponderView(frame: NSRect(x: 0, y: 0, width: 80, height: 22))
+        fixture.window.contentView?.addSubview(external)
+        fixture.window.makeKey()
+        #expect(fixture.window.makeFirstResponder(external))
+        let search = try #require(keyEvent("f", .command))
+        let outsideSearch = fixture.focus.performKeyEquivalent(with: search)
+        #expect(!outsideSearch)
+        #expect(fixture.window.firstResponder === external)
+        let fit = try #require(keyEvent("0", .command))
+        let outsideFit = fixture.focus.performKeyEquivalent(with: fit)
+        #expect(!outsideFit)
+        let exit = try #require(keyEvent("d", [.command, .shift]))
+        let outsideExit = fixture.focus.performKeyEquivalent(with: exit)
+        #expect(!outsideExit)
+        #expect(!fixture.flag.value)
+
+        fixture.window.makeFirstResponder(fixture.focus.canvas)
+        let insideSearch = fixture.focus.performKeyEquivalent(with: search)
+        #expect(insideSearch)
+        #expect(fixture.focus.inspectionSearchVisible)
+        fixture.window.makeFirstResponder(fixture.focus.inspectionSearchField)
+        let actual = try #require(keyEvent("1", .command))
+        let insideActual = fixture.focus.performKeyEquivalent(with: actual)
+        #expect(insideActual)
+        let insideExit = fixture.focus.performKeyEquivalent(with: exit)
+        #expect(insideExit)
+        #expect(fixture.flag.value)
+        await fixture.close()
+    }
+
+    @Test func backgroundWindowCannotOverwriteTheFocusMenu() throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let vault = temporary.appendingPathComponent("vault")
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        try "plain\n".write(to: vault.appendingPathComponent("note.md"), atomically: true, encoding: .utf8)
+        let core = try WorkspaceCore.inDirectories(config: temporary.appendingPathComponent("config").path,
+                                                   cache: temporary.appendingPathComponent("cache").path)
+        let session = try core.openDocument(vault: vault.path, path: "note.md")
+        let document = NoteDocument(io: DocumentIO(session: session, url: vault.appendingPathComponent("note.md")),
+                                    initial: try session.initial())
+        let application = ApplicationWorkspace()
+        application.core = core
+        let first = application.initial
+        let second = WindowRecord(layout: Layout())
+        application.records.append(second)
+        application.configure(first)
+        application.configure(second)
+        first.workspace.tabs = [NoteTab(path: "note.md", document: document, loading: false)]
+        first.workspace.selected = "note.md"
+        document.hasPreparedDiagrams = true
+
+        let item = NSMenuItem(title: "Focus", action: nil, keyEquivalent: "d")
+        item.keyEquivalentModifierMask = [.command, .shift]
+        item.isEnabled = false
+        FocusMenuState.inspectionItem = item
+        defer { FocusMenuState.inspectionItem = nil }
+
+        application.activeID = first.id
+        first.workspace.syncFocusDiagramMenu()
+        #expect(item.isEnabled)
+        // 背景窗口排版完成不能把前台窗口的菜单关掉。
+        second.workspace.syncFocusDiagramMenu()
+        #expect(item.isEnabled)
+        application.activeID = second.id
+        second.workspace.syncFocusDiagramMenu()
+        #expect(!item.isEnabled)
+    }
 }
