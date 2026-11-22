@@ -105,11 +105,9 @@ enum KnowledgeUIInspection {
         let handle = context.handle
         let modePrefix = "--knowledge-shot="
         let mode = arguments.first { $0.hasPrefix(modePrefix) }.map { String($0.dropFirst(modePrefix.count)) } ?? "en"
-        func shot(_ name: String, overlay: NSWindow? = nil) async throws {
+        func shot(_ name: String) async throws {
             try await Task.sleep(for: .milliseconds(180))
-            let path = media.appendingPathComponent(name + ".png").path
-            if let overlay { try await AppDelegate.snapshotDisplay(to: path, around: window, including: [overlay]) }
-            else { try await AppDelegate.snapshot(to: path, window: window) }
+            try await AppDelegate.snapshot(to: media.appendingPathComponent(name + ".png").path, window: window)
         }
         try await wait("shared index is ready") { context.searchIndexReadyMilliseconds != nil }
         let before = try hashes(root)
@@ -194,9 +192,7 @@ enum KnowledgeUIInspection {
         guard hits == ["architecture", "archive"], window.firstResponder === completionView else {
             throw failure("completion filtering or focus: \(hits)")
         }
-        if mode == "en" {
-            try await shot("link-completion-light", overlay: try require(completionView.linkCompletion.snapshotWindow, "popup"))
-        }
+        if mode == "en" { try await shot("link-completion-light") }
         try key(125, in: window)
         guard completionView.linkCompletion.selected == 1 else { throw failure("completion down arrow") }
         try key(126, in: window)
@@ -210,6 +206,8 @@ enum KnowledgeUIInspection {
         // 撤销后关闭试验标签，避免应用既有的自动保存改写原字节相同的文件。
         workspace.discardTabForTrash("architecture.md")
         workspace.openNote("architecture.md", savePrevious: false)
+        try await wait("reopened clean note") { workspace.current?.document != nil }
+        if workspace.current?.document?.reading == false { await workspace.toggleCurrentView() }
         _ = try await editor(workspace, path: "architecture.md", reading: true)
         result["completion"] = ["matches": hits, "keyboard_selection": true, "single_undo": true]
         result["after_read_only"] = try hashes(root)

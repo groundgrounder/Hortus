@@ -54,7 +54,7 @@ FIXTURE = {
         'Code stays literal: `[[target]] #ignored`.\n'),
     'router.md': (
         '# Routing Table\n\nSee [[architecture#Data Flow|Storage Architecture]].\n'
-        'Embedded sketch: ![[architecture#Data Flow|Design summary]].\n'
+        'Embed: ![[architecture#Data Flow|Diagram]].\n'
         'Alternate reference: [[Blueprint]].\n\n#system/network\n'),
     'pipeline.md': (
         '# Queue Pipeline\n\n```mermaid\nflowchart LR\n'

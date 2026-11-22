@@ -25,7 +25,7 @@ final class LinkCompletion {
             let opening = text.range(of: "[[", options: .backwards, range: prefix)
             guard opening.location != NSNotFound else { return nil }
             let query = text.substring(with: NSRange(location: NSMaxRange(opening), length: selection.location - NSMaxRange(opening)))
-            guard query.utf16.count <= 120, !query.contains(where: { "[]#|".contains($0) }) else { return nil }
+            guard !query.contains(where: { "[]#|".contains($0) }) else { return nil }
             path = view.representedPath
             start = opening.location
             caret = selection.location
@@ -49,9 +49,6 @@ final class LinkCompletion {
     private(set) var results: [LinkCompletionInfo] = []
     private(set) var selected = 0
     var onScreen: Bool { panel?.isVisible == true }
-    #if DEBUG
-    var snapshotWindow: NSWindow? { panel }
-    #endif
 
     func update(view: DiagramTextView, handle: VaultHandle?, edited: Bool) {
         guard view.isEditable, !view.compositionActive, let handle, let window = view.window,

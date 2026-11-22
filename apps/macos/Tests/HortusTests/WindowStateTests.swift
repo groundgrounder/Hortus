@@ -209,9 +209,10 @@ struct WindowStateTests {
         a.moveToRegion(.tool(.backlinks), .bottom)
         #expect(a.region(containing: .tool(.search)) == .right)
         #expect(b.region(containing: .tool(.search)) == .left)
-        let group = try #require(a.availableGroups(in: .right).last)
+        let group = try #require(a.group(containing: .tool(.search)))
+        a.select(.tool(.search), in: group.id)
         b.select(.tool(.search), in: try #require(b.availableGroups(in: .left).first).id)
-        #expect(a.availableGroups(in: .right).last?.selected == .tool(.search))
+        #expect(a.group(containing: .tool(.search))?.selected == .tool(.search))
         a.visible[.left] = false
         a.size[.left] = 350
         #expect(b.visible[.left] == true)
@@ -225,7 +226,7 @@ struct WindowStateTests {
         #expect(c.terminalIDs.count == 1)
         let json = String(decoding: try JSONEncoder().encode(a.persistedState), as: UTF8.self)
         #expect(!json.contains("visible"))
-        #expect(group.tabs == [.tool(.search)])
+        #expect(group.tabs == [.tool(.search), .tool(.tags)])
     }
 
     @Test func windowSessionRoundTripRetainsPerWindowToolLayout() throws {

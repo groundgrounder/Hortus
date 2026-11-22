@@ -718,7 +718,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 捕获窗口与 + 菜单的弹出窗口，合成到白底上；不包含桌面或其它应用。
-    static func snapshotDisplay(to path: String, around window: NSWindow? = nil, including children: [NSWindow] = []) async throws {
+    static func snapshotDisplay(to path: String, around window: NSWindow? = nil) async throws {
         guard let window else { throw CocoaError(.fileWriteUnknown) }
         let content = try await SCShareableContent.currentProcess
         guard let base = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
@@ -727,11 +727,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menuWindows = Set(NSApp.windows.filter {
             String(describing: type(of: $0)).contains("Menu")
         }.map { CGWindowID($0.windowNumber) })
-        let childIDs = Set(children.map { CGWindowID($0.windowNumber) })
         let extras = content.windows.filter {
-            $0.windowID != base.windowID && (menuWindows.contains($0.windowID) || childIDs.contains($0.windowID))
+            $0.windowID != base.windowID && menuWindows.contains($0.windowID)
         }
-        guard childIDs.isSubset(of: Set(extras.map(\.windowID))) else { throw CocoaError(.fileWriteUnknown) }
         let scale = NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: base.frame.midX, y: base.frame.midY)) })?
             .backingScaleFactor ?? 2
         let width = Int(base.frame.width * scale), height = Int(base.frame.height * scale)
