@@ -231,6 +231,17 @@ struct DiagramTests {
         let hit = try #require(prepared.scene.hitRegions.first(where: { $0.nodeId == "state-Lease" }))
         let range = try #require(diagram.sourceRange(at: CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY)))
         #expect((source as NSString).substring(with: range) == "state \"TCP 租借\" as Lease")
+
+        let editor = try EditingTests.Fixture(source)
+        try await editor.ready()
+        let live = try #require(editor.view.diagramViews[1])
+        editor.view.applySourceHighlight(caret: range.location)
+        #expect(live.highlightedNodeID == "state-Lease")
+        editor.view.applySourceHighlight(caret: (source as NSString).range(of: "FIN").location)
+        #expect(live.highlightedNodeID == "transition-1")
+        editor.view.applySourceHighlight(caret: 0)
+        #expect(live.highlightedNodeID == nil)
+        await editor.close()
     }
 
     @Test func graphSourceRangesAccessibilityAndFailureRetention() async throws {
