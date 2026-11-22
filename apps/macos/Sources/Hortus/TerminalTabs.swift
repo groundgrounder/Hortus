@@ -64,6 +64,15 @@ final class TerminalController {
 
     var allTabs: [TerminalTab] { creationOrder.compactMap { tabs[$0] } }
 
+    /// 发送目标：优先当前活跃且运行中的标签（Agent 或 Shell），其次最后一个运行中；
+    /// 仍在启动的标签排在后面，由会话队列补发。
+    func targetSessionForSend() -> TerminalTab? {
+        if let current, current.session.isRunning { return current }
+        if let running = allTabs.last(where: { $0.session.isRunning }) { return running }
+        if let current, current.session.acceptsSend { return current }
+        return allTabs.last { $0.session.acceptsSend }
+    }
+
     var shellTabs: [TerminalTab] { allTabs.filter { $0.kind == .shell } }
 
     // MARK: 库与窗口的建立和关闭
@@ -240,6 +249,22 @@ final class TerminalController {
         }
     }
 
+    /// 面板刚从收起重开时视图晚于命令挂载；在有限时间内等到真实视图再聚焦。
+    func focusWhenReady(_ tab: TerminalTab? = nil) {
+        Task { @MainActor [weak self] in
+            for _ in 0..<120 {
+                guard let self else { return }
+                let target = tab ?? self.current
+                if let view = target?.session.inspectionView, let window = view.window,
+                   window.makeFirstResponder(view) {
+                    UndoMenuState.scheduleRefresh()
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
+    }
+
     // MARK: Agent 启动闸门
 
     func start(_ tab: TerminalTab) {
@@ -331,6 +356,9 @@ final class TerminalController {
 
     private func configure(_ tab: TerminalTab) {
         tab.session.update(fontSize: fontSize, terminalFont: terminalFont)
+        #if DEBUG
+        tab.session.inspectionTabKind = tab.kind == .shell ? "shell" : "agent"
+        #endif
         tab.session.onTerminated = { [weak self, weak tab] exitCode in
             guard let self, let tab, tab.kind == .agent else { return }
             tab.agentPhase = .exited(exitCode)

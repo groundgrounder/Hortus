@@ -391,6 +391,10 @@
     "Collapse" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Collapse"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "折叠"}}}},
     "Find node" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Find node"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "查找节点"}}}},
     "%d in collapsed nodes" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "%d in collapsed nodes"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "%d 个在折叠节点里"}}}},
+    "Send Note Path to Terminal" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Send Note Path to Terminal"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "发送笔记路径到终端"}}}},
+    "Send Selection to Terminal" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Send Selection to Terminal"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "发送选区到终端"}}}},
+    "Select text to send to the terminal" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Select text to send to the terminal"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "请先选择要发送到终端的文本"}}}}
+,
     "Close" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Close"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "关闭"}}}}
   },
   "version" : "1.0"

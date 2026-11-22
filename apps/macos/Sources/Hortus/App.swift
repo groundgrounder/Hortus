@@ -230,6 +230,13 @@ private struct HortusCommands: Commands {
                 .keyboardShortcut("k", modifiers: .command)
                 .disabled(workspace.currentTerminalSession?.state != .running)
             Divider()
+            Button(L10n.string("Send Note Path to Terminal")) { workspace.sendActiveNotePathToTerminal() }
+                .keyboardShortcut("l", modifiers: [.control, .command])
+                .disabled(workspace.current == nil)
+            Button(L10n.string("Send Selection to Terminal")) { workspace.sendCurrentSelectionToTerminal(window: NSApp.keyWindow) }
+                .keyboardShortcut("l", modifiers: [.control, .command, .shift])
+                .disabled(workspace.current == nil)
+            Divider()
             Button(L10n.string("New Shell")) { workspace.addShell(to: layout.defaultTerminalGroupID) }
                 .keyboardShortcut("t", modifiers: .command)
                 .disabled(workspace.root == nil)
@@ -393,6 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UndoMenuState.scheduleRefresh()
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
                      NSWindow.didUpdateNotification, NSText.didChangeNotification,
+                     NSTextView.didChangeSelectionNotification,
                      NSMenu.didChangeItemNotification] {
             commandAvailabilityObservers.append(NotificationCenter.default.addObserver(
                 forName: name, object: nil, queue: .main
@@ -400,6 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 MainActor.assumeIsolated {
                     UndoMenuState.scheduleRefresh()
                     self?.syncFocusDiagramMenu()
+                    SendToTerminalMenuState.scheduleRefresh()
                 }
             })
         }
@@ -421,10 +430,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         var terminalFontInspection = false
+        var sendToTerminalInspection = false
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
+        sendToTerminalInspection = SendToTerminalInspection.requested
         #endif
-        guard terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || focusInspectionRequested || knowledgeInspectionRequested || embedsInspectionRequested || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
+        guard sendToTerminalInspection || terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || focusInspectionRequested || knowledgeInspectionRequested || embedsInspectionRequested || args.contains(where: { $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--about-snapshot=") || $0.hasPrefix("--metrics=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || ($0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top") }) else { return }
         // 自检只设置两次一次性唤醒，其余等待由界面状态变更触发。
         let deadline = DispatchWorkItem { fputs("Hortus 自检超时\n", stderr); exit(2) }
         inspectionDeadline = deadline
@@ -487,10 +498,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func inspectWhenReady() {
         guard inspectionDeadline != nil, !inspectionStarted, let workspace = inspectionWorkspace else { return }
         var terminalFontInspection = false
+        var sendToTerminalInspection = false
         #if DEBUG
         terminalFontInspection = TerminalFontInspection.requested
+        sendToTerminalInspection = SendToTerminalInspection.requested
         #endif
-        let visualInspection = terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || focusInspectionRequested || knowledgeInspectionRequested || embedsInspectionRequested || ProcessInfo.processInfo.arguments.contains {
+        let visualInspection = sendToTerminalInspection || terminalFontInspection || agentInspectionRequested || toolTabsInspectionRequested || toolLabelInspectionRequested || fileOpsInspectionRequested || focusInspectionRequested || knowledgeInspectionRequested || embedsInspectionRequested || ProcessInfo.processInfo.arguments.contains {
             $0.hasPrefix("--reading-inspection=") || $0.hasPrefix("--snapshot=") || $0.hasPrefix("--edit-inspection=") || $0.hasPrefix("--diagram-inspection=") || $0.hasPrefix("--diagram-scroll-stability=") || $0.hasPrefix("--toolbar-inspection=") || $0.hasPrefix("--quick-open-query=") || $0.hasPrefix("--search-query=") || $0.hasPrefix("--search-performance=") || $0.hasPrefix("--terminal-inspection=") || $0.hasPrefix("--terminal-idle=") || $0 == "--inspect-fullscreen" || $0 == "--inspect-fullscreen-top"
         }
         let settled = withObservationTracking {
@@ -524,6 +537,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do {
             #if DEBUG
+            if let arg = args.first(where: { $0.hasPrefix(SendToTerminalInspection.argumentPrefix) }) {
+                let result = try await SendToTerminalInspection.run(workspace: workspace, layout: layout, arguments: args)
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: URL(fileURLWithPath: String(arg.dropFirst(SendToTerminalInspection.argumentPrefix.count))))
+                NSApp.terminate(nil)
+                return
+            }
             if let arg = args.first(where: { $0.hasPrefix(KnowledgeUIInspection.argumentPrefix) }) {
                 let result = try await KnowledgeUIInspection.run(workspace: workspace, layout: layout, arguments: args)
                 let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])

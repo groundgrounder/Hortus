@@ -36,8 +36,27 @@ final class TerminalSession {
     var onTerminated: ((Int32?) -> Void)?
     var onFailedToStart: (() -> Void)?
     private var pendingAgent: AgentStart?
+    /// 尚未就绪时排队；进程启动后按顺序补发，首次打开终端也不丢字。
+    private var pendingSends: [PendingSend] = []
     #if DEBUG
     private(set) var inspectionFontReadyBeforeShell = false
+    private(set) var inspectionSends: [InspectionSend] = []
+    @ObservationIgnored var inspectionSink: ((String) -> Void)?
+    var inspectionTabKind = "shell"
+    #endif
+
+    private struct PendingSend {
+        let text: String
+        let bracketedPaste: Bool
+    }
+
+    #if DEBUG
+    struct InspectionSend {
+        let text: String
+        let bracketedPaste: Bool
+        let tabKind: String
+        let queued: Bool
+    }
     #endif
 
     struct AgentStart {
@@ -75,6 +94,77 @@ final class TerminalSession {
         if case .running = state { return view?.process.running == true }
         return false
     }
+
+    /// 运行中或正在启动的会话都能接收；启动阶段的载荷先排队。
+    var acceptsSend: Bool {
+        switch state {
+        case .running, .starting, .startingAgent: true
+        case .empty, .exited, .failed: false
+        }
+    }
+
+    /// 发送用户文本，不追加任何回车。未就绪时排队，进入运行后补发一次。
+    @discardableResult
+    func sendText(_ text: String, bracketedPaste: Bool = false) -> Bool {
+        guard !text.isEmpty else { return false }
+        let payload = PendingSend(text: text, bracketedPaste: bracketedPaste)
+        switch state {
+        case .starting, .startingAgent:
+            pendingSends.append(payload)
+            return true
+        case .running:
+            if deliver(payload, queued: false) { return true }
+            pendingSends.append(payload)
+            return true
+        case .empty, .exited, .failed:
+            return false
+        }
+    }
+
+    private func deliver(_ payload: PendingSend, queued: Bool) -> Bool {
+        var bytes = Array(payload.text.utf8)
+        if payload.bracketedPaste {
+            bytes = Array("\u{1b}[200~".utf8) + bytes + Array("\u{1b}[201~".utf8)
+        }
+        #if DEBUG
+        if let sink = inspectionSink {
+            sink(String(decoding: bytes, as: UTF8.self))
+            record(payload, queued: queued)
+            return true
+        }
+        #endif
+        guard state == .running, let view, view.process.running else { return false }
+        view.send(bytes)
+        #if DEBUG
+        record(payload, queued: queued)
+        #endif
+        return true
+    }
+
+    private func flushPendingSends() {
+        guard state == .running, !pendingSends.isEmpty else { return }
+        let sends = pendingSends
+        pendingSends.removeAll()
+        for payload in sends where !deliver(payload, queued: true) {
+            pendingSends.append(payload)
+        }
+    }
+
+    #if DEBUG
+    private func record(_ payload: PendingSend, queued: Bool) {
+        inspectionSends.append(InspectionSend(text: payload.text, bracketedPaste: payload.bracketedPaste,
+                                              tabKind: inspectionTabKind, queued: queued))
+        if inspectionSends.count > 8 { inspectionSends.removeFirst(inspectionSends.count - 8) }
+    }
+
+    var inspectionPendingSendCount: Int { pendingSends.count }
+
+    /// 单元测试模拟进程就绪；补发路径与真实启动回调相同。
+    func inspectionMarkRunning() {
+        state = .running
+        flushPendingSends()
+    }
+    #endif
 
     func attach(_ view: HortusTerminalView, fontSize: Double, terminalFont: String?) {
         self.view = view
@@ -233,6 +323,7 @@ final class TerminalSession {
         #endif
         state = .running
         view.startProcess(executable: shell, args: ["-l"], environment: variables, currentDirectory: root)
+        flushPendingSends()
     }
 
     private func startPendingAgent() {
@@ -251,6 +342,7 @@ final class TerminalSession {
         pendingAgent = nil
         view.startProcess(executable: pending.executable, args: pending.args,
                           environment: variables, currentDirectory: root)
+        flushPendingSends()
     }
 
     private func sendTerminationSignals(for view: HortusTerminalView) {
