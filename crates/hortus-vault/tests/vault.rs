@@ -350,8 +350,12 @@ fn file_operations_create_validate_and_refuse_to_clobber() {
     assert!(fs::read(dir.path().join("idea.md")).unwrap().is_empty());
     let markdown = vault.create_note("", "Draft.markdown").unwrap();
     assert_eq!(markdown.path, "Draft.markdown");
-    // 独占创建：同名（含大小写不敏感文件系统上的变体）拒绝且不覆盖。
-    for name in ["idea", "ALPHA.md", "alpha.md"] {
+    // 独占创建：同名（大小写不敏感文件系统含大小写变体）拒绝且不覆盖。
+    let mut duplicates = vec!["idea", "alpha.md"];
+    if fs::symlink_metadata(dir.path().join("ALPHA.md")).is_ok() {
+        duplicates.push("ALPHA.md");
+    }
+    for name in duplicates {
         let error = vault.create_note("", name).unwrap_err();
         assert_eq!(error.to_string(), "vault.already_exists", "{name}");
     }
@@ -426,14 +430,21 @@ fn rename_entries_keeps_folders_whole_and_rejects_conflicts() {
         fs::read_to_string(dir.path().join("Beta.md")).unwrap(),
         "note"
     );
-    // 与其他不同 inode 的文件同名（大小写不敏感命中）必须拒绝。
-    assert_eq!(
-        vault
-            .rename_entry("Beta.md", "C.md")
-            .unwrap_err()
-            .to_string(),
-        "vault.already_exists"
-    );
+    // 与其他不同 inode 的文件同名必须拒绝（大小写不敏感文件系统含大小写变体）。
+    let mut conflicts = vec!["c.md"];
+    if fs::symlink_metadata(dir.path().join("C.md")).is_ok() {
+        conflicts.push("C.md");
+    }
+    for conflict in conflicts {
+        assert_eq!(
+            vault
+                .rename_entry("Beta.md", conflict)
+                .unwrap_err()
+                .to_string(),
+            "vault.already_exists",
+            "{conflict}"
+        );
+    }
     assert_eq!(
         fs::read_to_string(dir.path().join("c.md")).unwrap(),
         "other"
