@@ -230,6 +230,27 @@ struct FileOpsIntegrationTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.recoveryDirectory.path).isEmpty)
     }
 
+    @Test func renameAndTrashFinishDiagramStateChangesBeforeReturning() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let root = fixture.handle.root()
+        try fixture.core.rememberDiagram(vault: root, note: "note.md", block: 1, collapsed: ["parent"])
+        let moved = try await fixture.workspace.renameEntry(path: "note.md", newName: "renamed.md")
+        #expect(try fixture.core.collapsedNodes(vault: root, note: "note.md", block: 1).isEmpty)
+        #expect(try fixture.core.collapsedNodes(vault: root, note: moved.path, block: 1) == ["parent"])
+
+        let trash = fixture.directory.appendingPathComponent("trashed.md")
+        fixture.workspace.moveToTrash = { source in
+            try FileManager.default.moveItem(at: source, to: trash)
+            return trash
+        }
+        let removed = try await fixture.workspace.trashEntry(path: moved.path)
+        #expect(removed == trash.path)
+        #expect(try fixture.core.collapsedNodes(vault: root, note: moved.path, block: 1).isEmpty)
+        _ = try await fixture.workspace.createNote(parent: "", name: "renamed")
+        #expect(try fixture.core.collapsedNodes(vault: root, note: moved.path, block: 1).isEmpty)
+    }
+
     @Test func trashProtectsUnsavedDraftsUntilConfirmed() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }

@@ -320,10 +320,10 @@ final class ApplicationWorkspace {
         if let core {
             let newPath = entry.path
             let directory = entry.directory
-            Task.detached {
+            relocations.append(Task.detached {
                 try? core.renameDiagramState(vault: root, oldPath: oldPath, newPath: newPath,
                                              directory: directory)
-            }
+            })
         }
         return relocations
     }

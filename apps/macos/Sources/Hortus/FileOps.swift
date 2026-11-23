@@ -112,7 +112,8 @@ extension Workspace {
     /// 重命名核心流程：磁盘重命名并跨全部同库窗口迁移标签、会话与索引。
     func renameEntry(path: String, newName: String) async throws -> TreeEntry {
         let entry = try await runFileOp { try $0.renameEntry(path: path, newName: newName) }
-        finishRename(oldPath: path, entry: entry)
+        let relocations = application?.entryRenamed(root: root ?? "", oldPath: path, entry: entry) ?? []
+        for relocation in relocations { await relocation.value }
         return entry
     }
 
@@ -289,9 +290,9 @@ extension Workspace {
         }
         if let root, let core {
             let directory = entry.directory
-            Task.detached {
+            await Task.detached {
                 try? core.removeDiagramState(vault: root, path: path, directory: directory)
-            }
+            }.value
         }
         if let focus = folderSelection, focus == path || (entry.directory && focus.hasPrefix(path + "/")) {
             folderSelection = nil
@@ -387,11 +388,6 @@ extension Workspace {
     }
 
 
-
-    /// 重命名成功：同库全部窗口的标签与会话迁移，文件树与搜索索引立即同步。
-    private func finishRename(oldPath: String, entry: TreeEntry) {
-        application?.entryRenamed(root: root ?? "", oldPath: oldPath, entry: entry)
-    }
 
     // MARK: 移到废纸篓
 
