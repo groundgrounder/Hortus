@@ -477,22 +477,22 @@ fn folder_rename_tracks_explicit_attachments_and_exact_directory_identity() {
             ),
         ),
     ]);
-    let plan = index.plan_folder_rename_links("docs", "archive");
+    let plan = index.plan_folder_rename_links("docs", "papers");
     assert_eq!(plan.moves.len(), 1);
     assert_eq!(plan.moves[0].old_path, "docs/a.md");
-    assert_eq!(plan.moves[0].new_path, "archive/a.md");
+    assert_eq!(plan.moves[0].new_path, "papers/a.md");
     assert_eq!(
         plan.rewrites
             .iter()
             .map(|edit| edit.after.as_str())
             .collect::<Vec<_>>(),
         [
-            "![[archive/img.png]]",
-            "[[archive/file.pdf]]",
-            "[[archive/a]]",
-            "[[/archive/a]]",
-            "![[archive/sub/pic.png]]",
-            "[[  /archive/a.md  #heading |alias ]]",
+            "![[papers/img.png]]",
+            "[[papers/file.pdf]]",
+            "[[papers/a]]",
+            "[[/papers/a]]",
+            "![[papers/sub/pic.png]]",
+            "[[  /papers/a.md  #heading |alias ]]",
         ],
     );
     let attachments = index.plan_folder_rename_links("docs-extra", "images");
