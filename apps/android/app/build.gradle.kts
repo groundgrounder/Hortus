@@ -6,6 +6,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.androidx.baselineprofile)
+    alias(libs.plugins.androidx.baselineprofile.apptarget)
 }
 
 val hortusVersionCode: Int =
@@ -48,6 +50,15 @@ android {
         getByName("release") {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            matchingFallbacks += listOf("benchmark")
+        }
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            isDebuggable = false
+            isProfileable = true
+            versionNameSuffix = "-benchmark"
         }
     }
 
@@ -61,6 +72,9 @@ android {
     }
 
     sourceSets {
+        getByName("benchmark") {
+            java.srcDir("src/release/java")
+        }
         getByName("main") {
             java.srcDir(layout.buildDirectory.dir("generated/uniffi/kotlin"))
             assets.srcDir(layout.buildDirectory.dir("generated/hortusAssets"))
@@ -92,6 +106,7 @@ dependencies {
             type = "aar"
         }
     }
+    implementation(libs.androidx.profileinstaller)
 
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
@@ -104,5 +119,15 @@ dependencies {
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
+baselineProfile {
+    saveInSrc = true
+    variants {
+        create("release") {
+            saveInSrc = true
+            from(project(":macrobenchmark"))
+        }
     }
 }

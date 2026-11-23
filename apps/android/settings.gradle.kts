@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "HortusAndroid"
 include(":app")
+include(":macrobenchmark")
