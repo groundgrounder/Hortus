@@ -34,3 +34,9 @@ fixtures/mermaid/tree/
 
 # macOS 构建命令生成的 UniFFI 绑定
 apps/macos/Generated/
+
+# Linux 本地构建与 Nix 结果链接
+result
+result-*
+apps/linux/target/
+build/linux/
