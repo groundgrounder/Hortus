@@ -57,7 +57,11 @@ impl<'a> Parser<'a> {
             index
         });
         if declared && !self.defined[index] {
-            self.diagram.classes[index].source_range = range;
+            let class = &mut self.diagram.classes[index];
+            class.source_range = range;
+            if class.namespace.is_none() {
+                class.namespace = namespace;
+            }
             self.defined[index] = true;
         }
         index

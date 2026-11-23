@@ -639,3 +639,74 @@ fn arrow_markers_are_vector_primitives_with_expected_orientation() {
     let point = Point { x: 0.0, y: 0.0 };
     assert!(scene.hit_test(point).is_none());
 }
+
+fn assert_class_endpoints(scene: &Scene, from: &str, to: &str) -> (Point, Point) {
+    let path = scene
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::GraphPath { points, .. } => Some(points),
+            _ => None,
+        })
+        .unwrap();
+    let start = path[0];
+    let end = *path.last().unwrap();
+    for (id, point) in [(from, start), (to, end)] {
+        let rect = scene
+            .hit_regions
+            .iter()
+            .find(|hit| hit.node_id == id)
+            .unwrap()
+            .rect;
+        let dx = (point.x - rect.x).min(rect.x + rect.width - point.x);
+        let dy = (point.y - rect.y).min(rect.y + rect.height - point.y);
+        assert!(
+            dx >= -0.01 && dy >= -0.01 && dx.min(dy).abs() < 0.01,
+            "{id}: {point:?} is not on the card edge {rect:?}"
+        );
+    }
+    (start, end)
+}
+
+#[test]
+fn namespace_reordering_preserves_class_ports_and_cardinalities() {
+    let source = "classDiagram\nnamespace Core {\n  class A\n}\nclass B\nA \"1\" --> \"*\" B\n";
+    let scene = scene(source, 700.0, Theme::Light);
+    let (start, end) = assert_class_endpoints(&scene, "class-A", "class-B");
+    for (text, port, other) in [("1", start, end), ("*", end, start)] {
+        let span = scene
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Text(span) if span.text == text => Some(span),
+                _ => None,
+            })
+            .unwrap();
+        let distance = |point: Point| (span.baseline.x - point.x).hypot(span.baseline.y - point.y);
+        assert!(distance(port) < 50.0 && distance(port) < distance(other));
+    }
+}
+
+#[test]
+fn forward_referenced_class_joins_its_declared_namespace() {
+    let source = "classDiagram\nFoo --> Bar\nnamespace Domain {\n  class Foo\n}\nclass Bar\n";
+    let diagram = class_diagram(source);
+    assert_eq!(diagram.classes[0].namespace, Some(0));
+    let scene = scene(source, 700.0, Theme::Light);
+    let bounds = |id: &str| {
+        scene
+            .hit_regions
+            .iter()
+            .find(|hit| hit.node_id == id)
+            .unwrap()
+            .rect
+    };
+    let domain = bounds("namespace-Domain");
+    let foo = bounds("class-Foo");
+    assert!(domain.contains(Point { x: foo.x, y: foo.y }));
+    assert!(domain.contains(Point {
+        x: foo.x + foo.width,
+        y: foo.y + foo.height
+    }));
+    assert_class_endpoints(&scene, "class-Foo", "class-Bar");
+}

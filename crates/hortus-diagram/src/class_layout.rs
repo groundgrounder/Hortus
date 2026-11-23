@@ -610,15 +610,19 @@ fn endpoint(points: &[Point], at_start: bool) -> Option<(Point, Point)> {
     Some((port, direction))
 }
 
-fn routing_graph(diagram: &ClassDiagram, nodes: &[(String, Range<usize>)]) -> Graph {
+fn routing_graph(
+    diagram: &ClassDiagram,
+    nodes: &[(String, Range<usize>)],
+    class_to_node: &[usize],
+) -> Graph {
     let edges = diagram
         .relations
         .iter()
         .enumerate()
         .map(|(id, relation)| Edge {
             id,
-            from: relation.from,
-            to: relation.to,
+            from: class_to_node[relation.from],
+            to: class_to_node[relation.to],
             source_range: relation.source_range.clone(),
             connector_range: relation.connector_range.clone(),
             label: relation.label.clone(),
@@ -848,6 +852,7 @@ pub fn layout_class(
     let mut obstacles = Vec::new();
     let mut nodes = Vec::new();
     let mut pending_notes = Vec::new();
+    let mut class_to_node = vec![0; diagram.classes.len()];
     for (block, offset) in blocks.iter().zip(&offsets) {
         for ((cell, position), &member) in
             block.cells.iter().zip(&block.positions).zip(&block.members)
@@ -856,6 +861,7 @@ pub fn layout_class(
                 x: x_offset + offset.x + position.x,
                 y: content_top + offset.y + position.y,
             };
+            class_to_node[member] = obstacles.len();
             obstacles.push((uml::offset_rect(cell.rect, at), Shape::Rounded));
             nodes.push((
                 format!("class-{}", diagram.classes[member].id),
@@ -870,7 +876,7 @@ pub fn layout_class(
         obstacles.push((rect, Shape::Rounded));
         nodes.push((id, range));
     }
-    let graph = routing_graph(diagram, &nodes);
+    let graph = routing_graph(diagram, &nodes, &class_to_node);
     let (_, _, accepted) = crate::graph_layout::assign_ranks(&graph);
     let labels: Vec<_> = diagram
         .relations
@@ -933,7 +939,7 @@ pub fn layout_class(
                         out,
                         text,
                         label_rect,
-                        obstacles[relation.from].0,
+                        obstacles[class_to_node[relation.from]].0,
                     );
                 }
             }
@@ -947,7 +953,7 @@ pub fn layout_class(
                         out,
                         text,
                         label_rect,
-                        obstacles[relation.to].0,
+                        obstacles[class_to_node[relation.to]].0,
                     );
                 }
             }

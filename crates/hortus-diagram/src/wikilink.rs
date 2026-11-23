@@ -43,7 +43,13 @@ pub(crate) fn display(label: &str) -> std::borrow::Cow<'_, str> {
 }
 
 fn can_open(label: &str, start: usize) -> bool {
-    !matches!(label[..start].chars().next_back(), Some('!' | '\\'))
+    let prefix = &label.as_bytes()[..start];
+    let backslashes = prefix
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count();
+    prefix.last() != Some(&b'!') && backslashes.is_multiple_of(2)
 }
 
 fn parse(label: &str, start: usize, inner: &str) -> Option<WikiLink> {
@@ -150,6 +156,13 @@ mod tests {
         assert!(extract("[[#Heading]]").is_none());
         assert!(extract("[[|Alias]]").is_none());
         assert!(extract("[[unclosed [[Target]]").is_some_and(|l| l.target == "Target"));
+    }
+
+    #[test]
+    fn only_odd_backslash_runs_escape_wiki_links() {
+        assert!(extract(r"\[[Target]]").is_none());
+        assert_eq!(extract(r"\\[[Target]]").unwrap().target, "Target");
+        assert!(extract(r"\\\[[Target]]").is_none());
     }
 
     #[test]
