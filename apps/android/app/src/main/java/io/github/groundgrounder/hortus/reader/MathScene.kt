@@ -118,6 +118,13 @@ internal class PreparedMath(
     }
 }
 
+private fun mathFailureDetail(error: MathFailure): String = when (error) {
+    is MathFailure.Parse -> error.detail
+    is MathFailure.ResourceLimit -> error.detail
+    is MathFailure.Panic -> error.detail
+    is MathFailure.InvalidLayout -> error.detail
+}.ifBlank { "formula could not be rendered" }
+
 private data class MathCacheKey(val latex: String, val style: MathStyle, val emBits: Long)
 private data class Metrik(val codepoint: Int, val width: Double, val height: Double, val depth: Double)
 
@@ -247,11 +254,12 @@ internal class MathSceneRenderer(
                 synchronized(lock) { cache[key] = prepared }
                 MathRenderResult(prepared, null, measured)
             } catch (error: MathFailure) {
-                val reason = error.toString()
+                // 只把 RaTeX 给出的原因交给界面，不暴露生成的异常类名。
+                val reason = mathFailureDetail(error)
                 synchronized(lock) { failed[key] = reason }
                 MathRenderResult(null, reason, 0)
             } catch (error: Exception) {
-                val reason = error.message ?: error.javaClass.simpleName
+                val reason = error.message?.takeIf { it.isNotBlank() } ?: "formula could not be rendered"
                 synchronized(lock) { failed[key] = reason }
                 MathRenderResult(null, reason, 0)
             }
@@ -339,13 +347,14 @@ internal class MathSceneRenderer(
             }
         }
         val width = (scene.optDouble("width", 0.0) * em).toFloat()
-        val height = (scene.optDouble("height", 0.0) * em).toFloat()
-        val depth = (scene.optDouble("depth", 0.0) * em).toFloat()
+        // 场景的 height 是基线以上的上升，depth 是基线以下的下降；y 坐标从公式顶部向下。
+        val ascent = (scene.optDouble("height", 0.0) * em).toFloat()
+        val descent = (scene.optDouble("depth", 0.0) * em).toFloat()
         return PreparedMath(
             width = width,
-            height = height,
-            ascent = height,
-            descent = depth,
+            height = ascent + descent,
+            ascent = ascent,
+            descent = descent,
             shapes = shapes,
             em = em,
             glyphCount = glyphs,

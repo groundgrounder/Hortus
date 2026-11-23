@@ -31,7 +31,6 @@ internal data class ReaderCallbacks(
     val onLink: (TextLink) -> Unit,
     val onOpenPath: (String, String?) -> Unit,
     val onFocus: (DiagramItem, SceneData, List<String>) -> Unit,
-    val onExport: (DiagramExportFormat, DiagramItem, SceneData?, List<String>) -> Unit,
     val onNotice: (String) -> Unit,
 )
 
@@ -56,6 +55,7 @@ internal fun ReaderItemView(
             bodySizePx = bodySizePx,
             palette = palette,
             repository = repository,
+            notePath = notePath,
             onLink = callbacks.onLink,
             modifier = modifier,
         )
@@ -65,6 +65,7 @@ internal fun ReaderItemView(
             bodySizePx = bodySizePx,
             palette = palette,
             repository = repository,
+            notePath = notePath,
             modifier = modifier,
         )
         is ImageItem -> ImageBlockView(
@@ -75,6 +76,9 @@ internal fun ReaderItemView(
         )
         is MathItem -> MathBlockView(
             item.formulas,
+            itemKey = item.key,
+            blockId = item.blockId,
+            notePath = notePath,
             contentWidth = contentWidth,
             bodySizePx = bodySizePx,
             palette = palette,
@@ -89,9 +93,7 @@ internal fun ReaderItemView(
             palette = palette,
             repository = repository,
             notePath = notePath,
-            onOpenLink = callbacks.onOpenPath,
             onFocus = callbacks.onFocus,
-            onExport = callbacks.onExport,
             modifier = modifier,
         )
         is EmbedItem -> EmbedBlockView(
@@ -232,9 +234,7 @@ internal fun EmbedBlockView(
                     palette = palette,
                     repository = repository,
                     notePath = info.resolvedPath ?: notePath,
-                    onOpenLink = callbacks.onOpenPath,
                     onFocus = callbacks.onFocus,
-                    onExport = callbacks.onExport,
                 )
             }
             "cycle" -> EmbedMessage(R.string.embed_cycle, info.displayTitle, palette)

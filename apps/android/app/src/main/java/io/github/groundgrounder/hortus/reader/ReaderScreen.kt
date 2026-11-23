@@ -64,6 +64,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,12 +80,6 @@ import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
-
-private data class PendingExport(
-    val bytes: ByteArray,
-    val name: String,
-    val format: DiagramExportFormat,
-)
 
 @Composable
 internal fun ReaderApp(
@@ -112,75 +108,6 @@ private fun ReaderScaffold(
     val scope = rememberCoroutineScope()
     val drawerState = androidx.compose.material3.rememberDrawerState(DrawerValue.Closed)
     val snackbarHost = remember { SnackbarHostState() }
-    var pendingExport by remember { mutableStateOf<PendingExport?>(null) }
-    val documentLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        val uri = result.data?.data
-        val pending = pendingExport
-        pendingExport = null
-        if (uri == null || pending == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    DiagramExporter.write(context, uri, pending.bytes)
-                }
-                Inspection.recordExport(
-                    pending.format.extension,
-                    pending.name,
-                    pending.bytes.size,
-                    uri.toString(),
-                )
-                controller.notice(context.getString(R.string.export_success, pending.name))
-            } catch (error: Exception) {
-                Inspection.recordExport(
-                    pending.format.extension,
-                    pending.name,
-                    pending.bytes.size,
-                    null,
-                    org.json.JSONObject().put("error", error.message ?: "write_failed"),
-                )
-                controller.notice(context.getString(R.string.export_failed, error.message ?: "write_failed"))
-            }
-        }
-    }
-
-    fun exportDiagram(
-        format: DiagramExportFormat,
-        item: DiagramItem,
-        scene: io.github.groundgrounder.hortus.core.SceneData?,
-        collapsed: List<String>,
-    ) {
-        if (scene == null) return
-        scope.launch {
-            try {
-                val bytes = when (format) {
-                    DiagramExportFormat.Svg -> DiagramExporter.svg(
-                        controller.repository(),
-                        item.engineText,
-                        item.mmd,
-                        item.ordinal,
-                        scene.width,
-                        dark,
-                        collapsed,
-                    )
-                    DiagramExportFormat.Png -> DiagramExporter.png(scene, dark)
-                    DiagramExportFormat.Pdf -> DiagramExporter.pdf(scene, dark)
-                }
-                val name = DiagramExporter.defaultName(item.documentKey, item.ordinal, format)
-                pendingExport = PendingExport(bytes, name, format)
-                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = format.mime
-                    putExtra(Intent.EXTRA_TITLE, name)
-                }
-                documentLauncher.launch(intent)
-            } catch (error: Exception) {
-                controller.notice(context.getString(R.string.export_failed, error.message ?: "encode_failed"))
-            }
-        }
-    }
-
     fun focusDiagram(item: DiagramItem, scene: io.github.groundgrounder.hortus.core.SceneData, collapsed: List<String>) {
         val token = FocusPayloads.put(
             FocusPayload(
@@ -204,7 +131,6 @@ private fun ReaderScaffold(
         onLink = controller::followLink,
         onOpenPath = controller::openPath,
         onFocus = ::focusDiagram,
-        onExport = ::exportDiagram,
         onNotice = controller::notice,
     )
 
@@ -319,38 +245,6 @@ private fun ReaderContent(
             firstVisibleItemScrollOffset = initialTarget?.offsetPx?.coerceAtLeast(0) ?: 0,
         )
     }
-    LaunchedEffect(content.path) {
-        HitRegistry.clear()
-    }
-    LaunchedEffect(content.path, contentWidth, content.revision) {
-        val items = content.items.filterIsInstance<TextItem>()
-            .filter { it.inlineMath.isEmpty() && it.inlineImages.isEmpty() }
-            .take(900)
-        withContext(Dispatchers.Default) {
-            for (item in items) {
-                val key = TextLayoutKey(
-                    item.key,
-                    item.text,
-                    contentWidth,
-                    controller.bodySizePx,
-                    palette.hashCode(),
-                    density,
-                )
-                if (TextLayoutCache.get(key) != null) continue
-                runCatching {
-                    prepareText(
-                        item = item.copy(text = item.text.replace('\uE000', '\u200B')),
-                        contentWidth = contentWidth,
-                        blockSize = controller.bodySizePx,
-                        palette = palette,
-                        density = density,
-                        math = emptyMap(),
-                        images = emptyMap(),
-                    )
-                }.getOrNull()?.let { TextLayoutCache.put(key, it) }
-            }
-        }
-    }
     LaunchedEffect(scrollTarget, content.items.size) {
         val target = scrollTarget ?: return@LaunchedEffect
         val last = content.items.lastIndex.coerceAtLeast(0)
@@ -391,9 +285,19 @@ private fun ReaderContent(
             }
         }
     }
+    val activity = LocalContext.current as? android.app.Activity
     LaunchedEffect(openSequence, content.revision) {
         withFrameNanos { }
         controller.markFirstFrame()
+        // reportFullyDrawn 在独立 UI 消息里调用，随后再排一帧，Macrobenchmark
+        // 才能把这次上报关联到之后的 RenderThread 帧切片。
+        withFrameNanos { }
+        val decor = activity?.window?.decorView ?: return@LaunchedEffect
+        decor.post {
+            controller.markFullyDrawn()
+            activity.reportFullyDrawn()
+            decor.invalidate()
+        }
     }
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
@@ -416,7 +320,16 @@ private fun ReaderContent(
                     notePath = content.path,
                     ancestors = listOf(content.path),
                     callbacks = callbacks,
-                    modifier = Modifier.padding(vertical = 1.dp),
+                    modifier = Modifier
+                        .padding(vertical = 1.dp)
+                        .onGloballyPositioned { coordinates ->
+                            LayoutInspection.recordItemBounds(
+                                item.key,
+                                item.blockId,
+                                coordinates.positionInWindow().y,
+                                coordinates.size.height.toFloat(),
+                            )
+                        },
                 )
             }
         }

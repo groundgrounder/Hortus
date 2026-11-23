@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package io.github.groundgrounder.hortus.reader
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Paint
@@ -9,9 +10,8 @@ import android.graphics.Typeface
 import android.text.Layout
 import android.text.SpannableString
 import android.text.Spanned
-import android.text.StaticLayout
-import android.text.TextDirectionHeuristics
 import android.text.TextPaint
+import android.text.TextUtils
 import android.text.style.AbsoluteSizeSpan
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
@@ -21,14 +21,19 @@ import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 import android.text.style.UnderlineSpan
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectTapGestures
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewConfiguration
+import android.view.ViewGroup
+import android.widget.TextView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -38,34 +43,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import io.github.groundgrounder.hortus.core.MathBlock
 import io.github.groundgrounder.hortus.core.MediaBlock
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
-internal data class HitArea(val rect: RectF, val link: TextLink?)
-
-internal class PreparedText(
-    val layout: StaticLayout,
-    val widthPx: Int,
-    val heightPx: Int,
-    val textOffsetX: Float,
-    val textOffsetY: Float,
-    val hits: List<HitArea>,
-    val rule: Boolean,
-)
+internal fun mathInlinePadding(em: Float): Float = max(1f, em * 0.08f)
 
 private class MathReplacementSpan(
     private val prepared: PreparedMath?,
@@ -73,13 +64,27 @@ private class MathReplacementSpan(
     private val errorColor: Int,
     private val bodyColor: Int,
 ) : ReplacementSpan() {
+    private val padding = prepared?.let { mathInlinePadding(it.em) } ?: 0f
+
     override fun getSize(
         paint: Paint,
         text: CharSequence,
         start: Int,
         end: Int,
         fm: Paint.FontMetricsInt?,
-    ): Int = (prepared?.width ?: paint.measureText(fallback)).toInt()
+    ): Int {
+        val content = prepared?.width ?: paint.measureText(fallback)
+        if (prepared != null && fm != null) {
+            // 让行高容纳公式真实的上升与下降；小公式不额外撑高。
+            val ascent = ceil(prepared.ascent).toInt()
+            val descent = ceil(prepared.descent).toInt()
+            if (fm.ascent > -ascent) fm.ascent = -ascent
+            if (fm.top > -ascent) fm.top = -ascent
+            if (fm.descent < descent) fm.descent = descent
+            if (fm.bottom < descent) fm.bottom = descent
+        }
+        return ceil(content + padding * 2f).toInt()
+    }
 
     override fun draw(
         canvas: AndroidCanvas,
@@ -93,7 +98,12 @@ private class MathReplacementSpan(
         paint: Paint,
     ) {
         if (prepared != null) {
-            prepared.draw(canvas, x, baseline.toFloat(), if (paint.color == 0) bodyColor else paint.color)
+            prepared.draw(
+                canvas,
+                x + padding,
+                baseline - prepared.ascent,
+                if (paint.color == 0) bodyColor else paint.color,
+            )
         } else {
             val fallbackPaint = Paint(paint).apply {
                 color = errorColor
@@ -115,7 +125,17 @@ private class ImageReplacementSpan(
         start: Int,
         end: Int,
         fm: Paint.FontMetricsInt?,
-    ): Int = (image?.widthPx ?: paint.measureText(fallback)).toInt()
+    ): Int {
+        val bitmap = image?.bitmap
+        if (bitmap != null && fm != null) {
+            val height = image.heightPx
+            if (fm.ascent > -height) fm.ascent = -height
+            if (fm.top > -height) fm.top = -height
+            if (fm.descent < 0) fm.descent = 0
+            if (fm.bottom < 0) fm.bottom = 0
+        }
+        return (image?.widthPx ?: paint.measureText(fallback)).toInt()
+    }
 
     override fun draw(
         canvas: AndroidCanvas,
@@ -170,6 +190,270 @@ internal fun textBlockVerticalPadding(item: TextItem, density: Float): Pair<Floa
     return top to bottom
 }
 
+internal fun textBlockWidths(item: TextItem, contentWidth: Int, density: Float): Triple<Float, Int, Int> {
+    val codePadding = if (item.code) 10f * density else 0f
+    val quotePadding = if (item.callout != null || item.quote) 14f * density else 0f
+    val textWidth = max(1, (contentWidth - codePadding * 2 - quotePadding).toInt())
+    return Triple(codePadding + quotePadding, codePadding.toInt(), textWidth)
+}
+
+/**
+ * 原生 TextView 承载阅读文本：系统负责选择手柄、复制工具栏和文本绘制。
+ * 只覆盖触摸以保留双链单击，并且不叠加任何自绘控件。
+ */
+internal class ReaderTextView(context: Context) : TextView(context) {
+    var itemKey: String = ""
+    var blockId: Long = 0
+    var notePath: String = ""
+    var onLink: ((TextLink) -> Unit)? = null
+    var onLayoutReady: (() -> Unit)? = null
+
+    private var item: TextItem? = null
+    private var palette: ReaderPalette? = null
+    private var mathByOffset: Map<Int, PreparedMath?> = emptyMap()
+    private var mathLatex: Map<Int, String> = emptyMap()
+    private var links: List<TextLink> = emptyList()
+    private var appliedSpannable: SpannableString? = null
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private var downX = 0f
+    private var downY = 0f
+    private var moved = false
+
+    init {
+        includeFontPadding = false
+        setTextIsSelectable(true)
+        isVerticalScrollBarEnabled = false
+        isHorizontalScrollBarEnabled = false
+        setLineSpacing(0f, 1.34f)
+        breakStrategy = android.graphics.text.LineBreaker.BREAK_STRATEGY_HIGH_QUALITY
+        hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
+        gravity = Gravity.START or Gravity.TOP
+        paint.isLinearText = true
+        paint.isSubpixelText = true
+        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+    }
+
+    fun configure(
+        item: TextItem,
+        notePath: String,
+        blockSize: Float,
+        contentWidth: Int,
+        palette: ReaderPalette,
+        density: Float,
+        spannable: SpannableString,
+        math: Map<Int, PreparedMath?>,
+        latex: Map<Int, String>,
+        onLink: (TextLink) -> Unit,
+    ) {
+        this.item = item
+        this.itemKey = item.key
+        this.blockId = item.blockId
+        this.notePath = notePath
+        this.palette = palette
+        this.mathByOffset = math
+        this.mathLatex = latex
+        this.links = item.links
+        if (item.links.isEmpty()) HitRegistry.replace("text:${item.key}", emptyList())
+        this.onLink = onLink
+        val (left, right, _) = textBlockWidths(item, contentWidth.coerceAtLeast(1), density)
+        val (top, bottom) = textBlockVerticalPadding(item, density)
+        setPadding(left.toInt(), top.toInt(), right, bottom.toInt())
+        setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, blockSize)
+        typeface = if (item.code) Typeface.MONOSPACE else Typeface.DEFAULT
+        setTextColor(
+            when {
+                item.quote -> palette.mutedArgb
+                else -> palette.textArgb
+            },
+        )
+        setLineSpacing(0f, if (item.code) 1.18f else 1.34f)
+        if (appliedSpannable !== spannable) {
+            appliedSpannable = spannable
+            setText(spannable, BufferType.SPANNABLE)
+        }
+        setTextIsSelectable(true)
+        // 链接命中区依赖布局；首帧布局完成后再刷新一次，避免打开新笔记时漏登记。
+        post { refreshLayoutData() }
+    }
+
+    override fun onDraw(canvas: AndroidCanvas) {
+        val item = item
+        val palette = palette
+        if (item != null && palette != null) {
+            val density = resources.displayMetrics.density
+            val fullWidth = width.toFloat()
+            if (item.code) {
+                canvas.drawRoundRect(
+                    0f,
+                    0f,
+                    fullWidth,
+                    height.toFloat(),
+                    8f * density,
+                    8f * density,
+                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.codeBackgroundArgb },
+                )
+            }
+            if (item.callout != null) {
+                canvas.drawRoundRect(
+                    0f,
+                    0f,
+                    fullWidth,
+                    height.toFloat(),
+                    8f * density,
+                    8f * density,
+                    Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        color = calloutBackground(item.callout.kind, palette).toArgbCompat()
+                    },
+                )
+                canvas.drawRect(
+                    0f,
+                    0f,
+                    3f * density,
+                    height.toFloat(),
+                    Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        color = calloutAccent(item.callout.kind, palette).toArgbCompat()
+                    },
+                )
+            } else if (item.quote) {
+                canvas.drawRect(
+                    0f,
+                    0f,
+                    3f * density,
+                    height.toFloat(),
+                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.ruleArgb },
+                )
+            }
+            if (item.rule) {
+                canvas.drawRect(
+                    0f,
+                    height / 2f,
+                    fullWidth,
+                    height / 2f + max(1f, density),
+                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.ruleArgb },
+                )
+            }
+        }
+        super.onDraw(canvas)
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        if (changed) {
+            post { onLayoutReady?.invoke() }
+        }
+    }
+
+    private fun linkAt(x: Float, y: Float): TextLink? {
+        val layout = layout ?: return null
+        val vertical = (y - totalPaddingTop).toInt()
+        if (vertical < 0 || vertical > layout.height) return null
+        val line = layout.getLineForVertical(vertical)
+        val horizontal = x - totalPaddingLeft
+        if (horizontal < layout.getLineLeft(line) - 2f ||
+            horizontal > layout.getLineRight(line) + 2f
+        ) {
+            return null
+        }
+        val offset = layout.getOffsetForHorizontal(line, horizontal)
+        return links.firstOrNull { offset >= it.start && offset < it.end }
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                downY = event.y
+                moved = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (kotlin.math.hypot(event.x - downX, event.y - downY) > touchSlop) moved = true
+            }
+        }
+        val handled = super.onTouchEvent(event)
+        if (event.actionMasked == MotionEvent.ACTION_UP && !moved) {
+            val start = selectionStart
+            val end = selectionEnd
+            val hasSelection = start >= 0 && end >= 0 && start != end
+            if (!hasSelection) {
+                linkAt(event.x, event.y)?.let { link ->
+                    onLink?.invoke(link)
+                    return true
+                }
+            }
+        }
+        return handled
+    }
+
+    fun refreshHits() {
+        if (links.isEmpty()) return
+        val layout = layout ?: return
+        val location = IntArray(2)
+        getLocationOnScreen(location)
+        val hits = ArrayList<ScreenHit>(links.size)
+        for (link in links) {
+            for (rect in layoutRects(layout, link.start, link.end)) {
+                hits += ScreenHit(
+                    kind = "link",
+                    label = link.alias ?: link.target,
+                    x = location[0] + totalPaddingLeft + rect.left,
+                    y = location[1] + totalPaddingTop + rect.top,
+                    width = rect.width(),
+                    height = rect.height(),
+                    target = link.resolvedPath ?: link.target,
+                    heading = link.heading,
+                    canCollapse = false,
+                    nodeId = null,
+                )
+            }
+        }
+        HitRegistry.replace("text:$itemKey", hits)
+    }
+
+    fun refreshLayoutData() {
+        refreshHits()
+        if (!Inspection.recordingEnabled) return
+        val layout = layout ?: return
+        val item = item ?: return
+
+        val lines = ArrayList<LineMetrics>(layout.lineCount)
+        for (line in 0 until layout.lineCount) {
+            lines += LineMetrics(
+                index = line,
+                top = layout.getLineTop(line) + totalPaddingTop.toFloat(),
+                bottom = layout.getLineBottom(line) + totalPaddingTop.toFloat(),
+                baselineY = layout.getLineBaseline(line) + totalPaddingTop.toFloat(),
+            )
+        }
+        val boxes = ArrayList<MathBoxMetrics>()
+        for (offset in mathByOffset.keys) {
+            val prepared = mathByOffset[offset] ?: continue
+            if (offset !in 0 until layout.text.length) continue
+            val line = layout.getLineForOffset(offset)
+            val padding = mathInlinePadding(prepared.em)
+            val baseline = layout.getLineBaseline(line) + totalPaddingTop.toFloat()
+            boxes += MathBoxMetrics(
+                formulaKey = "$offset:${mathLatex[offset].orEmpty()}",
+                latex = mathLatex[offset].orEmpty(),
+                lineIndex = line,
+                x = layout.getPrimaryHorizontal(offset) + totalPaddingLeft + padding,
+                top = baseline - prepared.ascent,
+                baselineY = baseline,
+                bottom = baseline + prepared.descent,
+                width = prepared.width + padding * 2f,
+                em = prepared.em,
+                rendered = true,
+            )
+        }
+        LayoutInspection.recordText(
+            "text:$itemKey",
+            notePath,
+            blockId,
+            lines,
+            boxes,
+        )
+    }
+}
+
 @Composable
 internal fun TextBlockView(
     item: TextItem,
@@ -177,6 +461,7 @@ internal fun TextBlockView(
     bodySizePx: Float,
     palette: ReaderPalette,
     repository: ReaderRepository,
+    notePath: String,
     onLink: (TextLink) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -204,135 +489,79 @@ internal fun TextBlockView(
             )
         }
     }
-    val layoutKey = TextLayoutKey(
+    val mathByLocal = HashMap<Int, PreparedMath?>()
+    val mathLatex = HashMap<Int, String>()
+    for (formula in item.inlineMath) {
+        val local = (formula.displayStart.toLong() - item.displayStart).toInt()
+        if (local !in 0 until item.text.length) continue
+        mathByLocal[local] = mathResults[mathKey(formula)]?.prepared
+        mathLatex[local] = formula.latex
+    }
+    val spannable = remember(
         item.key,
         item.text,
         contentWidth,
         blockSize,
-        palette.hashCode(),
-        density,
-    )
-    val useCache = item.inlineMath.isEmpty() && item.inlineImages.isEmpty()
-    val prepared = (if (useCache) TextLayoutCache.get(layoutKey) else null) ?: remember(
-        item,
-        contentWidth,
         palette,
-        blockSize,
         mathResults.size,
         images.size,
         density,
     ) {
-        runCatching {
-            prepareText(
-                item = item.copy(text = item.text.replace('\uE000', '\u200B')),
-                contentWidth = contentWidth,
-                blockSize = blockSize,
-                palette = palette,
-                density = density,
-                math = item.inlineMath.associateBy { mathKey(it) }.mapValues { mathResults[mathKey(it.value)] },
-                images = item.inlineImages.associateBy { mediaKey(it) }.mapValues { images[mediaKey(it.value)] },
-            )
-        }.getOrNull()?.also { if (useCache) TextLayoutCache.put(layoutKey, it) }
-    }
-    val current = prepared
-    if (current == null) {
-        Box(modifier.fillMaxWidth().height((48 * density).dp))
-        return
-    }
-    var origin by remember(item.key) { mutableStateOf(Offset.Zero) }
-    LaunchedEffect(current.hits, origin, item.key) {
-        HitRegistry.replace(
-            "text:${item.key}",
-            current.hits.mapNotNull { hit ->
-                hit.link?.let { link ->
-                    ScreenHit(
-                        kind = "link",
-                        label = link.alias ?: link.target,
-                        x = origin.x + hit.rect.left,
-                        y = origin.y + hit.rect.top,
-                        width = hit.rect.width(),
-                        height = hit.rect.height(),
-                        target = link.resolvedPath ?: link.target,
-                        heading = link.heading,
-                        canCollapse = false,
-                        nodeId = null,
-                    )
-                }
-            },
+        buildTextSpannable(
+            item = item,
+            blockSize = blockSize,
+            palette = palette,
+            math = mathResults.mapValues { it.value.prepared },
+            images = images,
         )
     }
-    DisposableEffect(item.key) {
-        onDispose { HitRegistry.replace("text:${item.key}", emptyList()) }
-    }
+    var textView by remember(item.key) { mutableStateOf<ReaderTextView?>(null) }
     val failures = item.inlineMath.mapNotNull { formula ->
         val result = mathResults[mathKey(formula)]
         if (result != null && result.prepared == null && result.reason != null) formula to result.reason else null
     }
-    Column(modifier = modifier.fillMaxWidth()) {
-        Canvas(
-            Modifier
+    Column(modifier.fillMaxWidth()) {
+        AndroidView(
+            factory = { context ->
+                ReaderTextView(context).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                    onLayoutReady = { refreshLayoutData() }
+                    textView = this
+                }
+            },
+            update = { view ->
+                view.configure(
+                    item = item,
+                    notePath = notePath,
+                    blockSize = blockSize,
+                    contentWidth = contentWidth,
+                    palette = palette,
+                    density = density,
+                    spannable = spannable,
+                    math = mathByLocal,
+                    latex = mathLatex,
+                    onLink = onLink,
+                )
+                view.refreshLayoutData()
+            },
+            modifier = Modifier
                 .fillMaxWidth()
-                .height(with(LocalDensity.current) { current.heightPx.toDp() })
-                .onGloballyPositioned { origin = it.positionInWindow() }
-                .pointerInput(current.hits, item.key) {
-                    detectTapGestures { point ->
-                        val hit = current.hits.firstOrNull { it.rect.contains(point.x, point.y) }
-                        if (hit?.link != null) onLink(hit.link)
-                    }
-                },
-        ) {
-            val top = current.textOffsetY
-            if (item.code) {
-                drawRoundRect(
-                    color = palette.codeBackground,
-                    topLeft = Offset(0f, top),
-                    size = Size(size.width, size.height - top),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f * density, 8f * density),
-                )
-            }
-            if (item.callout != null) {
-                val accent = calloutAccent(item.callout.kind, palette)
-                drawRoundRect(
-                    color = calloutBackground(item.callout.kind, palette),
-                    topLeft = Offset(0f, top),
-                    size = Size(size.width, size.height - top),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f * density, 8f * density),
-                )
-                drawRect(
-                    color = accent,
-                    topLeft = Offset(0f, top),
-                    size = Size(3f * density, size.height - top),
-                )
-            } else if (item.quote) {
-                drawRect(
-                    color = palette.rule,
-                    topLeft = Offset(0f, top),
-                    size = Size(3f * density, size.height - top),
-                )
-            }
-            if (item.rule) {
-                drawRect(
-                    color = palette.rule,
-                    topLeft = Offset(0f, size.height / 2),
-                    size = Size(size.width, max(1f, density)),
-                )
-            }
-            drawIntoCanvas { canvas ->
-                val native = canvas.nativeCanvas
-                native.save()
-                native.translate(current.textOffsetX, current.textOffsetY)
-                current.layout.draw(native)
-                native.restore()
-            }
-        }
+                .onGloballyPositioned { if (item.links.isNotEmpty()) textView?.refreshHits() },
+        )
         for ((formula, reason) in failures) {
-            androidx.compose.material3.Text(
+            Text(
                 "${formula.displaySource}: $reason",
-                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelSmall,
                 color = palette.error,
                 modifier = Modifier.padding(start = 8.dp),
             )
         }
+    }
+    DisposableEffect(item.key) {
+        onDispose { HitRegistry.replace("text:${item.key}", emptyList()) }
     }
 }
 
@@ -340,32 +569,15 @@ private fun mathKey(formula: MathBlock): String = "${formula.displayStart}:${for
 private fun MathBlock.displayEnd(): ULong = displayStart + displayLength
 private fun mediaKey(media: MediaBlock): String = "${media.displayStart}:${media.displayLength}"
 
-internal fun prepareText(
+internal fun buildTextSpannable(
     item: TextItem,
-    contentWidth: Int,
     blockSize: Float,
     palette: ReaderPalette,
-    density: Float,
-    math: Map<String, MathRenderResult?>,
+    math: Map<String, PreparedMath?>,
     images: Map<String, LoadedImage?>,
-): PreparedText {
-    val codePadding = if (item.code) 10f * density else 0f
-    val quotePadding = if (item.callout != null || item.quote) 14f * density else 0f
-    val width = max(1, (contentWidth - codePadding * 2 - quotePadding).toInt())
+): SpannableString {
     val bodyBaseSize = if (item.headingLevel > 0) blockSize / headingScale(item.headingLevel) else blockSize
-    val paint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
-        textSize = blockSize
-        color = when {
-            item.code -> palette.textArgb
-            item.quote -> palette.mutedArgb
-            item.headingLevel > 0 -> palette.textArgb
-            else -> palette.textArgb
-        }
-        typeface = if (item.code) Typeface.MONOSPACE else Typeface.DEFAULT
-        isLinearText = true
-        hinting = Paint.HINTING_OFF
-    }
-    val spannable = SpannableString(item.text)
+    val spannable = SpannableString(item.text.replace('\uE000', '\u200B'))
     if (item.headingLevel > 0) {
         spannable.setSpan(
             StyleSpan(Typeface.BOLD),
@@ -392,7 +604,11 @@ internal fun prepareText(
         }
     }
     if (item.fenced || item.code) {
-        val start = if (item.fenced) min(item.text.length, item.text.indexOf('\n').let { if (it < 0) item.text.length else it } + 1) else 0
+        val start = if (item.fenced) {
+            min(item.text.length, item.text.indexOf('\n').let { if (it < 0) item.text.length else it } + 1)
+        } else {
+            0
+        }
         if (start < item.text.length) {
             spannable.setSpan(TypefaceSpan("monospace"), start, item.text.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             spannable.setSpan(
@@ -538,8 +754,7 @@ internal fun prepareText(
     for (formula in item.inlineMath) {
         val local = (formula.displayStart.toLong() - item.displayStart).toInt()
         if (local !in 0 until item.text.length) continue
-        val result = math[mathKey(formula)]
-        val prepared = result?.prepared
+        val prepared = math[mathKey(formula)]
         val fallback = formula.displaySource.ifBlank { "\$${formula.latex}\$" }.ifBlank { "∅" }
         spannable.setSpan(
             MathReplacementSpan(prepared, fallback, palette.errorArgb, palette.textArgb),
@@ -560,34 +775,7 @@ internal fun prepareText(
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
         )
     }
-    val builder = StaticLayout.Builder
-        .obtain(spannable, 0, spannable.length, paint, width)
-        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-        .setIncludePad(true)
-        .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_HIGH_QUALITY)
-        .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
-        .setTextDirection(TextDirectionHeuristics.FIRSTSTRONG_LTR)
-        .setLineSpacing(0f, if (item.code) 1.18f else 1.34f)
-    val layout = builder.build()
-    val padTop = textBlockVerticalPadding(item, density).first
-    val padBottom = textBlockVerticalPadding(item, density).second
-    val offsetX = codePadding + quotePadding
-    val hits = ArrayList<HitArea>()
-    for (link in item.links) {
-        hits += layoutRects(layout, link.start, link.end).map { rect ->
-            HitArea(RectF(rect.left + offsetX, rect.top + padTop, rect.right + offsetX, rect.bottom + padTop), link)
-        }
-    }
-    val height = (layout.height + padTop + padBottom).toInt()
-    return PreparedText(
-        layout = layout,
-        widthPx = width,
-        heightPx = height,
-        textOffsetX = offsetX,
-        textOffsetY = padTop,
-        hits = hits,
-        rule = item.rule,
-    )
+    return spannable
 }
 
 private fun layoutRects(layout: Layout, start: Int, end: Int): List<RectF> {
@@ -612,7 +800,7 @@ private fun layoutRects(layout: Layout, start: Int, end: Int): List<RectF> {
     return result
 }
 
-private fun Color.toArgbCompat(): Int = android.graphics.Color.argb(
+private fun androidx.compose.ui.graphics.Color.toArgbCompat(): Int = android.graphics.Color.argb(
     (alpha * 255).toInt().coerceIn(0, 255),
     (red * 255).toInt().coerceIn(0, 255),
     (green * 255).toInt().coerceIn(0, 255),

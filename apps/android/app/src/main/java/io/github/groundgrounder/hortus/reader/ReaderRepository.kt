@@ -471,8 +471,8 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
                     viewport = emptyList(),
                 )
             }
-            val counts = measureScene(scene, documentKey)
-            DiagramInspection.record(
+            val counts = if (Inspection.recordingEnabled) measureScene(scene, documentKey) else SceneCounts()
+            if (Inspection.recordingEnabled) DiagramInspection.record(
                 "$documentKey#$ordinal@${width.toInt()}/$dark",
                 scene,
                 counts,

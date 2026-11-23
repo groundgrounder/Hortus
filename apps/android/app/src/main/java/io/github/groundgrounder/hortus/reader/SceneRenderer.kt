@@ -149,8 +149,10 @@ internal object SceneTextMetrics {
     }
 
     fun paint(span: SceneText, zoom: Float, color: Int): Paint {
+        // 先算横向比例再取画笔：scaleX 会复用同一支 Paint 测量，不能让它覆盖最终颜色。
+        val scale = scaleX(span, zoom)
         val paint = basePaint(span, zoom, color)
-        paint.textScaleX = scaleX(span, zoom)
+        paint.textScaleX = scale
         return paint
     }
 

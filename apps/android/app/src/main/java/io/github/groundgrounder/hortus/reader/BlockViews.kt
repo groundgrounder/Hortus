@@ -47,6 +47,8 @@ import androidx.compose.ui.unit.dp
 import io.github.groundgrounder.hortus.core.MathBlock
 import io.github.groundgrounder.hortus.core.MediaBlock
 import io.github.groundgrounder.hortus.core.MediaRun
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
@@ -57,8 +59,20 @@ private class CellMathSpan(
     private val fallback: String,
     private val errorColor: Int,
 ) : ReplacementSpan() {
-    override fun getSize(paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int =
-        (prepared?.width ?: paint.measureText(fallback)).toInt()
+    private val padding = prepared?.let { mathInlinePadding(it.em) } ?: 0f
+
+    override fun getSize(paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int {
+        val content = prepared?.width ?: paint.measureText(fallback)
+        if (prepared != null && fm != null) {
+            val ascent = kotlin.math.ceil(prepared.ascent).toInt()
+            val descent = kotlin.math.ceil(prepared.descent).toInt()
+            if (fm.ascent > -ascent) fm.ascent = -ascent
+            if (fm.top > -ascent) fm.top = -ascent
+            if (fm.descent < descent) fm.descent = descent
+            if (fm.bottom < descent) fm.bottom = descent
+        }
+        return kotlin.math.ceil(content + padding * 2f).toInt()
+    }
 
     override fun draw(
         canvas: android.graphics.Canvas,
@@ -72,7 +86,7 @@ private class CellMathSpan(
         paint: Paint,
     ) {
         if (prepared != null) {
-            prepared.draw(canvas, x, baseline.toFloat(), paint.color)
+            prepared.draw(canvas, x + padding, baseline - prepared.ascent, paint.color)
         } else {
             canvas.drawText(fallback, x, baseline.toFloat(), Paint(paint).apply { color = errorColor })
         }
@@ -92,6 +106,7 @@ internal fun TableBlockView(
     bodySizePx: Float,
     palette: ReaderPalette,
     repository: ReaderRepository,
+    notePath: String,
     modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current.density
@@ -117,6 +132,77 @@ internal fun TableBlockView(
             val result = mathResults[cellMathKey(formula)]
             if (result != null && result.prepared == null && result.reason != null) formula to result.reason else null
         }
+    }
+    LaunchedEffect(prepared, media, notePath, density) {
+        if (!Inspection.recordingEnabled) return@LaunchedEffect
+        val columns = media.columns.map { it.toFloat() }
+        val cells = ArrayList<JSONObject>()
+        var y = 0f
+        for (row in 0 until max(1, media.rows.toInt())) {
+            var x = 0f
+            for (column in columns.indices) {
+                val index = row * columns.size + column
+                val layout = prepared.layouts.getOrNull(index)
+                val cell = media.cells.getOrNull(index)
+                if (layout != null) {
+                    val alignment = media.alignments.getOrNull(column)?.toInt() ?: 0
+                    val available = max(0f, columns[column] - 20f * density)
+                    val offset = when (alignment) {
+                        1 -> (available - layout.width) / 2f
+                        2 -> available - layout.width
+                        else -> 0f
+                    }
+                    val cellX = x + 10f * density + offset
+                    val cellY = y + 8f * density
+                    val lines = JSONArray()
+                    for (line in 0 until layout.lineCount) {
+                        lines.put(JSONObject()
+                            .put("line", line)
+                            .put("top", cellY + layout.getLineTop(line))
+                            .put("bottom", cellY + layout.getLineBottom(line))
+                            .put("baselineY", cellY + layout.getLineBaseline(line)))
+                    }
+                    val formulas = JSONArray()
+                    for (formula in cell?.math.orEmpty()) {
+                        val local = formula.displayStart.toInt()
+                        if (local !in 0 until layout.text.length) continue
+                        val math = mathResults[cellMathKey(formula)]?.prepared
+                        val formulaLine = layout.getLineForOffset(local)
+                        val padding = math?.let { mathInlinePadding(it.em) } ?: 0f
+                        formulas.put(JSONObject()
+                            .put("key", cellMathKey(formula))
+                            .put("latex", formula.latex)
+                            .put("line", formulaLine)
+                            .put("x", cellX + layout.getPrimaryHorizontal(local) + padding)
+                            .put("top", if (math != null) cellY + layout.getLineBaseline(formulaLine) - math.ascent else 0f)
+                            .put("baselineY", cellY + layout.getLineBaseline(formulaLine))
+                            .put("bottom", if (math != null) cellY + layout.getLineBaseline(formulaLine) + math.descent else 0f)
+                            .put("width", if (math != null) math.width + padding * 2f else 0f)
+                            .put("em", math?.em ?: 0f)
+                            .put("rendered", math != null))
+                    }
+                    cells.add(JSONObject()
+                        .put("row", row)
+                        .put("column", column)
+                        .put("x", cellX)
+                        .put("y", cellY)
+                        .put("width", layout.width)
+                        .put("height", layout.height)
+                        .put("lines", lines)
+                        .put("formulas", formulas))
+                }
+                x += columns[column]
+            }
+            y += prepared.rowHeights.getOrElse(row) { 0f }
+        }
+        LayoutInspection.recordTable(
+            key = "table:${media.blockId}:${media.displayStart}",
+            note = notePath,
+            blockId = media.blockId.toLong(),
+            columns = columns,
+            rowHeights = prepared.rowHeights,
+            cells = cells,
+        )
     }
     Column(modifier.fillMaxWidth()) {
     Canvas(
@@ -347,6 +433,9 @@ internal fun ImageBlockView(
 @Composable
 internal fun MathBlockView(
     formulas: List<MathBlock>,
+    itemKey: String,
+    blockId: Long,
+    notePath: String,
     contentWidth: Int,
     bodySizePx: Float,
     palette: ReaderPalette,
@@ -354,30 +443,62 @@ internal fun MathBlockView(
     modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current.density
+    // 块级公式上下各留 0.5 em，避免与相邻块贴住。
+    val verticalPadding = bodySizePx * 0.5f
     val results = remember(formulas) { mutableStateMapOf<MathBlock, MathRenderResult>() }
-    var loaded by remember(formulas) { mutableStateOf(false) }
-    LaunchedEffect(formulas, bodySizePx) {
-        val values = withContext(Dispatchers.IO) { repository.prepareMath(formulas, bodySizePx) }
-        formulas.forEachIndexed { index, formula ->
-            values.getOrNull(index)?.let { results[formula] = it }
+    LaunchedEffect(formulas, bodySizePx, results.size, notePath, itemKey) {
+        if (results.size < formulas.size) {
+            val values = withContext(Dispatchers.IO) { repository.prepareMath(formulas, bodySizePx) }
+            formulas.forEachIndexed { index, formula ->
+                values.getOrNull(index)?.let { results[formula] = it }
+            }
         }
-        loaded = true
+        if (!Inspection.recordingEnabled) return@LaunchedEffect
+        val records = JSONArray()
+        for (formula in formulas) {
+            val result = results[formula]
+            val prepared = result?.prepared
+            records.put(
+                JSONObject()
+                    .put("latex", formula.latex)
+                    .put("rendered", prepared != null)
+                    .put("reason", result?.reason)
+                    .put("ascent", prepared?.ascent)
+                    .put("descent", prepared?.descent)
+                    .put("boxHeight", prepared?.height)
+                    .put("width", prepared?.width)
+                    .put("em", prepared?.em)
+                    .put("bodySizePx", bodySizePx)
+                    .put("topGapPx", verticalPadding)
+                    .put("bottomGapPx", verticalPadding)
+                    .put("gapEm", verticalPadding / bodySizePx),
+            )
+        }
+        if (results.size >= formulas.size) {
+            LayoutInspection.recordBlockMath(
+                itemKey,
+                notePath,
+                blockId,
+                JSONObject().put("formulas", records),
+            )
+        }
     }
-    Column(modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+    Column(modifier.fillMaxWidth()) {
         for (formula in formulas) {
             val result = results[formula]
             val prepared = result?.prepared
             if (prepared != null) {
+                val blockHeight = verticalPadding * 2f + prepared.height
                 Canvas(
                     Modifier
                         .fillMaxWidth()
-                        .height(with(LocalDensity.current) { (prepared.height + prepared.descent + 8f * density).toDp() }),
+                        .height(with(LocalDensity.current) { blockHeight.toDp() }),
                 ) {
                     val x = max(0f, (size.width - prepared.width) / 2f)
                     prepared.draw(
                         drawContext.canvas.nativeCanvas,
                         x,
-                        4f * density + prepared.ascent,
+                        verticalPadding,
                         palette.textArgb,
                     )
                 }
@@ -385,6 +506,7 @@ internal fun MathBlockView(
                 Column(
                     Modifier
                         .fillMaxWidth()
+                        .padding(vertical = with(LocalDensity.current) { verticalPadding.toDp() })
                         .background(palette.codeBackground, RoundedCornerShape(6.dp))
                         .padding(10.dp),
                 ) {
@@ -404,7 +526,7 @@ internal fun MathBlockView(
                     formula.displaySource.ifBlank { formula.latex },
                     style = MaterialTheme.typography.bodyMedium,
                     color = palette.muted,
-                    modifier = Modifier.padding(vertical = 4.dp),
+                    modifier = Modifier.padding(vertical = with(LocalDensity.current) { verticalPadding.toDp() }),
                 )
             }
         }

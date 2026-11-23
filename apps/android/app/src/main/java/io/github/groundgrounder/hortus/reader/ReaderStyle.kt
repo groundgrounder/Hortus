@@ -23,6 +23,8 @@ internal data class ReaderPalette(
     val mutedArgb: Int get() = muted.toArgb()
     val accentArgb: Int get() = accent.toArgb()
     val errorArgb: Int get() = error.toArgb()
+    val codeBackgroundArgb: Int get() = codeBackground.toArgb()
+    val ruleArgb: Int get() = rule.toArgb()
 }
 
 @Composable
