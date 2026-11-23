@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package io.github.groundgrounder.hortus
 
-import android.content.Intent
 import androidx.test.core.app.ActivityScenario
-import androidx.test.uiautomator.UiDevice
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.groundgrounder.hortus.reader.DiagramFocusActivity
@@ -11,6 +9,7 @@ import io.github.groundgrounder.hortus.reader.FocusPayload
 import io.github.groundgrounder.hortus.reader.FocusPayloads
 import io.github.groundgrounder.hortus.reader.FocusStateRegistry
 import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -26,13 +25,27 @@ class FocusGestureTest {
 
     @Before
     fun setUp() {
+        instrumentation.uiAutomation.executeShellCommand(
+            "appops set io.github.groundgrounder.hortus MANAGE_EXTERNAL_STORAGE allow",
+        )
         vault = File(context.getExternalFilesDir(null), "focus-vault").apply { mkdirs() }
         File(vault, "diagram.md").writeText("# Diagram\n")
+        runBlocking {
+            val core = CoreEnvironment.createWorkspaceCore(context)
+            try {
+                core.rememberDiagramFocus(vault.absolutePath, "diagram.md", 1u, 0.0, 0.0, 0.0)
+            } finally {
+                core.close()
+            }
+        }
         FocusStateRegistry.lastScale = 0f
         FocusStateRegistry.lastOffsetX = 0f
         FocusStateRegistry.lastOffsetY = 0f
         FocusStateRegistry.sceneWidth = 0f
         FocusStateRegistry.sceneHeight = 0f
+        FocusStateRegistry.sceneFontSize = 0f
+        FocusStateRegistry.drawnFontSize = 0f
+        FocusStateRegistry.collapsed = emptyList()
     }
 
     private fun launch(): ActivityScenario<DiagramFocusActivity> {
@@ -64,6 +77,19 @@ class FocusGestureTest {
         assertTrue("focus scene did not render", FocusStateRegistry.lastScale > 0f)
     }
 
+    private fun writeReport(name: String, extra: JSONObject = JSONObject()) {
+        val directory = File("/sdcard/Download/hortus-m1-instrument").apply { mkdirs() }
+        val report = JSONObject()
+            .put("scale", FocusStateRegistry.lastScale)
+            .put("offsetX", FocusStateRegistry.lastOffsetX)
+            .put("offsetY", FocusStateRegistry.lastOffsetY)
+            .put("fitScale", FocusStateRegistry.fitScale)
+            .put("sceneFontSize", FocusStateRegistry.sceneFontSize)
+            .put("drawnFontSize", FocusStateRegistry.drawnFontSize)
+            .put("extra", extra)
+        File(directory, name).writeText(report.toString(2) + "\n")
+    }
+
     @Test
     fun pinchPanDoubleTapAndPersistence() {
         var scenario = launch()
@@ -72,16 +98,29 @@ class FocusGestureTest {
         val height = context.resources.displayMetrics.heightPixels
         val cx = width / 2f
         val cy = height / 2f
-        val initialScale = FocusStateRegistry.lastScale
-        assertTrue("initial fit scale must be positive", initialScale > 0f)
+        val fit = FocusStateRegistry.fitScale
+        assertTrue("fit scale must be positive", fit > 0f)
+        assertEquals("initial view uses fit", fit, FocusStateRegistry.lastScale, 0.02f)
 
         MotionPinch.pinch(instrumentation, cx, cy, 120f, 900f)
-        assertTrue("pinch out should exceed 300%: ${FocusStateRegistry.lastScale}",
-            FocusStateRegistry.lastScale >= 3f)
+        MotionPinch.pinch(instrumentation, cx, cy, 160f, 1000f)
+        assertEquals("pinch reaches exactly 400%", 4f, FocusStateRegistry.lastScale, 0.01f)
+        assertTrue("scene font size recorded", FocusStateRegistry.sceneFontSize > 0f)
+        assertEquals(
+            "drawn font size equals scene font size × 4",
+            FocusStateRegistry.sceneFontSize * 4f,
+            FocusStateRegistry.drawnFontSize,
+            0.05f,
+        )
+        runCatching {
+            androidx.test.uiautomator.UiDevice.getInstance(instrumentation).takeScreenshot(
+                File("/sdcard/Download/hortus-m1-instrument/focus-400.png"),
+            )
+        }
+        writeReport("focus-400.json")
 
-        MotionPinch.pinch(instrumentation, cx, cy, 900f, 80f)
-        assertTrue("pinch in should reach 50% or less: ${FocusStateRegistry.lastScale}",
-            FocusStateRegistry.lastScale <= 0.5f)
+        MotionPinch.pinch(instrumentation, cx, cy, 900f, 60f)
+        assertEquals("pinch in reaches fit", fit, FocusStateRegistry.lastScale, 0.02f)
 
         val beforePanX = FocusStateRegistry.lastOffsetX
         val beforePanY = FocusStateRegistry.lastOffsetY
@@ -90,36 +129,25 @@ class FocusGestureTest {
         )
         Thread.sleep(400)
         assertTrue(
-            "pan should change offsets",
+            "pan changes offsets",
             kotlin.math.abs(FocusStateRegistry.lastOffsetX - beforePanX) > 1f ||
                 kotlin.math.abs(FocusStateRegistry.lastOffsetY - beforePanY) > 1f,
         )
 
         MotionPinch.doubleTap(instrumentation, cx, cy)
         val toggled = FocusStateRegistry.lastScale
-        assertTrue("double tap should switch between fit and 100%: $toggled",
-            kotlin.math.abs(toggled - 1f) < 0.05f || kotlin.math.abs(toggled - initialScale) < 0.05f)
+        assertTrue(
+            "double tap switches between fit and 100%: $toggled",
+            kotlin.math.abs(toggled - focusScale(target = 1f)) < 0.05f ||
+                kotlin.math.abs(toggled - fit) < 0.05f,
+        )
 
-        MotionPinch.pinch(instrumentation, cx, cy, 120f, 900f)
-        MotionPinch.pinch(instrumentation, cx, cy, 200f, 1200f)
+        MotionPinch.pinch(instrumentation, cx, cy, 140f, 1000f)
         Thread.sleep(300)
-        val scale = FocusStateRegistry.lastScale
-        assertTrue("scale should be at least 300%: $scale", scale >= 3f)
-        if (scale >= 4f) {
-            runCatching {
-                UiDevice.getInstance(instrumentation).takeScreenshot(
-                    java.io.File(context.getExternalFilesDir(null), "m1-focus-400.png"),
-                )
-            }
-            val base = FocusStateRegistry.baseLargestFontPx
-            val drawn = FocusStateRegistry.largestFontPx
-            assertTrue("vector text must scale with zoom", base > 0f)
-            assertTrue("drawn font size should be base × 4: $drawn", kotlin.math.abs(drawn - base * 4f) < 0.05f)
-        }
-
         val persistedScale = FocusStateRegistry.lastScale
         val persistedX = FocusStateRegistry.lastOffsetX
         val persistedY = FocusStateRegistry.lastOffsetY
+        assertEquals("pinch restored 400% before persistence check", 4f, persistedScale, 0.01f)
         scenario.close()
         Thread.sleep(1_200)
         FocusStateRegistry.lastScale = 0f
@@ -128,6 +156,9 @@ class FocusGestureTest {
         assertEquals("scale restored", persistedScale, FocusStateRegistry.lastScale, 0.02f)
         assertEquals("offset x restored", persistedX, FocusStateRegistry.lastOffsetX, 2f)
         assertEquals("offset y restored", persistedY, FocusStateRegistry.lastOffsetY, 2f)
+        writeReport("focus-restored.json")
         scenario.close()
     }
+
+    private fun focusScale(target: Float): Float = target.coerceAtLeast(FocusStateRegistry.fitScale)
 }
