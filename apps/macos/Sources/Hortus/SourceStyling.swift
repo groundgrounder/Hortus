@@ -225,7 +225,10 @@ final class SourceStyling {
         return result
     }
     func installReading(_ next: [SourceStyleRun], size: Double) {
-        fontSize = size; attributes = [:]; runs = next
+        fontSize = size
+        attributes = [:]
+        runs = zip(next, next.dropFirst()).allSatisfy { pair in pair.0.start <= pair.1.start }
+            ? next : next.sorted { $0.start < $1.start }
     }
     func style(_ mask: UInt32) -> [NSAttributedString.Key: Any] {
         if let cached = attributes[mask] { return cached }

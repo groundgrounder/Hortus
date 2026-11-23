@@ -46,6 +46,47 @@ struct SendToTerminalTests {
         #expect(SendToTerminalSelection.lineRange(in: text, start: 5, end: 6) == 1...1)
     }
 
+    @Test func crlfAndBareCRUseUTF16LineBoundaries() {
+        let crlf = "line1\r\nline2\r\nline3" as NSString
+        #expect(SendToTerminalSelection.lineRange(in: crlf, start: 7, end: 12) == 2...2)
+        #expect(SendToTerminalSelection.lineRange(in: crlf, start: 7, end: 19) == 2...3)
+        #expect(SendToTerminalSelection.lineRange(in: crlf, start: 6, end: 7) == 1...1)
+        let cr = "😀\rnext\rlast" as NSString
+        #expect(SendToTerminalSelection.lineRange(in: cr, start: 3, end: 12) == 2...3)
+    }
+
+    @Test func selectionHeaderAndControlCharactersAreSafeAtPTYBoundary() {
+        let session = TerminalSession()
+        var received: [String] = []
+        session.inspectionSink = { received.append($0) }
+        session.inspectionMarkRunning()
+        let one = TerminalPayload.selection(relativePath: "note.md", text: "x", lineRange: 1...1)
+        #expect(one.bracketedPaste)
+        #expect(session.sendText(one.text, bracketedPaste: one.bracketedPaste))
+        let begin = "\u{1b}[200~"
+        let end = "\u{1b}[201~"
+        #expect(received == [begin + "note.md（第 1 行）：\nx" + end])
+
+        let controls = (0...31).filter { ![9, 10, 13].contains($0) } + Array(127...159)
+        let scalars = String(String.UnicodeScalarView(controls.compactMap(Unicode.Scalar.init)))
+        let raw = "alpha" + scalars + "\r\nbeta\rgamma\tdelta"
+        let body = "alpha\nbeta\ngamma\tdelta"
+        let selection = TerminalPayload.selection(relativePath: "", text: raw, lineRange: nil)
+        #expect(selection.text == body)
+        #expect(selection.bracketedPaste)
+        #expect(session.sendText(selection.text, bracketedPaste: selection.bracketedPaste))
+        #expect(session.sendText(raw, bracketedPaste: true))
+        #expect(session.sendText(raw, bracketedPaste: false))
+        #expect(Array(received.dropFirst()) == [begin + body + end, begin + body + end, "alphabetagammadelta"])
+    }
+
+    @Test func controlCharactersInPathsAreQuotedWithoutPTYControls() {
+        let payload = TerminalPayload.notePath(relativePath: "a\r\n\u{1b}\u{009b}'\\(x)`.md")
+        #expect(payload.text == "$'a\\015\\012\\033\\302\\233\\'\\\\(x)`.md' ")
+        #expect(!payload.bracketedPaste)
+        #expect(payload.text.unicodeScalars.allSatisfy { $0.value >= 0x20 && !(0x7f...0x9f).contains($0.value) })
+    }
+
     @Test func startedSessionQueuesAndFlushesExactlyOnce() throws {
         let sandbox = try TemporaryDirectory()
         let session = TerminalSession()

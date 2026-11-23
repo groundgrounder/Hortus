@@ -269,6 +269,41 @@ enum SendToTerminalInspection {
         result["menu_path_title"] = L10n.string("Send Note Path to Terminal")
         result["menu_selection_title"] = L10n.string("Send Selection to Terminal")
 
+        if let capturePath, readyPath != nil {
+            // 记录进程处于 raw 模式，只接收和保存字节。
+            window.makeFirstResponder(rereading)
+            let display = rereading.string as NSString
+            let first = display.range(of: firstLine)
+            guard first.location != NSNotFound else { throw failure("single-character marker") }
+            let one = display.rangeOfComposedCharacterSequence(at: first.location)
+            rereading.setSelectedRange(one)
+            let oneBaseline = session.inspectionSends.count
+            guard workspace.sendCurrentSelectionToTerminal(window: window) else {
+                throw failure("single-character send")
+            }
+            let oneRecord = try await sendRecord(session, after: oneBaseline)
+            result["single_character"] = describe(oneRecord)
+            try await waitForCapture(capturePath, suffix: framed(TerminalPayload(
+                text: oneRecord.text, bracketedPaste: oneRecord.bracketedPaste)))
+
+            let raw = "Sample\u{1b}\u{0003}\u{0007}\u{009b}\r\nContinuation\tText"
+            let selection = TerminalPayload.selection(relativePath: note, text: raw, lineRange: nil)
+            let sampleBaseline = session.inspectionSends.count
+            guard session.sendText(selection.text, bracketedPaste: selection.bracketedPaste),
+                  session.sendText(raw, bracketedPaste: true) else { throw failure("control-byte sends") }
+            result["sanitized_selection"] = describe(try await sendRecord(session, after: sampleBaseline))
+            result["sanitized_at_delivery"] = describe(try await sendRecord(session, after: sampleBaseline + 1))
+            try await waitForCapture(capturePath, suffix: framed(TerminalPayload(
+                text: "Sample\nContinuation\tText", bracketedPaste: true)))
+
+            let filename = "capture\r\n\u{1b}\u{009b}.md"
+            let path = TerminalPayload.notePath(relativePath: filename)
+            let pathBaseline = session.inspectionSends.count
+            guard session.sendText(path.text, bracketedPaste: path.bracketedPaste) else { throw failure("control-byte path") }
+            result["sanitized_path"] = describe(try await sendRecord(session, after: pathBaseline))
+            try await waitForCapture(capturePath, suffix: framed(path))
+        }
+
         result["terminal_pid"] = Int(session.inspectionShellPid)
         result["vault_unchanged"] = before == (try hashes(rootURL))
         result["app_pid"] = Int(getpid())

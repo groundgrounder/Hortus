@@ -12,6 +12,7 @@ struct TerminalPayload: Equatable {
 
     /// 选区正文带紧凑来源提示；多字符或多行使用 bracketed paste，不自动执行。
     static func selection(relativePath: String, text: String, lineRange: ClosedRange<Int>?) -> TerminalPayload {
+        let relativePath = sanitized(relativePath, allowLayout: false)
         let header: String
         if relativePath.isEmpty {
             header = ""
@@ -23,12 +24,36 @@ struct TerminalPayload: Equatable {
         } else {
             header = "\(relativePath)：\n"
         }
-        return TerminalPayload(text: header + text,
-                               bracketedPaste: text.contains("\n") || text.contains("\r") || text.count > 1)
+        let body = header + sanitized(text, allowLayout: true)
+        return TerminalPayload(text: body,
+                               bracketedPaste: body.contains("\n") || body.contains("\t") || body.count > 1)
     }
 
-    /// POSIX 单引号：普通路径原样；含空白、引号或非 ASCII 时整体引用。
+    private static func isControl(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.value < 0x20 || (0x7f...0x9f).contains(scalar.value)
+    }
+
+    static func sanitized(_ text: String, allowLayout: Bool) -> String {
+        let normalized = allowLayout
+            ? text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            : text
+        return String(String.UnicodeScalarView(normalized.unicodeScalars.filter {
+            !isControl($0) || (allowLayout && ($0 == "\n" || $0 == "\t"))
+        }))
+    }
+
+    /// 控制字符用 ANSI-C 字节转义，其余路径沿用 POSIX 单引号。
     static func quoted(_ path: String) -> String {
+        if path.unicodeScalars.contains(where: isControl) {
+            let escaped = path.unicodeScalars.map { scalar in
+                if isControl(scalar) {
+                    return String(scalar).utf8.map { String(format: "\\%03o", Int($0)) }.joined()
+                }
+                if scalar == "'" || scalar == "\\" { return "\\" + String(scalar) }
+                return String(scalar)
+            }.joined()
+            return "$'" + escaped + "'"
+        }
         let safe = path.unicodeScalars.allSatisfy { scalar in
             switch scalar.value {
             case 0x30...0x39, 0x41...0x5A, 0x61...0x7A, 0x2D, 0x2E, 0x2F, 0x5F:
@@ -47,22 +72,25 @@ struct TerminalPayload: Equatable {
 /// 从阅读/编辑视图读取真实选区，并把显示位置映射回源文行号。
 @MainActor
 enum SendToTerminalSelection {
-    typealias Selection = (text: String, lines: ClosedRange<Int>?)
+    typealias Selection = (path: String, text: String, lines: ClosedRange<Int>?)
 
     static func current(in workspace: Workspace, window: NSWindow?) -> Selection? {
-        guard let document = workspace.current?.document else { return nil }
-        if let responder = window?.firstResponder as? DiagramTextView,
-           responder.representedDocument == ObjectIdentifier(document),
-           let selection = selection(in: responder, document: document) {
+        guard let path = workspace.selected, let document = workspace.current?.document else { return nil }
+        let responder = window?.firstResponder as? DiagramTextView
+        if let responder, responder.isEmbedded {
+            return responder.embeddedTerminalSelection?()
+        }
+        if let responder, responder.representedDocument == ObjectIdentifier(document),
+           let selection = selection(in: responder, document: document, path: path) {
             return selection
         }
-        if let view = document.mountedTextView, let selection = selection(in: view, document: document) {
+        if let view = document.mountedTextView, let selection = selection(in: view, document: document, path: path) {
             return selection
         }
         return nil
     }
 
-    static func selection(in view: DiagramTextView, document: NoteDocument) -> Selection? {
+    static func selection(in view: DiagramTextView, document: NoteDocument, path: String) -> Selection? {
         let range = view.selectedRange()
         guard range.location != NSNotFound, range.length > 0 else { return nil }
         let displayed = view.string as NSString
@@ -72,15 +100,15 @@ enum SendToTerminalSelection {
         if view.isReading {
             guard let coordinator = view.readingCoordinator,
                   let start = coordinator.sourcePosition(at: range.location) else {
-                return (text, nil)
+                return (path, text, nil)
             }
             let endPosition = NSMaxRange(range)
             let last = coordinator.sourcePosition(at: endPosition - 1) ?? start
             let after = coordinator.sourcePosition(at: endPosition)
             let end = (after.map { $0 > last ? $0 : last + 1 }) ?? (last + 1)
-            return (text, lineRange(in: document.text as NSString, start: start, end: end))
+            return (path, text, lineRange(in: document.text as NSString, start: start, end: end))
         }
-        return (text, lineRange(in: displayed, start: range.location, end: NSMaxRange(range)))
+        return (path, text, lineRange(in: displayed, start: range.location, end: NSMaxRange(range)))
     }
 
     static func lineRange(in text: NSString, start: Int, end: Int) -> ClosedRange<Int>? {
@@ -92,11 +120,17 @@ enum SendToTerminalSelection {
         return first...max(first, last)
     }
 
-    private static func lineNumber(in text: NSString, offset: Int) -> Int {
-        let prefix = text.substring(to: offset)
-        return 1 + prefix.reduce(into: 0) { count, character in
-            if character == "\n" { count += 1 }
+    nonisolated static func lineNumber(in text: NSString, offset: Int) -> Int {
+        var line = 1
+        for index in 0..<max(0, min(offset, text.length)) {
+            let unit = text.character(at: index)
+            // CRLF 在 LF 之后才换行；单独的 CR 也结束一行。
+            if unit == 0x000a || (unit == 0x000d
+                && (index + 1 == text.length || text.character(at: index + 1) != 0x000a)) {
+                line += 1
+            }
         }
+        return line
     }
 }
 
@@ -111,12 +145,12 @@ extension Workspace {
     /// 发送当前阅读/编辑视图的非空选区；没有选区时给一次克制提示。
     @discardableResult
     func sendCurrentSelectionToTerminal(window: NSWindow?) -> Bool {
-        guard let path = selected, current?.document != nil else { return false }
+        guard current?.document != nil else { return false }
         guard let selection = SendToTerminalSelection.current(in: self, window: window) else {
             showKnowledgeMessage(L10n.string("Select text to send to the terminal"))
             return false
         }
-        return deliverToTerminal(TerminalPayload.selection(relativePath: path,
+        return deliverToTerminal(TerminalPayload.selection(relativePath: selection.path,
                                                            text: selection.text,
                                                            lineRange: selection.lines))
     }

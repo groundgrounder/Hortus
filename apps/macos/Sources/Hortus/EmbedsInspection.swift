@@ -82,6 +82,46 @@ enum EmbedsInspection {
         }
     }
 
+    private static func attachmentGeometry(_ card: EmbeddedNoteView) -> [String: Any] {
+        guard let textView = card.inspectionReadingView?.inspectionTextView else { return [:] }
+        textView.needsLayout = true
+        textView.layoutSubtreeIfNeeded()
+        return [
+            "width": textView.bounds.width,
+            "diagrams": textView.diagramViews.values.map { $0.frame.maxX },
+            "media": textView.mediaViews.map { $0.frame.maxX },
+        ]
+    }
+
+    private static func inspectDiagram(_ diagram: DiagramView, workspace: Workspace, window: NSWindow)
+        async throws -> [String: Any] {
+        let hit = try require(diagram.prepared.scene.hitRegions.first { $0.linkTarget == "Target" }, "diagram link")
+        let point = diagram.convert(CGPoint(x: hit.rect.cgRect.midX, y: hit.rect.cgRect.midY), to: nil)
+        let event = try require(NSEvent.mouseEvent(with: .rightMouseDown, location: point, modifierFlags: [],
+            timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+            "diagram menu event")
+        let menu = try require(diagram.menu(for: event), "diagram menu")
+        let link = try require(menu.items.first { $0.title == DiagramExportStrings.openLinkedNote }, "open link item")
+        let collapse = try require(menu.items.first { $0.title == L10n.string("Collapse") }, "collapse item")
+        NSApp.sendAction(try require(collapse.action, "collapse action"), to: collapse.target, from: collapse)
+        try await wait("embedded node collapsed") {
+            diagram.prepared.scene.hitRegions.contains { $0.nodeId == hit.nodeId && $0.collapsed }
+        }
+        let request = try require(diagram.exportRequestProvider?(), "embedded diagram export")
+        let svg = try await request.svg()
+        guard svg.hasPrefix("<svg"), !svg.contains(">Leaf<"), !menu.autoenablesItems else {
+            throw failure("embedded diagram export or menu")
+        }
+        NSApp.sendAction(try require(link.action, "open link action"), to: link.target, from: link)
+        try await wait("embedded local link target and heading") {
+            guard workspace.selected == "gallery/Target.md", let document = workspace.current?.document,
+                  let heading = document.headings.first(where: { $0.title == "Section" }) else { return false }
+            return document.sourceAnchor == Int(heading.start)
+        }
+        return ["target": workspace.selected ?? "", "collapsed": true, "svg_bytes": svg.utf8.count,
+                "autoenables_items": menu.autoenablesItems, "source": request.note]
+    }
+
     static func run(workspace: Workspace, arguments: [String]) async throws -> [String: Any] {
         guard CGPreflightPostEventAccess() else { throw failure("HID event posting permission required") }
         let context = try require(workspace.context, "vault context")
@@ -209,6 +249,28 @@ enum EmbedsInspection {
         mmdFirst.inspectionOpen()
         try await wait("opened mmd file") { workspace.selected == "arch.mmd" }
         result["mmd_click"] = true
+        func openSeams() async throws -> (EmbeddedNoteView, EmbeddedNoteView, EmbeddedNoteView) {
+            workspace.openNote("seams.md", savePrevious: false)
+            try await wait("embedded diagram seams", timeout: 15) {
+                guard workspace.selected == "seams.md", let view = workspace.textView else { return false }
+                let active = cards(in: view)
+                return card(active, path: "gallery/gallery.mmd")?.inspectionHasDiagram == true
+                    && card(active, path: "rich.md")?.inspectionDiagramCount == 1
+                    && card(active, path: "gallery/nested.md")?.inspectionDiagramCount == 1
+            }
+            let active = cards(in: try require(workspace.textView, "seams view"))
+            return (try require(card(active, path: "gallery/gallery.mmd"), "mmd seams card"),
+                    try require(card(active, path: "rich.md"), "rich seams card"),
+                    try require(card(active, path: "gallery/nested.md"), "nested seams card"))
+        }
+        let (mmdSeams, _, _) = try await openSeams()
+        result["mmd_interaction"] = try await inspectDiagram(
+            try require(mmdSeams.inspectionDiagramView, "mmd diagram view"), workspace: workspace, window: window)
+        let (_, richSeams, nestedSeams) = try await openSeams()
+        result["geometry"] = ["outer": attachmentGeometry(richSeams), "nested": attachmentGeometry(nestedSeams)]
+        let nestedDiagram = try require(nestedSeams.inspectionReadingView?.inspectionTextView.diagramViews[1],
+                                        "nested diagram view")
+        result["nested_interaction"] = try await inspectDiagram(nestedDiagram, workspace: workspace, window: window)
         guard try hashes(root) == before else { throw failure("vault changed during read-only embeds") }
         result["read_only"] = true
         workspace.openNote("host.md", savePrevious: false)

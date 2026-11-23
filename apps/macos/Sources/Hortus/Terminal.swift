@@ -121,8 +121,11 @@ final class TerminalSession {
         }
     }
 
-    private func deliver(_ payload: PendingSend, queued: Bool) -> Bool {
-        var bytes = Array(payload.text.utf8)
+    private func deliver(_ pending: PendingSend, queued: Bool) -> Bool {
+        let text = TerminalPayload.sanitized(pending.text, allowLayout: pending.bracketedPaste)
+        guard !text.isEmpty else { return true }
+        let payload = PendingSend(text: text, bracketedPaste: pending.bracketedPaste)
+        var bytes = Array(text.utf8)
         if payload.bracketedPaste {
             bytes = Array("\u{1b}[200~".utf8) + bytes + Array("\u{1b}[201~".utf8)
         }

@@ -373,7 +373,7 @@ def run_app_checks(base, output, media):
     recorder = base / 'pty-recorder.zsh'
     recorder.write_text(
         '#!/bin/zsh\n'
-        'stty -icanon min 1 time 0 2>/dev/null\n'
+        'stty raw -echo 2>/dev/null\n'
         ': > "$HORTUS_SEND_READY"\n'
         'exec cat >> "$HORTUS_SEND_CAPTURE"\n')
     recorder.chmod(0o700)
@@ -415,9 +415,25 @@ def run_app_checks(base, output, media):
                        + b'\x1b[201~')
     reading_bytes = (b'\x1b[200~' + capture_data['reading_selection']['text'].encode()
                      + b'\x1b[201~')
+    single = capture_data['single_character']
+    clean = capture_data['sanitized_selection']
+    boundary = capture_data['sanitized_at_delivery']
+    control_path = capture_data['sanitized_path']
+    check(single['text'] == f'{NOTE}（第 3 行）：\n{SELECTION[0]}', single)
+    check(clean['text'] == f'{NOTE}：\nSample\nContinuation\tText', clean)
+    check(boundary['text'] == 'Sample\nContinuation\tText', boundary)
+    check(control_path['text'] == "$'capture\\015\\012\\033\\302\\233.md' ", control_path)
+    extra_bytes = []
+    for record in (single, clean, boundary, control_path):
+        body = record['text']
+        bracketed = record is not control_path
+        check(record['bracketed_paste'] is bracketed and not record['auto_enter'], record)
+        check(all((bracketed and char in '\n\t') or
+                  (ord(char) >= 32 and not 127 <= ord(char) <= 159) for char in body), record)
+        extra_bytes.append(b'\x1b[200~' + body.encode() + b'\x1b[201~' if bracketed else body.encode())
     actual = capture.read_bytes()
-    check(actual == path_bytes + selection_bytes + reading_bytes,
-          f'PTY bytes differ:\n{actual!r}\n{path_bytes + selection_bytes + reading_bytes!r}')
+    expected_bytes = path_bytes + selection_bytes + reading_bytes + b''.join(extra_bytes)
+    check(actual == expected_bytes, f'PTY bytes differ:\n{actual!r}\n{expected_bytes!r}')
     check(not actual.endswith(b'\r') and not actual.endswith(b'\n'), 'PTY payload ended with Enter')
     check(capture_data['selection']['bracketed_paste'] and capture_data['reading_selection']['bracketed_paste'],
           'capture run did not use bracketed paste')
@@ -426,7 +442,8 @@ def run_app_checks(base, output, media):
     writing = {
         'theme': 'capture', 'path_bytes': len(path_bytes),
         'selection_bytes': len(selection_bytes), 'reading_bytes': len(reading_bytes),
-        'total_bytes': len(actual), 'payload': actual.decode(errors='replace'),
+        'total_bytes': len(actual), 'security_case_bytes': list(map(len, extra_bytes)),
+        'payload': actual.decode(errors='replace'),
     }
     write(output / 'send-capture-bytes.json', json.dumps(writing, ensure_ascii=False, indent=2) + '\n')
 

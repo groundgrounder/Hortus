@@ -25,7 +25,14 @@ SHOTS = (
     'embeds-zh-dark-boundary.png',
     'folder-rename-zh-dark-after.png',
 )
+GALLERY = 'mindmap\n  root((Root))\n    [[Target#Section]]\n      Leaf\n'
 FIXTURE = {
+    'seams.md': '# Seams\n\n![[gallery/gallery.mmd]]\n\n![[rich]]\n',
+    'gallery/gallery.mmd': GALLERY,
+    'gallery/nested.md': '# Nested\n\n```mermaid\n' + GALLERY + '```\n\n'
+                         '| Name | Value |\n| --- | --- |\n| A sample | Another sample |\n',
+    'gallery/Target.md': '# Target\n\n## Section\n\nLinked body.\n',
+    'other/Target.md': '# Other target\n',
     'host.md': (
         '# Host\n\n'
         '![[child]]\n\n'
@@ -63,7 +70,7 @@ FIXTURE = {
     'unrelated.md': '[[docs-extra/keep]]\n',
     'x/Same.md': '# Same X\n',
     'y/Same.md': '# Same Y\n',
-    'rich.md': '# Rich\n\n| Key | Value |\n|---|---|\n| One | Two |\n\nFormula $x^2$.\n\n```mermaid\nflowchart LR\n  R[Rich] --> S[Body]\n```\n',
+    'rich.md': '# Rich\n\n| Key | Value |\n|---|---|\n| One | Two |\n\nFormula $x^2$.\n\n```mermaid\nflowchart LR\n  R[Rich] --> S[Body]\n```\n\n![[gallery/nested]]\n',
 }
 EXPECTED_OUTSIDE = (
     '[[papers/intro]] [[papers/sub/api#Auth|API]]\n'
@@ -99,6 +106,16 @@ def verify(result, before, mode):
     assert result['read_only'] and result['title_click'] and result['section_click'], result
     assert result['mmd_click'], result
     assert result['live_refresh'], result
+    for depth, geometry in result['geometry'].items():
+        assert geometry['diagrams'] and geometry['media'], (depth, geometry)
+        assert all(0 < edge <= geometry['width'] + 0.01
+                   for edge in geometry['diagrams'] + geometry['media']), (depth, geometry)
+    for key, path in [('mmd_interaction', 'gallery/gallery.mmd'),
+                      ('nested_interaction', 'gallery/nested.md')]:
+        interaction = result[key]
+        assert interaction['target'] == 'gallery/Target.md' and interaction['source'] == path, interaction
+        assert interaction['collapsed'] and not interaction['autoenables_items'], interaction
+        assert interaction['svg_bytes'] > 0, interaction
     cards = {card['title']: card for card in result['cards']}
     assert cards['child']['kind'] == 'note' and cards['child']['path'] == 'child.md', cards
     assert cards['Section alias › Section Two']['kind'] == 'note', cards

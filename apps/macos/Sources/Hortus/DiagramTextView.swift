@@ -772,6 +772,7 @@ final class DiagramTextView: NSTextView {
     private(set) var formulaAccessibilityBuildCount = 0
     /// 嵌入卡片里的正文没有自己的滚动容器，不能借用宿主窗口的滚动几何。
     var isEmbedded = false
+    var embeddedTerminalSelection: (() -> SendToTerminalSelection.Selection?)?
     private var hostScroll: DiagramScrollView? {
         guard !isEmbedded, let scroll = enclosingScrollView as? DiagramScrollView else { return nil }
         return scroll
@@ -1103,9 +1104,11 @@ final class DiagramTextView: NSTextView {
                 let view = DiagramView(prepared: prepared)
                 view.isHidden = true
                 view.onToggle = { [weak self] id in self?.onToggle?(block.ordinal, id) }
-                view.onEditSource = { [weak self] in self?.onEditSource?(block.ordinal) }
-                view.onSourceRange = { [weak self] range in self?.onSourceRange?(block.ordinal, range) }
-                view.onFocus = { [weak self] in self?.onFocus?(block.ordinal) }
+                if !isEmbedded {
+                    view.onEditSource = { [weak self] in self?.onEditSource?(block.ordinal) }
+                    view.onSourceRange = { [weak self] range in self?.onSourceRange?(block.ordinal, range) }
+                    view.onFocus = { [weak self] in self?.onFocus?(block.ordinal) }
+                }
                 view.onOpenLink = { [weak self] target, heading in
                     self?.onOpenLink?(block.ordinal, target, heading)
                 }

@@ -18,6 +18,22 @@ struct EmbedRequest: Sendable {
     let mathService: MathService
 
     var maxDepth: Int { 3 }
+    static func bodyWidth(_ width: Double) -> Double { max(120, width - 24) }
+    static func contentWidth(_ width: Double) -> Double { max(120, bodyWidth(width) - 28) }
+
+    func resolveDiagramLink(from path: String?, target: String) async -> String? {
+        guard let path else { return nil }
+        return await Task.detached { handle.resolveLink(sourcePath: path, rawTarget: target).resolvedPath }.value
+    }
+
+    @MainActor
+    func diagramExport(info: EmbedContentInfo, block: NoteDiagram) -> DiagramExportRequest? {
+        guard let path = info.resolvedPath, let scene = block.prepared else { return nil }
+        return DiagramExportRequest(prepared: scene, note: path, ordinal: block.ordinal) {
+            try await DiagramExport.renderSVG(source: info.content, mmd: info.isMmd, block: block.ordinal,
+                                              width: scene.scene.width, dark: dark, collapsed: block.collapsed.sorted())
+        }
+    }
 }
 
 struct PreparedEmbed: Sendable {
@@ -25,6 +41,8 @@ struct PreparedEmbed: Sendable {
     let media: [PreparedMedia]
     let math: [PreparedMathBlock]
     let diagrams: [NoteDiagram]
+    /// 切片首行在整篇笔记中的零基偏移；未能匹配同版内容时省略行号。
+    let precedingLines: Int?
 }
 
 /// 嵌入内容在主线程之外准备：解析、切片、图片探测、公式和 Mermaid 布局都不占用窗口线程。
@@ -32,22 +50,26 @@ actor EmbedRenderer {
     static let shared = EmbedRenderer()
 
     func prepare(_ request: EmbedRequest) async -> PreparedEmbed? {
-        guard request.width > 0 else { return nil }
+        guard request.width > 0, !Task.isCancelled else { return nil }
         do {
+            let width = EmbedRequest.contentWidth(request.width)
             let info = try request.handle.resolveEmbed(
                 sourcePath: request.source, rawTarget: request.target, heading: request.heading,
                 alias: request.alias, ancestors: request.ancestors, maxDepth: UInt32(request.maxDepth),
-                width: request.width, size: request.size)
+                width: width, size: request.size)
+            guard !Task.isCancelled else { return nil }
             var media: [PreparedMedia] = []
             if info.kind == "note" {
                 media = await LocalImageCache.shared.prepare(info.media, vault: request.vault,
                                                             size: request.size, mathService: request.mathService)
             }
+            guard !Task.isCancelled else { return nil }
             var math: [PreparedMathBlock] = []
             if info.kind == "note", !info.math.isEmpty {
                 math = await request.mathService.prepare(info.math, source: info.content, size: request.size,
-                                                         width: request.width, displayText: info.text)
+                                                         width: width, displayText: info.text)
             }
+            guard !Task.isCancelled else { return nil }
             var diagrams: [NoteDiagram] = []
             if info.kind == "diagram" {
                 diagrams = [NoteDiagram(ordinal: 1, sourceStart: 0,
@@ -65,12 +87,24 @@ actor EmbedRenderer {
             }
             if !diagrams.isEmpty {
                 diagrams = await request.service.render(source: info.content, mmd: info.isMmd, blocks: diagrams,
-                                                        width: max(120, request.width - 28), dark: request.dark)
+                    width: info.isMmd ? EmbedRequest.bodyWidth(request.width) : width, dark: request.dark)
             }
-            return PreparedEmbed(info: info, media: media, math: math, diagrams: diagrams)
+            guard !Task.isCancelled else { return nil }
+            let precedingLines = info.kind == "note" ? self.precedingLines(for: info, request: request) : nil
+            guard !Task.isCancelled else { return nil }
+            return PreparedEmbed(info: info, media: media, math: math, diagrams: diagrams,
+                                 precedingLines: precedingLines)
         } catch {
             return nil
         }
+    }
+
+    private func precedingLines(for info: EmbedContentInfo, request: EmbedRequest) -> Int? {
+        guard let path = info.resolvedPath, let source = try? request.handle.readNote(path: path) else { return nil }
+        let text = source as NSString
+        let match = text.range(of: info.content, options: request.heading == nil ? [.anchored, .backwards, .literal] : .literal)
+        guard match.location != NSNotFound else { return nil }
+        return SendToTerminalSelection.lineNumber(in: text, offset: match.location) - 1
     }
 }
 
@@ -88,10 +122,11 @@ final class EmbeddedNoteView: NSView {
     private let message = NSTextField(labelWithString: "")
     private var body: NSView?
     private weak var diagramView: DiagramView?
+    private var diagram: NoteDiagram?
     private var collapsed: Set<String> = []
+    private var diagramTask: Task<Void, Never>?
     private var content: EmbedContentInfo?
     private var task: Task<Void, Never>?
-    private var loaded = false
     private let titleHeight: CGFloat = 30
 
     var cardAccessibilityLabel: String {
@@ -136,7 +171,11 @@ final class EmbeddedNoteView: NSView {
 
     override var isFlipped: Bool { true }
 
-    func cancel() { task?.cancel(); task = nil }
+    func cancel() {
+        task?.cancel(); task = nil
+        diagramTask?.cancel(); diagramTask = nil
+        (body as? EmbeddedReadingView)?.cancel()
+    }
 
     private func load() {
         task = Task { [weak self] in
@@ -146,14 +185,12 @@ final class EmbeddedNoteView: NSView {
                 if !Task.isCancelled { showMessage(L10n.string("Embedded note could not be read")) }
                 return
             }
-            guard !Task.isCancelled else { return }
             install(prepared)
         }
     }
 
     private func install(_ prepared: PreparedEmbed) {
         content = prepared.info
-        loaded = true
         titleButton.title = title(for: prepared.info)
         titleButton.toolTip = prepared.info.resolvedPath ?? request.target
         titleButton.image = NSImage(systemSymbolName: prepared.info.isMmd ? "chart.xyaxis.line" : "doc.text",
@@ -165,7 +202,10 @@ final class EmbeddedNoteView: NSView {
             let reading = EmbeddedReadingView(prepared: prepared, request: request)
             reading.onOpenLink = { [weak self] path, heading in self?.onOpenLink?(path, heading) }
             reading.onShowTag = { [weak self] tag in self?.onShowTag?(tag) }
-            reading.onSizeChange = { [weak self] height in self?.setBody(reading, height: height) }
+            reading.onSizeChange = { [weak self, weak reading] height in
+                guard let reading else { return }
+                self?.setBody(reading, height: height)
+            }
             body = reading
             addSubview(reading)
             reading.start()
@@ -174,10 +214,25 @@ final class EmbeddedNoteView: NSView {
                 let view = DiagramView(prepared: scene)
                 view.setAccessibilityLabel(L10n.string("Mermaid diagram"))
                 view.onToggle = { [weak self] id in self?.toggle(id) }
+                view.onOpenLink = { [weak self] target, heading in
+                    Task { [weak self] in
+                        guard let path = await self?.request.resolveDiagramLink(
+                            from: prepared.info.resolvedPath, target: target) else { return }
+                        self?.onOpenLink?(path, heading)
+                    }
+                }
+                view.exportRequestProvider = { [weak self] in
+                    guard let self, let block = self.diagram else { return nil }
+                    return request.diagramExport(info: prepared.info, block: block)
+                }
+                self.diagram = diagram
                 diagramView = view
                 body = view
                 addSubview(view)
                 setBody(view, height: scene.scene.height)
+                if abs(scene.scene.width - EmbedRequest.bodyWidth(bounds.width)) > 0.5 {
+                    rerenderDiagram()
+                }
             } else {
                 let fallback = sourceFallback(prepared.info.content,
                                               reason: prepared.diagrams.first?.reason ?? "")
@@ -216,17 +271,16 @@ final class EmbeddedNoteView: NSView {
     }
 
     private func rerenderDiagram() {
-        guard let info = content, info.isMmd else { return }
-        let block = NoteDiagram(ordinal: 1, sourceStart: 0,
-                                range: NSRange(location: 0, length: (info.content as NSString).length),
-                                collapsed: collapsed, tailStart: 0,
-                                documentIdentity: "embed:" + (info.resolvedPath ?? ""), revision: 2)
-        let width = max(120, request.width - 28)
-        Task { [weak self] in
-            guard let self else { return }
+        guard let info = content, var block = diagram else { return }
+        block.collapsed = collapsed
+        let width = EmbedRequest.bodyWidth(bounds.width)
+        diagramTask?.cancel()
+        diagramTask = Task { [weak self, request] in
             let rendered = await request.service.render(source: info.content, mmd: true, blocks: [block],
                                                         width: width, dark: request.dark)
-            guard !Task.isCancelled, let scene = rendered.first?.prepared, let view = diagramView else { return }
+            guard !Task.isCancelled, let self, let block = rendered.first,
+                  let scene = block.prepared, let view = diagramView else { return }
+            self.diagram = block
             view.update(scene)
             setBody(view, height: scene.scene.height)
         }
@@ -278,6 +332,7 @@ final class EmbeddedNoteView: NSView {
         if abs(preferredSize.width - newSize.width) > 0.5 {
             preferredSize.width = newSize.width
             needsLayout = true
+            if diagram != nil { rerenderDiagram() }
         }
     }
 
@@ -286,7 +341,7 @@ final class EmbeddedNoteView: NSView {
         let width = max(120, bounds.width)
         titleButton.frame = CGRect(x: 14, y: 6, width: width - 24, height: 20)
         if let body {
-            body.frame = CGRect(x: 12, y: titleHeight, width: width - 24,
+            body.frame = CGRect(x: 12, y: titleHeight, width: EmbedRequest.bodyWidth(bounds.width),
                                 height: max(0, bounds.height - titleHeight - 8))
         } else {
             message.frame = CGRect(x: 14, y: titleHeight, width: width - 24, height: 20)
@@ -325,6 +380,8 @@ extension EmbeddedNoteView {
     }
     var inspectionMessage: String? { message.isHidden ? nil : message.stringValue }
     var inspectionHasDiagram: Bool { ((body as? DiagramView)?.prepared.scene.height ?? 0) > 0 }
+    var inspectionDiagramView: DiagramView? { diagramView }
+    var inspectionReadingView: EmbeddedReadingView? { body as? EmbeddedReadingView }
     var inspectionEmbeddedCards: [EmbeddedNoteView] {
         if let reading = body as? EmbeddedReadingView { return reading.inspectionCards }
         return []
@@ -351,16 +408,22 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
     var onOpenLink: ((String, String?) -> Void)?
     var onShowTag: ((String) -> Void)?
     var onSizeChange: ((CGFloat) -> Void)?
-    private var width: CGFloat = 0
+    private var width: CGFloat
+    private var displayRanges: [NSRange] = []
+    private var fallbackBlocks: Set<Int> = []
+    private var diagrams: [NoteDiagram] = []
+    private var pendingCollapses: [UInt32: Set<String>] = [:]
+    private var diagramTasks: [UInt32: Task<Void, Never>] = [:]
     private var reportedHeight: CGFloat = 0
 
     init(prepared: PreparedEmbed, request: EmbedRequest) {
         self.prepared = prepared
         self.request = request
-        width = max(120, CGFloat(request.width) - 28)
+        width = EmbedRequest.bodyWidth(request.width)
         super.init(frame: CGRect(x: 0, y: 0, width: width, height: 1))
         textView.isReading = true
         textView.isEmbedded = true
+        textView.embeddedTerminalSelection = { [weak self] in self?.terminalSelection() }
         textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
@@ -368,13 +431,12 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
         textView.isHorizontallyResizable = false
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.lineFragmentPadding = 0
-        textView.textContainerInset = NSSize(width: 14, height: 8)
+        textView.textContainerInset = NSSize(width: Self.textInset(for: width), height: 8)
         textView.frame = CGRect(x: 0, y: 0, width: width, height: 1)
         textView.autoresizingMask = [.width]
         textView.sourceStyling = styling
         textView.textLayoutManager?.delegate = self
         textView.onDocumentHeightChange = { [weak self] in self?.sizeChanged() }
-        textView.onWidthOrThemeChange = { [weak self] in self?.relayout() }
         addSubview(textView)
         let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick(_:)))
         click.delaysPrimaryMouseButtonEvents = false
@@ -386,45 +448,122 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
 
     func start() {
         let info = prepared.info
+        let source = info.content as NSString
+        let display = NSMutableString(string: info.text)
         var runs: [SourceStyleRun] = []
-        for block in info.blocks {
-            for run in block.runs {
-                runs.append(SourceStyleRun(start: run.start, length: run.length, mask: run.mask))
+        var ordinal: UInt32 = 0
+        var shift = 0
+        for (index, block) in info.blocks.enumerated() {
+            let original = NSRange(location: Int(block.displayStart) + shift, length: Int(block.displayLength))
+            var range = original
+            if block.diagram {
+                ordinal += 1
+                if var diagram = prepared.diagrams.first(where: { $0.ordinal == ordinal }), diagram.prepared != nil {
+                    diagram.range = range
+                    diagram.tailStart = range.location
+                    diagrams.append(diagram)
+                } else if NSMaxRange(original) <= display.length {
+                    let sourceRange = NSRange(location: Int(block.sourceStartUtf16), length: Int(block.sourceLengthUtf16))
+                    let replacement = NSMaxRange(sourceRange) <= source.length ? source.substring(with: sourceRange) : ""
+                    display.replaceCharacters(in: original, with: replacement)
+                    range.length = (replacement as NSString).length
+                    shift += range.length - original.length
+                    fallbackBlocks.insert(index)
+                }
+            }
+            displayRanges.append(range)
+            if fallbackBlocks.contains(index) {
+                runs.append(SourceStyleRun(start: UInt64(range.location), length: UInt64(range.length), mask: 32))
+            } else {
+                for run in block.runs {
+                    runs.append(SourceStyleRun(start: UInt64(range.location) + run.start, length: run.length, mask: run.mask))
+                }
             }
         }
         styling.installReading(runs, size: request.size)
-        textView.textStorage?.setAttributedString(NSAttributedString(string: info.text, attributes: styling.style(0)))
-        textView.sourceUTF16Length = (info.text as NSString).length
-        let items = prepared.media.map { item in
-            NoteMedia(range: NSRange(location: Int(item.block.displayStart), length: Int(item.block.displayLength)),
-                      prepared: item)
+        textView.textStorage?.setAttributedString(NSAttributedString(string: display as String, attributes: styling.style(0)))
+        textView.sourceUTF16Length = display.length
+        textView.onOpenLink = { [weak self] _, target, heading in
+            Task { [weak self] in
+                guard let path = await self?.request.resolveDiagramLink(from: info.resolvedPath, target: target) else { return }
+                self?.onOpenLink?(path, heading)
+            }
         }
-        textView.installMedia(items, width: Double(width), size: request.size, vault: request.vault,
+        textView.exportRequestProvider = { [weak self] ordinal in
+            guard let self, let block = diagrams.first(where: { $0.ordinal == ordinal }) else { return nil }
+            return request.diagramExport(info: info, block: block)
+        }
+        textView.onToggle = { [weak self] ordinal, id in self?.toggle(ordinal: ordinal, id: id) }
+        installAttachments()
+        textView.install(diagrams)
+        textView.needsLayout = true
+        textView.layoutSubtreeIfNeeded()
+        sizeChanged()
+    }
+
+    func cancel() {
+        diagramTasks.values.forEach { $0.cancel() }
+        diagramTasks.removeAll()
+        for media in textView.mediaViews { media.detach() }
+    }
+
+    private func toggle(ordinal: UInt32, id: String) {
+        guard let block = diagrams.first(where: { $0.ordinal == ordinal }) else { return }
+        var collapsed = pendingCollapses[ordinal] ?? block.collapsed
+        if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) }
+        pendingCollapses[ordinal] = collapsed
+        rerender(block)
+    }
+
+    private func rerender(_ diagram: NoteDiagram) {
+        var block = diagram
+        let ordinal = block.ordinal
+        block.collapsed = pendingCollapses[ordinal] ?? diagram.collapsed
+        let width = textView.layoutContentWidth
+        let source = prepared.info.content
+        diagramTasks[ordinal]?.cancel()
+        diagramTasks[ordinal] = Task { [weak self, request] in
+            let rendered = await request.service.render(source: source, mmd: false, blocks: [block],
+                                                        width: width, dark: request.dark)
+            guard !Task.isCancelled, let self,
+                  let index = diagrams.firstIndex(where: { $0.ordinal == ordinal }) else { return }
+            diagramTasks[ordinal] = nil
+            pendingCollapses[ordinal] = nil
+            guard let result = rendered.first, result.reason == nil, result.prepared != nil else { return }
+            diagrams[index] = result
+            textView.install(diagrams)
+            textView.layoutSubtreeIfNeeded()
+            sizeChanged()
+        }
+    }
+
+    private func displayRange(start: UInt64, length: UInt64) -> NSRange? {
+        guard let index = prepared.info.blocks.firstIndex(where: {
+            start >= $0.displayStart && start < $0.displayStart + $0.displayLength
+        }), !fallbackBlocks.contains(index) else { return nil }
+        let location = displayRanges[index].location + Int(start - prepared.info.blocks[index].displayStart)
+        guard location + Int(length) <= textView.sourceUTF16Length else { return nil }
+        return NSRange(location: location, length: Int(length))
+    }
+
+    private func installAttachments() {
+        let available = textView.layoutContentWidth
+        let items = prepared.media.compactMap { item -> NoteMedia? in
+            guard let range = displayRange(start: item.block.displayStart, length: item.block.displayLength) else { return nil }
+            return NoteMedia(range: range, prepared: item)
+        }
+        textView.installMedia(items, width: available, size: request.size, vault: request.vault,
                               refresh: { [weak self] in self?.reload() }) { [weak self] item, media in
             self?.installEmbedCard(item, media: media)
         }
         let formulas = prepared.math.compactMap { item -> NoteMath? in
-            let range = NSRange(location: Int(item.block.displayStart), length: Int(item.block.displayLength))
-            guard NSMaxRange(range) <= textView.string.utf16.count else { return nil }
-            return NoteMath(range: range, prepared: item, offset: Int(item.block.displayStart))
+            guard let range = displayRange(start: item.block.displayStart, length: item.block.displayLength) else { return nil }
+            return NoteMath(range: range, prepared: item, offset: range.location)
         }
-        textView.installInlineMath(formulas.filter { !$0.prepared.block.block }, width: Double(width),
-                                   size: request.size, replacing: NSRange(location: 0, length: textView.string.utf16.count))
-        var diagrams = prepared.diagrams
-        var ordinal: UInt32 = 0
-        for block in info.blocks where block.diagram {
-            ordinal += 1
-            guard var diagram = diagrams.first(where: { $0.ordinal == ordinal }) else { continue }
-            diagram.range = NSRange(location: Int(block.displayStart), length: Int(block.displayLength))
-            diagram.tailStart = Int(block.displayStart)
-            diagrams[diagrams.firstIndex(where: { $0.ordinal == ordinal })!] = diagram
-        }
-        textView.install(diagrams)
-        textView.installMath(formulas, width: Double(width), size: request.size)
+        textView.installInlineMath(formulas.filter { !$0.prepared.block.block }, width: available,
+                                   size: request.size, replacing: NSRange(location: 0, length: textView.sourceUTF16Length))
+        textView.installMath(formulas, width: available, size: request.size)
         textView.installFormulaAccessibility(formulas)
-        textView.needsLayout = true
-        textView.layoutSubtreeIfNeeded()
-        sizeChanged()
     }
 
     private func installEmbedCard(_ item: NoteMedia, media: MediaView) {
@@ -439,7 +578,7 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
         ancestors.append(path)
         let nested = EmbedRequest(source: path, target: link.target, heading: link.heading, alias: link.alias,
                                   ancestors: ancestors, depth: request.depth + 1, handle: request.handle,
-                                  vault: request.vault, width: Double(width), size: request.size,
+                                  vault: request.vault, width: textView.layoutContentWidth, size: request.size,
                                   dark: request.dark, service: request.service, mathService: request.mathService)
         let card = EmbeddedNoteView(nested)
         card.onOpen = { [weak self] target, heading in self?.onOpenLink?(target, heading) }
@@ -459,28 +598,26 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
         onSizeChange?(reportedHeight)
     }
 
-    private func relayout() {
-        textView.frame.size.width = width
-        textView.needsLayout = true
-        textView.layoutSubtreeIfNeeded()
-        sizeChanged()
-    }
-
     private func sizeChanged() {
         let height = max(24, textView.frame.height + 4)
         guard abs(height - reportedHeight) > 0.5 else { return }
         reportedHeight = height
-        frame.size = CGSize(width: width, height: height)
         onSizeChange?(height)
     }
 
     override func layout() {
         super.layout()
-        if abs(width - bounds.width) > 0.5 {
-            width = max(120, bounds.width)
-            relayout()
-        }
-        textView.frame = CGRect(x: 0, y: 0, width: width, height: max(1, bounds.height))
+        guard abs(width - bounds.width) > 0.5 else { return }
+        width = bounds.width
+        textView.textContainerInset.width = Self.textInset(for: width)
+        textView.frame.size.width = width
+        installAttachments()
+        for diagram in diagrams { rerender(diagram) }
+        textView.needsLayout = true
+    }
+
+    private static func textInset(for width: CGFloat) -> CGFloat {
+        min(14, max(0, (width - 120) / 2))
     }
 
     func textLayoutManager(_ manager: NSTextLayoutManager, textLayoutFragmentFor location: any NSTextLocation,
@@ -493,8 +630,12 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
     }
 
     @objc private func handleClick(_ recognizer: NSClickGestureRecognizer) {
-        guard let event = NSApp.currentEvent, let position = textView.knowledgeCharacter(at: event),
-              let source = sourcePosition(at: position) else { return }
+        guard let event = NSApp.currentEvent, let position = textView.knowledgeCharacter(at: event) else { return }
+        activate(at: position)
+    }
+
+    private func activate(at position: Int) {
+        guard let source = sourcePosition(at: position) else { return }
         let mask = styling.mask(at: position)
         if mask & (1 << 18) != 0, let link = prepared.info.links.first(where: {
             !$0.inDiagram && !$0.attachment && UInt64(source) >= $0.startUtf16
@@ -511,11 +652,10 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
     }
 
     private func sourcePosition(at position: Int) -> Int? {
-        let blocks = prepared.info.blocks
-        guard let block = blocks.first(where: {
-            position >= Int($0.displayStart) && position < Int($0.displayStart + $0.displayLength)
-        }) else { return nil }
-        let local = position - Int(block.displayStart)
+        guard let index = displayRanges.firstIndex(where: { NSLocationInRange(position, $0) }) else { return nil }
+        let block = prepared.info.blocks[index]
+        let local = position - displayRanges[index].location
+        if fallbackBlocks.contains(index) { return Int(block.sourceStartUtf16) + local }
         guard let run = block.runs.first(where: {
             local >= Int($0.start) && local < Int($0.start + $0.length)
         }) else { return Int(block.sourceStartUtf16) }
@@ -524,6 +664,21 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
             return base + (local - Int(run.start))
         }
         return base
+    }
+
+    private func terminalSelection() -> SendToTerminalSelection.Selection? {
+        let range = textView.selectedRange()
+        let displayed = textView.string as NSString
+        guard let path = prepared.info.resolvedPath, range.location != NSNotFound, range.length > 0,
+              NSMaxRange(range) <= displayed.length else { return nil }
+        let text = displayed.substring(with: range)
+        var lines: ClosedRange<Int>?
+        if let preceding = prepared.precedingLines, let start = sourcePosition(at: range.location),
+           let end = sourcePosition(at: NSMaxRange(range) - 1),
+           let local = SendToTerminalSelection.lineRange(in: prepared.info.content as NSString, start: start, end: end + 1) {
+            lines = (local.lowerBound + preceding)...(local.upperBound + preceding)
+        }
+        return (path, text, lines)
     }
 }
 
@@ -534,7 +689,10 @@ extension EmbeddedReadingView: NSGestureRecognizerDelegate {
 
 #if DEBUG
 extension EmbeddedReadingView {
+    var inspectionTextView: DiagramTextView { textView }
     var inspectionText: String { textView.string }
+    func inspectionSourcePosition(at index: Int) -> Int? { sourcePosition(at: index) }
+    func inspectionActivate(at index: Int) { activate(at: index) }
     var inspectionCards: [EmbeddedNoteView] {
         textView.mediaViews.compactMap(\.inspectionEmbeddedCard)
     }
