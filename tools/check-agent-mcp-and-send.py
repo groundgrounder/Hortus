@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Agent 闭环封口检查：hortus mcp 只读协议 + macOS 发送路径/选区到内置终端。
+"""End-to-end check for hortus mcp stdio server and macOS Send-to-Terminal.
 
-MCP 部分直接对 target/release/hortus 的 stdio 管道跑完整生命周期；macOS 部分
-启动 Debug 应用的真实窗口，核对终端 PTY 收到的字节、菜单状态和两张截图。
+Verifies JSON-RPC 2.0 read-only MCP tools/resources over target/release/hortus
+and real-window PTY payload delivery, menu state, and screenshots in Hortus.
 """
 import argparse
 import hashlib
