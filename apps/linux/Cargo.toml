@@ -13,11 +13,18 @@ path = "src/main.rs"
 [dependencies]
 gtk4 = { version = "=0.11.5", features = ["v4_16"] }
 libadwaita = { version = "=0.9.2", features = ["v1_6"] }
+cairo-rs = { version = "=0.22.11", features = ["pdf", "png"] }
+pango = "=0.22.9"
+roxmltree = "=0.20.0"
+glib = "=0.22.11"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 hortus-ffi = { path = "../../crates/hortus-ffi" }
 hortus-config = { path = "../../crates/hortus-config" }
+hortus-diagram = { path = "../../crates/hortus-diagram" }
 hortus-document = { path = "../../crates/hortus-document" }
+hortus-links = { path = "../../crates/hortus-links" }
+hortus-math = { path = "../../crates/hortus-math" }
 hortus-vault = { path = "../../crates/hortus-vault" }
 
 [dev-dependencies]

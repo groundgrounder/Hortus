@@ -619,12 +619,19 @@ dependencies = [
 name = "hortus-linux"
 version = "0.5.0"
 dependencies = [
+ "cairo-rs",
+ "glib",
  "gtk4",
  "hortus-config",
+ "hortus-diagram",
  "hortus-document",
  "hortus-ffi",
+ "hortus-links",
+ "hortus-math",
  "hortus-vault",
  "libadwaita",
+ "pango",
+ "roxmltree",
  "serde",
  "serde_json",
  "tempfile",

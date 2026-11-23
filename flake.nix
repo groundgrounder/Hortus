@@ -49,6 +49,8 @@
               cairo
               fontconfig
               glib
+              librsvg
+              webp-pixbuf-loader
               gsettings-desktop-schemas
               adwaita-icon-theme
               hicolor-icon-theme
@@ -116,15 +118,28 @@
               cairo
               fontconfig
               glib
+              librsvg
+              webp-pixbuf-loader
               gsettings-desktop-schemas
               adwaita-icon-theme
               hicolor-icon-theme
+            ];
+
+            gappsWrapperArgs = [
+              "--set-default"
+              "HORTUS_KATEX_FONTS_DIR"
+              "${placeholder "out"}/share/hortus/fonts/KaTeX"
             ];
 
             preBuild = remapRustFlags;
             preCheck = ''
               export HOME="$TMPDIR"
               export FONTCONFIG_FILE="${mkTestFontsConf pkgs}"
+              if [ -d "$PWD/apps/macos/Resources/Fonts/KaTeX" ]; then
+                export HORTUS_KATEX_FONTS_DIR="$PWD/apps/macos/Resources/Fonts/KaTeX"
+              elif [ -d "$PWD/../macos/Resources/Fonts/KaTeX" ]; then
+                export HORTUS_KATEX_FONTS_DIR="$PWD/../macos/Resources/Fonts/KaTeX"
+              fi
             '';
 
             postInstall = ''
@@ -134,6 +149,11 @@
                 "$out/share/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg"
               install -Dm644 apps/LICENSE \
                 "$out/share/licenses/hortus-linux/LICENSE"
+              install -d "$out/share/hortus/fonts/KaTeX"
+              install -Dm644 apps/macos/Resources/Fonts/KaTeX/KaTeX_*.ttf \
+                apps/macos/Resources/Fonts/KaTeX/OFL.txt \
+                apps/macos/Resources/Fonts/KaTeX/FONT_NOTICE.txt \
+                "$out/share/hortus/fonts/KaTeX/"
             '';
 
             meta = with pkgs.lib; {
@@ -217,6 +237,8 @@
               cairo
               fontconfig
               glib
+              librsvg
+              webp-pixbuf-loader
               gsettings-desktop-schemas
               adwaita-icon-theme
               hicolor-icon-theme
@@ -225,6 +247,11 @@
             preCheck = ''
               export HOME="$TMPDIR"
               export FONTCONFIG_FILE="${mkTestFontsConf pkgs}"
+              if [ -d "$PWD/apps/macos/Resources/Fonts/KaTeX" ]; then
+                export HORTUS_KATEX_FONTS_DIR="$PWD/apps/macos/Resources/Fonts/KaTeX"
+              elif [ -d "$PWD/../macos/Resources/Fonts/KaTeX" ]; then
+                export HORTUS_KATEX_FONTS_DIR="$PWD/../macos/Resources/Fonts/KaTeX"
+              fi
             '';
 
             postCheck = ''
