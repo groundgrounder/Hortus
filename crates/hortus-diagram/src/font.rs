@@ -104,6 +104,26 @@ impl SystemFonts {
     pub fn new() -> Result<Self, String> {
         let mut db = Database::new();
         db.load_system_fonts();
+        #[cfg(target_os = "android")]
+        if db.faces().next().is_none() {
+            db.load_fonts_dir("/system/fonts");
+        }
+        Self::from_database(db)
+    }
+
+    /// 从显式字体文件路径集合构建字体库；跳过不存在或损坏的单个文件，全部无效时返回错误。
+    pub fn from_paths(paths: &[PathBuf]) -> Result<Self, String> {
+        let mut db = Database::new();
+        for path in paths {
+            let _ = db.load_font_file(path);
+        }
+        if db.faces().next().is_none() {
+            return Err("No readable font file was provided".into());
+        }
+        Self::from_database(db)
+    }
+
+    fn from_database(db: Database) -> Result<Self, String> {
         let find = |names: &[&str]| {
             names
                 .iter()
@@ -120,11 +140,16 @@ impl SystemFonts {
             "SF Pro Text",
             "Segoe UI",
             "Cantarell",
+            #[cfg(target_os = "android")]
+            "Roboto",
             "Noto Sans",
             "DejaVu Sans",
             "Arial",
         ])
-        .or_else(|| db.faces().next().map(|f| f.families[0].0.clone()))
+        .or_else(|| {
+            db.faces()
+                .find_map(|f| f.families.first().map(|(n, _)| n.clone()))
+        })
         .ok_or("No readable system font is available")?;
         let cjk = find(&[
             "PingFang SC",
@@ -139,6 +164,10 @@ impl SystemFonts {
             ".AppleSystemUIFontMonospaced",
             "SF Mono",
             "Cascadia Mono",
+            #[cfg(target_os = "android")]
+            "Droid Sans Mono",
+            #[cfg(target_os = "android")]
+            "Roboto Mono",
             "DejaVu Sans Mono",
             "Liberation Mono",
         ])
@@ -345,5 +374,65 @@ impl FontMetrics for SystemFonts {
     }
     fn reference_fonts_available(&self) -> bool {
         self.reference
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_system_font_paths() -> Vec<PathBuf> {
+        let mut db = Database::new();
+        db.load_system_fonts();
+        let mut paths = Vec::new();
+        for face in db.faces() {
+            if let Source::File(path) = &face.source
+                && !paths.contains(path)
+            {
+                paths.push(path.clone());
+                if paths.len() >= 12 {
+                    break;
+                }
+            }
+        }
+        paths
+    }
+
+    #[test]
+    fn from_paths_rejects_empty_and_invalid_files() {
+        assert!(SystemFonts::from_paths(&[]).is_err());
+
+        let missing = PathBuf::from("/nonexistent/hortus-font-test-missing.ttf");
+        assert!(SystemFonts::from_paths(std::slice::from_ref(&missing)).is_err());
+
+        let corrupt =
+            std::env::temp_dir().join(format!("hortus-corrupt-font-{}.ttf", std::process::id()));
+        std::fs::write(&corrupt, b"not a valid sfnt font").unwrap();
+        let result = SystemFonts::from_paths(&[missing, corrupt.clone()]);
+        let _ = std::fs::remove_file(&corrupt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_paths_loads_valid_fonts_skipping_bad_entries_and_measures_text() {
+        let mut paths = vec![PathBuf::from("/nonexistent/hortus-font-missing.ttf")];
+        paths.extend(sample_system_font_paths());
+        // 若当前测试环境仅包含内存字体源，则补充仓库内置 KaTeX 字体确保可测。
+        let katex_font = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/macos/Resources/Fonts/KaTeX/KaTeX_Main-Regular.ttf");
+        if katex_font.is_file() {
+            paths.push(katex_font);
+        }
+
+        let mut fonts = SystemFonts::from_paths(&paths).expect("有效字体路径应成功初始化");
+        let english = fonts.measure("Hortus Diagram 2026", 15.0, 400);
+        assert!(english.width > 0.0);
+        assert!(english.ascent > 0.0);
+        assert!(!english.runs.is_empty());
+
+        let chinese = fonts.measure("笔记阅读", 15.0, 600);
+        assert!(chinese.width > 0.0);
+        assert!(!chinese.runs.is_empty());
+        assert!(!fonts.used_fonts().is_empty());
     }
 }

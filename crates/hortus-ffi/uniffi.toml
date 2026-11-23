@@ -2,3 +2,16 @@
 module_name = "HortusCore"
 ffi_module_name = "HortusFFI"
 generate_module_map = true
+
+[crates.hortus_ffi.bindings.kotlin]
+package_name = "io.github.groundgrounder.hortus.core"
+cdylib_name = "hortus_ffi"
+android = true
+
+# 避开 Kotlin 对象析构方法与 Throwable.message 的保留成员。
+[crates.hortus_ffi.bindings.kotlin.rename]
+"VaultHandle.close" = "stop_watching"
+"MathFailure.Parse.message" = "detail"
+"MathFailure.ResourceLimit.message" = "detail"
+"MathFailure.Panic.message" = "detail"
+"MathFailure.InvalidLayout.message" = "detail"

@@ -88,23 +88,19 @@ pub struct DiagramEngine {
 impl DiagramEngine {
     #[uniffi::constructor]
     pub fn new() -> Result<Arc<Self>, DiagramFailure> {
-        let mut fonts = SystemFonts::new().map_err(|_| DiagramFailure::Engine {
+        let fonts = SystemFonts::new().map_err(|_| DiagramFailure::Engine {
             kind: "font".into(),
         })?;
-        // 覆盖首张图要用的字体和字重，文件读取与整形均在后台预热。
-        for weight in [400, 500, 600, 650] {
-            fonts.measure("Hortus 笔记阅读 +0123456789", 15.0, weight);
-        }
-        Ok(Arc::new(Self {
-            state: Mutex::new(EngineState {
-                fonts,
-                source: String::new(),
-                mmd: false,
-                diagrams: Vec::new(),
-                document: String::new(),
-                revision: 0,
-            }),
-        }))
+        Ok(Self::from_fonts(fonts))
+    }
+
+    #[uniffi::constructor]
+    pub fn with_font_paths(paths: Vec<String>) -> Result<Arc<Self>, DiagramFailure> {
+        let paths: Vec<std::path::PathBuf> = paths.into_iter().map(Into::into).collect();
+        let fonts = SystemFonts::from_paths(&paths).map_err(|_| DiagramFailure::Engine {
+            kind: "font".into(),
+        })?;
+        Ok(Self::from_fonts(fonts))
     }
 
     pub fn render(
@@ -187,6 +183,23 @@ impl DiagramEngine {
 }
 
 impl DiagramEngine {
+    fn from_fonts(mut fonts: SystemFonts) -> Arc<Self> {
+        // 覆盖首张图要用的字体和字重，文件读取与整形均在后台预热。
+        for weight in [400, 500, 600, 650] {
+            fonts.measure("Hortus 笔记阅读 +0123456789", 15.0, weight);
+        }
+        Arc::new(Self {
+            state: Mutex::new(EngineState {
+                fonts,
+                source: String::new(),
+                mmd: false,
+                diagrams: Vec::new(),
+                document: String::new(),
+                revision: 0,
+            }),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_request_impl(
         &self,
@@ -613,6 +626,40 @@ mod tests {
             .iter()
             .any(|primitive| primitive["kind"] == "graph_path"
                 && primitive["line"] == "dotted"));
+    }
+
+    #[test]
+    fn with_font_paths_handles_invalid_and_valid_font_files() {
+        assert!(matches!(
+            DiagramEngine::with_font_paths(vec![]),
+            Err(DiagramFailure::Engine { ref kind }) if kind == "font"
+        ));
+        assert!(matches!(
+            DiagramEngine::with_font_paths(vec!["/nonexistent/hortus-missing-font.ttf".into()]),
+            Err(DiagramFailure::Engine { ref kind }) if kind == "font"
+        ));
+
+        let katex_font = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/macos/Resources/Fonts/KaTeX/KaTeX_Main-Regular.ttf");
+        let engine = DiagramEngine::with_font_paths(vec![
+            "/nonexistent/hortus-ignored-font.ttf".into(),
+            katex_font.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let scene = engine
+            .render(
+                "flowchart TB\nA[Start] --> B[End]".into(),
+                true,
+                1,
+                700.0,
+                false,
+                vec![],
+            )
+            .unwrap();
+        assert!(scene.width > 0.0);
+        assert!(scene.height > 0.0);
+        assert!(!scene.primitives.is_empty());
+        assert_eq!(scene.hit_regions.len(), 2);
     }
 }
 
