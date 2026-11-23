@@ -16,7 +16,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
-import io.github.groundgrounder.hortus.reader.OpenFrameMonitor
 import io.github.groundgrounder.hortus.reader.ReaderApp
 import io.github.groundgrounder.hortus.reader.ReaderController
 import io.github.groundgrounder.hortus.ui.HortusTheme
@@ -29,6 +28,7 @@ open class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_OPEN_NOTE = "io.github.groundgrounder.hortus.OPEN_NOTE"
         const val EXTRA_OPEN_HEADING = "io.github.groundgrounder.hortus.OPEN_HEADING"
+        const val EXTRA_OPEN_VAULT = "io.github.groundgrounder.hortus.OPEN_VAULT"
     }
 
     internal lateinit var controller: ReaderController
@@ -55,7 +55,6 @@ open class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         refreshPermission()
         DebugHooks.onActivityCreate(this, intent)
-        OpenFrameMonitor.install(window)
         setContent {
             val dark = isSystemInDarkTheme()
             SideEffect {
@@ -74,8 +73,12 @@ open class MainActivity : ComponentActivity() {
         }
         if (intent.getBooleanExtra("run_smoke", false)) {
             // DebugSmokeActivity 子类自行处理；MainActivity 不启动任何检查。
-        } else {
-            openSavedOrRequested()
+        } else if (intent.getStringExtra("debug_vault") == null) {
+            if (intent.getStringExtra(EXTRA_OPEN_NOTE) != null) {
+                handleOpenIntent(intent)
+            } else {
+                openSavedOrRequested()
+            }
         }
     }
 
@@ -108,9 +111,22 @@ open class MainActivity : ComponentActivity() {
     private fun handleOpenIntent(intent: Intent) {
         val note = intent.getStringExtra(EXTRA_OPEN_NOTE) ?: return
         val heading = intent.getStringExtra(EXTRA_OPEN_HEADING)
-        val current = controller.state
-        if (current.vaultPath == null) {
-            controller.start(path.ifBlank { controller.preferencesState.vaultPath ?: return }, note)
+        val vault = intent.getStringExtra(EXTRA_OPEN_VAULT)?.takeIf { it.isNotBlank() }
+            ?: controller.state.vaultPath
+            ?: path.takeIf { it.isNotBlank() }
+            ?: controller.preferencesState.vaultPath
+            ?: return
+        path = vault
+        if (controller.state.vaultPath == null) {
+            controller.start(vault, null)
+            lifecycleScope.launch {
+                var waited = 0
+                while (controller.state.vaultPath == null && waited < 5000) {
+                    kotlinx.coroutines.delay(50)
+                    waited += 50
+                }
+                controller.openPath(note, heading)
+            }
         } else {
             controller.openPath(note, heading)
         }

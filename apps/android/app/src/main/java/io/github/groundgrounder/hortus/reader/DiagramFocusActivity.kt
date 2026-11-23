@@ -3,7 +3,9 @@ package io.github.groundgrounder.hortus.reader
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -15,11 +17,11 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
@@ -65,6 +67,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
+
+private const val DOWNLOAD_DOCUMENT_URI =
+    "content://com.android.externalstorage.documents/document/primary%3ADownload"
 
 internal class DiagramFocusActivity : ComponentActivity() {
     companion object {
@@ -99,6 +105,7 @@ internal class DiagramFocusActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         val value = payload ?: return
+        FocusDebug.write(applicationContext, FocusDebug.stateJson())
         val scale = FocusStateRegistry.lastScale
         if (scale <= 0f) return
         val appContext = applicationContext
@@ -130,6 +137,16 @@ internal class DiagramFocusActivity : ComponentActivity() {
     }
 }
 
+internal object FocusCounts {
+    @Volatile var counts = SceneCounts()
+}
+
+private data class SaveRequest(
+    val bytes: ByteArray,
+    val name: String,
+    val format: DiagramExportFormat,
+)
+
 @Composable
 private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
     if (payload == null) return
@@ -145,26 +162,36 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
     var offsetX by remember { mutableStateOf(0f) }
     var offsetY by remember { mutableStateOf(0f) }
     var menuOpen by remember { mutableStateOf(false) }
-    var pendingBytes by remember { mutableStateOf<ByteArray?>(null) }
-    var pendingName by remember { mutableStateOf("") }
-    var pendingFormat by remember { mutableStateOf(DiagramExportFormat.Png) }
+    var pendingSave by remember { mutableStateOf<SaveRequest?>(null) }
     val engine = remember { FocusEngine(context.applicationContext) }
+
     val documentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         val uri = result.data?.data
-        val bytes = pendingBytes
-        pendingBytes = null
-        if (uri != null && bytes != null) {
+        val request = pendingSave
+        pendingSave = null
+        if (uri != null && request != null) {
             scope.launch {
                 try {
-                    withContext(Dispatchers.IO) { DiagramExporter.write(context, uri, bytes) }
-                    Inspection.recordExport(pendingFormat.extension, pendingName, bytes.size, uri.toString())
+                    withContext(Dispatchers.IO) { DiagramExporter.write(context, uri, request.bytes) }
+                    Inspection.recordExport(
+                        request.format.extension,
+                        request.name,
+                        request.bytes.size,
+                        uri.toString(),
+                    )
                 } catch (_: Exception) {
                     Unit
                 }
             }
         }
+    }
+
+    fun fitScale(): Float {
+        val value = scene ?: return 1f
+        if (viewport.width == 0 || value.width <= 0.0) return 1f
+        return min(1f, viewport.width / value.width.toFloat())
     }
 
     fun clampOffsets(newScale: Float, x: Float, y: Float): Pair<Float, Float> {
@@ -181,21 +208,29 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
         return x.coerceIn(minX, maxX) to y.coerceIn(minY, maxY)
     }
 
-    fun fitValues(): Pair<Float, Pair<Float, Float>> {
-        val value = scene ?: return 1f to (0f to 0f)
-        if (viewport.width == 0 || viewport.height == 0) return 1f to (0f to 0f)
-        val fit = min(1f, min(viewport.width / value.width.toFloat(), viewport.height / value.height.toFloat()))
-        return fit to (
-            (viewport.width - value.width.toFloat() * fit) / 2f to
-                (viewport.height - value.height.toFloat() * fit) / 2f
-            )
+    fun applyFit() {
+        val value = scene ?: return
+        val fit = fitScale()
+        scale = fit
+        offsetX = (viewport.width - value.width.toFloat() * fit) / 2f
+        offsetY = if (value.height.toFloat() * fit <= viewport.height) {
+            (viewport.height - value.height.toFloat() * fit) / 2f
+        } else {
+            0f
+        }
+        val (x, y) = clampOffsets(scale, offsetX, offsetY)
+        offsetX = x
+        offsetY = y
     }
 
-    fun applyFit() {
-        val (fit, offsets) = fitValues()
-        scale = fit
-        offsetX = offsets.first
-        offsetY = offsets.second
+    fun applyActual() {
+        val value = scene ?: return
+        scale = 1f
+        offsetX = (viewport.width - value.width.toFloat()) / 2f
+        offsetY = (viewport.height - value.height.toFloat()) / 2f
+        val (x, y) = clampOffsets(scale, offsetX, offsetY)
+        offsetX = x
+        offsetY = y
     }
 
     fun rememberNow() {
@@ -204,16 +239,30 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
         FocusStateRegistry.lastOffsetY = offsetY
         FocusStateRegistry.sceneWidth = scene?.width?.toFloat() ?: 0f
         FocusStateRegistry.sceneHeight = scene?.height?.toFloat() ?: 0f
+        FocusStateRegistry.fitScale = fitScale()
         val base = scene?.primitives
             ?.filterIsInstance<io.github.groundgrounder.hortus.core.ScenePrimitive.Text>()
             ?.maxOfOrNull { it.span.fontSize.toFloat() } ?: 0f
-        FocusStateRegistry.baseLargestFontPx = base
-        FocusStateRegistry.largestFontPx = base * scale
+        FocusStateRegistry.sceneFontSize = base
+        FocusStateRegistry.drawnFontSize = base * scale
+        FocusStateRegistry.sceneKey = "${payload.documentKey}#${payload.ordinal}"
+        FocusStateRegistry.notePath = payload.notePath
+        FocusStateRegistry.ordinal = payload.ordinal
+        FocusStateRegistry.collapsed = collapsed
+        FocusStateRegistry.visibleNodes = scene?.hitRegions?.size ?: 0
+        FocusStateRegistry.hits = scene?.hitRegions.orEmpty()
+        FocusStateRegistry.plusLabels = scene?.primitives?.count {
+            it is io.github.groundgrounder.hortus.core.ScenePrimitive.Text &&
+                it.span.text.trim().startsWith("+")
+        } ?: 0
     }
 
     fun toggleNode(nodeId: String) {
         val next = if (nodeId in collapsed) collapsed - nodeId else collapsed + nodeId
         collapsed = next
+        DiagramStateBus.publish(payload.notePath, payload.ordinal, next)
+        FocusStateRegistry.collapsed = next
+        FocusDebug.write(context, FocusDebug.stateJson())
         scope.launch {
             try {
                 engine.rememberCollapsed(next)
@@ -223,10 +272,82 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
         }
     }
 
+    fun openNote(target: String, heading: String?) {
+        scope.launch {
+            val resolved = withContext(Dispatchers.IO) {
+                runCatching { engine.resolveTarget(target) }.getOrNull()
+            } ?: target
+            context.startActivity(
+                Intent(context, MainActivity::class.java).apply {
+                    putExtra(MainActivity.EXTRA_OPEN_NOTE, resolved)
+                    putExtra(MainActivity.EXTRA_OPEN_HEADING, heading)
+                    putExtra(MainActivity.EXTRA_OPEN_VAULT, payload.vaultPath)
+                },
+            )
+        }
+    }
+
+    suspend fun encode(format: DiagramExportFormat): ByteArray {
+        val value = scene ?: throw IllegalStateException("diagram unavailable")
+        return when (format) {
+            DiagramExportFormat.Svg -> engine.renderSvg(payload, collapsed, dark)
+            DiagramExportFormat.Png -> DiagramExporter.encodePng(value, dark)
+            DiagramExportFormat.Pdf -> DiagramExporter.encodePdf(value, dark)
+        }
+    }
+
+    fun share(format: DiagramExportFormat) {
+        scope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { encode(format) }
+                val name = DiagramExporter.defaultName(payload.notePath, payload.ordinal, format)
+                val file = withContext(Dispatchers.IO) {
+                    DiagramExporter.shareFile(context, name, bytes)
+                }
+                val uri = DiagramExporter.shareUri(context, file)
+                val readBack = withContext(Dispatchers.IO) { DiagramExporter.readBack(context, uri) }
+                Inspection.recordShare(
+                    Intent.ACTION_SEND,
+                    format.mime,
+                    uri.toString(),
+                    name,
+                    bytes.size,
+                    readBack?.contentEquals(bytes) == true,
+                    readBack?.size ?: -1,
+                )
+                val intent = DiagramExporter.shareIntent(context, file, format, payload.title)
+                context.startActivity(Intent.createChooser(intent, context.getString(R.string.share_sheet_title)))
+            } catch (_: Exception) {
+                Unit
+            }
+        }
+    }
+
+    fun save(format: DiagramExportFormat) {
+        scope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { encode(format) }
+                val name = DiagramExporter.defaultName(payload.notePath, payload.ordinal, format)
+                pendingSave = SaveRequest(bytes, name, format)
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = format.mime
+                    putExtra(Intent.EXTRA_TITLE, name)
+                    putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse(DOWNLOAD_DOCUMENT_URI))
+                }
+                documentLauncher.launch(intent)
+            } catch (_: Exception) {
+                Unit
+            }
+        }
+    }
+
     LaunchedEffect(payload.documentKey, payload.ordinal, dark, collapsed) {
         try {
-            scene = engine.render(payload, collapsed, dark)
+            val rendered = engine.render(payload, collapsed, dark)
+            scene = rendered
             failure = null
+            withContext(Dispatchers.IO) { measureFocusScene(rendered, payload) }
         } catch (error: Exception) {
             failure = error.message ?: error.javaClass.simpleName
             scene = null
@@ -236,12 +357,11 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
         val value = scene ?: return@LaunchedEffect
         if (viewport.width == 0 || viewport.height == 0) return@LaunchedEffect
         if (scale == 0f) {
+            val fit = fitScale()
             val stored = engine.loadFocus()
-            if (stored != null) {
-                scale = stored.scale.toFloat().coerceIn(0.25f, 4f)
-                offsetX = stored.offsetX.toFloat()
-                offsetY = stored.offsetY.toFloat()
-                val (x, y) = clampOffsets(scale, offsetX, offsetY)
+            if (stored != null && stored.scale >= fit - 0.01 && stored.scale <= 4.0) {
+                scale = stored.scale.toFloat().coerceIn(fit, 4f)
+                val (x, y) = clampOffsets(scale, stored.offsetX.toFloat(), stored.offsetY.toFloat())
                 offsetX = x
                 offsetY = y
             } else {
@@ -249,8 +369,9 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             }
         }
         rememberNow()
+        FocusDebug.write(context, FocusDebug.stateJson())
     }
-    LaunchedEffect(scale, offsetX, offsetY, scene) { rememberNow() }
+    LaunchedEffect(scale, offsetX, offsetY, scene, collapsed) { rememberNow() }
 
     Box(
         Modifier
@@ -286,8 +407,9 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                                     0f
                                 }
                                 FocusStateRegistry.gestureDistance = distance
+                                val fit = fitScale()
                                 if (pressed.size >= 2 && previousDistance > 1f && distance > 1f) {
-                                    val next = (scale * (distance / previousDistance)).coerceIn(0.25f, 4f)
+                                    val next = (scale * (distance / previousDistance)).coerceIn(fit, 4f)
                                     val sceneX = (centroid.x - offsetX) / scale
                                     val sceneY = (centroid.y - offsetY) / scale
                                     scale = next
@@ -313,42 +435,27 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                                     (tapPosition - lastTapPosition).getDistance() < 120f
                                 if (isDouble) {
                                     lastTapUp = 0
-                                    val (fit, _) = fitValues()
-                                    if (scale > fit + 0.05f) {
+                                    if (scale > fitScale() + 0.05f) {
                                         applyFit()
                                     } else {
-                                        scale = 1f
-                                        offsetX = (viewport.width - value.width.toFloat()) / 2f
-                                        offsetY = (viewport.height - value.height.toFloat()) / 2f
-                                        val (x, y) = clampOffsets(scale, offsetX, offsetY)
-                                        offsetX = x
-                                        offsetY = y
+                                        applyActual()
                                     }
                                 } else {
                                     lastTapUp = now
                                     lastTapPosition = tapPosition
-                                    val hit = SceneRenderer.hitAt(
-                                        value,
-                                        (tapPosition.x - offsetX) / scale,
-                                        (tapPosition.y - offsetY) / scale,
-                                    )
+                                    val sceneX = (tapPosition.x - offsetX) / scale
+                                    val sceneY = (tapPosition.y - offsetY) / scale
+                                    FocusStateRegistry.lastTapSceneX = sceneX
+                                    FocusStateRegistry.lastTapSceneY = sceneY
+                                    val hit = SceneRenderer.hitAt(value, sceneX, sceneY)
+                                    FocusStateRegistry.lastHitLabel = hit?.label ?: ""
+                                    FocusStateRegistry.lastHitNodeId = hit?.nodeId ?: ""
+                                    FocusStateRegistry.lastHitCanCollapse = hit?.canCollapse == true
                                     if (hit != null) {
                                         if (hit.canCollapse) {
                                             toggleNode(hit.nodeId)
                                         } else {
-                                            hit.linkTarget?.let { target ->
-                                                context.startActivity(
-                                                    Intent(context, MainActivity::class.java).apply {
-                                                        putExtra(MainActivity.EXTRA_OPEN_NOTE, target)
-                                                        putExtra(MainActivity.EXTRA_OPEN_HEADING, hit.linkHeading)
-                                                        addFlags(
-                                                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                                                                Intent.FLAG_ACTIVITY_CLEAR_TOP,
-                                                        )
-                                                    },
-                                                )
-                                                onClose()
-                                            }
+                                            hit.linkTarget?.let { target -> openNote(target, hit.linkHeading) }
                                         }
                                     }
                                 }
@@ -364,6 +471,7 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                         zoom = scale,
                         translateX = offsetX,
                         translateY = offsetY,
+                        diagramKey = "focus:${payload.documentKey}#${payload.ordinal}",
                     )
                 }
             }
@@ -385,56 +493,60 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             Text(
                 payload.title.ifBlank { stringResource(R.string.focus_title) },
                 maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Text(stringResource(R.string.focus_zoom, (scale * 100).toInt()))
-            TextButton(onClick = { applyFit() }) { Text(stringResource(R.string.focus_fit)) }
-            TextButton(
-                onClick = {
-                    scale = 1f
-                    offsetX = (viewport.width - (scene?.width?.toFloat() ?: 0f)) / 2f
-                    offsetY = (viewport.height - (scene?.height?.toFloat() ?: 0f)) / 2f
-                },
-            ) { Text(stringResource(R.string.focus_actual)) }
+            Text(stringResource(R.string.focus_zoom, (scale * 100).roundToInt()))
             Box {
                 IconButton(onClick = { menuOpen = true }) {
                     Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.diagram_menu))
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.focus_fit)) },
+                        onClick = {
+                            menuOpen = false
+                            applyFit()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.focus_actual)) },
+                        onClick = {
+                            menuOpen = false
+                            applyActual()
+                        },
+                    )
                     for (format in DiagramExportFormat.entries) {
                         DropdownMenuItem(
                             text = {
                                 Text(
                                     when (format) {
-                                        DiagramExportFormat.Svg -> stringResource(R.string.export_svg)
-                                        DiagramExportFormat.Png -> stringResource(R.string.export_png)
-                                        DiagramExportFormat.Pdf -> stringResource(R.string.export_pdf)
+                                        DiagramExportFormat.Svg -> stringResource(R.string.share_svg)
+                                        DiagramExportFormat.Png -> stringResource(R.string.share_png)
+                                        DiagramExportFormat.Pdf -> stringResource(R.string.share_pdf)
                                     },
                                 )
                             },
                             onClick = {
                                 menuOpen = false
-                                val current = scene ?: return@DropdownMenuItem
-                                scope.launch {
-                                    try {
-                                        val bytes = when (format) {
-                                            DiagramExportFormat.Svg -> engine.renderSvg(payload, collapsed, dark)
-                                            DiagramExportFormat.Png -> DiagramExporter.png(current, dark)
-                                            DiagramExportFormat.Pdf -> DiagramExporter.pdf(current, dark)
-                                        }
-                                        pendingBytes = bytes
-                                        pendingFormat = format
-                                        pendingName = DiagramExporter.defaultName(payload.notePath, payload.ordinal, format)
-                                        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                                            addCategory(Intent.CATEGORY_OPENABLE)
-                                            type = format.mime
-                                            putExtra(Intent.EXTRA_TITLE, pendingName)
-                                        }
-                                        documentLauncher.launch(intent)
-                                    } catch (_: Exception) {
-                                        Unit
-                                    }
-                                }
+                                share(format)
+                            },
+                        )
+                    }
+                    for (format in DiagramExportFormat.entries) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    when (format) {
+                                        DiagramExportFormat.Svg -> stringResource(R.string.save_svg)
+                                        DiagramExportFormat.Png -> stringResource(R.string.save_png)
+                                        DiagramExportFormat.Pdf -> stringResource(R.string.save_pdf)
+                                    },
+                                )
+                            },
+                            onClick = {
+                                menuOpen = false
+                                save(format)
                             },
                         )
                     }
@@ -444,10 +556,47 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
     }
 }
 
+private fun measureFocusScene(scene: SceneData, payload: FocusPayload) {
+    val counts = SceneCounts()
+    val width = scene.width.toInt().coerceAtLeast(1)
+    val height = scene.height.toInt().coerceAtLeast(1)
+    val bitmap = android.graphics.Bitmap.createBitmap(
+        width,
+        height,
+        android.graphics.Bitmap.Config.ARGB_8888,
+    )
+    try {
+        SceneRenderer.draw(
+            android.graphics.Canvas(bitmap),
+            scene,
+            android.graphics.Color.BLACK,
+            counts = counts,
+            diagramKey = "focus:${payload.documentKey}#${payload.ordinal}",
+        )
+    } finally {
+        bitmap.recycle()
+    }
+    FocusCounts.counts = counts
+}
+
 private class FocusEngine(private val appContext: Context) {
     private var engine: DiagramEngine? = null
     private var workspace: WorkspaceCore? = null
+    private var vault: io.github.groundgrounder.hortus.core.VaultHandle? = null
     private var payload: FocusPayload? = null
+
+    suspend fun resolveTarget(target: String): String? {
+        val value = payload ?: return null
+        prepare()
+        return withContext(Dispatchers.IO) {
+            try {
+                val handle = vault ?: workspace?.openVault(value.vaultPath)?.also { vault = it }
+                handle?.resolveLink("", target)?.resolvedPath
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
 
     private suspend fun prepare() {
         if (engine != null) return

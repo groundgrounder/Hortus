@@ -41,6 +41,7 @@ internal object ReaderTiming {
     @Volatile var openStartedAt: Long = 0
     @Volatile var contentInstalledAt: Long = 0
     @Volatile var firstFrameAt: Long = 0
+    @Volatile var fullyDrawnAt: Long = 0
     @Volatile var openCount: Int = 0
 }
 
@@ -186,7 +187,20 @@ internal class ReaderController(context: Context) : AutoCloseable {
     fun openPath(path: String, heading: String?) {
         val content = state.content
         if (content == null) {
-            openNote(path, heading)
+            scope.launch {
+                loadMutex.withLock {
+                    val resolved = withContext(Dispatchers.IO) {
+                        repository.resolveLink("", path)
+                    } ?: path
+                    if (resolved.endsWith(".md", ignoreCase = true) ||
+                        resolved.endsWith(".mmd", ignoreCase = true)
+                    ) {
+                        openInternal(resolved, heading, push = true, restoreAnchor = false)
+                    } else {
+                        notice(appContext.getString(io.github.groundgrounder.hortus.R.string.link_not_found))
+                    }
+                }
+            }
             return
         }
         if (path == content.path) {
@@ -224,7 +238,6 @@ internal class ReaderController(context: Context) : AutoCloseable {
         val start = SystemClock.uptimeMillis()
         ReaderTiming.openStartedAt = start
         ReaderTiming.firstFrameAt = 0
-        OpenFrameMonitor.begin()
         state = state.copy(loading = true, error = null, notice = null)
         val width = if (contentWidthPx > 0) contentWidthPx else defaultWidth()
         try {
@@ -381,6 +394,10 @@ internal class ReaderController(context: Context) : AutoCloseable {
         if (ReaderTiming.firstFrameAt == 0L && state.content != null) {
             ReaderTiming.firstFrameAt = SystemClock.uptimeMillis()
         }
+    }
+
+    fun markFullyDrawn() {
+        ReaderTiming.fullyDrawnAt = SystemClock.uptimeMillis()
     }
 
     fun markActivityCreated() {

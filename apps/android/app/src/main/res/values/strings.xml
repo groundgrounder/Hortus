@@ -64,4 +64,13 @@
     <string name="focus_zoom">%1$d%%</string>
     <string name="focus_title">Diagram</string>
     <string name="focus_hint">Pinch to zoom, drag to pan, double tap to switch fit and 100%.</string>
+    <string name="focus_share">Share</string>
+    <string name="focus_save">Save to…</string>
+    <string name="share_png">Share PNG</string>
+    <string name="share_svg">Share SVG</string>
+    <string name="share_pdf">Share PDF</string>
+    <string name="save_png">Save PNG…</string>
+    <string name="save_svg">Save SVG…</string>
+    <string name="save_pdf">Save PDF…</string>
+    <string name="share_sheet_title">Share diagram</string>
 </resources>

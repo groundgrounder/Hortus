@@ -64,4 +64,13 @@
     <string name="focus_zoom">%1$d%%</string>
     <string name="focus_title">图表</string>
     <string name="focus_hint">双指缩放、拖动平移、双击在适应和 100% 之间切换。</string>
+    <string name="focus_share">分享</string>
+    <string name="focus_save">保存到…</string>
+    <string name="share_png">分享 PNG</string>
+    <string name="share_svg">分享 SVG</string>
+    <string name="share_pdf">分享 PDF</string>
+    <string name="save_png">保存 PNG…</string>
+    <string name="save_svg">保存 SVG…</string>
+    <string name="save_pdf">保存 PDF…</string>
+    <string name="share_sheet_title">分享图表</string>
 </resources>
