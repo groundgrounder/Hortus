@@ -39,6 +39,9 @@
               rustfmt
               pkg-config
               python3
+              # 自动化 GUI 检查在私有 Xvfb 中运行，避免在真实桌面上弹窗。
+              xvfb
+              xvfb-run
             ];
 
             buildInputs = with pkgs; [

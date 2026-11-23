@@ -474,6 +474,17 @@ pub fn build_image_widget(
         picture.set_content_fit(gtk4::ContentFit::Contain);
         picture.set_size_request(target_w.round() as i32, target_h.round() as i32);
         picture.set_halign(gtk4::Align::Start);
+        // 图片的目标显示宽度是自然尺寸而非最小宽度：窄窗口下允许横向滚动而不是撑破窗口。
+        let picture_scroll = gtk4::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk4::PolicyType::Automatic)
+            .vscrollbar_policy(gtk4::PolicyType::Never)
+            .propagate_natural_width(true)
+            .propagate_natural_height(true)
+            .child(&picture)
+            .build();
+        picture_scroll.add_css_class("hortus-image-scroll");
+        picture_scroll.set_size_request(120, -1);
+        let picture = picture_scroll;
 
         if !block.image_path.is_empty() {
             let path = PathBuf::from(&block.image_path);
@@ -497,10 +508,12 @@ pub fn build_image_widget(
         return container.upcast();
     }
 
+    let _ = max_width;
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     card.add_css_class("hortus-media-placeholder");
-    card.set_halign(gtk4::Align::Start);
-    card.set_size_request((max_width - 16.0).max(240.0).round() as i32, -1);
+    card.set_halign(gtk4::Align::Fill);
+    card.set_hexpand(true);
+    card.set_size_request(220, -1);
 
     let title_text = if block.image_alt.is_empty() {
         block.image_target.clone()
@@ -550,13 +563,16 @@ pub fn build_image_widget(
 }
 
 pub type LinkOpenCallback = Rc<dyn Fn(String, Option<String>)>;
+pub type LinkOpenUriCallback = Rc<dyn Fn(String)>;
 
 /// 使用内核计算列宽、对齐方式、行内样式及单元格内公式构造原生 `GtkGrid` 表格。
 pub fn build_table_widget(
     media: &PreparedMedia,
     max_width: f64,
     on_open_link: Option<LinkOpenCallback>,
+    on_open_uri: Option<LinkOpenUriCallback>,
 ) -> gtk4::Widget {
+    let _ = max_width;
     let block = &media.block;
     let cols = block.columns.len().max(1);
     let rows = usize::try_from(block.rows).unwrap_or(0);
@@ -637,23 +653,37 @@ pub fn build_table_widget(
                         let mut e_it = buf.iter_at_offset(ce as i32);
                         buf.delete(&mut s_it, &mut e_it);
                         let anchor = buf.create_child_anchor(&mut s_it);
-                        let w = build_inline_math_widget(math_item);
+                        // 单元格内错误公式降级为可省略的紧凑标签，避免撑破固定列宽。
+                        let w: gtk4::Widget = if math_item.math.is_some() {
+                            build_inline_math_widget(math_item)
+                        } else {
+                            let badge =
+                                gtk4::Label::new(Some(math_item.block.display_source.trim()));
+                            badge.add_css_class("hortus-math-inline-fallback");
+                            badge.add_css_class("monospace");
+                            badge.set_valign(gtk4::Align::Baseline);
+                            badge.set_ellipsize(pango::EllipsizeMode::End);
+                            badge.set_max_width_chars(14);
+                            badge.set_tooltip_text(Some(
+                                math_item.failure.as_deref().unwrap_or("公式语法错误"),
+                            ));
+                            badge.upcast()
+                        };
                         tv.add_child_at_anchor(&w, &anchor);
                     }
                 }
             }
 
-            // 单元格内部链接仅在单元格文本简单点击时检查（如有 `on_open_link`）
-            if let Some(ref open_cb) = on_open_link
-                && !cell.source.is_empty()
-                && (cell.source.contains("[[") || cell.source.contains("]("))
+            // 单元格内部链接：`[[双链]]` 交由笔记跳转，标准 `[text](url)` 外链经系统 URL 启动器打开。
+            if !cell.source.is_empty() && (cell.source.contains("[[") || cell.source.contains("]("))
             {
                 attach_simple_cell_links(
                     &tv,
                     &cell.text,
                     &cell.runs,
                     &cell.source,
-                    open_cb.clone(),
+                    on_open_link.clone(),
+                    on_open_uri.clone(),
                 );
             }
 
@@ -668,37 +698,58 @@ pub fn build_table_widget(
         }
     }
 
-    let total_w: f64 = block.columns.iter().sum();
-    if total_w > max_width {
-        let scroll = gtk4::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk4::PolicyType::Automatic)
-            .vscrollbar_policy(gtk4::PolicyType::Never)
-            .propagate_natural_height(true)
-            .hexpand(true)
-            .child(&grid)
-            .build();
-        scroll.add_css_class("hortus-table-wrap");
-        scroll.upcast()
-    } else {
-        grid.add_css_class("hortus-table-wrap");
-        grid.set_halign(gtk4::Align::Start);
-        grid.upcast()
-    }
+    let scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Automatic)
+        .vscrollbar_policy(gtk4::PolicyType::Never)
+        .propagate_natural_width(true)
+        .propagate_natural_height(true)
+        .hexpand(true)
+        .child(&grid)
+        .build();
+    scroll.add_css_class("hortus-table-wrap");
+    scroll.set_size_request(180, -1);
+    scroll.upcast()
+}
+
+/// 单元格内链接目标：双链走笔记解析，标准 Markdown 外链交给 URI 启动器。
+#[derive(Clone)]
+enum CellLinkAction {
+    Note(String),
+    Uri(String),
 }
 
 fn attach_simple_cell_links(
     tv: &gtk4::TextView,
     text: &str,
     runs: &[LocalMediaRun],
-    _source: &str,
-    on_open_link: Rc<dyn Fn(String, Option<String>)>,
+    source: &str,
+    on_open_link: Option<LinkOpenCallback>,
+    on_open_uri: Option<LinkOpenUriCallback>,
 ) {
-    let mut link_ranges: Vec<(i32, i32, String)> = Vec::new();
+    let mut link_ranges: Vec<(i32, i32, CellLinkAction)> = Vec::new();
     for run in runs {
-        if run.mask & (1 << 18) != 0 {
-            let (cs, ce) = utf16_range_to_char_range(text, run.start as usize, run.length as usize);
-            if let Some(target) = utf16_slice(text, run.start as usize, run.length as usize) {
-                link_ranges.push((cs as i32, ce as i32, target));
+        if run.mask & (1 << 18) == 0 {
+            continue;
+        }
+        let (cs, ce) = utf16_range_to_char_range(text, run.start as usize, run.length as usize);
+        if let Some(target) = utf16_slice(text, run.start as usize, run.length as usize) {
+            link_ranges.push((cs as i32, ce as i32, CellLinkAction::Note(target)));
+        }
+    }
+    // 标准 Markdown 外链：单元格源文本中的 `[显示文字](url)`，按显示文字在单元格正文顺序定位。
+    let mut search_from = 0usize;
+    for (label, url) in markdown_cell_links(source) {
+        if let Some(pos) = text.get(search_from..).and_then(|tail| tail.find(&label)) {
+            let byte_start = search_from + pos;
+            let char_start = text[..byte_start].chars().count() as i32;
+            let char_end = char_start + label.chars().count() as i32;
+            search_from = byte_start + label.len();
+            if char_end > char_start
+                && !link_ranges
+                    .iter()
+                    .any(|(s, e, _)| char_start >= *s && char_start < *e)
+            {
+                link_ranges.push((char_start, char_end, CellLinkAction::Uri(url)));
             }
         }
     }
@@ -712,14 +763,65 @@ fn attach_simple_cell_links(
     click.connect_pressed(move |_, _, x, y| {
         let (bx, by) =
             tv_c.window_to_buffer_coords(gtk4::TextWindowType::Widget, x as i32, y as i32);
-        if let Some(iter) = tv_c.iter_at_location(bx, by) {
-            let off = iter.offset();
-            if let Some((_, _, target)) = map.iter().find(|(s, e, _)| off >= *s && off < *e) {
-                (on_open_link)(target.clone(), None);
+        let Some(iter) = tv_c.iter_at_location(bx, by) else {
+            return;
+        };
+        let off = iter.offset();
+        let Some((_, _, action)) = map.iter().find(|(s, e, _)| off >= *s && off < *e) else {
+            return;
+        };
+        match action {
+            CellLinkAction::Note(target) => {
+                if let Some(ref cb) = on_open_link {
+                    cb(target.clone(), None);
+                }
+            }
+            CellLinkAction::Uri(url) => {
+                if let Some(ref cb) = on_open_uri {
+                    cb(url.clone());
+                } else if url.starts_with("http://") || url.starts_with("https://") {
+                    let launcher = gtk4::UriLauncher::new(url);
+                    launcher.launch(None::<&gtk4::Window>, gio::Cancellable::NONE, |_| {});
+                }
             }
         }
     });
     tv.add_controller(click);
+}
+
+/// 从单元格 Markdown 源中提取 `[显示文字](url)` 形式的外链。
+pub fn markdown_cell_links(source: &str) -> Vec<(String, String)> {
+    let mut links = Vec::new();
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'[' {
+            index += 1;
+            continue;
+        }
+        let Some(close) = source[index + 1..].find(']') else {
+            break;
+        };
+        let label_end = index + 1 + close;
+        if !source[label_end + 1..].starts_with('(') {
+            index = label_end + 1;
+            continue;
+        }
+        let url_start = label_end + 2;
+        let Some(url_end_rel) = source[url_start..].find(')') else {
+            break;
+        };
+        let url = &source[url_start..url_start + url_end_rel];
+        let label = &source[index + 1..label_end];
+        if !label.is_empty()
+            && !label.contains('[')
+            && (url.starts_with("http://") || url.starts_with("https://"))
+        {
+            links.push((label.to_string(), url.to_string()));
+        }
+        index = url_start + url_end_rel + 1;
+    }
+    links
 }
 
 pub fn summarize_media_stats(items: &[PreparedMedia]) -> (usize, usize, usize, usize, usize) {
@@ -751,6 +853,21 @@ pub fn summarize_media_stats(items: &[PreparedMedia]) -> (usize, usize, usize, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_cell_links_extracts_external_targets() {
+        let links =
+            markdown_cell_links("见 [规范指南](https://example.org) 与 [文档](http://a.example/x)");
+        assert_eq!(
+            links,
+            vec![
+                ("规范指南".to_string(), "https://example.org".to_string()),
+                ("文档".to_string(), "http://a.example/x".to_string()),
+            ]
+        );
+        assert!(markdown_cell_links("[[内部双链]] 不是外链").is_empty());
+        assert!(markdown_cell_links("[相对](Assets/a.png)").is_empty());
+    }
 
     #[test]
     fn sanitize_svg_strips_scripts_event_handlers_and_external_urls() {

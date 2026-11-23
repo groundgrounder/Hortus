@@ -434,6 +434,8 @@ pub struct ReadingEnv {
     pub parent_window: Option<gtk4::Window>,
     pub callbacks: EmbedCallbacks,
     pub on_open_source: Rc<dyn Fn(u64, u64)>,
+    /// 阅读视图内点击 `#标签` 时切到标签面板并筛选。
+    pub on_open_tag: Rc<dyn Fn(String)>,
 }
 
 #[derive(Clone)]
@@ -453,6 +455,7 @@ enum LinkAction {
         resolved_path: Option<String>,
     },
     ExternalUrl(String),
+    Tag(String),
 }
 
 #[derive(Clone)]
@@ -872,7 +875,7 @@ fn assemble_reading_buffer_data(
                 if seen_hr_chars.insert(zw_char) {
                     let sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
                     sep.add_css_class("hortus-reading-hr");
-                    sep.set_size_request((env.content_width - 12.0).max(160.0) as i32, -1);
+                    sep.set_hexpand(true);
                     anchors.push((zw_char, AnchorKind::Widget(sep.upcast())));
                 }
             }
@@ -907,6 +910,23 @@ fn assemble_reading_buffer_data(
                         char_start: r_char_start,
                         char_end: r_char_end,
                         action: LinkAction::ExternalUrl(url),
+                    });
+                }
+            }
+
+            // 行内 `#标签`：点击切换左侧标签面板并筛选该标签。
+            if final_mask & (512 | 8192) != 0 && r_char_end > r_char_start {
+                let tag_text: String = text
+                    .chars()
+                    .skip(r_char_start as usize)
+                    .take((r_char_end - r_char_start) as usize)
+                    .collect();
+                let tag = tag_text.trim_start_matches('#').trim().to_string();
+                if !tag.is_empty() {
+                    link_spans.push(LinkSpan {
+                        char_start: r_char_start,
+                        char_end: r_char_end,
+                        action: LinkAction::Tag(tag),
                     });
                 }
             }
@@ -1049,6 +1069,7 @@ fn assemble_reading_buffer_data(
                 item,
                 env.content_width,
                 Some(env.callbacks.on_open_note.clone()),
+                Some(env.callbacks.on_open_external.clone()),
             );
             anchors.push((char_pos, AnchorKind::Widget(tbl)));
         } else {
@@ -1180,6 +1201,7 @@ fn install_text_view_with_anchors(
             let cbs = env.callbacks.clone();
             let handle = Arc::clone(&env.handle);
             let src_note = env.note_path.clone();
+            let open_tag = env.on_open_tag.clone();
             click.connect_released(move |_, _, x, y| {
                 let (bx, by) =
                     tv_c.window_to_buffer_coords(gtk4::TextWindowType::Widget, x as i32, y as i32);
@@ -1212,6 +1234,9 @@ fn install_text_view_with_anchors(
                     }
                     LinkAction::ExternalUrl(url) => {
                         (cbs.on_open_external)(url.clone());
+                    }
+                    LinkAction::Tag(tag) => {
+                        (open_tag)(tag.clone());
                     }
                 }
             });

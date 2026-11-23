@@ -3,6 +3,7 @@
 """L1 Linux Reading View、Mermaid 原生渲染、RaTeX 公式、嵌入/表格/图片、专注模式与零写盘零联网综合自检。"""
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
@@ -43,6 +44,52 @@ KATEX_FILES = [
 def check(condition, message):
     if not condition:
         raise AssertionError(message)
+
+def start_private_display():
+    """在私有 Xvfb 中运行 GUI：测试窗口不出现在真实桌面，也不抢焦点。"""
+    explicit = os.environ.get("HORTUS_TEST_DISPLAY")
+    if explicit:
+        os.environ["DISPLAY"] = explicit
+        os.environ["GDK_BACKEND"] = "x11"
+        os.environ["GSK_RENDERER"] = "cairo"
+        return None
+    xvfb = shutil.which("Xvfb")
+    check(
+        xvfb is not None,
+        "需要 Xvfb 以离屏运行 GUI（在 nix develop 中提供；或设置 HORTUS_TEST_DISPLAY 复用现有显示）",
+    )
+    number = None
+    for candidate in range(90, 140):
+        if not Path(f"/tmp/.X11-unix/X{candidate}").exists():
+            number = candidate
+            break
+    check(number is not None, "找不到空闲的 X 显示编号")
+    proc = subprocess.Popen(
+        [xvfb, f":{number}", "-screen", "0", "1600x1000x24", "-nolisten", "tcp"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    socket = Path(f"/tmp/.X11-unix/X{number}")
+    for _ in range(200):
+        if socket.exists():
+            break
+        time.sleep(0.05)
+    check(socket.exists(), "Xvfb 未在 10s 内就绪")
+    os.environ["DISPLAY"] = f":{number}"
+    os.environ["GDK_BACKEND"] = "x11"
+    os.environ["GSK_RENDERER"] = "cairo"
+    os.environ["NO_AT_BRIDGE"] = "1"
+
+    def _stop():
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    atexit.register(_stop)
+    return proc
+
 
 
 def discover_gui_bin(explicit: Path | None) -> Path:
@@ -670,6 +717,7 @@ def main():
 
     gui_bin = discover_gui_bin(args.gui_bin)
     katex_dir = verify_nix_fonts_installed(gui_bin)
+    start_private_display()
 
     with tempfile.TemporaryDirectory(prefix="hortus-l1-check-") as tmp:
         tmp_path = Path(tmp)

@@ -5,8 +5,11 @@
 mod core;
 mod diagram_render;
 mod embed_render;
+mod files;
+mod findbar;
 mod focus;
 mod fonts;
+mod knowledge;
 mod math_render;
 mod media_render;
 mod pangocairo_ffi;
@@ -51,6 +54,8 @@ fn main() -> std::process::ExitCode {
         || options.edit_mode
         || options.focus_diagram.is_some()
         || options.scroll_fraction.is_some()
+        || options.edit_knowledge_json.is_some()
+        || options.edit_knowledge_scene.is_some()
     {
         gio::ApplicationFlags::NON_UNIQUE
     } else {
@@ -64,6 +69,14 @@ fn main() -> std::process::ExitCode {
 
     app.set_accels_for_action("win.open-vault", &["<Control>o"]);
     app.set_accels_for_action("win.close-tab", &["<Control>w"]);
+    app.set_accels_for_action("win.save-note", &["<Control>s"]);
+    app.set_accels_for_action("win.new-note", &["<Control>n"]);
+    app.set_accels_for_action("win.find-in-note", &["<Control>f"]);
+    app.set_accels_for_action("win.replace-in-note", &["<Control>h"]);
+    app.set_accels_for_action("win.quick-open", &["<Control>p"]);
+    app.set_accels_for_action("win.focus-search", &["<Control><Shift>f"]);
+    app.set_accels_for_action("win.align-table", &["<Control><Shift>t"]);
+    app.set_accels_for_action("win.toggle-task", &["<Control>Return"]);
     app.set_accels_for_action("win.toggle-edit-mode", &["<Control>e"]);
     app.set_accels_for_action("win.focus-diagram", &["<Control><Shift>d"]);
     app.set_accels_for_action("win.toggle-left-sidebar", &["<Control><Shift>s"]);

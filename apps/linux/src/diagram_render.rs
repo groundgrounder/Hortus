@@ -803,8 +803,19 @@ pub fn build_diagram_card(
     tools.append(&focus_btn);
     tools.append(&export_btn);
 
+    // 图表画布的固定内容宽度只作为自然尺寸：放进水平滚动容器后，窄窗口可收缩而不撑破最小宽度。
+    let canvas = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Automatic)
+        .vscrollbar_policy(gtk4::PolicyType::Never)
+        .propagate_natural_width(true)
+        .propagate_natural_height(true)
+        .child(&drawing)
+        .build();
+    canvas.add_css_class("hortus-diagram-canvas");
+    // 显式最小宽度：自然宽度仍为图表宽度，但窄平铺时可收缩而不撑大窗口最小宽度。
+    canvas.set_size_request(220, -1);
     let overlay = gtk4::Overlay::new();
-    overlay.set_child(Some(&drawing));
+    overlay.set_child(Some(&canvas));
     overlay.add_overlay(&tools);
     overlay.set_hexpand(true);
     overlay.add_css_class("hortus-diagram-card");
@@ -824,8 +835,9 @@ fn build_diagram_fallback_card(
         .trim_end();
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     card.add_css_class("hortus-diagram-fallback");
-    card.set_halign(gtk4::Align::Start);
-    card.set_size_request(560, -1);
+    card.set_halign(gtk4::Align::Fill);
+    card.set_hexpand(true);
+    card.set_size_request(220, -1);
 
     let header = gtk4::Label::new(Some(reason));
     header.set_halign(gtk4::Align::Start);

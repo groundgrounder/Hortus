@@ -58,6 +58,8 @@ impl VaultNode {
 }
 
 type OpenNoteCallback = Rc<RefCell<Option<Box<dyn Fn(String)>>>>;
+/// 右键菜单回调：锚点控件、相对路径、是否目录。
+type ContextMenuCallback = Rc<dyn Fn(gtk4::Widget, String, bool)>;
 
 #[derive(Clone)]
 pub struct VaultTree {
@@ -68,6 +70,7 @@ pub struct VaultTree {
     entries: Rc<RefCell<BTreeMap<String, TreeEntryItem>>>,
     dir_stores: Rc<RefCell<HashMap<String, gio::ListStore>>>,
     on_open_note: OpenNoteCallback,
+    on_context_menu: Rc<RefCell<Option<ContextMenuCallback>>>,
 }
 
 impl VaultTree {
@@ -108,25 +111,50 @@ impl VaultTree {
         selection.set_autoselect(false);
         selection.set_can_unselect(true);
 
+        let on_context_menu: Rc<RefCell<Option<ContextMenuCallback>>> = Rc::new(RefCell::new(None));
+
         let factory = gtk4::SignalListItemFactory::new();
-        factory.connect_setup(|_, list_item| {
-            let Some(list_item) = list_item.downcast_ref::<gtk4::ListItem>() else {
-                return;
-            };
-            let expander = gtk4::TreeExpander::new();
-            let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-            row_box.set_margin_top(2);
-            row_box.set_margin_bottom(2);
-            let icon = gtk4::Image::new();
-            let label = gtk4::Label::new(None);
-            label.set_halign(gtk4::Align::Start);
-            label.set_hexpand(true);
-            label.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-            row_box.append(&icon);
-            row_box.append(&label);
-            expander.set_child(Some(&row_box));
-            list_item.set_child(Some(&expander));
-        });
+        {
+            let cb = on_context_menu.clone();
+            factory.connect_setup(move |_, list_item| {
+                let Some(list_item) = list_item.downcast_ref::<gtk4::ListItem>() else {
+                    return;
+                };
+                let expander = gtk4::TreeExpander::new();
+                let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+                row_box.set_margin_top(2);
+                row_box.set_margin_bottom(2);
+                let icon = gtk4::Image::new();
+                let label = gtk4::Label::new(None);
+                label.set_halign(gtk4::Align::Start);
+                label.set_hexpand(true);
+                label.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+                row_box.append(&icon);
+                row_box.append(&label);
+                expander.set_child(Some(&row_box));
+                list_item.set_child(Some(&expander));
+
+                // 右键菜单：每个行工厂持有一份当前路径，由列表项绑定阶段更新。
+                let target: Rc<RefCell<Option<(String, bool)>>> = Rc::new(RefCell::new(None));
+                unsafe {
+                    list_item.set_data("hortus-context-target", target.clone());
+                }
+                let click = gtk4::GestureClick::new();
+                click.set_button(3);
+                let anchor = row_box.clone();
+                let cb = cb.clone();
+                click.connect_pressed(move |gesture, _, _, _| {
+                    let Some((path, is_dir)) = target.borrow().clone() else {
+                        return;
+                    };
+                    if let Some(handler) = cb.borrow().as_ref() {
+                        handler(anchor.clone().upcast::<gtk4::Widget>(), path, is_dir);
+                        gesture.set_state(gtk4::EventSequenceState::Claimed);
+                    }
+                });
+                expander.add_controller(click);
+            });
+        }
 
         factory.connect_bind(|_, list_item| {
             let Some(list_item) = list_item.downcast_ref::<gtk4::ListItem>() else {
@@ -151,6 +179,13 @@ impl VaultTree {
             let Some(label) = icon.next_sibling().and_downcast::<gtk4::Label>() else {
                 return;
             };
+            unsafe {
+                if let Some(target) =
+                    list_item.data::<Rc<RefCell<Option<(String, bool)>>>>("hortus-context-target")
+                {
+                    *target.as_ref().borrow_mut() = Some((node.path(), node.is_directory()));
+                }
+            }
             if node.is_directory() {
                 icon.set_icon_name(Some("folder-symbolic"));
             } else {
@@ -201,7 +236,30 @@ impl VaultTree {
             entries,
             dir_stores,
             on_open_note,
+            on_context_menu,
         }
+    }
+
+    pub fn set_on_context_menu(&self, callback: impl Fn(gtk4::Widget, String, bool) + 'static) {
+        *self.on_context_menu.borrow_mut() = Some(Rc::new(callback));
+    }
+
+    /// 当前选中的目录（用于新建笔记/文件夹的默认位置）；选中笔记时返回其父目录。
+    pub fn selected_directory(&self) -> Option<(String, bool)> {
+        let row = self
+            .selection
+            .selected_item()
+            .and_downcast::<gtk4::TreeListRow>()?;
+        let node = row.item().and_downcast::<VaultNode>()?;
+        let path = node.path();
+        if node.is_directory() {
+            return Some((path, true));
+        }
+        let parent = path
+            .rsplit_once('/')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_default();
+        Some((parent, false))
     }
 
     pub fn set_on_open_note(&self, callback: impl Fn(String) + 'static) {

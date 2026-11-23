@@ -194,6 +194,7 @@ pub fn prepare_embed_bg(req: &EmbedRequest) -> Result<PreparedEmbed, String> {
 pub struct EmbedCallbacks {
     pub on_open_note: Rc<dyn Fn(String, Option<String>)>,
     pub on_open_external: Rc<dyn Fn(String)>,
+    pub on_open_tag: Rc<dyn Fn(String)>,
     pub on_export_diagram: Rc<dyn Fn(DiagramExportKind, DiagramExportMeta)>,
     pub on_open_focus: Rc<dyn Fn(String, u32)>,
 }
@@ -207,7 +208,7 @@ pub fn build_embed_card(
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     card.add_css_class("hortus-embed-card");
     card.set_halign(gtk4::Align::Start);
-    card.set_size_request((req.width - 16.0).max(240.0).round() as i32, -1);
+    card.set_size_request(220, -1);
 
     let header_btn = gtk4::Button::new();
     header_btn.add_css_class("flat");
@@ -347,6 +348,7 @@ fn populate_embed_card(
                 parent_window: None,
                 callbacks: callbacks.clone(),
                 on_open_source: Rc::new(|_, _| {}),
+                on_open_tag: callbacks.on_open_tag.clone(),
             };
             let body_widget = build_embedded_note_body(
                 &env,

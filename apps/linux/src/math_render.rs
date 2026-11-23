@@ -18,7 +18,7 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use hortus_ffi::{MathBlock, MathEngine, MathFailure, MathGlyphMetrics, MathStyle};
 use serde::Deserialize;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -612,33 +612,91 @@ pub fn build_display_math_widget(item: &PreparedMathBlock, max_width: f64) -> gt
     let natural_h = (math.height_px + 2.0 * vpad).ceil().max(24.0);
     let draw_w = natural_w.max(max_width.max(120.0));
 
-    let drawing = gtk4::DrawingArea::new();
-    drawing.set_content_width(draw_w as i32);
-    drawing.set_content_height(natural_h as i32);
+    let drawing = DisplayMathCanvas::new(Arc::clone(math), draw_w, natural_h, hpad, vpad);
     drawing.set_tooltip_text(Some(&item.block.latex));
+    drawing.set_hexpand(true);
+    drawing.add_css_class("hortus-math-block");
+    drawing.upcast()
+}
 
-    let math_c = Arc::clone(math);
-    drawing.set_draw_func(move |widget, cr, alloc_w, _| {
-        let fg = widget.color();
-        let ox = ((f64::from(alloc_w) - math_c.width_px) / 2.0).max(hpad);
-        draw_prepared_math(cr, &math_c, ox, vpad, fg);
-    });
+mod display_imp {
+    use super::*;
 
-    if natural_w > max_width {
-        let scroller = gtk4::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk4::PolicyType::Automatic)
-            .vscrollbar_policy(gtk4::PolicyType::Never)
-            .propagate_natural_height(true)
-            .hexpand(true)
-            .child(&drawing)
-            .build();
-        scroller.add_css_class("hortus-math-block");
-        scroller.upcast()
-    } else {
-        drawing.set_hexpand(true);
-        drawing.set_halign(gtk4::Align::Fill);
-        drawing.add_css_class("hortus-math-block");
-        drawing.upcast()
+    #[derive(Default)]
+    pub struct DisplayMathCanvas {
+        pub math: RefCell<Option<Arc<PreparedMath>>>,
+        pub natural_width: Cell<f64>,
+        pub natural_height: Cell<i32>,
+        pub hpad: Cell<f64>,
+        pub vpad: Cell<f64>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for DisplayMathCanvas {
+        const NAME: &'static str = "HortusDisplayMathCanvas";
+        type Type = super::DisplayMathCanvas;
+        type ParentType = gtk4::Widget;
+    }
+
+    impl ObjectImpl for DisplayMathCanvas {}
+
+    impl WidgetImpl for DisplayMathCanvas {
+        fn request_mode(&self) -> gtk4::SizeRequestMode {
+            gtk4::SizeRequestMode::ConstantSize
+        }
+
+        fn measure(&self, orientation: gtk4::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
+            match orientation {
+                // 最小宽度固定为 120：块级公式的自然宽度只影响自然尺寸，窄窗口时可收缩。
+                gtk4::Orientation::Horizontal => (
+                    120,
+                    self.natural_width.get().ceil().max(120.0) as i32,
+                    -1,
+                    -1,
+                ),
+                _ => {
+                    let height = self.natural_height.get().max(24);
+                    (height, height, -1, -1)
+                }
+            }
+        }
+
+        fn snapshot(&self, snapshot: &gtk4::Snapshot) {
+            let guard = self.math.borrow();
+            let Some(ref math) = *guard else { return };
+            let widget = self.obj();
+            let w = widget.width().max(1) as f32;
+            let h = widget.height().max(1) as f32;
+            let rect = graphene::Rect::new(0.0, 0.0, w, h);
+            let cr = snapshot.append_cairo(&rect);
+            let fg = widget.color();
+            let ox = ((f64::from(w) - math.width_px) / 2.0).max(self.hpad.get());
+            draw_prepared_math(&cr, math, ox, self.vpad.get(), fg);
+        }
+    }
+}
+
+glib::wrapper! {
+    pub struct DisplayMathCanvas(ObjectSubclass<display_imp::DisplayMathCanvas>)
+        @extends gtk4::Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
+}
+
+impl DisplayMathCanvas {
+    pub fn new(
+        math: Arc<PreparedMath>,
+        natural_width: f64,
+        natural_height: f64,
+        hpad: f64,
+        vpad: f64,
+    ) -> Self {
+        let obj: Self = glib::Object::new();
+        *obj.imp().math.borrow_mut() = Some(math);
+        obj.imp().natural_width.set(natural_width);
+        obj.imp().natural_height.set(natural_height.ceil() as i32);
+        obj.imp().hpad.set(hpad);
+        obj.imp().vpad.set(vpad);
+        obj
     }
 }
 
@@ -728,7 +786,7 @@ pub fn build_inline_math_widget(item: &PreparedMathBlock) -> gtk4::Widget {
     canvas.upcast()
 }
 
-fn build_math_fallback_widget(
+pub fn build_math_fallback_widget(
     source: &str,
     reason: &str,
     block: bool,
@@ -757,7 +815,9 @@ fn build_math_fallback_widget(
         badge.add_css_class("hortus-math-inline-fallback");
         badge.add_css_class("monospace");
         badge.set_tooltip_text(Some(reason));
-        badge.set_valign(gtk4::Align::BaselineCenter);
+        // GtkLabel 会回报自身基线；使用 `Baseline` 让错误公式与周围正文共享同一基线，
+        // 而不是 `BaselineCenter` 造成的整体上浮。
+        badge.set_valign(gtk4::Align::Baseline);
         badge.upcast()
     }
 }
@@ -765,6 +825,22 @@ fn build_math_fallback_widget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_error_fallback_uses_baseline_alignment() {
+        if gtk4::init().is_err() {
+            eprintln!("skipping GTK fallback baseline test: GTK 初始化失败");
+            return;
+        }
+        let widget =
+            build_math_fallback_widget("\\unknowninlinecmd{x}", "公式语法错误", false, 0.0);
+        assert!(widget.has_css_class("hortus-math-inline-fallback"));
+        // GTK 会把 BASELINE 归一化为 BASELINE_FILL（无扩展子控件时二者等价）。
+        assert!(matches!(
+            widget.valign(),
+            gtk4::Align::Baseline | gtk4::Align::BaselineFill
+        ));
+    }
 
     #[test]
     fn ratex_display_inline_and_cjk_fallback_render_with_katex_fonts() {

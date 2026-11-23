@@ -161,8 +161,19 @@ pub struct CliOptions {
     pub reading_json: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
     pub quit_after_ms: Option<u64>,
+    pub edit_knowledge_json: Option<PathBuf>,
+    pub edit_knowledge_scene: Option<String>,
     pub show_help: bool,
 }
+
+/// L2 截图场景：由 `--edit-knowledge-scene` 在截图前装配真实界面状态。
+pub const L2_SCENES: [&str; 5] = [
+    "search-backlinks",
+    "tags",
+    "quick-open",
+    "edit-find-completion",
+    "rename-links",
+];
 
 impl CliOptions {
     pub fn parse<I, S>(args: I) -> Result<Self, String>
@@ -261,6 +272,21 @@ impl CliOptions {
                         .map_err(|_| format!("--quit-after-ms 参数无效：{value}"))?;
                     options.quit_after_ms = Some(parsed);
                 }
+                "--edit-knowledge-json" => {
+                    let value = iter
+                        .next()
+                        .ok_or("--edit-knowledge-json 需要提供输出路径")?;
+                    options.edit_knowledge_json = Some(PathBuf::from(value));
+                }
+                "--edit-knowledge-scene" => {
+                    let value = iter
+                        .next()
+                        .ok_or("--edit-knowledge-scene 需要提供场景名称")?;
+                    if !L2_SCENES.contains(&value.as_str()) {
+                        return Err(format!("未知的 L2 截图场景：{value}"));
+                    }
+                    options.edit_knowledge_scene = Some(value);
+                }
                 other => return Err(format!("未知参数：{other}")),
             }
         }
@@ -281,6 +307,11 @@ impl CliOptions {
   --scroll-fraction <比例>   截图或导出前滚动到指定纵向比例 (0..1)
   --smoke-json <路径>        运行 L0 行为自检并导出 JSON 后退出
   --reading-json <路径>      运行 L1 阅读态与场景完整自检并导出 JSON 后退出
+  --edit-knowledge-json <路径>
+                             运行 L2 编辑/保存/知识导航/文件管理自检并导出 JSON 后退出
+  --edit-knowledge-scene <场景>
+                             L2 界面截图场景：search-backlinks | tags | quick-open |
+                             edit-find-completion | rename-links
   --screenshot <路径>        渲染完成后导出窗口 PNG 截图后退出
   --quit-after-ms <毫秒>     到达延迟后退出"
     }
@@ -384,6 +415,31 @@ impl Utf16Mapper {
     pub fn utf16_to_byte(&self, target_utf16: usize) -> usize {
         let idx = self.utf16_to_char(target_utf16);
         self.byte_offsets[idx]
+    }
+
+    pub fn char_len(&self) -> usize {
+        self.utf16_offsets.len().saturating_sub(1)
+    }
+
+    pub fn utf16_at(&self, char_index: usize) -> usize {
+        self.utf16_offsets
+            .get(char_index)
+            .copied()
+            .unwrap_or_else(|| *self.utf16_offsets.last().unwrap_or(&0))
+    }
+
+    pub fn char_to_utf16(&self, char_index: usize) -> usize {
+        self.utf16_offsets
+            .get(char_index)
+            .copied()
+            .unwrap_or_else(|| *self.utf16_offsets.last().unwrap_or(&0))
+    }
+
+    pub fn char_to_byte(&self, char_index: usize) -> usize {
+        self.byte_offsets
+            .get(char_index)
+            .copied()
+            .unwrap_or_else(|| *self.byte_offsets.last().unwrap_or(&0))
     }
 
     pub fn byte_to_utf16(&self, target_byte: usize) -> usize {
@@ -508,6 +564,106 @@ pub fn is_note_file_name(name: &str) -> bool {
         })
 }
 
+/// 按当前行推断回车续写前缀：无序列表、有序列表与任务项（含缩进与已完成状态）。
+/// 空列表项返回 `None`，让回车结束列表而不是无限续写。
+pub fn line_list_continuation(line: &str) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let indent = &line[..indent_len];
+    let rest = &line[indent_len..];
+    let (marker, tail) = if let Some(tail) = rest.strip_prefix("- [ ] ") {
+        ("- [ ] ", tail)
+    } else if let Some(tail) = rest
+        .strip_prefix("- [x] ")
+        .or_else(|| rest.strip_prefix("- [X] "))
+    {
+        ("- [ ] ", tail)
+    } else if let Some(tail) = rest.strip_prefix("- ").or_else(|| rest.strip_prefix("* ")) {
+        ("- ", tail)
+    } else {
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        let after = &rest[digits..];
+        if digits > 0
+            && let Some(tail) = after.strip_prefix(". ")
+        {
+            let next = rest[..digits].parse::<u64>().ok()?.saturating_add(1);
+            let prefix = format!("{next}. ");
+            if tail.trim().is_empty() {
+                return None;
+            }
+            return Some(format!("{indent}{prefix}"));
+        }
+        if let Some(tail) = rest.strip_prefix("> ") {
+            ("> ", tail)
+        } else {
+            return None;
+        }
+    };
+    if tail.trim().is_empty() {
+        return None;
+    }
+    Some(format!("{indent}{marker}"))
+}
+
+/// 在包含 `caret_char`（GtkTextBuffer 字符偏移）的行首定位任务勾选框并翻转。
+/// 返回 `(char_start, char_end, replacement)`，字符偏移相对整段文本。
+pub fn task_toggle_at(text: &str, caret_char: usize) -> Option<(usize, usize, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let caret = caret_char.min(chars.len());
+    let mut line_start = 0usize;
+    for idx in (0..caret).rev() {
+        if chars[idx] == '\n' {
+            line_start = idx + 1;
+            break;
+        }
+    }
+    let mut line_end = chars.len();
+    for (idx, ch) in chars.iter().enumerate().skip(caret) {
+        if *ch == '\n' {
+            line_end = idx;
+            break;
+        }
+    }
+    let line: String = chars[line_start..line_end].iter().collect();
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    // 仅识别行首标记，避免误改正文中的字面量。
+    let open = ["- [ ] ", "- [x] ", "- [X] "]
+        .into_iter()
+        .find(|prefix| rest.starts_with(prefix))?;
+    let start = line_start + line[..indent].chars().count();
+    let end = start + open.chars().count();
+    let replacement = if open == "- [ ] " { "- [x] " } else { "- [ ] " };
+    Some((start, end, replacement.to_string()))
+}
+
+/// 在文本中按 ASCII 大小写不敏感查找全部匹配，返回字符偏移区间（供 GtkTextBuffer 使用）。
+pub fn find_char_ranges(haystack: &str, needle: &str, limit: usize) -> Vec<(usize, usize)> {
+    if needle.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let needle_chars: Vec<char> = needle.chars().collect();
+    let width = needle_chars.len();
+    let chars: Vec<char> = haystack.chars().collect();
+    let mut found = Vec::new();
+    let mut index = 0usize;
+    while index + width <= chars.len() {
+        let hit = chars[index..index + width]
+            .iter()
+            .zip(&needle_chars)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b));
+        if hit {
+            found.push((index, index + width));
+            if found.len() >= limit {
+                break;
+            }
+            index += width;
+        } else {
+            index += 1;
+        }
+    }
+    found
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct SmokeHeading {
     pub level: u8,
@@ -556,6 +712,40 @@ pub struct SmokeReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_continuation_and_task_toggle_follow_markdown_prefixes() {
+        assert_eq!(line_list_continuation("  - 已有内容"), Some("  - ".into()));
+        assert_eq!(line_list_continuation("1. 第一项"), Some("2. ".into()));
+        assert_eq!(
+            line_list_continuation("- [x] 完成项"),
+            Some("- [ ] ".into())
+        );
+        assert_eq!(line_list_continuation("-   "), None);
+        assert_eq!(line_list_continuation("普通段落"), None);
+
+        let text = "# 标题\n- [ ] 待办\n- [x] 已完成\n";
+        assert_eq!(task_toggle_at(text, 8), Some((5, 11, "- [x] ".into())));
+        // 第二行的完成项反向翻转。
+        let second = text.find("已完成").unwrap();
+        assert_eq!(
+            task_toggle_at(text, text[..second].chars().count()),
+            Some((14, 20, "- [ ] ".into()))
+        );
+        assert_eq!(task_toggle_at("没有任何任务", 2), None);
+    }
+
+    #[test]
+    fn find_char_ranges_is_ascii_case_insensitive_across_cjk() {
+        let text = "Hortus 中文 Search 搜索 search";
+        let ranges = find_char_ranges(text, "search", 10);
+        assert_eq!(ranges.len(), 2);
+        let chars: Vec<char> = text.chars().collect();
+        let first: String = chars[ranges[0].0..ranges[0].1].iter().collect();
+        assert_eq!(first, "Search");
+        assert!(find_char_ranges("abc", "", 10).is_empty());
+        assert_eq!(find_char_ranges("aaa", "aa", 10), vec![(0, 2)]);
+    }
 
     #[test]
     fn cli_options_parse_and_reject_invalid_values() {

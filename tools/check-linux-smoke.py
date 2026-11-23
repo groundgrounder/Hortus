@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Linux 端自动化合规、静态二进制审计、CLI/GUI 冒烟与原型截图检查。"""
 import argparse
+import atexit
 import hashlib
 import json
 import os
@@ -50,6 +51,52 @@ EXACT_VERSION_RE = re.compile(r"^=\d+\.\d+\.\d+(?:[-+].+)?$")
 def check(condition, message):
     if not condition:
         raise AssertionError(message)
+
+def start_private_display():
+    """在私有 Xvfb 中运行 GUI：测试窗口不出现在真实桌面，也不抢焦点。"""
+    explicit = os.environ.get("HORTUS_TEST_DISPLAY")
+    if explicit:
+        os.environ["DISPLAY"] = explicit
+        os.environ["GDK_BACKEND"] = "x11"
+        os.environ["GSK_RENDERER"] = "cairo"
+        return None
+    xvfb = shutil.which("Xvfb")
+    check(
+        xvfb is not None,
+        "需要 Xvfb 以离屏运行 GUI（在 nix develop 中提供；或设置 HORTUS_TEST_DISPLAY 复用现有显示）",
+    )
+    number = None
+    for candidate in range(90, 140):
+        if not Path(f"/tmp/.X11-unix/X{candidate}").exists():
+            number = candidate
+            break
+    check(number is not None, "找不到空闲的 X 显示编号")
+    proc = subprocess.Popen(
+        [xvfb, f":{number}", "-screen", "0", "1600x1000x24", "-nolisten", "tcp"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    socket = Path(f"/tmp/.X11-unix/X{number}")
+    for _ in range(200):
+        if socket.exists():
+            break
+        time.sleep(0.05)
+    check(socket.exists(), "Xvfb 未在 10s 内就绪")
+    os.environ["DISPLAY"] = f":{number}"
+    os.environ["GDK_BACKEND"] = "x11"
+    os.environ["GSK_RENDERER"] = "cairo"
+    os.environ["NO_AT_BRIDGE"] = "1"
+
+    def _stop():
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    atexit.register(_stop)
+    return proc
+
 
 
 def tracked_public_files(root):
@@ -592,6 +639,7 @@ def main():
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     media_dir = (args.media if args.media is not None else output_dir / "media").resolve()
+    start_private_display()
 
     gui_bin = discover_binary(
         args.gui_bin,
