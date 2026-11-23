@@ -145,7 +145,7 @@ impl PanelPlacement {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CliOptions {
     pub vault: Option<PathBuf>,
     pub open_notes: Vec<String>,
@@ -154,7 +154,11 @@ pub struct CliOptions {
     pub color_scheme: Option<ColorSchemeChoice>,
     pub overview: bool,
     pub hide_top_bar: bool,
+    pub edit_mode: bool,
+    pub focus_diagram: Option<u32>,
+    pub scroll_fraction: Option<f64>,
     pub smoke_json: Option<PathBuf>,
+    pub reading_json: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
     pub quit_after_ms: Option<u64>,
     pub show_help: bool,
@@ -214,9 +218,37 @@ impl CliOptions {
                 "--hide-top-bar" => {
                     options.hide_top_bar = true;
                 }
+                "--edit" => {
+                    options.edit_mode = true;
+                }
+                "--focus-diagram" => {
+                    let value = iter
+                        .next()
+                        .ok_or("--focus-diagram 需要提供图块序号（从 1 开始）")?;
+                    let parsed = value
+                        .parse::<u32>()
+                        .map_err(|_| format!("--focus-diagram 参数无效：{value}"))?;
+                    if parsed == 0 {
+                        return Err("--focus-diagram 序号须 >= 1".into());
+                    }
+                    options.focus_diagram = Some(parsed);
+                }
+                "--scroll-fraction" => {
+                    let value = iter
+                        .next()
+                        .ok_or("--scroll-fraction 需要提供 0..1 浮点数")?;
+                    let parsed = value
+                        .parse::<f64>()
+                        .map_err(|_| format!("--scroll-fraction 参数无效：{value}"))?;
+                    options.scroll_fraction = Some(parsed.clamp(0.0, 1.0));
+                }
                 "--smoke-json" => {
                     let value = iter.next().ok_or("--smoke-json 需要提供输出路径")?;
                     options.smoke_json = Some(PathBuf::from(value));
+                }
+                "--reading-json" => {
+                    let value = iter.next().ok_or("--reading-json 需要提供输出路径")?;
+                    options.reading_json = Some(PathBuf::from(value));
                 }
                 "--screenshot" => {
                     let value = iter.next().ok_or("--screenshot 需要提供输出 PNG 路径")?;
@@ -244,7 +276,11 @@ impl CliOptions {
   --color-scheme <模式>      主题：light | dark | system
   --overview                 初始打开 AdwTabOverview 标签全景网格
   --hide-top-bar             初始隐藏顶栏
-  --smoke-json <路径>        运行原生行为自检并导出 JSON 后退出
+  --edit                     打开首篇笔记后切入编辑模式
+  --focus-diagram <序号>     打开首篇笔记后进入指定图表专注模式
+  --scroll-fraction <比例>   截图或导出前滚动到指定纵向比例 (0..1)
+  --smoke-json <路径>        运行 L0 行为自检并导出 JSON 后退出
+  --reading-json <路径>      运行 L1 阅读态与场景完整自检并导出 JSON 后退出
   --screenshot <路径>        渲染完成后导出窗口 PNG 截图后退出
   --quit-after-ms <毫秒>     到达延迟后退出"
     }
@@ -305,6 +341,58 @@ pub fn utf16_range_to_char_range(
         chars += 1;
     }
     (char_start.unwrap_or(chars), chars)
+}
+
+/// 从源码中提取给定 UTF-16 起点与长度的切片。
+pub fn utf16_slice(text: &str, start_utf16: usize, length_utf16: usize) -> Option<String> {
+    let mapper = Utf16Mapper::new(text);
+    let b0 = mapper.utf16_to_byte(start_utf16);
+    let b1 = mapper.utf16_to_byte(start_utf16.saturating_add(length_utf16));
+    text.get(b0..b1).map(str::to_string)
+}
+
+/// 线性预扫描一次字符串，提供 O(log N) 精确 UTF-16 ↔ Unicode char ↔ UTF-8 byte 索引转换。
+pub struct Utf16Mapper {
+    utf16_offsets: Vec<usize>,
+    byte_offsets: Vec<usize>,
+}
+
+impl Utf16Mapper {
+    pub fn new(text: &str) -> Self {
+        let mut utf16_offsets = Vec::with_capacity(text.chars().count() + 1);
+        let mut byte_offsets = Vec::with_capacity(utf16_offsets.capacity());
+        let mut u16 = 0usize;
+        for (b, ch) in text.char_indices() {
+            utf16_offsets.push(u16);
+            byte_offsets.push(b);
+            u16 += ch.len_utf16();
+        }
+        utf16_offsets.push(u16);
+        byte_offsets.push(text.len());
+        Self {
+            utf16_offsets,
+            byte_offsets,
+        }
+    }
+
+    pub fn utf16_to_char(&self, target_utf16: usize) -> usize {
+        self.utf16_offsets
+            .partition_point(|&u| u < target_utf16)
+            .min(self.utf16_offsets.len().saturating_sub(1))
+    }
+
+    pub fn utf16_to_byte(&self, target_utf16: usize) -> usize {
+        let idx = self.utf16_to_char(target_utf16);
+        self.byte_offsets[idx]
+    }
+
+    pub fn byte_to_utf16(&self, target_byte: usize) -> usize {
+        let idx = self
+            .byte_offsets
+            .partition_point(|&b| b < target_byte)
+            .min(self.utf16_offsets.len().saturating_sub(1));
+        self.utf16_offsets[idx]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

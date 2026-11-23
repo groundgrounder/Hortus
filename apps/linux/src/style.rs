@@ -65,6 +65,89 @@ const APP_CSS: &str = r#"
     background-color: alpha(@accent_bg_color, 0.16);
     color: @accent_color;
 }
+
+.hortus-reading-view,
+.hortus-embedded-reading-view {
+    font-size: 15px;
+    line-height: 1.58;
+    background-color: transparent;
+    color: @view_fg_color;
+}
+
+.hortus-diagram-card {
+    border-radius: 10px;
+    border: 1px solid alpha(currentColor, 0.10);
+    background-color: alpha(currentColor, 0.02);
+    padding: 4px;
+}
+
+.hortus-diagram-tools {
+    background-color: alpha(@window_bg_color, 0.86);
+    border: 1px solid alpha(currentColor, 0.12);
+    border-radius: 999px;
+    padding: 2px;
+}
+
+.hortus-diagram-fallback,
+.hortus-math-fallback,
+.hortus-media-placeholder {
+    border-radius: 8px;
+    border: 1px solid alpha(currentColor, 0.14);
+    background-color: alpha(currentColor, 0.04);
+    padding: 10px 12px;
+}
+
+.hortus-fallback-code {
+    background-color: transparent;
+    font-size: 0.90em;
+}
+
+.hortus-embed-card {
+    border-radius: 10px;
+    border: 1px solid alpha(currentColor, 0.12);
+    border-left: 3px solid alpha(@accent_bg_color, 0.55);
+    background-color: alpha(currentColor, 0.03);
+    padding: 8px 10px;
+}
+
+.hortus-embed-header {
+    padding: 2px 4px;
+    font-weight: 600;
+    font-size: 0.92em;
+}
+
+.hortus-table-wrap {
+    border-radius: 8px;
+    border: 1px solid alpha(currentColor, 0.10);
+    background-color: alpha(currentColor, 0.015);
+}
+
+.hortus-table-header-cell {
+    border-bottom: 1px solid alpha(currentColor, 0.18);
+    background-color: alpha(currentColor, 0.04);
+}
+
+.hortus-table-body-cell {
+    border-bottom: 1px solid alpha(currentColor, 0.08);
+}
+
+.hortus-table-cell-text {
+    background-color: transparent;
+}
+
+.hortus-focus-overlay {
+    background-color: @window_bg_color;
+}
+
+.hortus-focus-bar {
+    padding: 6px 10px;
+    background-color: @headerbar_bg_color;
+}
+
+.hortus-reading-hr {
+    margin: 6px 0px;
+    opacity: 0.55;
+}
 "#;
 
 pub fn install_css() {
@@ -173,8 +256,99 @@ pub fn create_tag_table() -> gtk4::TextTagTable {
             .scale(0.92)
             .build(),
     );
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("unresolved_link")
+            .foreground_rgba(&gdk::RGBA::new(0.55, 0.57, 0.62, 0.85))
+            .underline(pango::Underline::Single)
+            .build(),
+    );
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("callout_block")
+            .paragraph_background_rgba(&gdk::RGBA::new(0.21, 0.52, 0.89, 0.08))
+            .left_margin(10)
+            .right_margin(10)
+            .build(),
+    );
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("quote_block")
+            .left_margin(16)
+            .foreground_rgba(&gdk::RGBA::new(0.45, 0.48, 0.52, 0.90))
+            .build(),
+    );
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("task")
+            .foreground_rgba(&gdk::RGBA::new(0.21, 0.52, 0.89, 1.0))
+            .weight(600)
+            .build(),
+    );
 
     table
+}
+
+pub fn apply_mask_tags(
+    buffer: &gtk4::TextBuffer,
+    s: &gtk4::TextIter,
+    e: &gtk4::TextIter,
+    mask: u32,
+) {
+    let heading = (mask >> 24) & 0xff;
+    if (1..=6).contains(&heading) {
+        buffer.apply_tag_by_name(&format!("h{heading}"), s, e);
+    }
+    if mask & 1 != 0 {
+        buffer.apply_tag_by_name("marker", s, e);
+    }
+    if mask & 2 != 0 {
+        buffer.apply_tag_by_name("strong", s, e);
+    }
+    if mask & 4 != 0 {
+        buffer.apply_tag_by_name("emphasis", s, e);
+    }
+    if mask & 8 != 0 {
+        buffer.apply_tag_by_name("strike", s, e);
+    }
+    if mask & 16 != 0 {
+        buffer.apply_tag_by_name("code", s, e);
+    }
+    if mask & (32 | 65536) != 0 {
+        buffer.apply_tag_by_name("codeblock", s, e);
+    }
+    if mask & 64 != 0 {
+        buffer.apply_tag_by_name("quote_block", s, e);
+    }
+    if mask & 128 != 0 {
+        if mask & (1 << 19) != 0 {
+            buffer.apply_tag_by_name("unresolved_link", s, e);
+        } else {
+            buffer.apply_tag_by_name("link", s, e);
+        }
+    }
+    if mask & 512 != 0 {
+        buffer.apply_tag_by_name("tag", s, e);
+    }
+    if mask & 1024 != 0 {
+        buffer.apply_tag_by_name("highlight", s, e);
+    }
+    if mask & 2048 != 0 {
+        buffer.apply_tag_by_name("comment", s, e);
+    }
+    if mask & 4096 != 0 {
+        buffer.apply_tag_by_name("callout", s, e);
+        buffer.apply_tag_by_name("callout_block", s, e);
+    }
+    if mask & 8192 != 0 {
+        buffer.apply_tag_by_name("tag", s, e);
+    }
+    if mask & 16384 != 0 {
+        buffer.apply_tag_by_name("frontmatter", s, e);
+    }
+    if mask & 131072 != 0 {
+        buffer.apply_tag_by_name("task", s, e);
+    }
 }
 
 pub fn apply_source_styles(buffer: &gtk4::TextBuffer, text: &str, packed_runs: &[u8]) {

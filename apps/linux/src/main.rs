@@ -3,6 +3,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod core;
+mod diagram_render;
+mod embed_render;
+mod focus;
+mod fonts;
+mod math_render;
+mod media_render;
+mod pangocairo_ffi;
+mod reading;
 mod style;
 mod tree;
 mod window;
@@ -15,6 +23,7 @@ use libadwaita as adw;
 use std::cell::RefCell;
 
 fn main() -> std::process::ExitCode {
+    fonts::mark_main_thread();
     let options = match CliOptions::parse(std::env::args()) {
         Ok(opts) => opts,
         Err(err) => {
@@ -32,12 +41,16 @@ fn main() -> std::process::ExitCode {
     let flags = if options.vault.is_some()
         || !options.open_notes.is_empty()
         || options.smoke_json.is_some()
+        || options.reading_json.is_some()
         || options.screenshot.is_some()
         || options.color_scheme.is_some()
         || options.width.is_some()
         || options.height.is_some()
         || options.overview
         || options.hide_top_bar
+        || options.edit_mode
+        || options.focus_diagram.is_some()
+        || options.scroll_fraction.is_some()
     {
         gio::ApplicationFlags::NON_UNIQUE
     } else {
@@ -52,6 +65,7 @@ fn main() -> std::process::ExitCode {
     app.set_accels_for_action("win.open-vault", &["<Control>o"]);
     app.set_accels_for_action("win.close-tab", &["<Control>w"]);
     app.set_accels_for_action("win.toggle-edit-mode", &["<Control>e"]);
+    app.set_accels_for_action("win.focus-diagram", &["<Control><Shift>d"]);
     app.set_accels_for_action("win.toggle-left-sidebar", &["<Control><Shift>s"]);
     app.set_accels_for_action("win.toggle-right-sidebar", &["<Control><Shift>i"]);
     app.set_accels_for_action("win.toggle-bottom-panel", &["<Control>j"]);
