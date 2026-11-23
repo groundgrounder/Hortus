@@ -46,6 +46,15 @@ struct DiagramExportAndLinksTests {
         #expect(!svg.contains("href="))
     }
 
+    @Test func svgExportEngineInitializesOnItsActorAtFirstRender() async throws {
+        let engine = DiagramSVGEngine()
+        #expect(await engine.inspectionInitializedOnMain == nil)
+        let svg = try await engine.render(source: source, mmd: true, block: 1, width: 700,
+                                          dark: false, collapsed: [])
+        #expect(svg.hasPrefix("<svg"))
+        #expect(await engine.inspectionInitializedOnMain == false)
+    }
+
     @Test func pngUsesTwoTimesRetinaPixels() throws {
         let prepared = try prepared(source)
         let png = try #require(DiagramExport.renderPNG(prepared: prepared))

@@ -166,8 +166,19 @@ import Testing
         #expect(link == "Target.md")
         #expect(tag == "sampletag")
 
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let sendItem = NSMenuItem(title: "Send Selection", action: nil, keyEquivalent: "l")
+        sendItem.keyEquivalentModifierMask = [.control, .command, .shift]
+        menu.addItem(sendItem)
+        let previousMenu = NSApp.mainMenu
+        NSApp.mainMenu = menu
+        defer { NSApp.mainMenu = previousMenu }
+        host.window.makeKey()
         #expect(host.window.makeFirstResponder(view))
         view.setSelectedRange(linkRange)
+        SendToTerminalMenuState.sync(workspace: workspace)
+        #expect(sendItem.isEnabled)
         let selection = try #require(SendToTerminalSelection.current(in: workspace, window: host.window))
         #expect(selection.path == "Child.md")
         #expect(selection.text == "Target")
@@ -177,6 +188,8 @@ import Testing
         view.setSelectedRange(NSRange(location: linkRange.location, length: 0))
         #expect(host.view.selectedRange().length == 4)
         #expect(SendToTerminalSelection.current(in: workspace, window: host.window) == nil)
+        SendToTerminalMenuState.sync(workspace: workspace)
+        #expect(!sendItem.isEnabled)
         await host.close()
     }
 

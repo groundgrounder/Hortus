@@ -52,12 +52,20 @@ struct DiagramExportRequest {
 }
 
 /// 导出专用引擎：避免主线程承担字体预热与全文重排版。
-private actor DiagramSVGEngine {
+actor DiagramSVGEngine {
     private var engine: DiagramEngine?
+    #if DEBUG
+    private(set) var inspectionInitializedOnMain: Bool?
+    #endif
 
     func render(source: String, mmd: Bool, block: UInt32, width: Double, dark: Bool,
                 collapsed: [String]) throws -> String {
-        if engine == nil { engine = try DiagramEngine() }
+        if engine == nil {
+            #if DEBUG
+            inspectionInitializedOnMain = Thread.isMainThread
+            #endif
+            engine = try? DiagramEngine()
+        }
         guard let engine else { throw DiagramExportError.render }
         return try engine.renderSvg(source: source, mmd: mmd, block: block,
                                     width: width, dark: dark, collapsed: collapsed)
