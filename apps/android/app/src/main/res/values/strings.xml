@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<resources>
+    <string name="app_name">Hortus</string>
+    <string name="permission_title">Allow access to your notes</string>
+    <string name="permission_body">Hortus opens Markdown folders directly in shared storage. Allow all files access to read and save your notes.</string>
+    <string name="permission_grant_action">Grant storage access</string>
+    <string name="vault_path">Vault folder path</string>
+    <string name="open_vault">Open vault</string>
+    <string name="section_foundation_status">Core checks</string>
+    <string name="section_notes_list">Notes</string>
+    <string name="status_running">Running core checks…</string>
+    <string name="status_pass">Passed</string>
+    <string name="status_fail">Failed</string>
+    <string name="status_pending">Pending</string>
+    <string name="check_vault_scan">Vault scan</string>
+    <string name="note_count">%1$d notes</string>
+    <string name="check_mermaid">Mermaid layout</string>
+    <string name="diagram_count">%1$d diagram types</string>
+    <string name="check_math">RaTeX layout</string>
+    <string name="check_fonts">Font width difference</string>
+    <string name="font_difference">%1$.2f px max</string>
+    <string name="check_atomic_save">Atomic save</string>
+    <string name="test_save_copy">Test save on a copy</string>
+    <string name="check_error">The checks could not finish. Try opening the folder again.</string>
+    <string name="empty_notes">No Markdown notes found in this vault.</string>
+    <string name="note_preview_close">Close</string>
+    <string name="preview_error">This note could not be opened.</string>
+</resources>

@@ -34,3 +34,9 @@ fixtures/mermaid/tree/
 
 # macOS 构建命令生成的 UniFFI 绑定
 apps/macos/Generated/
+
+# Android 构建与生成目录
+apps/android/.gradle/
+apps/android/.kotlin/
+apps/android/build/
+apps/android/app/build/

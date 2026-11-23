@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<resources>
+    <string name="app_name">Hortus</string>
+    <string name="permission_title">允许访问笔记</string>
+    <string name="permission_body">Hortus 直接打开共享存储中的 Markdown 文件夹。请授予所有文件访问权限，以读取和保存笔记。</string>
+    <string name="permission_grant_action">授予存储访问权限</string>
+    <string name="vault_path">笔记库文件夹路径</string>
+    <string name="open_vault">打开笔记库</string>
+    <string name="section_foundation_status">内核验证</string>
+    <string name="section_notes_list">笔记</string>
+    <string name="status_running">正在验证内核…</string>
+    <string name="status_pass">通过</string>
+    <string name="status_fail">失败</string>
+    <string name="status_pending">待测试</string>
+    <string name="check_vault_scan">笔记库扫描</string>
+    <string name="note_count">%1$d 篇笔记</string>
+    <string name="check_mermaid">Mermaid 排版</string>
+    <string name="diagram_count">%1$d 类图</string>
+    <string name="check_math">RaTeX 排版</string>
+    <string name="check_fonts">字体字宽偏差</string>
+    <string name="font_difference">最大 %1$.2f px</string>
+    <string name="check_atomic_save">原子保存</string>
+    <string name="test_save_copy">用副本测试保存</string>
+    <string name="check_error">验证未能完成，请重新打开文件夹。</string>
+    <string name="empty_notes">笔记库中没有找到 Markdown 笔记。</string>
+    <string name="note_preview_close">关闭</string>
+    <string name="preview_error">无法打开这篇笔记。</string>
+</resources>
