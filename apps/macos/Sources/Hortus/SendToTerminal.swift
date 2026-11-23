@@ -185,8 +185,8 @@ enum SendToTerminalMenuState {
 
     static func sync(workspace: Workspace) {
         let noteOpen = workspace.current != nil
-        let window = NSApp.keyWindow
-            ?? workspace.application?.records.first(where: { $0.workspace === workspace })?.window
+        let window = workspace.application?.records.first(where: { $0.workspace === workspace })?.window
+            ?? NSApp.keyWindow
         let hasSelection = SendToTerminalSelection.current(in: workspace, window: window) != nil
         setEnabled(noteOpen, item: pathItem())
         setEnabled(noteOpen && hasSelection, item: selectionItem())

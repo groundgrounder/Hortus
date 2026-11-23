@@ -132,7 +132,11 @@ import Testing
         }
         let host = try EditingTests.Fixture("host old selection")
         try await host.ready()
-        let workspace = Workspace()
+        let application = ApplicationWorkspace()
+        application.core = host.core
+        application.configure(application.initial)
+        application.initial.window = host.window
+        let workspace = application.initial.workspace
         workspace.tabs = [NoteTab(path: host.path, document: host.document, loading: false)]
         workspace.selected = host.path
         host.view.setSelectedRange(NSRange(location: 0, length: 4))
