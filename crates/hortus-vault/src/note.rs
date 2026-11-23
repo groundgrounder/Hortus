@@ -198,6 +198,8 @@ pub fn atomic_replace(
     if path.exists() && !writable(path) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "note.not_writable").into());
     }
+    #[cfg(target_os = "android")]
+    let shared_staging_allowed = android_cache_to_shared_vault(&temporary, &vault);
     let mut staged = tempfile::NamedTempFile::new_in(temporary)?;
     staged.write_all(bytes)?;
     #[cfg(target_os = "macos")]
@@ -238,6 +240,23 @@ pub fn atomic_replace(
         });
     }
     if baseline.is_some() {
+        #[cfg(target_os = "android")]
+        if let Err(error) = fs::rename(staged.path(), path) {
+            // Android 的应用外部缓存和共享目录即使 st_dev 相同，也可能禁止跨区重命名。
+            if error.kind() != io::ErrorKind::CrossesDevices || !shared_staging_allowed {
+                return Err(error.into());
+            }
+            drop(staged);
+            let replacement = tempfile::Builder::new()
+                .prefix(".hortus-save-")
+                .tempdir_in(
+                    vault
+                        .parent()
+                        .ok_or_else(|| io::Error::other("note.missing_parent"))?,
+                )?;
+            return atomic_replace(path, bytes, baseline, replacement.path(), &vault, None);
+        }
+        #[cfg(not(target_os = "android"))]
         fs::rename(staged.path(), path)?;
     } else {
         publish_new(staged.path(), path)?;
@@ -249,6 +268,26 @@ pub fn atomic_replace(
     // 目录同步让已完成的替换尽可能经受断电；不支持目录 fsync 的平台不把成功保存降为失败。
     let _ = fs::File::open(parent).and_then(|file| file.sync_all());
     Ok(DiskVersion::new(bytes.to_vec()))
+}
+
+#[cfg(target_os = "android")]
+fn android_cache_to_shared_vault(temporary: &Path, vault: &Path) -> bool {
+    let Some(data) = temporary.parent().and_then(Path::parent) else {
+        return false;
+    };
+    let Some(android) = data.parent() else {
+        return false;
+    };
+    let Some(volume) = android.parent() else {
+        return false;
+    };
+    temporary.file_name().is_some_and(|name| name == "cache")
+        && data.file_name().is_some_and(|name| name == "data")
+        && android.file_name().is_some_and(|name| name == "Android")
+        && volume.parent() == Some(Path::new("/storage/emulated"))
+        && vault.starts_with(volume)
+        && vault != volume
+        && !vault.starts_with(android)
 }
 
 fn publish_new(staged: &Path, path: &Path) -> Result<(), WriteFailure> {
