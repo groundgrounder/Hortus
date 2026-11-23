@@ -4,16 +4,17 @@ mod query;
 
 use hortus_diagram::{
     Diagram, LayoutOptions, SystemFonts, Theme, layout, layout_class, layout_er, layout_graph,
-    layout_sequence, layout_state, mermaid_block,
+    layout_sequence, layout_state,
 };
+use hortus_vault::note::Format;
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 
 const USAGE: &str = "Usage: hortus guide
        hortus mcp [--vault DIR]
-       hortus mermaid render <note.md> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json] [--scene scene.json]
-       hortus mermaid check <note.md> [--block N]
+       hortus mermaid render <note.md|diagram.mmd> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json] [--scene scene.json]
+       hortus mermaid check <note.md|diagram.mmd> [--block N]
        hortus search <query> [--vault DIR] [--limit N]
        hortus backlinks <note> [--vault DIR]
        hortus links <note> [--vault DIR]
@@ -352,9 +353,20 @@ fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("Input, SVG, and metrics must use different files".into());
     }
-    let markdown = std::fs::read_to_string(&input)?;
-    let block = mermaid_block(&markdown, args.block)?;
-    let diagram = block.parse_diagram()?;
+    let mmd = hortus_links::is_mmd_path(&args.input.to_string_lossy());
+    let text = if mmd {
+        let bytes = std::fs::read(&input)?;
+        let (_, text, valid) = Format::decode(&bytes);
+        if !valid {
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8").into(),
+            );
+        }
+        text
+    } else {
+        std::fs::read_to_string(&input)?
+    };
+    let diagram = mermaid_check::diagram_block(&text, mmd, args.block)?.parse()?;
     let mut fonts = SystemFonts::new()?;
     let scene = match diagram {
         Diagram::Tree(tree) => layout(&tree, &args.options, &mut fonts)?,

@@ -407,3 +407,126 @@ fn embed_resolution_never_writes_to_the_vault() {
     assert_eq!(fs::read_dir(&root).unwrap().count(), 3);
     handle.close();
 }
+
+#[test]
+fn embed_cycles_use_exact_normalized_paths() {
+    let (_temporary, _root, handle) = fixture(&[("a.md", b"![[b]]"), ("b.md", b"![[a]]")]);
+    let resolve = |source: &str, target: &str, ancestors| {
+        handle
+            .resolve_embed(
+                source.into(),
+                target.into(),
+                None,
+                None,
+                ancestors,
+                3,
+                700.0,
+                15.0,
+            )
+            .unwrap()
+    };
+    // Supply the source spelling directly to simulate a case-sensitive vault.
+    let distinct = resolve("./A.md", "a.md", vec![]);
+    assert_eq!(distinct.resolved_path.as_deref(), Some("a.md"));
+    assert_eq!(distinct.kind, "note");
+    assert_eq!(resolve("a.md", "b", vec![]).kind, "note");
+    assert_eq!(resolve("b.md", "a", vec!["/./a.md".into()]).kind, "cycle");
+    assert_eq!(resolve("./a.md", "A.md", vec![]).kind, "cycle");
+    assert_eq!(resolve("./a.md", "", vec![]).kind, "cycle");
+    handle.close();
+}
+
+#[test]
+fn embed_block_and_run_utf16_offsets_match_nested_multiblock_content() {
+    let raw = concat!(
+        "# 图解🧭\r\n\r\n",
+        "正文 **粗体😀** 和 [[base|引述🚀]]。\r\n\r\n",
+        "> 引用🪶\r\n>\r\n> - 内层 **文字🎈**\r\n",
+        ">   - 次层 \u{60}代码🔎\u{60}\r\n\r\n",
+        "\u{60}\u{60}\u{60}mermaid\r\nflowchart TB\r\nA --> B\r\n\u{60}\u{60}\u{60}\r\n\r\n",
+        "结尾 ![[base]]。\r\n",
+    );
+    let (_temporary, _root, handle) =
+        fixture(&[("base.md", b"Base"), ("blocks.md", raw.as_bytes())]);
+    let result = handle
+        .resolve_embed(
+            "base.md".into(),
+            "blocks".into(),
+            None,
+            None,
+            vec![],
+            3,
+            700.0,
+            15.0,
+        )
+        .unwrap();
+    assert_eq!(result.kind, "note");
+    let normalized = raw.replace("\r\n", "\n");
+    assert_eq!(result.content, normalized);
+    let model = hortus_document::Document::new(&normalized)
+        .reading(false)
+        .unwrap();
+    assert!(model.blocks.len() >= 5);
+    assert_eq!(result.blocks.len(), model.blocks.len());
+    let utf16 = |s: &str| s.encode_utf16().count() as u64;
+    let mut display_start = 0;
+    let mut run_count = 0;
+    let mut found_bold = false;
+    for (actual, block) in result.blocks.iter().zip(&model.blocks) {
+        let start = actual.source_start_byte as usize;
+        let end = start + actual.source_length_byte as usize;
+        let body = &normalized[start..end];
+        let body_utf16 = body.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(actual.source_start_utf16, utf16(&normalized[..start]));
+        assert_eq!(actual.source_length_utf16, utf16(body));
+        assert_eq!(actual.source_start_utf16, block.source.start as u64);
+        assert_eq!(actual.source_length_utf16, block.source.len() as u64);
+        assert_eq!(actual.display_start, display_start);
+        assert_eq!(actual.display_length, utf16(&block.content.text));
+        assert_eq!(actual.runs.len(), block.content.runs.len());
+        for (actual, run) in actual.runs.iter().zip(&block.content.runs) {
+            assert_eq!(actual.start, run.display.start as u64);
+            assert_eq!(actual.length, run.display.len() as u64);
+            assert_eq!(actual.source_start_utf16, run.source.start as u64);
+            assert_eq!(actual.source_length_utf16, run.source.len() as u64);
+            assert_eq!(actual.mask, run.mask);
+            let start = actual.source_start_utf16 as usize;
+            let end = start + actual.source_length_utf16 as usize;
+            let mapped = String::from_utf16(&body_utf16[start..end]).unwrap();
+            if mapped == "粗体😀" {
+                assert_eq!(actual.source_start_utf16, utf16("正文 **"));
+                assert_eq!(actual.source_length_utf16, 4);
+                found_bold = true;
+            }
+            run_count += 1;
+        }
+        display_start += actual.display_length;
+    }
+    assert!(found_bold && run_count > model.blocks.len());
+    assert_eq!(display_start, utf16(&result.text));
+    handle.close();
+}
+
+#[test]
+fn folder_rename_rewrites_attachment_links_without_moving_any_notes() {
+    let (_temporary, root, handle) = fixture(&[(
+        "base.md",
+        b"![[./media/picture.png]] [[/media/nested/spec.pdf#page|Spec]]",
+    )]);
+    fs::create_dir_all(root.join("media/nested")).unwrap();
+    fs::write(root.join("media/picture.png"), b"example image").unwrap();
+    fs::write(root.join("media/nested/spec.pdf"), b"example document").unwrap();
+    let plan = handle.plan_folder_rename_links("media".into(), "assets".into());
+    assert_eq!(plan.total_rewrites, 2);
+    fs::rename(root.join("media"), root.join("assets")).unwrap();
+    let result = handle
+        .apply_folder_rename_links("media".into(), "assets".into(), vec![])
+        .unwrap();
+    assert!(result.failed.is_empty());
+    assert_eq!(result.total_rewrites, 2);
+    assert_eq!(
+        fs::read_to_string(root.join("base.md")).unwrap(),
+        "![[assets/picture.png]] [[/assets/nested/spec.pdf#page|Spec]]",
+    );
+    handle.close();
+}

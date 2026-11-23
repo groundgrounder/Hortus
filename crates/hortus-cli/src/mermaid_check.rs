@@ -1,6 +1,8 @@
-//! `hortus mermaid check`: validate every Mermaid fence in a note.
+//! Validate Mermaid fences in Markdown or a standalone Mermaid diagram.
 
-use hortus_diagram::{Diagram, DiagramError, mermaid_block, mermaid_blocks};
+use hortus_diagram::{
+    Diagram, DiagramError, MermaidBlock, mermaid_block, mermaid_blocks, parse_diagram_at,
+};
 use hortus_vault::note::Format;
 use serde_json::{Value, json};
 use std::io::Write;
@@ -11,27 +13,69 @@ pub fn run(input: &Path, block: Option<usize>) -> Result<bool, String> {
     let bytes = std::fs::read(input)
         .map_err(|error| format!("unable to read {}: {error}", input.display()))?;
     let (_format, text, _valid) = Format::decode(&bytes);
-    let (valid, report) = evaluate(&text, &input.display().to_string(), block)?;
+    let file = input.to_string_lossy();
+    let (valid, report) = evaluate(&text, &file, hortus_links::is_mmd_path(&file), block)?;
     emit(&report)?;
     Ok(valid)
 }
 
-/// 对已解码的正文执行同一套校验；MCP 与命令行共用，避免两套解析。
-pub fn evaluate(text: &str, file: &str, block: Option<usize>) -> Result<(bool, Value), String> {
-    let mut entries = Vec::new();
-    if let Some(requested) = block {
-        let block = mermaid_block(text, requested).map_err(|error| match error {
-            DiagramError::MissingBlock { requested } => {
-                format!("MissingBlock: requested={requested}")
-            }
-            other => other.to_string(),
-        })?;
-        entries.push(report(text, requested, &block));
-    } else {
-        for (index, block) in mermaid_blocks(text).iter().enumerate() {
-            entries.push(report(text, index + 1, block));
+pub enum DiagramBlock<'a> {
+    Standalone(&'a str),
+    Fenced(MermaidBlock<'a>),
+}
+
+impl DiagramBlock<'_> {
+    pub fn parse(&self) -> Result<Diagram, DiagramError> {
+        match self {
+            Self::Standalone(text) => parse_diagram_at(text, 0),
+            Self::Fenced(block) => block.parse_diagram(),
         }
     }
+
+    fn source(&self) -> &str {
+        match self {
+            Self::Standalone(text) => text,
+            Self::Fenced(block) => &block.source,
+        }
+    }
+
+    fn start(&self) -> usize {
+        match self {
+            Self::Standalone(_) => 0,
+            Self::Fenced(block) => block.fence_range.start,
+        }
+    }
+}
+
+pub fn diagram_block(
+    text: &str,
+    mmd: bool,
+    requested: usize,
+) -> Result<DiagramBlock<'_>, DiagramError> {
+    match (mmd, requested) {
+        (true, 1) => Ok(DiagramBlock::Standalone(text)),
+        (true, _) => Err(DiagramError::MissingBlock { requested }),
+        (false, _) => mermaid_block(text, requested).map(DiagramBlock::Fenced),
+    }
+}
+
+/// 对已解码的正文执行同一套校验；MCP 与命令行共用，避免两套解析。
+pub fn evaluate(
+    text: &str,
+    file: &str,
+    mmd: bool,
+    block: Option<usize>,
+) -> Result<(bool, Value), String> {
+    let entries = if let Some(requested) = block.or(mmd.then_some(1)) {
+        let block = diagram_block(text, mmd, requested).map_err(|error| error.to_string())?;
+        vec![report(text, requested, &block)]
+    } else {
+        mermaid_blocks(text)
+            .into_iter()
+            .enumerate()
+            .map(|(index, block)| report(text, index + 1, &DiagramBlock::Fenced(block)))
+            .collect()
+    };
     let valid = entries
         .iter()
         .all(|entry| entry["valid"].as_bool().unwrap_or(false));
@@ -45,15 +89,15 @@ pub fn evaluate(text: &str, file: &str, block: Option<usize>) -> Result<(bool, V
     ))
 }
 
-fn report(text: &str, number: usize, block: &hortus_diagram::MermaidBlock<'_>) -> Value {
-    match block.parse_diagram() {
+fn report(text: &str, number: usize, block: &DiagramBlock<'_>) -> Value {
+    match block.parse() {
         Ok(diagram) => {
             json!({
                 "block": number,
                 "diagram_type": diagram_type(&diagram),
                 "valid": true,
                 "error_kind": Value::Null,
-                "line": line_of(text, block.fence_range.start),
+                "line": line_of(text, block.start()),
                 "message": Value::Null,
             })
         }
@@ -61,11 +105,11 @@ fn report(text: &str, number: usize, block: &hortus_diagram::MermaidBlock<'_>) -
             let line = match &error {
                 DiagramError::Syntax { range, .. }
                 | DiagramError::UnsupportedConstruct { range, .. } => range.start,
-                _ => block.fence_range.start,
+                _ => block.start(),
             };
             json!({
                 "block": number,
-                "diagram_type": infer_type(&block.source),
+                "diagram_type": infer_type(block.source()),
                 "valid": false,
                 "error_kind": error_kind(&error),
                 "line": line_of(text, line),

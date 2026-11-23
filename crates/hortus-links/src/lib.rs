@@ -153,7 +153,17 @@ pub struct FolderRenamePlan {
 
 /// Parses one note's frontmatter fields, inline tags and wiki links.
 pub fn parse_note(text: &str) -> ParsedNote {
-    parse::parse_note(text)
+    parse_note_kind(text, false)
+}
+
+/// Parses Markdown or a standalone Mermaid diagram.
+pub fn parse_note_kind(text: &str, mmd: bool) -> ParsedNote {
+    parse::parse_note_kind(text, mmd)
+}
+
+/// True for a standalone Mermaid path, regardless of the extension's case.
+pub fn is_mmd_path(path: &str) -> bool {
+    note_extension(path).is_some_and(|extension| extension.eq_ignore_ascii_case("mmd"))
 }
 
 /// Normalizes a vault-relative note path. Returns `None` for empty paths,
@@ -242,6 +252,11 @@ fn dirname(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(directory, _)| directory)
 }
 
+fn strip_directory_exact<'a>(path: &'a str, directory: &str) -> Option<&'a str> {
+    path.strip_prefix(directory)
+        .filter(|rest| rest.starts_with('/'))
+}
+
 /// 只在目录边界上匹配：`docs/guide` 命中 `docs`，`docs-extra/guide` 不命中。
 fn strip_directory<'a>(path: &'a str, directory: &str) -> Option<&'a str> {
     let prefix = path.get(..directory.len())?;
@@ -252,13 +267,15 @@ fn strip_directory<'a>(path: &'a str, directory: &str) -> Option<&'a str> {
     rest.starts_with('/').then_some(rest)
 }
 
-/// 显式路径前缀改写；保留目标原本的空格之外写法与可选前导 `/`。
-fn rewrite_directory_prefix(target: &str, old: &str, new: &str) -> Option<String> {
-    let (leading, body) = match target.strip_prefix('/') {
-        Some(rest) => ("/", rest),
-        None => ("", target),
-    };
-    let rest = strip_directory(body, old)?;
+/// 显式路径前缀改写；规范化目录段，同时保留可选的前导斜杠。
+fn rewrite_directory_prefix(target: &str, old: &str, new: &str, exact: bool) -> Option<String> {
+    let leading = if target.starts_with('/') { "/" } else { "" };
+    let body = normalize_note_path(target)?;
+    let rest = if exact {
+        strip_directory_exact(&body, old)
+    } else {
+        strip_directory(&body, old)
+    }?;
     Some(format!("{leading}{new}{rest}"))
 }
 
@@ -301,7 +318,7 @@ impl KnowledgeIndex {
         let path = normalize_note_path(&path).unwrap_or(path);
         self.remove(&path);
         let text = text.into();
-        let parsed = parse_note(&text);
+        let parsed = parse_note_kind(&text, is_mmd_path(&path));
         self.by_lower_path
             .entry(path.to_lowercase())
             .or_default()
@@ -346,7 +363,7 @@ impl KnowledgeIndex {
     }
 
     pub fn markup(&self, path: &str, text: &str) -> (Vec<ResolvedLink>, Vec<Tag>) {
-        let parsed = parse::parse_occurrences(text);
+        let parsed = parse::parse_occurrences(text, is_mmd_path(path));
         (
             parsed
                 .links
@@ -575,21 +592,15 @@ impl KnowledgeIndex {
         let mut moves = Vec::new();
         let mut mapping = BTreeMap::new();
         for path in self.notes.keys() {
-            let Some(rest) = strip_directory(path, &old) else {
+            let Some(rest) = strip_directory_exact(path, &old) else {
                 continue;
             };
-            if !rest.starts_with('/') {
-                continue;
-            }
             let new_path = format!("{new}{rest}");
             mapping.insert(path.clone(), new_path.clone());
             moves.push(FolderMove {
                 old_path: path.clone(),
                 new_path,
             });
-        }
-        if moves.is_empty() {
-            return FolderRenamePlan::default();
         }
         let mapped = |path: &str| {
             mapping
@@ -605,32 +616,44 @@ impl KnowledgeIndex {
         for (source, entry) in &self.notes {
             let next_source = mapped(source);
             for link in &entry.parsed.links {
-                let LinkResolution::Note(target) = self.resolve(source, &link.raw_target) else {
-                    continue;
-                };
-                let expected = mapped(&target);
                 let target_text = link.raw_target.trim();
-                let replacement = if mapping.contains_key(&target)
-                    && let Some(prefixed) = rewrite_directory_prefix(target_text, &old, &new)
-                {
-                    // 显式路径即使靠词干兜底仍能解析，写入的旧路径也必须跟着改。
-                    prefixed
-                } else {
-                    if next.resolve(&next_source, &link.raw_target)
-                        == LinkResolution::Note(expected.clone())
-                    {
-                        continue;
+                let replacement = match self.resolve(source, target_text) {
+                    LinkResolution::Attachment => {
+                        // 附件没有索引路径可确认身份，因此按目录原名匹配。
+                        let Some(prefixed) =
+                            rewrite_directory_prefix(target_text, &old, &new, true)
+                        else {
+                            continue;
+                        };
+                        prefixed
                     }
-                    let path = if note_extension(target_text).is_some() {
-                        expected.clone()
-                    } else {
-                        without_note_extension(&expected).to_owned()
-                    };
-                    if target_text.starts_with('/') {
-                        format!("/{path}")
-                    } else {
-                        path
+                    LinkResolution::Note(target) => {
+                        if mapping.contains_key(&target)
+                            && let Some(prefixed) =
+                                rewrite_directory_prefix(target_text, &old, &new, false)
+                        {
+                            // 显式路径即使靠词干兜底仍能解析，旧前缀也必须跟着改。
+                            prefixed
+                        } else {
+                            let expected = mapped(&target);
+                            if next.resolve(&next_source, target_text)
+                                == LinkResolution::Note(expected.clone())
+                            {
+                                continue;
+                            }
+                            let path = if note_extension(target_text).is_some() {
+                                expected
+                            } else {
+                                without_note_extension(&expected).to_owned()
+                            };
+                            if target_text.starts_with('/') {
+                                format!("/{path}")
+                            } else {
+                                path
+                            }
+                        }
                     }
+                    _ => continue,
                 };
                 if replacement == target_text {
                     continue;
@@ -763,18 +786,24 @@ impl KnowledgeIndex {
             forms.push(format!("{normalized}.markdown"));
             forms.push(format!("{normalized}.mmd"));
         }
-        let mut exact = BTreeSet::new();
+        let mut exact = forms.iter().filter(|form| self.notes.contains_key(*form));
+        if let Some(path) = exact.next()
+            && exact.next().is_none()
+        {
+            return LinkResolution::Note(path.clone());
+        }
+        let mut folded = BTreeSet::new();
         for form in &forms {
             if let Some(paths) = self.by_lower_path.get(&form.to_lowercase()) {
-                exact.extend(paths.iter().cloned());
+                folded.extend(paths.iter().cloned());
             }
         }
-        match exact.len() {
+        match folded.len() {
             1 => {
-                return LinkResolution::Note(exact.into_iter().next().unwrap_or_default());
+                return LinkResolution::Note(folded.into_iter().next().unwrap_or_default());
             }
             0 => {}
-            _ => return LinkResolution::Ambiguous(exact.into_iter().collect()),
+            _ => return LinkResolution::Ambiguous(folded.into_iter().collect()),
         }
 
         let stem = stem_of(&normalized).to_lowercase();

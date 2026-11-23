@@ -419,3 +419,140 @@ fn utf8_and_emoji_boundaries_are_safe_for_every_prefix() {
     assert!(note.links.iter().any(|link| link.in_diagram));
     assert!(note.links.iter().any(|link| link.is_attachment()));
 }
+
+#[test]
+fn standalone_mermaid_indexes_only_diagram_links() {
+    let text = concat!(
+        "---\naliases: [Graph Alias]\ntags: [fake-frontmatter]\n---\n",
+        "stateDiagram-v2\nstate check [[choice]]\n",
+        "state \"[[docs/Target#Section|Label]] #not-a-tag\" as T\n",
+        "![[image.png]]\n",
+    );
+    let index = index(&[
+        ("flow.MMD", text),
+        ("choice.md", ""),
+        ("docs/Target.md", ""),
+    ]);
+    let note = index.note("flow.MMD").unwrap();
+    assert!(note.aliases.is_empty() && note.source.is_none());
+    assert!(index.tags().is_empty());
+    assert!(index.backlinks("choice.md").unwrap().is_empty());
+    assert!(
+        index
+            .plan_rename_links("choice.md", "Renamed.md")
+            .is_empty()
+    );
+    assert_eq!(note.links.len(), 1);
+    assert!(note.links[0].in_diagram && !note.links[0].embed);
+    assert_eq!(
+        index.backlinks("docs/Target.md").unwrap()[0].source,
+        "flow.MMD"
+    );
+    let edits = index.plan_rename_links("docs/Target.md", "docs/Renamed.md");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(
+        &text[edits[0].start..edits[0].end],
+        "[[docs/Target#Section|Label]]"
+    );
+    assert_eq!(edits[0].after, "[[docs/Renamed#Section|Label]]");
+    let folder = index.plan_folder_rename_links("docs", "notes");
+    assert_eq!(folder.rewrites.len(), 1);
+    assert_eq!(folder.rewrites[0].after, "[[notes/Target#Section|Label]]");
+    let (links, tags) = index.markup("flow.MMD", text);
+    assert_eq!(links.len(), 1);
+    assert!(links[0].in_diagram && tags.is_empty());
+}
+
+#[test]
+fn folder_rename_tracks_explicit_attachments_and_exact_directory_identity() {
+    let index = index(&[
+        ("docs/a.md", ""),
+        ("Docs/b.md", ""),
+        (
+            "root.md",
+            concat!(
+                "![[docs/img.png]] [[docs/file.pdf]] [[./docs/a]] [[/docs/a]] ",
+                "![[docs//sub/pic.png]] ![[docs-extra/img.png]] ![[Docs/img.png]] ",
+                "[[Docs/b]] [[  /docs//a.md  #heading |alias ]] [[a]]",
+            ),
+        ),
+    ]);
+    let plan = index.plan_folder_rename_links("docs", "archive");
+    assert_eq!(plan.moves.len(), 1);
+    assert_eq!(plan.moves[0].old_path, "docs/a.md");
+    assert_eq!(plan.moves[0].new_path, "archive/a.md");
+    assert_eq!(
+        plan.rewrites
+            .iter()
+            .map(|edit| edit.after.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "![[archive/img.png]]",
+            "[[archive/file.pdf]]",
+            "[[archive/a]]",
+            "[[/archive/a]]",
+            "![[archive/sub/pic.png]]",
+            "[[  /archive/a.md  #heading |alias ]]",
+        ],
+    );
+    let attachments = index.plan_folder_rename_links("docs-extra", "images");
+    assert!(attachments.moves.is_empty());
+    assert_eq!(attachments.rewrites.len(), 1);
+    assert_eq!(attachments.rewrites[0].after, "![[images/img.png]]");
+}
+
+#[test]
+fn exact_case_path_wins_over_folded_candidates() {
+    let index = index(&[("a.md", ""), ("A.md", ""), ("docs/Mixed.md", "")]);
+    for (query, expected) in [
+        ("a.md", "a.md"),
+        ("A.md", "A.md"),
+        ("a", "a.md"),
+        ("./DOCS/mixed", "docs/Mixed.md"),
+    ] {
+        assert_eq!(
+            index.resolve("x.md", query),
+            LinkResolution::Note(expected.into())
+        );
+    }
+}
+
+#[test]
+fn mermaid_quote_state_resets_and_subroutine_shapes_keep_their_syntax() {
+    let text = concat!(
+        "\x60\x60\x60mermaid\nflowchart TB\nA[\"unclosed\n%% [[Comment]]\n",
+        "A[[Worker]]\nB[\"[[Worker]]\"]\nC[Go [[Worker]]]\nD([[Worker]])\n\x60\x60\x60\n",
+        "\x60\x60\x60mermaid\nmindmap\n  [[Worker]]\n\x60\x60\x60\n",
+        "\x60\x60\x60mermaid\nstateDiagram-v2\nstate \"[[Worker]]\" as s1\n\x60\x60\x60\n",
+    );
+    let index = index(&[("source.md", text), ("Worker.md", ""), ("Comment.md", "")]);
+    assert!(index.backlinks("Comment.md").unwrap().is_empty());
+    let edits = index.plan_rename_links("Worker.md", "Renamed.md");
+    assert_eq!(edits.len(), 5);
+    assert!(
+        edits
+            .iter()
+            .all(|edit| edit.after == "[[Renamed]]" && edit.line != 5)
+    );
+    assert!(
+        index
+            .note("source.md")
+            .unwrap()
+            .links
+            .iter()
+            .all(|link| link.in_diagram)
+    );
+}
+
+#[test]
+fn mermaid_wiki_link_escapes_follow_backslash_parity() {
+    let text = concat!(
+        "flowchart TB\n",
+        "A[\"\\[[Odd]]\"]\n",
+        "B[\"\\\\[[Even]]\"]\n",
+        "C[\"\\\\\\[[OddAgain]]\"]\n",
+    );
+    let parsed = hortus_links::parse_note_kind(text, true);
+    assert_eq!(parsed.links.len(), 1);
+    assert_eq!(parsed.links[0].raw_target, "Even");
+}

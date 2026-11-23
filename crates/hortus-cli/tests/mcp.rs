@@ -477,3 +477,74 @@ fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<String, (u64, u128)
         }
     }
 }
+
+#[test]
+fn standalone_mermaid_checks_report_one_real_block() {
+    let fixture = Fixture::new();
+    write(
+        &fixture.vault().join("valid.mmd"),
+        "stateDiagram-v2\n[*] --> A\n",
+    );
+    write(
+        &fixture.vault().join("invalid.mmd"),
+        "stateDiagram-v2\nstate A {\n",
+    );
+    let mut server = fixture.start();
+    for (note, valid) in [("valid.mmd", true), ("invalid.mmd", false)] {
+        for block in [json!({ "note": note }), json!({ "note": note, "block": 1 })] {
+            let response = server.call("hortus_mermaid_check", block);
+            let report = structured(&response);
+            assert_eq!(report["valid"], valid);
+            let blocks = report["blocks"].as_array().unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0]["block"], 1);
+            assert_eq!(blocks[0]["diagram_type"], "state");
+            assert_eq!(blocks[0]["valid"], valid);
+            if !valid {
+                assert_eq!(blocks[0]["error_kind"], "syntax");
+                assert!(!blocks[0]["message"].as_str().unwrap().is_empty());
+            }
+        }
+    }
+    let missing = server.call(
+        "hortus_mermaid_check",
+        json!({"note": "valid.mmd", "block": 2}),
+    );
+    assert_eq!(missing["result"]["isError"], true);
+    assert!(tool_text(&missing).contains("MissingBlock: requested=2"));
+    assert!(server.finish().0.success());
+}
+
+#[test]
+fn notification_methods_only_respond_when_the_request_has_an_id() {
+    let fixture = Fixture::new();
+    let mut server = fixture.start();
+    server.notify("notifications/initialized", Value::Null);
+    server.write(&json!({"jsonrpc": "2.0", "id": 42, "method": "notifications/initialized"}));
+    // Send a ping before reading so a dropped request fails immediately.
+    server.write(&json!({"jsonrpc": "2.0", "id": 43, "method": "ping"}));
+    let response = server.read();
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 42);
+    assert_eq!(response["error"]["code"], -32601);
+    assert_eq!(server.read()["id"], 43);
+    assert!(server.finish().0.success());
+}
+
+#[test]
+fn oversized_line_is_drained_and_the_next_request_is_served() {
+    let fixture = Fixture::new();
+    let mut server = fixture.start();
+    // Leave the first line exactly at the limit and keep the last line short.
+    let ping = r#"{"jsonrpc":"2.0","id":42,"method":"ping"}"#;
+    let limit = 8 * 1024 * 1024;
+    server.write_raw(&format!("{}{}", " ".repeat(limit - ping.len()), ping));
+    assert_eq!(server.read()["id"], 42);
+    server.write_raw(&" ".repeat(limit + 4096));
+    server.write(&json!({"jsonrpc": "2.0", "id": 43, "method": "ping"}));
+    let error = server.read();
+    assert_eq!(error["id"], Value::Null);
+    assert_eq!(error["error"]["code"], -32600);
+    assert_eq!(server.read()["id"], 43);
+    assert!(server.finish().0.success());
+}

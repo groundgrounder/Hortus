@@ -11,17 +11,23 @@ use std::ops::Range;
 
 const CONTEXT_LIMIT: usize = 160;
 
-pub(crate) fn parse_note(text: &str) -> ParsedNote {
-    let mut note = parse_occurrences(text);
+pub(crate) fn parse_note_kind(text: &str, mmd: bool) -> ParsedNote {
+    let mut note = parse_occurrences(text, mmd);
     let mut seen = BTreeSet::new();
     note.tags.retain(|tag| seen.insert(tag.key.clone()));
     note
 }
 
-pub(crate) fn parse_occurrences(text: &str) -> ParsedNote {
+pub(crate) fn parse_occurrences(text: &str, mmd: bool) -> ParsedNote {
+    let lines = Lines::new(text);
+    if mmd {
+        return ParsedNote {
+            links: scan_diagram_links(text, 0..text.len(), &lines, false),
+            ..ParsedNote::default()
+        };
+    }
     let frontmatter = crate::frontmatter::parse(text);
     let body_start = frontmatter.as_ref().map_or(0, |front| front.end);
-    let lines = Lines::new(text);
     let mut tags = Vec::new();
     let mut seen = BTreeSet::new();
     let mut aliases = Vec::new();
@@ -44,7 +50,7 @@ pub(crate) fn parse_occurrences(text: &str) -> ParsedNote {
 
     let mut links = scan_links(text, &ignored, body_start, &lines);
     for range in diagrams {
-        links.extend(scan_diagram_links(text, range, &lines));
+        links.extend(scan_diagram_links(text, range, &lines, true));
     }
     links.sort_by_key(|link| link.start);
 
@@ -406,7 +412,12 @@ fn scan_links(text: &str, ignored: &[bool], body_start: usize, lines: &Lines) ->
     links
 }
 
-fn scan_diagram_links(text: &str, range: Range<usize>, lines: &Lines) -> Vec<Link> {
+fn scan_diagram_links(
+    text: &str,
+    range: Range<usize>,
+    lines: &Lines,
+    allow_embeds: bool,
+) -> Vec<Link> {
     let mut links = Vec::new();
     let mut index = range.start.min(text.len());
     let end = range.end.min(text.len());
@@ -416,6 +427,12 @@ fn scan_diagram_links(text: &str, range: Range<usize>, lines: &Lines) -> Vec<Lin
         let Some(character) = text[index..].chars().next() else {
             break;
         };
+        if character == '\n' {
+            quoted = false;
+            escaped = false;
+            index += 1;
+            continue;
+        }
         if escaped {
             escaped = false;
             index += character.len_utf8();
@@ -453,8 +470,13 @@ fn scan_diagram_links(text: &str, range: Range<usize>, lines: &Lines) -> Vec<Lin
             if link.end > end {
                 break;
             }
+            // 未加引号的 A[[Worker]] 是流程图子例程形状。
+            let subroutine = !quoted
+                && !embed
+                && index > range.start
+                && matches!(text.as_bytes()[index - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-');
             index = link.end;
-            if is_state_pseudo_link(text, &link) {
+            if subroutine || (embed && !allow_embeds) || is_state_pseudo_link(text, &link) {
                 continue;
             }
             links.push(link);
@@ -653,7 +675,7 @@ fn is_heading_marker(text: &str, index: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::parse_note;
 
     #[test]
     fn reads_frontmatter_fields_and_body_links() {

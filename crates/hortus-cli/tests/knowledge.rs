@@ -535,3 +535,30 @@ fn mermaid_check_classifies_valid_and_invalid_state_fences() {
     assert_eq!(report["blocks"][1]["error_kind"], "syntax");
     assert_eq!(report["blocks"][1]["line"], 12);
 }
+
+#[test]
+fn explicit_paths_prefer_the_exact_case_before_folded_matches() {
+    let fixture = Fixture::new();
+    let vault = fixture.vault();
+    write(&vault.join("guides/core.md"), "[[index]]\n");
+    write(&vault.join("guides/图A.md"), "[[index]]\n");
+    write(
+        &vault.join("guides/Core.mmd"),
+        "flowchart TB\nA[\"[[second]]\"]\n",
+    );
+    for (query, expected, in_diagram) in [
+        ("guides/core", "guides/core.md", false),
+        ("guides/Core", "guides/Core.mmd", true),
+        ("guides/CORE.MD", "guides/core.md", false),
+        ("图a", "guides/图A.md", false),
+    ] {
+        let result = json(&run(
+            fixture.path(),
+            &["links", query, "--vault", vault.to_str().unwrap()],
+            &[],
+        ));
+        assert_eq!(result["note"], expected);
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["links"][0]["in_diagram"], in_diagram);
+    }
+}

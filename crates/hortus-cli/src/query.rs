@@ -93,17 +93,18 @@ impl Vault {
             forms.push(format!("{query}.markdown"));
             forms.push(format!("{query}.mmd"));
         }
-        let mut matches = self
+        let mut exact = forms.iter().filter(|form| self.notes.contains_key(*form));
+        if let Some(path) = exact.next()
+            && exact.next().is_none()
+        {
+            return Some(path.clone());
+        }
+        let mut folded = self
             .notes
             .keys()
-            .filter(|path| forms.iter().any(|form| path.eq_ignore_ascii_case(form)))
-            .cloned()
-            .collect::<Vec<_>>();
-        if matches.len() == 1 {
-            matches.pop()
-        } else {
-            None
-        }
+            .filter(|path| forms.iter().any(|form| path.eq_ignore_ascii_case(form)));
+        let path = folded.next()?;
+        folded.next().is_none().then(|| path.clone())
     }
 }
 
@@ -176,7 +177,7 @@ fn scan(
             relative,
             NoteFile {
                 text,
-                mmd: name.to_ascii_lowercase().ends_with(".mmd"),
+                mmd: hortus_links::is_mmd_path(name),
             },
         );
     }
@@ -194,14 +195,9 @@ fn has_note_extension(name: &str) -> bool {
 }
 
 fn stem(name: &str) -> &str {
-    for extension in [".md", ".markdown", ".mmd"] {
-        if name.len() >= extension.len()
-            && name[name.len() - extension.len()..].eq_ignore_ascii_case(extension)
-        {
-            return &name[..name.len() - extension.len()];
-        }
-    }
-    name
+    name.rsplit_once('.')
+        .filter(|_| has_note_extension(name))
+        .map_or(name, |(stem, _)| stem)
 }
 
 fn has_symlink_component(root: &Path, relative: &Path) -> bool {

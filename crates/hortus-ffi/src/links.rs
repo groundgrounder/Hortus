@@ -186,7 +186,7 @@ impl From<LinkResolution> for LinkResolutionInfo {
     }
 }
 
-// 顺序转换，一篇笔记只遍历一次，不为每条链接重算文首到当前位置的长度。
+// 顺序转换源码偏移，复用上一个位置的字节与 UTF-16 计数。
 #[derive(Default)]
 struct UTF16Offset {
     bytes: usize,
@@ -201,6 +201,20 @@ impl UTF16Offset {
         self.units += text[self.bytes..start].encode_utf16().count() as u64;
         self.bytes = start;
         (self.units, text[start..end].encode_utf16().count() as u64)
+    }
+
+    fn byte_at(&mut self, text: &str, units: u64) -> usize {
+        if units < self.units {
+            *self = Self::default();
+        }
+        let mut characters = text[self.bytes..].chars();
+        while self.units < units {
+            let character = characters.next().expect("UTF-16 offset within source");
+            self.units += character.len_utf16() as u64;
+            self.bytes += character.len_utf8();
+        }
+        debug_assert_eq!(self.units, units);
+        self.bytes
     }
 }
 
@@ -280,14 +294,17 @@ fn utf16_units(text: &str) -> u64 {
 }
 
 fn embed_blocks(content: &str, model: &hortus_document::reading::Model) -> Vec<EmbedBlockInfo> {
+    let mut offsets = UTF16Offset::default();
     let mut display = 0;
     model
         .blocks
         .iter()
         .map(|block| {
-            let body = &content[block.source.clone()];
-            let source_start_utf16 = utf16_units(&content[..block.source.start]);
-            let source_length_utf16 = utf16_units(body);
+            // 阅读模型的块范围按整篇正文的 UTF-16 计数。
+            let source_start_utf16 = block.source.start as u64;
+            let source_length_utf16 = block.source.len() as u64;
+            let start = offsets.byte_at(content, source_start_utf16);
+            let end = offsets.byte_at(content, block.source.end as u64);
             let runs = block
                 .content
                 .runs
@@ -295,15 +312,16 @@ fn embed_blocks(content: &str, model: &hortus_document::reading::Model) -> Vec<E
                 .map(|run| EmbedRunInfo {
                     start: run.display.start as u64,
                     length: run.display.len() as u64,
-                    source_start_utf16: utf16_units(&body[..run.source.start]),
-                    source_length_utf16: utf16_units(&body[run.source.clone()]),
+                    // 阅读模型的 run 源码范围已经是块内 UTF-16。
+                    source_start_utf16: run.source.start as u64,
+                    source_length_utf16: run.source.len() as u64,
                     mask: run.mask,
                 })
                 .collect();
             let info = EmbedBlockInfo {
                 id: block.id,
-                source_start_byte: block.source.start as u64,
-                source_length_byte: block.source.len() as u64,
+                source_start_byte: start as u64,
+                source_length_byte: (end - start) as u64,
                 source_start_utf16,
                 source_length_utf16,
                 display_start: display as u64,
@@ -813,7 +831,7 @@ impl VaultHandle {
             hortus_links::normalize_note_path(&source_path).unwrap_or_else(|| source_path.clone());
         let (resolution, text) = {
             let index = recover_lock(&self.links);
-            let resolution = index.resolve(&source_path, &raw_target);
+            let resolution = index.resolve(&normalized_source, &raw_target);
             let text = match &resolution {
                 LinkResolution::Note(path) => index.text(path).map(str::to_owned),
                 _ => None,
@@ -859,19 +877,16 @@ impl VaultHandle {
                 });
             }
         };
-        let key = resolved.to_lowercase();
-        let mut seen = ancestors
-            .iter()
-            .filter_map(|path| hortus_links::normalize_note_path(path))
-            .map(|path| path.to_lowercase())
-            .collect::<BTreeSet<_>>();
-        seen.insert(normalized_source.to_lowercase());
+        let cycle = resolved == normalized_source
+            || ancestors.iter().any(|path| {
+                hortus_links::normalize_note_path(path).as_deref() == Some(resolved.as_str())
+            });
         let display_title = alias
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| embed_title(&resolved));
-        if seen.contains(&key) {
+        if cycle {
             return Ok(EmbedContentInfo {
                 kind: "cycle".into(),
                 resolved_path: Some(resolved),
@@ -894,7 +909,7 @@ impl VaultHandle {
         let title = alias
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| embed_title(&resolved));
-        let is_mmd = resolved.to_lowercase().ends_with(".mmd");
+        let is_mmd = hortus_links::is_mmd_path(&resolved);
         if is_mmd {
             return Ok(EmbedContentInfo {
                 kind: "diagram".into(),
@@ -1026,7 +1041,7 @@ impl VaultHandle {
             .map(|item| (item.old_path, item.new_path))
             .collect::<BTreeMap<_, _>>();
         plans.folder_pending.retain(|(old, _), _| old != &old_dir);
-        if !moves.is_empty() {
+        if !moves.is_empty() || !planned.is_empty() {
             plans.folder_pending.insert(
                 (old_dir, new_dir),
                 FolderRenamePreview {

@@ -436,3 +436,58 @@ fn er_diagrams_render_with_svg_metrics_and_scene() {
     assert_eq!(ids.len(), hits.len());
     assert!(hits.iter().any(|hit| hit["node_id"] == "entity-ORDER-ITEM"));
 }
+
+#[test]
+fn standalone_mermaid_check_and_render_share_block_selection_and_errors() {
+    let sandbox = Sandbox::new();
+    for (file, text, valid) in [
+        (
+            "valid.MMD",
+            "\u{feff}flowchart TB\r\nsubgraph G\r\nA --> B\r\nend\r\n",
+            true,
+        ),
+        ("invalid.mmd", "flowchart TB\nA[unclosed\n", false),
+    ] {
+        std::fs::write(sandbox.0.join(file), text).unwrap();
+        for selection in [vec![], vec!["--block", "1"]] {
+            let mut args = vec!["mermaid", "check", file];
+            args.extend(selection);
+            let checked = sandbox.invoke(&args);
+            assert_eq!(checked.status.success(), valid);
+            let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+            assert_eq!(report["valid"], valid);
+            let blocks = report["blocks"].as_array().unwrap();
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0]["block"], 1);
+            assert_eq!(blocks[0]["diagram_type"], "flowchart");
+            assert_eq!(blocks[0]["valid"], valid);
+            if !valid {
+                assert_eq!(blocks[0]["error_kind"], "syntax");
+                assert_eq!(blocks[0]["line"], 2);
+                assert!(!blocks[0]["message"].as_str().unwrap().is_empty());
+            }
+        }
+        let svg = format!("{file}.svg");
+        let rendered = sandbox.invoke(&["mermaid", "render", file, "--out", &svg]);
+        assert_eq!(rendered.status.success(), valid);
+        if valid {
+            assert!(
+                std::fs::read_to_string(sandbox.0.join(&svg))
+                    .unwrap()
+                    .contains("<svg")
+            );
+        } else {
+            assert!(String::from_utf8_lossy(&rendered.stderr).contains("Syntax"));
+            assert!(!sandbox.0.join(&svg).exists());
+        }
+    }
+    for action in ["check", "render"] {
+        let mut args = vec!["mermaid", action, "valid.MMD", "--block", "2"];
+        if action == "render" {
+            args.extend(["--out", "missing.svg"]);
+        }
+        let result = sandbox.invoke(&args);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("MissingBlock: requested=2"));
+    }
+}

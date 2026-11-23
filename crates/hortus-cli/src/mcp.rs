@@ -8,12 +8,13 @@ use crate::mermaid_check;
 use crate::query::{self, Vault};
 use hortus_config::Directories;
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::Path;
 
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
 const FALLBACK_PROTOCOL_VERSION: &str = "2025-03-26";
 const GUIDE_URI: &str = "hortus://guide";
+const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 /// 当前生效的 Agent 指南；只读配置目录，不创建目录。
 pub fn guide_text() -> Result<String, String> {
@@ -31,17 +32,26 @@ pub fn run(vault: Option<&Path>) -> Result<(), String> {
     let mut bytes = Vec::new();
     loop {
         bytes.clear();
-        let read = input
+        let read = (&mut input)
+            .take((MAX_LINE_BYTES + 1) as u64)
             .read_until(b'\n', &mut bytes)
             .map_err(|error| format!("unable to read stdin: {error}"))?;
         if read == 0 {
             return Ok(());
         }
-        if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
-            continue;
-        }
-        let Some(response) = respond(&bytes, &root) else {
-            continue;
+        let response = if read > MAX_LINE_BYTES && bytes.last() != Some(&b'\n') {
+            input
+                .skip_until(b'\n')
+                .map_err(|error| format!("unable to read stdin: {error}"))?;
+            error_response(Value::Null, -32600, "Invalid Request: line exceeds 8 MiB")
+        } else {
+            if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+                continue;
+            }
+            let Some(response) = respond(&bytes, &root) else {
+                continue;
+            };
+            response
         };
         serde_json::to_writer(&mut output, &response)
             .map_err(|error| format!("unable to write JSON: {error}"))?;
@@ -66,7 +76,7 @@ fn respond(line: &[u8], root: &Path) -> Option<Value> {
     let Some(method) = object.get("method").and_then(Value::as_str) else {
         return has_id.then(|| error_response(id, -32600, "Invalid Request"));
     };
-    if method.starts_with("notifications/") {
+    if !has_id && method.starts_with("notifications/") {
         return None;
     }
     let params = object.get("params").cloned().unwrap_or(Value::Null);
@@ -368,7 +378,8 @@ fn mermaid(vault: &Vault, arguments: &Value) -> Result<Value, CallError> {
         .notes
         .get(&note)
         .ok_or_else(|| CallError::Tool(format!("note not found: {note}")))?;
-    let (_, report) = mermaid_check::evaluate(&file.text, &note, block).map_err(CallError::Tool)?;
+    let (_, report) =
+        mermaid_check::evaluate(&file.text, &note, file.mmd, block).map_err(CallError::Tool)?;
     Ok(report)
 }
 

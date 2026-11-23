@@ -283,3 +283,35 @@ fn confirmed_rename_rewrites_exact_bytes_and_reports_skips() {
     assert_eq!(fs::read_dir(&root).unwrap().count(), 6);
     handle.close();
 }
+
+#[test]
+fn standalone_mermaid_markup_backlinks_and_rename_share_one_projection() {
+    let graph =
+        "stateDiagram-v2\r\nstate check [[choice]]\r\nstate \"[[Target|跳转]] #fake\" as T\r\n";
+    let (_temporary, root, handle) = fixture(&[
+        ("graph.mmd", graph.as_bytes()),
+        ("Target.md", b"Target"),
+        ("choice.md", b"Choice"),
+    ]);
+    let links = handle.links("graph.mmd".into());
+    assert_eq!(links.len(), 1);
+    assert!(links[0].in_diagram);
+    let markup = handle.knowledge_markup("graph.mmd".into(), graph.into());
+    assert_eq!(markup.links.len(), 1);
+    assert!(markup.links[0].in_diagram && markup.tags.is_empty());
+    assert!(handle.backlinks("choice.md".into()).is_empty());
+    assert_eq!(handle.backlinks("Target.md".into())[0].source, "graph.mmd");
+    let plan = handle.plan_rename_links("Target.md".into(), "Renamed.md".into());
+    assert_eq!(plan.total_rewrites, 1);
+    fs::rename(root.join("Target.md"), root.join("Renamed.md")).unwrap();
+    let result = handle
+        .apply_rename_links("Target.md".into(), "Renamed.md".into(), vec![])
+        .unwrap();
+    assert!(result.failed.is_empty());
+    assert_eq!(result.total_rewrites, 1);
+    assert_eq!(
+        fs::read_to_string(root.join("graph.mmd")).unwrap(),
+        graph.replace("[[Target|", "[[Renamed|"),
+    );
+    handle.close();
+}
