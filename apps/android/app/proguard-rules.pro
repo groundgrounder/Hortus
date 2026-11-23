@@ -5,3 +5,5 @@
 -keep class io.github.groundgrounder.hortus.core.** extends com.sun.jna.Structure { *; }
 -keep interface io.github.groundgrounder.hortus.core.** extends com.sun.jna.Library { *; }
 -keep interface io.github.groundgrounder.hortus.core.** extends com.sun.jna.Callback { *; }
+-dontwarn com.google.errorprone.annotations.**
+-dontwarn javax.lang.model.**

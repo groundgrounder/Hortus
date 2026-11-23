@@ -31,12 +31,24 @@ android {
         ndk {
             abiFilters += "arm64-v8a"
         }
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    buildTypes.configureEach {
-        // 两种 APK 均裁除 AndroidX 里 API 29 不可达的旧平台代码。
-        isMinifyEnabled = true
-        proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+    buildTypes {
+        getByName("debug") {
+            // 与 Release 一样裁除不可达平台代码；调试构建仍保持可调试。
+            isMinifyEnabled = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+                "proguard-debug-rules.pro",
+            )
+            testProguardFiles("proguard-test-rules.pro")
+        }
+        getByName("release") {
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
     }
 
     compileOptions {
@@ -72,12 +84,21 @@ dependencies {
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidsvg)
     implementation(libs.jna) {
         artifact {
             type = "aar"
         }
     }
+
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.uiautomator)
+    androidTestImplementation(libs.errorprone.annotations)
+    androidTestImplementation("org.jetbrains.kotlin:kotlin-stdlib:2.2.21")
 }
 
 kotlin {

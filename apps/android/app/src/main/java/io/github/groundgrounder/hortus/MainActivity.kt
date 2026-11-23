@@ -2,9 +2,9 @@
 package io.github.groundgrounder.hortus
 
 import android.Manifest
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -16,21 +16,28 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
-import io.github.groundgrounder.hortus.ui.FoundationScreen
+import io.github.groundgrounder.hortus.reader.OpenFrameMonitor
+import io.github.groundgrounder.hortus.reader.ReaderApp
+import io.github.groundgrounder.hortus.reader.ReaderController
 import io.github.groundgrounder.hortus.ui.HortusTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 open class MainActivity : ComponentActivity() {
+    companion object {
+        const val EXTRA_OPEN_NOTE = "io.github.groundgrounder.hortus.OPEN_NOTE"
+        const val EXTRA_OPEN_HEADING = "io.github.groundgrounder.hortus.OPEN_HEADING"
+    }
+
+    internal lateinit var controller: ReaderController
+        private set
     private var hasAccess by mutableStateOf(false)
     private var path by mutableStateOf("")
     private var running by mutableStateOf(false)
     private var failed by mutableStateOf(false)
     private var result by mutableStateOf<FoundationResult?>(null)
-    private var preview by mutableStateOf<NotePreview?>(null)
 
     private val settings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         refreshPermission()
@@ -42,12 +49,13 @@ open class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CoreEnvironment.initialize(this)
+        controller = ReaderController(this)
+        controller.markActivityCreated()
         enableEdgeToEdge()
-        path = savedInstanceState?.getString("vaultPath") ?: File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
-            "HortusDemoVault",
-        ).path
         refreshPermission()
+        DebugHooks.onActivityCreate(this, intent)
+        OpenFrameMonitor.install(window)
         setContent {
             val dark = isSystemInDarkTheme()
             SideEffect {
@@ -57,50 +65,99 @@ open class MainActivity : ComponentActivity() {
                 }
             }
             HortusTheme(darkTheme = dark) {
-                FoundationScreen(
+                ReaderApp(
+                    controller = controller,
                     hasAccess = hasAccess,
-                    grantAccess = ::requestPermission,
-                    path = path,
-                    setPath = { path = it },
-                    running = running,
-                    failed = failed,
-                    result = result,
-                    preview = preview,
-                    open = { launchChecks(path.trim(), testSave = false) },
-                    testSave = { result?.let { launchChecks(it.vaultPath, testSave = true) } },
-                    openNote = ::openNote,
-                    closePreview = { preview = null },
+                    onRequestPermission = ::requestPermission,
                 )
             }
         }
+        if (intent.getBooleanExtra("run_smoke", false)) {
+            // DebugSmokeActivity 子类自行处理；MainActivity 不启动任何检查。
+        } else {
+            openSavedOrRequested()
+        }
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        outState.putString("vaultPath", path)
-        super.onSaveInstanceState(outState)
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleOpenIntent(intent)
+        DebugHooks.onNewIntent(this, intent)
     }
 
     override fun onResume() {
         super.onResume()
         refreshPermission()
+        controller.setForeground(true)
+        if (controller.state.content != null) {
+            controller.refresh()
+        }
+    }
+
+    override fun onPause() {
+        controller.setForeground(false)
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        if (isFinishing) controller.close()
+        super.onDestroy()
+    }
+
+    private fun handleOpenIntent(intent: Intent) {
+        val note = intent.getStringExtra(EXTRA_OPEN_NOTE) ?: return
+        val heading = intent.getStringExtra(EXTRA_OPEN_HEADING)
+        val current = controller.state
+        if (current.vaultPath == null) {
+            controller.start(path.ifBlank { controller.preferencesState.vaultPath ?: return }, note)
+        } else {
+            controller.openPath(note, heading)
+        }
+    }
+
+    private fun openSavedOrRequested() {
+        if (!hasAccess) return
+        if (intent?.getStringExtra("debug_vault") != null) return
+        if (controller.state.vaultPath != null || controller.state.loading) return
+        val saved = controller.preferencesState
+        val requested = intent?.getStringExtra(EXTRA_OPEN_NOTE)
+        if (saved.vaultPath != null) {
+            path = saved.vaultPath
+            controller.start(saved.vaultPath, requested ?: saved.notePath)
+        }
     }
 
     private fun refreshPermission() {
         hasAccess = StoragePermissions.hasAllFilesAccess(this)
-        if (!hasAccess) {
-            result = null
-            preview = null
-        }
     }
 
     private fun requestPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             settings.launch(StoragePermissions.buildAllFilesAccessIntent(this))
         } else {
-            legacyPermission.launch(arrayOf(
-                Manifest.permission.READ_EXTERNAL_STORAGE,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE,
-            ))
+            legacyPermission.launch(
+                arrayOf(
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                ),
+            )
+        }
+    }
+
+    internal fun openDebugVault(vault: String, note: String?) {
+        if (!hasAccess) return
+        path = vault
+        controller.start(vault, note)
+    }
+
+    internal fun openDebugNote(note: String, heading: String? = null) {
+        if (!hasAccess) return
+        if (controller.state.vaultPath == null) {
+            val vault = path.ifBlank { controller.preferencesState.vaultPath }
+            if (vault != null) controller.start(vault, note) else return
+        } else {
+            controller.openPath(note, heading)
         }
     }
 
@@ -109,12 +166,11 @@ open class MainActivity : ComponentActivity() {
         testSave: Boolean,
         publish: (FoundationResult) -> Unit = {},
     ) {
-        if (running || !hasAccess || !File(vaultPath).isAbsolute) return
+        if (running || !hasAccess || !java.io.File(vaultPath).isAbsolute) return
         path = vaultPath
         running = true
         failed = false
         result = null
-        preview = null
         lifecycleScope.launch {
             try {
                 val completed = FoundationChecks.run(applicationContext, vaultPath, testSave)
@@ -129,26 +185,4 @@ open class MainActivity : ComponentActivity() {
             }
         }
     }
-
-    private fun openNote(relativePath: String) {
-        val vaultPath = result?.vaultPath ?: return
-        lifecycleScope.launch {
-            val excerpt = withContext(Dispatchers.IO) {
-                try {
-                    CoreEnvironment.createWorkspaceCore(applicationContext).use { workspace ->
-                        workspace.openDocument(vaultPath, relativePath).use { document ->
-                            document.snapshot().text.trim().take(900)
-                        }
-                    }
-                } catch (e: Exception) {
-                    null
-                }
-            }
-            if (hasAccess && result?.vaultPath == vaultPath) {
-                preview = NotePreview(relativePath, excerpt)
-            }
-        }
-    }
 }
-
-internal data class NotePreview(val path: String, val excerpt: String?)
