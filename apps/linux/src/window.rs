@@ -1077,14 +1077,13 @@ impl HortusWindow {
             return;
         }
 
-        let (core, diagram_engine, math_service, vault_root, vault_handle) = {
+        let (core, diagram_engine, math_service, vault_root) = {
             let st = self.state.borrow();
             (
                 st.core.clone(),
                 st.diagram_engine.clone(),
                 Arc::clone(&st.math_service),
                 st.vault_root.clone(),
-                st.vault_handle.clone(),
             )
         };
         let (Some(core), Some(diagram_engine), Some(vault_root)) =
@@ -1165,7 +1164,8 @@ impl HortusWindow {
         tab_overlay.set_child(Some(&page_wrap));
         let completion = LinkCompletion::new();
         completion.bind(&edit_view, &edit_buffer, &tab_overlay);
-        if let Some(handle) = self.state.borrow().vault_handle.clone() {
+        let vault_handle = self.state.borrow().vault_handle.clone();
+        if let Some(handle) = vault_handle.clone() {
             completion.set_handle(handle);
         }
 
@@ -1176,14 +1176,14 @@ impl HortusWindow {
             .unwrap_or(relpath);
         page.set_title(file_title);
         page.set_tooltip(relpath);
-        self.tab_view.set_selected_page(&page);
-        self.center_stack.set_visible_child_name("tabs");
 
+        // 先登记标签再切换选中页：selected-page 通知会立即调用 sync_active_tab_ui，
+        // 若此刻 AppState 还没有该页，界面会短暂回到“未打开笔记”。
         self.state.borrow_mut().tabs.insert(
             relpath.to_string(),
             OpenNoteTab {
                 path: relpath.to_string(),
-                page,
+                page: page.clone(),
                 content_stack,
                 reading_slot,
                 reading: None,
@@ -1207,6 +1207,10 @@ impl HortusWindow {
                 edit_state: Rc::new(RefCell::new(EditState::new(relpath))),
             },
         );
+        self.tab_view.set_selected_page(&page);
+        self.center_stack.set_visible_child_name("tabs");
+        // append 第一页时自动选中发生在登记之前，这里补一次同步确保大纲与徽标正确。
+        self.sync_active_tab_ui();
 
         let content_width = self.estimated_note_content_width();
         let dark = adw::StyleManager::default().is_dark();
@@ -1264,14 +1268,21 @@ impl HortusWindow {
                     this.maybe_schedule_automation();
                 }
                 Err(err) => {
-                    if let Some(tab) = this.state.borrow_mut().tabs.get_mut(&rel) {
-                        tab.edit_buffer.set_text(&format!("读取笔记失败：{err}"));
-                        clear_box(&tab.reading_slot);
+                    // 先结束 AppState 借用，再改 TextBuffer/销毁占位内容：两者都会发 GTK 信号。
+                    let widgets = {
+                        let mut st = this.state.borrow_mut();
+                        st.tabs.get_mut(&rel).map(|tab| {
+                            tab.source_loaded = true;
+                            tab.reading_loaded = true;
+                            (tab.edit_buffer.clone(), tab.reading_slot.clone())
+                        })
+                    };
+                    if let Some((edit_buffer, reading_slot)) = widgets {
+                        edit_buffer.set_text(&format!("读取笔记失败：{err}"));
+                        clear_box(&reading_slot);
                         let err_lbl = gtk4::Label::new(Some(&format!("读取笔记失败：{err}")));
                         err_lbl.set_margin_top(24);
-                        tab.reading_slot.append(&err_lbl);
-                        tab.source_loaded = true;
-                        tab.reading_loaded = true;
+                        reading_slot.append(&err_lbl);
                     }
                     this.show_toast(&format!("打开笔记失败：{err}"));
                     this.maybe_schedule_automation();
@@ -1347,48 +1358,66 @@ impl HortusWindow {
         );
 
         let revision = session.snapshot().map(|snap| snap.revision).unwrap_or(0);
-        let (pending_heading, pending_scroll) = {
+        let (edit_view, edit_buffer, edit_state, reading_slot) = {
+            let st = self.state.borrow();
+            let Some(tab) = st.tabs.get(rel) else {
+                return;
+            };
+            (
+                tab.edit_view.clone(),
+                tab.edit_buffer.clone(),
+                tab.edit_state.clone(),
+                tab.reading_slot.clone(),
+            )
+        };
+        {
+            let mut edit = edit_state.borrow_mut();
+            edit.suppress = true;
+            edit.text = text.clone();
+            edit.revision = revision;
+            edit.dirty = false;
+            edit.issue = None;
+        }
+        // 超大文档在视图未挂载时应用样式：避免 10 万级标签逐段触发可见布局。
+        let detach_for_load = text.chars().count() > 262_144;
+        if detach_for_load {
+            edit_view.set_buffer(None::<&gtk4::TextBuffer>);
+        }
+        edit_buffer.set_text(&text);
+        let style_started = Instant::now();
+        apply_source_styles(&edit_buffer, &text, packed_runs);
+        let load_style_micros = style_started.elapsed().as_micros() as u64;
+        if detach_for_load {
+            edit_view.set_buffer(Some(&edit_buffer));
+        }
+        {
+            let mut edit = edit_state.borrow_mut();
+            edit.suppress = false;
+            edit.load_style_micros = load_style_micros;
+            edit.last_style_micros = load_style_micros;
+        }
+        // 挂载阅读表面与替换旧表面都在 AppState 借用之外，避免销毁/重挂触发信号重入。
+        clear_box(&reading_slot);
+        reading_slot.append(&surface.root);
+        let (pending_heading, pending_scroll, old) = {
             let mut st = self.state.borrow_mut();
             let Some(tab) = st.tabs.get_mut(rel) else {
                 return;
             };
-            {
-                let mut edit = tab.edit_state.borrow_mut();
-                edit.suppress = true;
-                edit.text = text.clone();
-                edit.revision = revision;
-                edit.dirty = false;
-                edit.issue = None;
-            }
-            // 超大文档在视图未挂载时应用样式：避免 10 万级标签逐段触发可见布局。
-            let detach_for_load = text.chars().count() > 262_144;
-            if detach_for_load {
-                tab.edit_view.set_buffer(None::<&gtk4::TextBuffer>);
-            }
-            tab.edit_buffer.set_text(&text);
-            let style_started = Instant::now();
-            apply_source_styles(&tab.edit_buffer, &text, packed_runs);
-            let load_style_micros = style_started.elapsed().as_micros() as u64;
-            if detach_for_load {
-                tab.edit_view.set_buffer(Some(&tab.edit_buffer));
-            }
-            {
-                let mut edit = tab.edit_state.borrow_mut();
-                edit.suppress = false;
-                edit.load_style_micros = load_style_micros;
-                edit.last_style_micros = load_style_micros;
-            }
+            let old_reading = tab.reading.replace(surface);
+            let old_diagrams = std::mem::replace(&mut tab.prepared_diagrams, prepared.diagrams);
             tab.text = text;
             tab.headings = headings;
             tab.session = Some(session);
-            tab.prepared_diagrams = prepared.diagrams;
-            clear_box(&tab.reading_slot);
-            tab.reading_slot.append(&surface.root);
-            tab.reading = Some(surface);
             tab.source_loaded = true;
             tab.reading_loaded = true;
-            (tab.pending_heading.take(), tab.pending_scroll.take())
+            (
+                tab.pending_heading.take(),
+                tab.pending_scroll.take(),
+                (old_reading, old_diagrams),
+            )
         };
+        drop(old);
 
         self.bind_edit_sync(rel);
         self.start_checkpoint_timer(rel);
@@ -1473,11 +1502,14 @@ impl HortusWindow {
     }
 
     fn open_note_or_resolve(&self, source_note: &str, raw_target: &str, heading: Option<String>) {
+        // `AppState` 的借用在任何 GTK 回调（含本函数后继的 open_note_at）前必须释放：
+        // 先克隆句柄，再解析链接，最后才进入会 borrow_mut 的打开流程。
+        let handle = self.state.borrow().vault_handle.clone();
         if raw_target.ends_with(".md")
             || raw_target.ends_with(".markdown")
             || raw_target.ends_with(".mmd")
         {
-            if let Some(handle) = self.state.borrow().vault_handle.clone() {
+            if let Some(handle) = handle {
                 let res = handle.resolve_link(source_note.to_string(), raw_target.to_string());
                 if let Some(path) = res.resolved_path {
                     self.open_note_at(&path, heading);
@@ -1487,23 +1519,24 @@ impl HortusWindow {
             self.open_note_at(raw_target, heading);
             return;
         }
-        if let Some(handle) = self.state.borrow().vault_handle.clone() {
-            let res = handle.resolve_link(source_note.to_string(), raw_target.to_string());
-            match res.resolution_kind.as_str() {
-                "note" => {
-                    if let Some(path) = res.resolved_path {
-                        self.open_note_at(&path, heading);
-                    }
+        let Some(handle) = handle else {
+            return;
+        };
+        let res = handle.resolve_link(source_note.to_string(), raw_target.to_string());
+        match res.resolution_kind.as_str() {
+            "note" => {
+                if let Some(path) = res.resolved_path {
+                    self.open_note_at(&path, heading);
                 }
-                "ambiguous" => {
-                    self.show_toast(&format!(
-                        "多个笔记匹配“{raw_target}”：{}",
-                        res.candidates.join(", ")
-                    ));
-                }
-                _ => {
-                    self.show_toast(&format!("未找到链接目标：{raw_target}"));
-                }
+            }
+            "ambiguous" => {
+                self.show_toast(&format!(
+                    "多个笔记匹配“{raw_target}”：{}",
+                    res.candidates.join(", ")
+                ));
+            }
+            _ => {
+                self.show_toast(&format!("未找到链接目标：{raw_target}"));
             }
         }
     }
@@ -1568,13 +1601,14 @@ impl HortusWindow {
                 let Some(handle) = this.state.borrow().vault_handle.clone() else {
                     return;
                 };
+                let math_service = Arc::clone(&this.state.borrow().math_service);
                 let env = this.make_reading_env(
                     &rel,
                     vault_root.clone(),
                     Arc::clone(&core),
                     handle,
                     Arc::clone(&diagram_engine),
-                    Arc::clone(&this.state.borrow().math_service),
+                    math_service,
                 );
                 let this_c = this.clone();
                 let rel_c = rel.clone();
@@ -1601,13 +1635,30 @@ impl HortusWindow {
                         }
                     }),
                 );
-                if let Some(tab) = this.state.borrow_mut().tabs.get_mut(&rel) {
-                    clear_box(&tab.reading_slot);
-                    tab.reading_slot.append(&surface.root);
-                    tab.prepared_diagrams = prepared.diagrams;
-                    tab.reading = Some(surface);
+                let reading_slot = this
+                    .state
+                    .borrow()
+                    .tabs
+                    .get(&rel)
+                    .map(|tab| tab.reading_slot.clone());
+                let Some(reading_slot) = reading_slot else {
+                    return;
+                };
+                // 先结束 AppState 借用：重挂根控件和销毁旧阅读表面都会触发 GTK 信号。
+                clear_box(&reading_slot);
+                reading_slot.append(&surface.root);
+                let old = {
+                    let mut st = this.state.borrow_mut();
+                    let Some(tab) = st.tabs.get_mut(&rel) else {
+                        return;
+                    };
+                    let old_reading = tab.reading.replace(surface);
+                    let old_diagrams =
+                        std::mem::replace(&mut tab.prepared_diagrams, prepared.diagrams);
                     tab.reading_loaded = true;
-                }
+                    (old_reading, old_diagrams)
+                };
+                drop(old);
                 if let Some(fraction) = restore_fraction {
                     let this_restore = this.clone();
                     let rel_restore = rel.clone();
@@ -1629,37 +1680,39 @@ impl HortusWindow {
     }
 
     fn open_focus_mode(&self, note_path: &str, ordinal: u32) {
-        let (core, engine, vault_root, source, mmd, diagram) = {
+        let fields = {
             let st = self.state.borrow();
-            let Some(tab) = st.tabs.get(note_path) else {
-                self.show_toast("请先打开包含图表的笔记");
-                return;
-            };
-            let diag = tab
-                .prepared_diagrams
-                .iter()
-                .find(|d| d.ordinal == ordinal && d.scene.is_some())
-                .cloned()
-                .or_else(|| {
-                    tab.prepared_diagrams
-                        .iter()
-                        .find(|d| d.scene.is_some())
-                        .cloned()
-                });
-            let (Some(core), Some(engine), Some(vault_root), Some(diag)) =
-                (&st.core, &st.diagram_engine, &st.vault_root, diag)
-            else {
-                self.show_toast("当前笔记没有可用的 Mermaid 图表");
-                return;
-            };
-            (
-                Arc::clone(core),
-                Arc::clone(engine),
-                vault_root.clone(),
-                tab.text.clone(),
-                note_path.to_ascii_lowercase().ends_with(".mmd"),
-                diag,
-            )
+            st.tabs.get(note_path).map(|tab| {
+                let diag = tab
+                    .prepared_diagrams
+                    .iter()
+                    .find(|d| d.ordinal == ordinal && d.scene.is_some())
+                    .cloned()
+                    .or_else(|| {
+                        tab.prepared_diagrams
+                            .iter()
+                            .find(|d| d.scene.is_some())
+                            .cloned()
+                    });
+                (
+                    st.core.clone(),
+                    st.diagram_engine.clone(),
+                    st.vault_root.clone(),
+                    tab.text.clone(),
+                    note_path.to_ascii_lowercase().ends_with(".mmd"),
+                    diag,
+                )
+            })
+        };
+        let Some((core_slot, engine_slot, vault_slot, source, mmd, diagram)) = fields else {
+            self.show_toast("请先打开包含图表的笔记");
+            return;
+        };
+        let (Some(core), Some(engine), Some(vault_root), Some(diagram)) =
+            (core_slot, engine_slot, vault_slot, diagram)
+        else {
+            self.show_toast("当前笔记没有可用的 Mermaid 图表");
+            return;
         };
 
         let Some(scene) = diagram.scene else { return };
@@ -1797,8 +1850,14 @@ impl HortusWindow {
             self.render_outline_empty("正在解析大纲…");
         }
         self.refresh_backlinks(false);
-        if !editing && let Some(tab) = self.state.borrow().tabs.get(&path) {
-            tab.completion.hide();
+        let completion = self
+            .state
+            .borrow()
+            .tabs
+            .get(&path)
+            .map(|tab| tab.completion.clone());
+        if !editing && let Some(completion) = completion {
+            completion.hide();
         }
     }
 
@@ -1809,13 +1868,12 @@ impl HortusWindow {
                 return;
             };
             let u16_off = Utf16Mapper::new(&tab.text).byte_to_utf16(byte_start as usize) as u64;
-            if !tab.editing {
-                tab.editing = true;
-                tab.content_stack.set_visible_child_name("edit");
-            }
-            Some((tab.edit_view.clone(), u16_off))
+            tab.editing = true;
+            Some((tab.edit_view.clone(), u16_off, tab.content_stack.clone()))
         };
-        if let Some((ev, u16_off)) = mapper_u16 {
+        if let Some((ev, u16_off, content_stack)) = mapper_u16 {
+            // Stack 切换在 AppState 借用之外执行，避免 notify 回调重入。
+            content_stack.set_visible_child_name("edit");
             self.sync_active_tab_ui();
             self.scroll_to_utf16_offset(note_path, u16_off);
             ev.grab_focus();
@@ -1832,7 +1890,7 @@ impl HortusWindow {
             return;
         };
 
-        let (new_editing, anchor_u16, edit_view) = {
+        let (new_editing, anchor_u16, edit_view, content_stack) = {
             let mut st = self.state.borrow_mut();
             let Some(tab) = st.tabs.get_mut(&path) else {
                 return;
@@ -1853,14 +1911,16 @@ impl HortusWindow {
                     .sum()
             };
             tab.editing = !tab.editing;
-            if tab.editing {
-                tab.content_stack.set_visible_child_name("edit");
-            } else {
-                tab.content_stack.set_visible_child_name("reading");
-            }
-            (tab.editing, target_u16, tab.edit_view.clone())
+            (
+                tab.editing,
+                target_u16,
+                tab.edit_view.clone(),
+                tab.content_stack.clone(),
+            )
         };
 
+        // Stack 切换在 AppState 借用之外执行，避免 notify 回调重入。
+        content_stack.set_visible_child_name(if new_editing { "edit" } else { "reading" });
         self.sync_active_tab_ui();
         self.scroll_to_utf16_offset(&path, anchor_u16);
         if new_editing {
@@ -1935,23 +1995,45 @@ impl HortusWindow {
     }
 
     fn scroll_to_utf16_offset(&self, note_path: &str, start_utf16: u64) {
-        let st = self.state.borrow();
-        let Some(tab) = st.tabs.get(note_path) else {
-            return;
-        };
-        if !tab.editing {
-            if let Some(ref reading) = tab.reading {
-                reading.scroll_to_source_utf16(start_utf16);
+        type ScrollParts = (
+            Option<ReadingSurfaceHandle>,
+            Option<usize>,
+            Option<gtk4::TextBuffer>,
+            Option<gtk4::TextView>,
+            Option<gtk4::ScrolledWindow>,
+        );
+        let (reading, char_offset, buffer, view, scrolled): ScrollParts = {
+            let st = self.state.borrow();
+            let Some(tab) = st.tabs.get(note_path) else {
+                return;
+            };
+            if !tab.editing {
+                (tab.reading.clone(), None, None, None, None)
+            } else {
+                (
+                    None,
+                    Some(utf16_offset_to_char_offset(&tab.text, start_utf16 as usize)),
+                    Some(tab.edit_buffer.clone()),
+                    Some(tab.edit_view.clone()),
+                    Some(tab.edit_scrolled.clone()),
+                )
             }
+        };
+        // 滚动会更新 adjustment 并可能触发 GTK 回调，必须在 AppState 借用之外执行。
+        if let Some(reading) = reading {
+            reading.scroll_to_source_utf16(start_utf16);
             return;
         }
-        let char_offset = utf16_offset_to_char_offset(&tab.text, start_utf16 as usize);
-        let mut iter = tab.edit_buffer.iter_at_offset(char_offset as i32);
-        tab.edit_buffer.place_cursor(&iter);
-        tab.edit_view
-            .scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.12);
-        let adj = tab.edit_scrolled.vadjustment();
-        let rect = tab.edit_view.iter_location(&iter);
+        let (Some(char_offset), Some(buffer), Some(view), Some(scrolled)) =
+            (char_offset, buffer, view, scrolled)
+        else {
+            return;
+        };
+        let mut iter = buffer.iter_at_offset(char_offset as i32);
+        buffer.place_cursor(&iter);
+        view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.12);
+        let adj = scrolled.vadjustment();
+        let rect = view.iter_location(&iter);
         let target_y = (f64::from(rect.y()) - 12.0).max(0.0);
         let max_y = (adj.upper() - adj.page_size()).max(0.0);
         adj.set_value(target_y.min(max_y));
@@ -2046,7 +2128,8 @@ impl HortusWindow {
 
     /// 自动化/截图完成后直接退出：这些流程没有用户交互，不能停在关闭保护对话框。
     fn close_now(&self) {
-        if let Some(dialog) = self.state.borrow_mut().last_alert_dialog.take() {
+        let dialog = self.state.borrow_mut().last_alert_dialog.take();
+        if let Some(dialog) = dialog {
             dialog.force_close();
         }
         self.state.borrow_mut().close_approved = true;
@@ -2092,6 +2175,7 @@ impl HortusWindow {
             && self.options.reading_json.is_none()
             && self.options.edit_knowledge_json.is_none()
             && self.options.edit_knowledge_scene.is_none()
+            && self.options.wikilink_json.is_none()
             && self.options.screenshot.is_none()
             && self.options.focus_diagram.is_none()
             && !self.options.edit_mode
@@ -2179,6 +2263,11 @@ impl HortusWindow {
     }
 
     fn run_automation(&self) {
+        if let Some(ref json_path) = self.options.wikilink_json {
+            let path = json_path.clone();
+            self.execute_wikilink_checks(path);
+            return;
+        }
         if let Some(ref json_path) = self.options.edit_knowledge_json {
             let path = json_path.clone();
             self.execute_edit_knowledge_checks(path);
@@ -2528,11 +2617,18 @@ impl HortusWindow {
         let mut open_tabs = Vec::new();
         for idx in 0..self.tab_view.n_pages() {
             let page = self.tab_view.nth_page(idx);
-            if let Some(tab) = self.state.borrow().tabs.values().find(|t| t.page == page) {
+            let facts = {
+                let st = self.state.borrow();
+                st.tabs
+                    .values()
+                    .find(|t| t.page == page)
+                    .map(|tab| (tab.path.clone(), tab.edit_buffer.char_count()))
+            };
+            if let Some((path, char_count)) = facts {
                 open_tabs.push(SmokeTab {
-                    path: tab.path.clone(),
+                    path,
                     title: page.title().to_string(),
-                    char_count: tab.edit_buffer.char_count(),
+                    char_count,
                 });
             }
         }
@@ -3207,7 +3303,7 @@ impl HortusWindow {
     }
 
     fn request_save(&self, path: &str, choice: SaveChoice, announce: bool) {
-        let (session, edit_state, vault_root, save_temp) = {
+        let (session, edit_state, vault_root) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(path) else {
                 return;
@@ -3218,9 +3314,9 @@ impl HortusWindow {
             let Some(vault_root) = st.vault_root.clone() else {
                 return;
             };
-            let save_temp = self.save_temp_for(&vault_root, path);
-            (session, tab.edit_state.clone(), vault_root, save_temp)
+            (session, tab.edit_state.clone(), vault_root)
         };
+        let save_temp = self.save_temp_for(&vault_root, path);
         {
             let mut edit = edit_state.borrow_mut();
             if edit.save_inflight {
@@ -3276,8 +3372,11 @@ impl HortusWindow {
             edit.last_saved_at = Some(Instant::now());
         }
         let saved_clean = update.issue == DocumentIssue::None && !update.dirty;
-        if saved_clean && let Some(handle) = self.state.borrow().vault_handle.clone() {
-            handle.upsert_note_content(path.to_string(), text);
+        if saved_clean {
+            let handle = self.state.borrow().vault_handle.clone();
+            if let Some(handle) = handle {
+                handle.upsert_note_content(path.to_string(), text);
+            }
         }
         if let Some(copy) = update.copy_path.clone() {
             self.show_toast(&format!("已另存为冲突副本：{copy}"));
@@ -3354,8 +3453,14 @@ impl HortusWindow {
                 let apply_started = Instant::now();
                 apply_source_styles_with(&buffer, &mapper, &styles.packed_runs);
                 // 源码样式重放会清空标签，查找条打开时需要重新叠加匹配高亮。
-                if let Some(tab) = this.state.borrow().tabs.get(&path) {
-                    tab.find.refresh_highlights();
+                let find = this
+                    .state
+                    .borrow()
+                    .tabs
+                    .get(&path)
+                    .map(|tab| tab.find.clone());
+                if let Some(find) = find {
+                    find.refresh_highlights();
                 }
                 let apply_micros = apply_started.elapsed().as_micros() as u64;
                 {
@@ -3662,8 +3767,14 @@ impl HortusWindow {
             let mapper = Utf16Mapper::new(&text);
             apply_source_styles_with(&buffer, &mapper, &styles.packed_runs);
             edit_state.borrow_mut().suppress = false;
-            if let Some(tab) = this.state.borrow().tabs.get(&path) {
-                tab.find.refresh_highlights();
+            let find = this
+                .state
+                .borrow()
+                .tabs
+                .get(&path)
+                .map(|tab| tab.find.clone());
+            if let Some(find) = find {
+                find.refresh_highlights();
             }
             let headings: Vec<HeadingItem> = outline
                 .headings
@@ -3913,15 +4024,22 @@ impl HortusWindow {
             self.maybe_refresh_tab(path);
         }
         // 文件夹级删除/重命名不会逐个列出子笔记时，检查所有已打开标签的磁盘存在性。
-        let open_paths: Vec<String> = self.state.borrow().tabs.keys().cloned().collect();
+        let (open_paths, vault_root) = {
+            let st = self.state.borrow();
+            (
+                st.tabs.keys().cloned().collect::<Vec<_>>(),
+                st.vault_root.clone(),
+            )
+        };
         for rel in open_paths {
             if seen.contains(rel.as_str()) {
                 continue;
             }
-            if let Some(vault_root) = self.state.borrow().vault_root.clone()
-                && !vault_root.is_empty()
-                && !Path::new(&vault_root).join(&rel).exists()
-            {
+            // 借用必须在 maybe_refresh_tab 之前结束；否则它会 borrow_mut 并触发 RefCell panic。
+            let missing = vault_root
+                .as_deref()
+                .is_some_and(|root| !root.is_empty() && !Path::new(root).join(&rel).exists());
+            if missing {
                 self.maybe_refresh_tab(&rel);
             }
         }
@@ -4047,7 +4165,8 @@ impl HortusWindow {
         }
         if self.state.borrow().close_approved {
             self.state.borrow_mut().disposing = true;
-            if let Some(handle) = self.state.borrow_mut().vault_handle.take() {
+            let handle = self.state.borrow_mut().vault_handle.take();
+            if let Some(handle) = handle {
                 std::thread::spawn(move || handle.close());
             }
             return glib::Propagation::Proceed;
@@ -4068,7 +4187,8 @@ impl HortusWindow {
         self.state.borrow_mut().close_unsaved = unsaved.len() as u32;
         if unsaved.is_empty() {
             self.state.borrow_mut().disposing = true;
-            if let Some(handle) = self.state.borrow_mut().vault_handle.take() {
+            let handle = self.state.borrow_mut().vault_handle.take();
+            if let Some(handle) = handle {
                 std::thread::spawn(move || handle.close());
             }
             return glib::Propagation::Proceed;
@@ -4271,7 +4391,8 @@ impl HortusWindow {
     }
 
     fn after_create_entry(&self, entry: hortus_ffi::TreeEntry) {
-        if let Some(handle) = self.state.borrow().vault_handle.clone() {
+        let handle = self.state.borrow().vault_handle.clone();
+        if let Some(handle) = handle {
             handle.update_search_index(vec![entry.path.clone()], vec![]);
         }
         self.show_toast(if entry.directory {
@@ -4319,17 +4440,18 @@ impl HortusWindow {
     }
 
     fn perform_rename(&self, old_path: &str, new_name: &str, update_links: bool, is_dir: bool) {
-        let (handle, core, vault_root) = {
+        let resolved = {
             let st = self.state.borrow();
             match (&st.vault_handle, &st.core, &st.vault_root) {
                 (Some(handle), Some(core), Some(root)) => {
-                    (Arc::clone(handle), Arc::clone(core), root.clone())
+                    Some((Arc::clone(handle), Arc::clone(core), root.clone()))
                 }
-                _ => {
-                    self.show_toast("请先打开知识库");
-                    return;
-                }
+                _ => None,
             }
+        };
+        let Some((handle, core, vault_root)) = resolved else {
+            self.show_toast("请先打开知识库");
+            return;
         };
         let parent = old_path
             .rsplit_once('/')
@@ -4344,24 +4466,26 @@ impl HortusWindow {
             return;
         }
         let affected = self.affected_open_tabs(old_path);
-        let sessions: Vec<(String, Arc<DocumentSession>, String)> = {
+        let open_sessions: Vec<(String, Arc<DocumentSession>)> = {
             let st = self.state.borrow();
             affected
                 .iter()
                 .filter_map(|path| {
                     st.tabs.get(path).and_then(|tab| {
-                        tab.session.as_ref().map(|session| {
-                            let temp = self.save_temp_for(&vault_root, path);
-                            (
-                                path.clone(),
-                                Arc::clone(session),
-                                temp.to_string_lossy().into_owned(),
-                            )
-                        })
+                        tab.session
+                            .as_ref()
+                            .map(|session| (path.clone(), Arc::clone(session)))
                     })
                 })
                 .collect()
         };
+        let sessions: Vec<(String, Arc<DocumentSession>, String)> = open_sessions
+            .into_iter()
+            .map(|(path, session)| {
+                let temp = self.save_temp_for(&vault_root, &path);
+                (path, session, temp.to_string_lossy().into_owned())
+            })
+            .collect();
         self.state.borrow_mut().files_busy = true;
         let this = self.clone();
         let old_path = old_path.to_string();
@@ -4465,7 +4589,8 @@ impl HortusWindow {
                         this.update_tab_title(new);
                         this.refresh_document_tab(new);
                     }
-                    if let Some(handle) = this.state.borrow().vault_handle.clone() {
+                    let handle = this.state.borrow().vault_handle.clone();
+                    if let Some(handle) = handle {
                         let removed: Vec<String> = moved_tabs.iter().map(|(old, _)| old.clone()).collect();
                         let added: Vec<String> = moved_tabs.iter().map(|(_, new)| new.clone()).collect();
                         handle.update_search_index(added, removed);
@@ -4537,38 +4662,40 @@ impl HortusWindow {
     }
 
     fn perform_trash(&self, path: &str, is_dir: bool) {
-        let (handle, core, vault_root) = {
+        let resolved = {
             let st = self.state.borrow();
             match (&st.vault_handle, &st.core, &st.vault_root) {
                 (Some(handle), Some(core), Some(root)) => {
-                    (Arc::clone(handle), Arc::clone(core), root.clone())
+                    Some((Arc::clone(handle), Arc::clone(core), root.clone()))
                 }
-                _ => {
-                    self.show_toast("请先打开知识库");
-                    return;
-                }
+                _ => None,
             }
         };
+        let Some((handle, core, vault_root)) = resolved else {
+            self.show_toast("请先打开知识库");
+            return;
+        };
         let affected = self.affected_open_tabs(path);
-        let sessions: Vec<(String, Arc<DocumentSession>, String)> = {
+        let open_sessions: Vec<(String, Arc<DocumentSession>)> = {
             let st = self.state.borrow();
             affected
                 .iter()
                 .filter_map(|open| {
                     st.tabs.get(open).and_then(|tab| {
-                        tab.session.as_ref().map(|session| {
-                            (
-                                open.clone(),
-                                Arc::clone(session),
-                                self.save_temp_for(&vault_root, open)
-                                    .to_string_lossy()
-                                    .into_owned(),
-                            )
-                        })
+                        tab.session
+                            .as_ref()
+                            .map(|session| (open.clone(), Arc::clone(session)))
                     })
                 })
                 .collect()
         };
+        let sessions: Vec<(String, Arc<DocumentSession>, String)> = open_sessions
+            .into_iter()
+            .map(|(open, session)| {
+                let temp = self.save_temp_for(&vault_root, &open);
+                (open, session, temp.to_string_lossy().into_owned())
+            })
+            .collect();
         self.state.borrow_mut().files_busy = true;
         let this = self.clone();
         let path_bg = path.to_string();
@@ -5491,7 +5618,8 @@ impl HortusWindow {
             }),
         );
 
-        if let Some(root_path) = this.state.borrow().vault_root.clone() {
+        let root_path = this.state.borrow().vault_root.clone();
+        if let Some(root_path) = root_path {
             let _ = std::fs::remove_file(Path::new(&root_path).join(note));
         }
         let missing_shown = wait_for(9000, || {
@@ -5529,6 +5657,65 @@ impl HortusWindow {
                 "poll_refreshes": missing_facts.poll_refreshes,
             }),
         );
+        // 文件夹级外部删除：监听批次可能只报告目录本身，兜底对账必须逐个标签检查存在性。
+        let folder = "L2-外部文件夹";
+        let folder_notes = ["L2-外部文件夹/甲.md", "L2-外部文件夹/乙.md"];
+        {
+            let root_path = this.state.borrow().vault_root.clone().unwrap_or_default();
+            let dir = Path::new(&root_path).join(folder);
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("甲.md"), "# 甲\n\n文件夹级删除样本甲。\n");
+            let _ = std::fs::write(dir.join("乙.md"), "# 乙\n\n文件夹级删除样本乙。\n");
+            let handle = this.state.borrow().vault_handle.clone();
+            if let Some(handle) = handle {
+                handle.update_search_index(
+                    folder_notes.iter().map(|path| path.to_string()).collect(),
+                    vec![],
+                );
+            }
+        }
+        for rel in folder_notes {
+            this.open_note_at(rel, None);
+        }
+        let folder_loaded = wait_for(9000, || {
+            let st = this.state.borrow();
+            folder_notes.iter().all(|rel| {
+                st.tabs
+                    .get(*rel)
+                    .is_some_and(|tab| tab.source_loaded && tab.reading_loaded)
+            })
+        })
+        .await;
+        {
+            let root_path = this.state.borrow().vault_root.clone().unwrap_or_default();
+            let _ = std::fs::remove_dir_all(Path::new(&root_path).join(folder));
+        }
+        // 直接投递一条文件夹级路径事件，确保覆盖 process_file_changes 的兜底对账分支。
+        this.process_file_changes(&[folder.to_string()]);
+        let folder_missing = wait_for(9000, || {
+            let st = this.state.borrow();
+            folder_notes.iter().all(|rel| {
+                st.tabs.get(*rel).is_some_and(|tab| {
+                    tab.edit_state.borrow().issue == Some(DocumentIssue::Missing)
+                })
+            })
+        })
+        .await;
+        let folder_tabs_kept = {
+            let st = this.state.borrow();
+            folder_notes.iter().all(|rel| st.tabs.contains_key(*rel))
+        };
+        external.insert(
+            "folder_missing".into(),
+            serde_json::json!({
+                "folder": folder,
+                "notes": folder_notes,
+                "loaded": folder_loaded,
+                "missing_shown": folder_missing,
+                "tabs_kept": folder_tabs_kept,
+            }),
+        );
+
         // 关闭保护：脏且无法保存的标签页必须弹出原生对话框，且不能静默关闭。
         let close_guard_note = "L2-关闭保护.md";
         {
@@ -5537,7 +5724,8 @@ impl HortusWindow {
                 Path::new(&root_path).join(close_guard_note),
                 "# 关闭保护\n\n用于验证未保存内容不会被静默丢弃。\n",
             );
-            if let Some(handle) = this.state.borrow().vault_handle.clone() {
+            let handle = this.state.borrow().vault_handle.clone();
+            if let Some(handle) = handle {
                 handle.update_search_index(vec![close_guard_note.into()], vec![]);
             }
         }
@@ -5564,7 +5752,8 @@ impl HortusWindow {
             this.tab_facts(close_guard_note).is_some_and(|f| f.dirty)
         })
         .await;
-        if let Some(root_path) = this.state.borrow().vault_root.clone() {
+        let root_path = this.state.borrow().vault_root.clone();
+        if let Some(root_path) = root_path {
             let _ = std::fs::remove_file(Path::new(&root_path).join(close_guard_note));
         }
         let _ = wait_for(7000, || {
@@ -5617,7 +5806,8 @@ impl HortusWindow {
                 Path::new(&root_path).join(window_guard_note),
                 "# 窗口保护\n\n验证关闭窗口时不会静默丢数据。\n",
             );
-            if let Some(handle) = this.state.borrow().vault_handle.clone() {
+            let handle = this.state.borrow().vault_handle.clone();
+            if let Some(handle) = handle {
                 handle.update_search_index(vec![window_guard_note.into()], vec![]);
             }
         }
@@ -5644,7 +5834,8 @@ impl HortusWindow {
             this.tab_facts(window_guard_note).is_some_and(|f| f.dirty)
         })
         .await;
-        if let Some(root_path) = this.state.borrow().vault_root.clone() {
+        let root_path = this.state.borrow().vault_root.clone();
+        if let Some(root_path) = root_path {
             let _ = std::fs::remove_file(Path::new(&root_path).join(window_guard_note));
         }
         let _ = wait_for(7000, || {
@@ -6314,6 +6505,254 @@ impl HortusWindow {
             "last_toast".into(),
             serde_json::json!(this.state.borrow().last_toast),
         );
+        serde_json::Value::Object(report)
+    }
+
+    fn execute_wikilink_checks(&self, report_path: PathBuf) {
+        let this = self.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let report = this.run_wikilink_checks().await;
+            let json = serde_json::to_string_pretty(&report)
+                .unwrap_or_else(|err| format!("{{\"error\":\"{err}\"}}"));
+            let _ = std::fs::write(&report_path, json + "\n");
+            this.close_now();
+        });
+    }
+
+    fn reading_surface(&self, note: &str) -> Option<ReadingSurfaceHandle> {
+        self.state
+            .borrow()
+            .tabs
+            .get(note)
+            .and_then(|tab| tab.reading.clone())
+    }
+
+    fn click_reading_wikilink(&self, note: &str, label: &str) -> Option<(String, Option<String>)> {
+        self.reading_surface(note)?.click_wikilink(label)
+    }
+
+    fn tab_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.state.borrow().tabs.keys().cloned().collect();
+        paths.sort();
+        paths
+    }
+
+    /// 阅读态真实点击 `[[双链]]` 回归：命中 GestureClick::released → open_note_or_resolve，
+    /// 覆盖已解析裸链接、带标题链接、缺失目标与歧义目标的 toast 分支。
+    async fn run_wikilink_checks(&self) -> serde_json::Value {
+        let start = "Start here.md";
+        let map = "Learning/Learning map.md";
+        let loop_note = "Learning/Study loop.md";
+        let boundary = "L2-双链边界.md";
+        let mut report = serde_json::Map::new();
+        let mut stages: Vec<String> = Vec::new();
+        stages.push("wait-initial".into());
+        report.insert("stages".into(), serde_json::json!(stages.clone()));
+
+        let initial_ready = wait_for(20000, || {
+            let st = self.state.borrow();
+            st.scan_complete
+                && st
+                    .tabs
+                    .get(start)
+                    .is_some_and(|tab| tab.source_loaded && tab.reading_loaded)
+        })
+        .await;
+        report.insert("initial_ready".into(), serde_json::json!(initial_ready));
+        report.insert("initial_tabs".into(), serde_json::json!(self.tab_paths()));
+
+        // A. 仅打开 Start here.md 时，点击阅读视图里的 [[Learning map]]。
+        stages.push("click-learning-map".into());
+        report.insert("stages".into(), serde_json::json!(stages.clone()));
+        let click_map = self.click_reading_wikilink(start, "Learning map");
+        report.insert(
+            "learning_map_click".into(),
+            serde_json::json!({
+                "clicked": click_map.is_some(),
+                "target": click_map.as_ref().map(|(target, _)| target.clone()),
+                "heading": click_map.as_ref().and_then(|(_, heading)| heading.clone()),
+            }),
+        );
+        let map_loaded = wait_for(12000, || {
+            self.state
+                .borrow()
+                .tabs
+                .get(map)
+                .is_some_and(|tab| tab.source_loaded && tab.reading_loaded)
+        })
+        .await;
+        let map_active = self.active_tab_path();
+        let map_nodes = self
+            .state
+            .borrow()
+            .tabs
+            .get(map)
+            .and_then(|tab| {
+                tab.prepared_diagrams
+                    .iter()
+                    .filter_map(|diagram| diagram.scene.as_ref())
+                    .map(|scene| scene.hit_regions.len())
+                    .max()
+            })
+            .unwrap_or(0);
+        report.insert(
+            "learning_map_open".into(),
+            serde_json::json!({
+                "loaded": map_loaded,
+                "active_path": map_active,
+                "active_is_target": map_active.as_deref() == Some(map),
+                "tab_count": self.state.borrow().tabs.len(),
+                "diagram_nodes": map_nodes,
+                "diagram_ok": map_nodes > 0,
+            }),
+        );
+        if let Some(ref screenshot_path) = self.options.screenshot {
+            // 公开复核图：Start here.md 与 Learning map.md 双标签 + 81 节点大图。
+            glib::timeout_future(Duration::from_millis(500)).await;
+            if let Err(err) = self.capture_window_png(screenshot_path) {
+                eprintln!("screenshot failed: {err}");
+            }
+        }
+
+        // B. 从 Learning map 点击 [[Study loop]]（同一阅读点击路径的第二个目标）。
+        // 新标签刚完成装载时 TextView 尚未分配尺寸，等一帧再点击才能命中字符坐标。
+        let _ = wait_for(4000, || {
+            self.reading_surface(map)
+                .and_then(|surface| surface.text_view)
+                .is_some_and(|view| view.is_mapped() && view.width() > 0)
+        })
+        .await;
+        glib::timeout_future(Duration::from_millis(180)).await;
+        stages.push("click-study-loop".into());
+        report.insert("stages".into(), serde_json::json!(stages.clone()));
+        let click_study = self.click_reading_wikilink(map, "Study loop");
+        let study_loaded = wait_for(12000, || {
+            self.state
+                .borrow()
+                .tabs
+                .get(loop_note)
+                .is_some_and(|tab| tab.source_loaded && tab.reading_loaded)
+        })
+        .await;
+        let study_active = self.active_tab_path();
+        report.insert(
+            "study_loop_click".into(),
+            serde_json::json!({
+                "clicked": click_study.is_some(),
+                "target": click_study.as_ref().map(|(target, _)| target.clone()),
+                "loaded": study_loaded,
+                "active_path": study_active,
+                "active_is_target": study_active.as_deref() == Some(loop_note),
+                "tab_count": self.state.borrow().tabs.len(),
+            }),
+        );
+
+        // C. 边界笔记：缺失目标、带标题链接与歧义目标。
+        stages.push("open-boundary".into());
+        report.insert("stages".into(), serde_json::json!(stages.clone()));
+        self.open_note_at(boundary, None);
+        let boundary_loaded = wait_for(12000, || {
+            self.state
+                .borrow()
+                .tabs
+                .get(boundary)
+                .is_some_and(|tab| tab.source_loaded && tab.reading_loaded)
+        })
+        .await;
+        report.insert("boundary_loaded".into(), serde_json::json!(boundary_loaded));
+        let _ = wait_for(4000, || {
+            self.reading_surface(boundary)
+                .and_then(|surface| surface.text_view)
+                .is_some_and(|view| view.is_mapped() && view.width() > 0)
+        })
+        .await;
+        glib::timeout_future(Duration::from_millis(180)).await;
+
+        stages.push("click-missing-target".into());
+        report.insert("stages".into(), serde_json::json!(stages.clone()));
+        let tabs_before_missing = self.state.borrow().tabs.len();
+        let click_missing = self.click_reading_wikilink(boundary, "L2 不存在的目标");
+        let missing_toast = wait_for(4000, || {
+            self.state
+                .borrow()
+                .last_toast
+                .as_deref()
+                .is_some_and(|toast| toast.contains("未找到链接目标"))
+        })
+        .await;
+        report.insert(
+            "missing_target_click".into(),
+            serde_json::json!({
+                "clicked": click_missing.is_some(),
+                "target": click_missing.as_ref().map(|(target, _)| target.clone()),
+                "toast_shown": missing_toast,
+                "tab_count_unchanged": self.state.borrow().tabs.len() == tabs_before_missing,
+                "active_path": self.active_tab_path(),
+            }),
+        );
+
+        stages.push("click-ambiguous-target".into());
+        report.insert("stages".into(), serde_json::json!(stages.clone()));
+        let click_ambiguous = self.click_reading_wikilink(boundary, "同名");
+        let ambiguous_toast = wait_for(4000, || {
+            self.state
+                .borrow()
+                .last_toast
+                .as_deref()
+                .is_some_and(|toast| toast.contains("多个笔记匹配"))
+        })
+        .await;
+        report.insert(
+            "ambiguous_target_click".into(),
+            serde_json::json!({
+                "clicked": click_ambiguous.is_some(),
+                "target": click_ambiguous.as_ref().map(|(target, _)| target.clone()),
+                "toast_shown": ambiguous_toast,
+                "active_path": self.active_tab_path(),
+            }),
+        );
+
+        stages.push("click-heading-link".into());
+        report.insert("stages".into(), serde_json::json!(stages.clone()));
+        let click_heading = self.click_reading_wikilink(boundary, "带标题的链接");
+        let heading_active =
+            wait_for(4000, || self.active_tab_path().as_deref() == Some(map)).await;
+        report.insert(
+            "heading_link_click".into(),
+            serde_json::json!({
+                "clicked": click_heading.is_some(),
+                "target": click_heading.as_ref().map(|(target, _)| target.clone()),
+                "heading": click_heading.as_ref().and_then(|(_, heading)| heading.clone()),
+                "active_is_map": heading_active,
+                "active_path": self.active_tab_path(),
+            }),
+        );
+
+        // D. 裸目标（不带 .md）解析分支：阅读视图 span 已带 resolved_path，真实点击走
+        // raw_target 以 .md 结尾的第一分支；此处直接调用同一解析入口覆盖 1490 的 note 分支。
+        stages.push("bare-target-resolve".into());
+        report.insert("stages".into(), serde_json::json!(stages.clone()));
+        self.open_note_or_resolve(boundary, "Study loop", None);
+        let bare_active = wait_for(4000, || {
+            self.active_tab_path().as_deref() == Some(loop_note)
+        })
+        .await;
+        report.insert(
+            "bare_target_resolve".into(),
+            serde_json::json!({
+                "active_is_study_loop": bare_active,
+                "active_path": self.active_tab_path(),
+                "open_tabs": self.tab_paths(),
+            }),
+        );
+
+        stages.push("done".into());
+        report.insert("stages".into(), serde_json::json!(stages));
+        report.insert(
+            "last_toast".into(),
+            serde_json::json!(self.state.borrow().last_toast),
+        );
+        report.insert("completed".into(), serde_json::json!(true));
         serde_json::Value::Object(report)
     }
 }

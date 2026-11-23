@@ -231,6 +231,17 @@ const APP_CSS: &str = r#"
     font-size: 0.90em;
 }
 
+.hortus-tag-chip.hortus-tag-chip-selected {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+}
+
+.hortus-tag-chip.hortus-tag-chip-selected:hover,
+.hortus-tag-chip.hortus-tag-chip-selected:active {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+}
+
 .hortus-backlink-row {
     padding: 5px 10px;
     border-radius: 6px;

@@ -47,11 +47,13 @@ def check(condition, message):
 
 def start_private_display():
     """在私有 Xvfb 中运行 GUI：测试窗口不出现在真实桌面，也不抢焦点。"""
+    os.environ.pop("WAYLAND_DISPLAY", None)
     explicit = os.environ.get("HORTUS_TEST_DISPLAY")
     if explicit:
         os.environ["DISPLAY"] = explicit
         os.environ["GDK_BACKEND"] = "x11"
         os.environ["GSK_RENDERER"] = "cairo"
+        os.environ["NO_AT_BRIDGE"] = "1"
         return None
     xvfb = shutil.which("Xvfb")
     check(
@@ -808,6 +810,9 @@ def main():
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    if args.media is not None:
+        stray_pngs = sorted(str(path.relative_to(output_dir)) for path in output_dir.rglob("*.png"))
+        check(not stray_pngs, f"--output 目录内出现 PNG（应全部写入 --media）：{stray_pngs}")
     print(
         f"PASS: katex_fonts=20(off_main), diagrams={sc_stats['diagram_rendered']}+2fallback+.mmd, "
         f"math={sc_stats['math_rendered']}(cjk_fb={len(sc_stats['math_cjk_fallback_codepoints'])})+{sc_stats['math_fallback_error']}err, "

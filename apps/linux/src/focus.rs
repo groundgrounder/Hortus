@@ -619,8 +619,12 @@ impl FocusController {
     }
 
     fn update_percent_label(&self) {
-        if let Some(st) = self.session.borrow().as_ref() {
-            let pct = (st.scale * 100.0).round() as i32;
+        let pct = self
+            .session
+            .borrow()
+            .as_ref()
+            .map(|st| (st.scale * 100.0).round() as i32);
+        if let Some(pct) = pct {
             self.percent_label.set_text(&format!("{pct}%"));
         }
     }

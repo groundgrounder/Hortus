@@ -57,7 +57,7 @@ impl VaultNode {
     }
 }
 
-type OpenNoteCallback = Rc<RefCell<Option<Box<dyn Fn(String)>>>>;
+type OpenNoteCallback = Rc<RefCell<Option<Rc<dyn Fn(String)>>>>;
 /// 右键菜单回调：锚点控件、相对路径、是否目录。
 type ContextMenuCallback = Rc<dyn Fn(gtk4::Widget, String, bool)>;
 
@@ -147,7 +147,8 @@ impl VaultTree {
                     let Some((path, is_dir)) = target.borrow().clone() else {
                         return;
                     };
-                    if let Some(handler) = cb.borrow().as_ref() {
+                    let handler = cb.borrow().clone();
+                    if let Some(handler) = handler {
                         handler(anchor.clone().upcast::<gtk4::Widget>(), path, is_dir);
                         gesture.set_state(gtk4::EventSequenceState::Claimed);
                     }
@@ -214,10 +215,11 @@ impl VaultTree {
             };
             if node.is_directory() {
                 tree_row.set_expanded(!tree_row.is_expanded());
-            } else if is_note_file_name(&node.name())
-                && let Some(cb) = on_open_cb.borrow().as_ref()
-            {
-                cb(node.path());
+            } else if is_note_file_name(&node.name()) {
+                let cb = on_open_cb.borrow().clone();
+                if let Some(cb) = cb {
+                    cb(node.path());
+                }
             }
         });
 
@@ -263,7 +265,7 @@ impl VaultTree {
     }
 
     pub fn set_on_open_note(&self, callback: impl Fn(String) + 'static) {
-        *self.on_open_note.borrow_mut() = Some(Box::new(callback));
+        *self.on_open_note.borrow_mut() = Some(Rc::new(callback));
     }
 
     pub fn clear(&self) {

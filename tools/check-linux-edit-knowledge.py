@@ -76,11 +76,13 @@ def check(condition, message):
 
 def start_private_display():
     """在私有 Xvfb 中运行 GUI：测试窗口不会出现在真实桌面上，也不抢焦点。"""
+    os.environ.pop("WAYLAND_DISPLAY", None)
     explicit = os.environ.get("HORTUS_TEST_DISPLAY")
     if explicit:
         os.environ["DISPLAY"] = explicit
         os.environ["GDK_BACKEND"] = "x11"
         os.environ["GSK_RENDERER"] = "cairo"
+        os.environ["NO_AT_BRIDGE"] = "1"
         return None
     xvfb = shutil.which("Xvfb")
     check(
@@ -297,6 +299,22 @@ Hortus 补全场景用于截图，正文保持在首屏内。
         "# 引用组\n\n嵌入 ![[L2-组/子笔记]] 应在文件夹重命名后更新。\n", encoding="utf-8"
     )
     (vault / "L2-待删除.md").write_text("# 待删除笔记\n\n将移入隔离回收站。\n", encoding="utf-8")
+    # 阅读态双链点击回归样本：已解析、缺失、歧义与带标题四类目标。
+    (vault / "L2-双链边界.md").write_text(
+        """# 双链边界
+
+- [[Learning map]]
+- [[Study loop]]
+- [[L2 不存在的目标]]
+- [[Learning map#Learning map|带标题的链接]]
+- [[同名]]
+""",
+        encoding="utf-8",
+    )
+    (vault / "L2-重名一").mkdir(exist_ok=True)
+    (vault / "L2-重名二").mkdir(exist_ok=True)
+    (vault / "L2-重名一/同名.md").write_text("# 同名 A\n\n歧义目标 A。\n", encoding="utf-8")
+    (vault / "L2-重名二/同名.md").write_text("# 同名 B\n\n歧义目标 B。\n", encoding="utf-8")
 
 
 def supervise(cmd, env, label: str, timeout: float = 180.0):
@@ -457,6 +475,10 @@ def assert_report(report: dict, vault: Path, env: dict, real_trash_before: list[
     window_guard = external["window_close_guard"]
     check(window_guard["alert_shown"] is True, "关闭窗口时未弹出未保存保护对话框")
     check(window_guard["window_kept"] is True, "关闭窗口保护失败：窗口被静默退出")
+    folder_missing = external["folder_missing"]
+    check(folder_missing["loaded"] is True, "文件夹级删除样本未加载")
+    check(folder_missing["missing_shown"] is True, f"文件夹级外部删除未提示缺失：{folder_missing}")
+    check(folder_missing["tabs_kept"] is True, "文件夹级外部删除后标签页丢失")
 
     find = report["find"]
     check(find["opened"] is True and find["matches_found"] is True, "Ctrl+F 查找未打开或无匹配")
@@ -645,11 +667,13 @@ def capture_scenes(gui_bin: Path, vault: Path, media_dir: Path, tmp_path: Path):
     return results
 
 
-def narrow_width_run(gui_bin: Path, vault: Path, tmp_path: Path, output_dir: Path):
+def narrow_width_run(gui_bin: Path, vault: Path, tmp_path: Path, media_dir: Path):
+    """窄屏截图属于过程媒体：一律写 media 目录，--output 只保留 JSON/日志。"""
     results = []
+    media_dir.mkdir(parents=True, exist_ok=True)
     for index, extra in enumerate(([], ["--edit"])):
         env = isolated_env(tmp_path / f"narrow-{index}")
-        png = output_dir / f"narrow-994-{index}.png"
+        png = media_dir / f"narrow-994-{index}.png"
         cmd = [
             str(gui_bin),
             "--vault",
@@ -682,6 +706,98 @@ def narrow_width_run(gui_bin: Path, vault: Path, tmp_path: Path, output_dir: Pat
             }
         )
     return results
+
+
+def run_wikilink_regression(
+    gui_bin: Path, vault: Path, tmp_path: Path, output_dir: Path, screenshot: Path | None
+):
+    """仅打开 Start here.md，用真实 GestureClick 释放事件点击阅读视图双链。"""
+    env = isolated_env(tmp_path / "wikilink")
+    report_path = output_dir / "wikilink-report.json"
+    report_path.unlink(missing_ok=True)
+    cmd = [
+        str(gui_bin),
+        "--vault",
+        str(vault),
+        "--open",
+        "Start here.md",
+        "--width",
+        "1280",
+        "--height",
+        "860",
+        "--color-scheme",
+        "light",
+        "--wikilink-json",
+        str(report_path),
+    ]
+    if screenshot is not None:
+        screenshot.unlink(missing_ok=True)
+        cmd.extend(["--screenshot", str(screenshot)])
+    run = supervise(cmd, env, "L2 双链点击回归", timeout=150)
+    assert_clean_run(run, "L2 双链点击回归")
+    check(report_path.is_file(), "双链回归未生成 JSON 报告")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    check(report.get("initial_ready") is True, "双链回归初始笔记未就绪")
+    check(
+        report.get("completed") is True,
+        f"双链回归未完成：stages={report.get('stages')}",
+    )
+    initial_tabs = report.get("initial_tabs") or []
+    check(initial_tabs == ["Start here.md"], f"双链回归应仅打开 Start here.md：{initial_tabs}")
+    click = report.get("learning_map_click") or {}
+    check(click.get("clicked") is True, f"未命中 Learning map 双链：{click}")
+    opened = report.get("learning_map_open") or {}
+    check(opened.get("loaded") is True, f"Learning map 未加载：{opened}")
+    check(opened.get("active_is_target") is True, f"点击后新标签未激活：{opened}")
+    check(
+        opened.get("diagram_ok") is True and opened.get("diagram_nodes", 0) > 0,
+        f"Mermaid 大图未渲染节点：{opened}",
+    )
+    study = report.get("study_loop_click") or {}
+    check(
+        study.get("clicked") is True and study.get("active_is_target") is True,
+        f"Study loop 双链点击失败：{study}",
+    )
+    missing = report.get("missing_target_click") or {}
+    check(
+        missing.get("clicked") is True and missing.get("toast_shown") is True,
+        f"缺失目标未走 toast 分支：{missing}",
+    )
+    check(missing.get("tab_count_unchanged") is True, f"缺失目标意外打开标签：{missing}")
+    ambiguous = report.get("ambiguous_target_click") or {}
+    check(
+        ambiguous.get("clicked") is True and ambiguous.get("toast_shown") is True,
+        f"歧义目标未走 toast 分支：{ambiguous}",
+    )
+    heading = report.get("heading_link_click") or {}
+    check(
+        heading.get("clicked") is True and heading.get("active_is_map") is True,
+        f"带标题双链未激活目标笔记：{heading}",
+    )
+    bare = report.get("bare_target_resolve") or {}
+    check(bare.get("active_is_study_loop") is True, f"裸目标解析分支失败：{bare}")
+    shot = None
+    if screenshot is not None:
+        check(screenshot.is_file(), f"双链公开复核截图缺失：{screenshot}")
+        width, height = png_dimensions(screenshot)
+        check(width >= 1200 and height >= 800, f"双链截图尺寸异常：{width}x{height}")
+        check(screenshot.stat().st_size > 40_000, f"双链截图内容过于简单：{screenshot.stat().st_size} bytes")
+        shot = {
+            "path": str(screenshot.resolve()),
+            "width": width,
+            "height": height,
+            "size_bytes": screenshot.stat().st_size,
+            "sha256": hashlib.sha256(screenshot.read_bytes()).hexdigest(),
+        }
+    return {
+        "returncode": run["returncode"],
+        "network_connections": len(run["sockets"]),
+        "peak_rss_mib": run["peak_rss_mib"],
+        "report_path": str(report_path.resolve()),
+        "learning_map_nodes": opened.get("diagram_nodes"),
+        "screenshot": shot,
+        "report": report,
+    }
 
 
 def main():
@@ -773,7 +889,18 @@ def main():
             shutil.copytree(ROOT / "fixtures/demo-vault", scene_vault)
             populate_l2_vault(scene_vault)
             scenes = capture_scenes(gui_bin, scene_vault, media_dir, tmp_path)
-            narrow = narrow_width_run(gui_bin, scene_vault, tmp_path, output_dir)
+            narrow = narrow_width_run(gui_bin, scene_vault, tmp_path, media_dir)
+        # 双链点击回归使用独立副本：只读流程，不允许受前面重命名/删除影响。
+        wikilink_vault = tmp_path / "wikilink-vault"
+        shutil.copytree(ROOT / "fixtures/demo-vault", wikilink_vault)
+        populate_l2_vault(wikilink_vault)
+        wikilink = run_wikilink_regression(
+            gui_bin,
+            wikilink_vault,
+            tmp_path,
+            output_dir,
+            media_dir / "l2-wikilink-click-learning-map.png",
+        )
 
     if display is not None:
         display.terminate()
@@ -798,19 +925,24 @@ def main():
         "verified": verified,
         "scenes": scenes,
         "narrow_width": narrow,
+        "wikilink": wikilink,
         "vault_unchanged_except": sorted(allowed_changes),
         "real_trash_untouched": True,
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    if args.media is not None:
+        stray_pngs = sorted(str(path.relative_to(output_dir)) for path in output_dir.rglob("*.png"))
+        check(not stray_pngs, f"--output 目录内出现 PNG（应全部写入 --media）：{stray_pngs}")
     print(
         "PASS: edit/save/conflict/missing ok, "
         f"big_doc_style={verified['big_doc']['style_worst_micros']}us, "
         f"search_groups={verified['knowledge']['search']['final_groups']}, "
         f"completion={verified['knowledge']['completion']['items']}, "
         f"rename_rewrites={verified['files']['rename_note']['op']['rewrites']}, "
-        f"trash_isolated=yes, 0 net, rss={run['peak_rss_mib']} MiB, scenes={len(scenes)}"
+        f"trash_isolated=yes, 0 net, rss={run['peak_rss_mib']} MiB, scenes={len(scenes)}, "
+        f"wikilink_nodes={wikilink['learning_map_nodes']}"
     )
     return 0
 

@@ -413,7 +413,8 @@ fn render_search_results(
             .unwrap_or(0);
         let open = on_open.clone();
         header_btn.connect_clicked(move |_| {
-            if let Some(cb) = open.borrow().as_ref() {
+            let cb = open.borrow().clone();
+            if let Some(cb) = cb {
                 cb(path.clone(), Some(start));
             }
         });
@@ -433,7 +434,8 @@ fn render_search_results(
             let start = u64::from(m.start);
             let open = on_open.clone();
             btn.connect_clicked(move |_| {
-                if let Some(cb) = open.borrow().as_ref() {
+                let cb = open.borrow().clone();
+                if let Some(cb) = cb {
                     cb(path.clone(), Some(start));
                 }
             });
@@ -682,12 +684,15 @@ impl TagsPanel {
             rows += 1;
             let label = format!("#{} ({})", tag.0, tag.2);
             let btn = gtk4::Button::with_label(&label);
-            btn.add_css_class("flat");
             btn.add_css_class("hortus-tag-chip");
             btn.set_halign(gtk4::Align::Start);
             let is_selected = selected.as_deref() == Some(tag.0.as_str());
             if is_selected {
+                // 选中态只用强调色胶囊；叠加 .flat 会把背景变透明，浅色主题下白字不可读。
                 btn.add_css_class("suggested-action");
+                btn.add_css_class("hortus-tag-chip-selected");
+            } else {
+                btn.add_css_class("flat");
             }
             let selected_tag = tag.0.clone();
             let selected_tag_cb = tag.0.clone();

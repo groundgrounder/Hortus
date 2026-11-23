@@ -471,10 +471,48 @@ pub struct ReadingSurfaceHandle {
     pub scrolled: gtk4::ScrolledWindow,
     pub text_view: Option<gtk4::TextView>,
     source_char_anchors: Vec<(u64, i32)>,
+    link_spans: Rc<Vec<LinkSpan>>,
+    click_gesture: Option<gtk4::GestureClick>,
     pub stats: NoteReadingStats,
 }
 
 impl ReadingSurfaceHandle {
+    /// 自动化回归：按可见文字命中阅读视图双链，并触发真实的 `GestureClick::released`。
+    /// 返回被点击链接的 `(target, heading)`；文字不在双链范围内时返回 `None`。
+    pub fn click_wikilink(&self, label: &str) -> Option<(String, Option<String>)> {
+        let text_view = self.text_view.as_ref()?;
+        let gesture = self.click_gesture.as_ref()?;
+        let buffer = text_view.buffer();
+        let text = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string();
+        let byte = text.find(label)?;
+        let char_off = text[..byte].chars().count() as i32;
+        let action = self
+            .link_spans
+            .iter()
+            .find(|span| char_off >= span.char_start && char_off < span.char_end)?
+            .action
+            .clone();
+        let LinkAction::Wiki {
+            target, heading, ..
+        } = action
+        else {
+            return None;
+        };
+        let mut iter = buffer.iter_at_offset(char_off);
+        text_view.scroll_to_iter(&mut iter, 0.0, false, 0.0, 0.0);
+        let rect = text_view.iter_location(&iter);
+        let (wx, wy) = text_view.buffer_to_window_coords(
+            gtk4::TextWindowType::Widget,
+            rect.x() + 2,
+            rect.y() + rect.height().max(1) / 2,
+        );
+        let (x, y) = (f64::from(wx), f64::from(wy));
+        gesture.emit_by_name::<()>("released", &[&1i32, &x, &y]);
+        Some((target, heading))
+    }
+
     pub fn scroll_to_source_utf16(&self, target_utf16: u64) {
         let Some(ref tv) = self.text_view else { return };
         let char_off = map_source_utf16_to_reading_char(&self.source_char_anchors, target_utf16);
@@ -577,6 +615,8 @@ pub fn build_reading_surface(
             scrolled,
             text_view: None,
             source_char_anchors: Vec::new(),
+            link_spans: Rc::new(Vec::new()),
+            click_gesture: None,
             stats,
         };
     }
@@ -594,7 +634,7 @@ pub fn build_reading_surface(
         on_diagram_collapse,
     );
 
-    let (text_view, scrolled) = install_text_view_with_anchors(
+    let (text_view, scrolled, click_gesture, link_spans) = install_text_view_with_anchors(
         &assembled.text,
         &assembled.runs,
         &assembled.anchors,
@@ -608,6 +648,8 @@ pub fn build_reading_surface(
         scrolled,
         text_view: Some(text_view),
         source_char_anchors: assembled.source_char_anchors,
+        link_spans,
+        click_gesture,
         stats,
     }
 }
@@ -647,7 +689,7 @@ pub fn build_embedded_note_body(
         on_collapse,
     );
 
-    let (text_view, _) = install_text_view_with_anchors(
+    let (text_view, _, _, _) = install_text_view_with_anchors(
         &assembled.text,
         &assembled.runs,
         &assembled.anchors,
@@ -1102,10 +1144,17 @@ fn install_text_view_with_anchors(
     link_spans: &[LinkSpan],
     env: &ReadingEnv,
     embedded: bool,
-) -> (gtk4::TextView, gtk4::ScrolledWindow) {
+) -> (
+    gtk4::TextView,
+    gtk4::ScrolledWindow,
+    Option<gtk4::GestureClick>,
+    Rc<Vec<LinkSpan>>,
+) {
     let tag_table = create_tag_table();
     let buffer = gtk4::TextBuffer::new(Some(&tag_table));
     buffer.set_text(display_text);
+    let spans = Rc::new(link_spans.to_vec());
+    let mut click_gesture: Option<gtk4::GestureClick> = None;
 
     let mapper = Utf16Mapper::new(display_text);
     for run in runs {
@@ -1174,7 +1223,6 @@ fn install_text_view_with_anchors(
 
     // 绑定正文双链与外部 URL 点击与手型光标
     if !link_spans.is_empty() {
-        let spans = Rc::new(link_spans.to_vec());
         let motion = gtk4::EventControllerMotion::new();
         {
             let tv_m = text_view.clone();
@@ -1241,7 +1289,8 @@ fn install_text_view_with_anchors(
                 }
             });
         }
-        text_view.add_controller(click);
+        text_view.add_controller(click.clone());
+        click_gesture = Some(click);
     }
 
     let scrolled = gtk4::ScrolledWindow::builder()
@@ -1252,7 +1301,7 @@ fn install_text_view_with_anchors(
         .child(&text_view)
         .build();
 
-    (text_view, scrolled)
+    (text_view, scrolled, click_gesture, spans)
 }
 
 fn make_diagram_callbacks(

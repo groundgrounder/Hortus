@@ -56,6 +56,7 @@ fn main() -> std::process::ExitCode {
         || options.scroll_fraction.is_some()
         || options.edit_knowledge_json.is_some()
         || options.edit_knowledge_scene.is_some()
+        || options.wikilink_json.is_some()
     {
         gio::ApplicationFlags::NON_UNIQUE
     } else {
@@ -89,7 +90,8 @@ fn main() -> std::process::ExitCode {
     let options_cell = RefCell::new(Some(options));
     app.connect_activate(move |app| {
         style::install_css();
-        if let Some(opts) = options_cell.borrow_mut().take() {
+        let options = options_cell.borrow_mut().take();
+        if let Some(opts) = options {
             let win = HortusWindow::new(app, opts);
             win.present();
         } else if let Some(win) = app.active_window() {
