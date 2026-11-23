@@ -776,6 +776,7 @@ enum DiagramFocusInspection {
         let block = try required(reading.blocks.first(where: { $0.ordinal == 1 }))
         let prepared = try required(block.prepared)
         let diagram = try required(reading.diagramViews[1])
+        let mdSVG = try await exportReadingSVG(diagram, note: note, to: directory)
         reveal(reading, block: block)
         let design = try required(prepared.scene.hitRegions.first {
             $0.linkTarget == "design" && $0.linkHeading == "Section Two"
@@ -876,13 +877,7 @@ enum DiagramFocusInspection {
         let svgURL = directory.appendingPathComponent("diagram-links-1.svg")
         let pngURL = directory.appendingPathComponent("diagram-links-1.png")
         let pdfURL = directory.appendingPathComponent("diagram-links-1.pdf")
-        let width = exportPrepared.scene.width
-        let collapsedNodes = exportBlock.collapsed.sorted()
-        let source = editing.string
-        let request = DiagramExportRequest(prepared: exportPrepared, note: note, ordinal: 1) {
-            try await DiagramExport.renderSVG(source: source, mmd: false, block: 1, width: width,
-                                              dark: false, collapsed: collapsedNodes)
-        }
+        let request = try required(exportView.exportRequestProvider?())
         try await DiagramExport.export(.svg, request: request, to: svgURL)
         try await DiagramExport.export(.png, request: request, to: pngURL)
         try await DiagramExport.export(.pdf, request: request, to: pdfURL)
@@ -974,7 +969,24 @@ enum DiagramFocusInspection {
         ]
         workspace.exitFocus(restore: false)
         result["document"] = ["path": workspace.selected ?? note, "source_count": editing.string.count]
+        let mmd = "reading-export.mmd"
+        let (mmdReading, _) = try await openReading(mmd, workspace: workspace)
+        let mmdDiagram = try required(mmdReading.diagramViews[1])
+        let mmdSVG = try await exportReadingSVG(mmdDiagram, note: mmd, to: directory)
+        result["reading_exports"] = [note: mdSVG, mmd: mmdSVG]
         return result
+    }
+
+    private static func exportReadingSVG(_ view: DiagramView, note: String, to directory: URL) async throws -> Int {
+        let request = try required(view.exportRequestProvider?())
+        guard view.window != nil, request.note == note, (view.superview as? DiagramTextView)?.isReading == true else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        let url = directory.appendingPathComponent(note + ".svg")
+        try await DiagramExport.export(.svg, request: request, to: url)
+        let svg = try String(contentsOf: url, encoding: .utf8)
+        guard svg.hasPrefix("<svg") else { throw CocoaError(.coderInvalidValue) }
+        return svg.utf8.count
     }
 
     @discardableResult
@@ -996,11 +1008,9 @@ enum DiagramFocusInspection {
         -> (DiagramTextView, NoteDocument) {
         if workspace.selected != note {
             workspace.openNote(note, savePrevious: false)
-            for _ in 0..<800 where workspace.selected != note {
-                try await Task.sleep(for: .milliseconds(5))
-            }
         }
-        guard let first = workspace.current?.document else { throw CocoaError(.fileNoSuchFile) }
+        _ = await waitUntil { workspace.selected == note && workspace.current?.document != nil }
+        guard workspace.selected == note, let first = workspace.current?.document else { throw CocoaError(.fileNoSuchFile) }
         if !first.reading { await workspace.toggleCurrentView() }
         for _ in 0..<800 where !(workspace.current?.document?.reading ?? false) {
             try await Task.sleep(for: .milliseconds(5))

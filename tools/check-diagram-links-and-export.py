@@ -91,6 +91,7 @@ def prepare_vault(base):
     (vault / NOTE).write_text(NOTE_TEXT)
     (vault / 'design.md').write_text(DESIGN)
     (vault / 'architecture.md').write_text(ARCHITECTURE)
+    (vault / 'reading-export.mmd').write_text('flowchart LR\nA[Origin] --> B[Destination]\n')
     (vault / 'plain.md').write_text('# Plain note\n\nNo diagrams here.\n')
     return vault
 
@@ -141,12 +142,12 @@ def launch(base, vault, note, inspection, extra=(), snapshot=None, dark=False, l
     return data
 
 
-def check_svg(path):
+def check_svg(path, labels=('Design Spec', 'architecture')):
     svg = path.read_text(encoding='utf-8')
     root = ET.fromstring(svg)
     assert root.tag.endswith('svg'), root.tag
     assert 'viewBox' in root.attrib, root.attrib
-    assert 'Design Spec' in svg and 'architecture' in svg
+    assert all(label in svg for label in labels)
     assert '<script' not in svg
     return {'bytes': len(svg.encode()), 'viewBox': root.attrib['viewBox']}
 
@@ -170,13 +171,20 @@ def main():
     media = (args.media or output / 'media').expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     media.mkdir(parents=True, exist_ok=True)
-    export_dir = output / 'export'
+    export_dir = media / 'export'
     export_dir.mkdir(parents=True, exist_ok=True)
     for stale in export_dir.iterdir():
         if stale.is_file():
             stale.unlink()
     screenshots = output / 'screenshots'
     screenshots.mkdir(parents=True, exist_ok=True)
+
+    strings = json.loads((ROOT / 'apps/macos/Localizable.xcstrings').read_text())['strings']
+    for key in ('Export Diagram', 'Export', 'Open Linked Note', 'Export Failed',
+                'The diagram could not be rendered or written.'):
+        localizations = strings[key]['localizations']
+        assert localizations['en']['stringUnit']['value'] == key
+        assert localizations['zh-Hans']['stringUnit']['value'].strip()
 
     base = Path(tempfile.mkdtemp(prefix='hortus-p4-01-'))
     prepare_state(base)
@@ -207,6 +215,12 @@ def main():
     assert export['export_enabled'], export
     assert export['export_menu'] == ['SVG…', 'PNG…', 'PDF…'], export
     svg = check_svg(export_dir / 'diagram-links-1.svg')
+    reading_exports = data['reading_exports']
+    assert set(reading_exports) == {NOTE, 'reading-export.mmd'}, reading_exports
+    for note, label in [(NOTE, 'Design Spec'), ('reading-export.mmd', 'Destination')]:
+        path = export_dir / f'{note}.svg'
+        check_svg(path, labels=(label,))
+        assert path.stat().st_size == reading_exports[note], path
     png = check_png(export_dir / 'diagram-links-1.png',
                     math.ceil(scene['width'] * 2), math.ceil(scene['height'] * 2))
     assert export['png_pixels'] == [png['width'], png['height']], (export, png)
@@ -259,6 +273,7 @@ def main():
         'command_click': data['command_click'],
         'export': {**export, 'svg_check': svg, 'png_check': png, 'pdf_bytes': len(pdf)},
         'focus': focus,
+        'reading_exports': reading_exports,
         'vault_unchanged': before == after,
         'media': {name: {'path': item['path'], 'sha256': item['sha256'], 'bytes': item['bytes']}
                   for name, item in shots.items()},

@@ -22,18 +22,12 @@ enum DiagramExportFormat: String, CaseIterable {
     var menuTitle: String { "\(rawValue.uppercased())…" }
 }
 
-/// 双语文案暂由本文件提供，合并后再收拢进 `Localizable.xcstrings`。
 enum DiagramExportStrings {
-    static var chinese: Bool {
-        Bundle.main.preferredLocalizations.first?.hasPrefix("zh") == true
-    }
-    static var exportDiagram: String { chinese ? "导出图表" : "Export Diagram" }
-    static var export: String { chinese ? "导出" : "Export" }
-    static var openLinkedNote: String { chinese ? "打开链接笔记" : "Open Linked Note" }
-    static var exportFailed: String { chinese ? "导出失败" : "Export Failed" }
-    static var exportFailedMessage: String {
-        chinese ? "无法生成或写入图表文件。" : "The diagram could not be rendered or written."
-    }
+    static var exportDiagram: String { L10n.string("Export Diagram") }
+    static var export: String { L10n.string("Export") }
+    static var openLinkedNote: String { L10n.string("Open Linked Note") }
+    static var exportFailed: String { L10n.string("Export Failed") }
+    static var exportFailedMessage: String { L10n.string("The diagram could not be rendered or written.") }
 }
 
 enum DiagramExportError: LocalizedError {
@@ -59,14 +53,11 @@ struct DiagramExportRequest {
 
 /// 导出专用引擎：避免主线程承担字体预热与全文重排版。
 private actor DiagramSVGEngine {
-    private let engine: DiagramEngine?
-
-    init() {
-        engine = try? DiagramEngine()
-    }
+    private var engine: DiagramEngine?
 
     func render(source: String, mmd: Bool, block: UInt32, width: Double, dark: Bool,
                 collapsed: [String]) throws -> String {
+        if engine == nil { engine = try DiagramEngine() }
         guard let engine else { throw DiagramExportError.render }
         return try engine.renderSvg(source: source, mmd: mmd, block: block,
                                     width: width, dark: dark, collapsed: collapsed)

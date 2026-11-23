@@ -123,8 +123,7 @@ struct EditorView: View {
                                                                     scale: scale, x: x, y: y)
                                  },
                                  onOpenLink: { target, heading in
-                                     workspace.exitFocus()
-                                     workspace.openLink(source: session.note, target: target, heading: heading)
+                                     workspace.openLinkFromFocus(session: session, target: target, heading: heading)
                                  })
                         .id(session.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)

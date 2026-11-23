@@ -557,6 +557,11 @@ final class Workspace {
         return min(location, source.length)
     }
 
+    func openLinkFromFocus(session: DiagramFocusSession, target: String, heading: String?) {
+        exitFocus(restore: false)
+        openLink(source: session.note, target: target, heading: heading)
+    }
+
     func openLink(source: String, target: String, heading: String?) {
         guard let context else { return }
         let handle = context.handle

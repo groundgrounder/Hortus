@@ -210,6 +210,7 @@ final class DiagramView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) })
         let menu = NSMenu()
+        menu.autoenablesItems = false
         if let hit, let target = hit.linkTarget {
             let item = NSMenuItem(title: DiagramExportStrings.openLinkedNote,
                                   action: #selector(openLinkedNoteFromMenu(_:)), keyEquivalent: "")
@@ -221,6 +222,7 @@ final class DiagramView: NSView {
             let item = NSMenuItem(title: L10n.string("Jump to Source"), action: #selector(jumpFromMenu(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = NSValue(range: range)
+            item.isEnabled = onSourceRange != nil
             menu.addItem(item)
         }
         if let hit, hit.canCollapse {

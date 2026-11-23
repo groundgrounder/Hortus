@@ -1,6 +1,11 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "The diagram could not be rendered or written." : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "The diagram could not be rendered or written."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "无法生成或写入图表文件。"}}}},
+    "Export Failed" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Export Failed"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "导出失败"}}}},
+    "Open Linked Note" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Open Linked Note"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "打开链接笔记"}}}},
+    "Export" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Export"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "导出"}}}},
+    "Export Diagram" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Export Diagram"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "导出图表"}}}},
     "Backlinks (%lld)" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Backlinks (%lld)"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "反链（%lld）"}}}},
     "Open a note to see its backlinks" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Open a note to see its backlinks"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "打开一篇笔记以查看反链"}}}},
     "No backlinks" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "No backlinks"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "没有反链"}}}},

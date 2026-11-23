@@ -40,7 +40,9 @@ struct ReadingTests {
         var openSource: (Int, Int) -> Void = { _, _ in }
         var view: DiagramTextView { editing.view }
         var document: NoteDocument { editing.document }
-        init(_ source: String) throws { editing = try EditingTests.Fixture(source) }
+        init(_ source: String, path: String = "note.md") throws {
+            editing = try EditingTests.Fixture(source, path: path)
+        }
         func start(mathService: MathService = .shared, size: Double = 15,
                    knowledgeHandle: VaultHandle? = nil) async throws {
             try await editing.ready()
@@ -49,7 +51,7 @@ struct ReadingTests {
             view.onCommit = nil; view.onCompositionState = nil
             view.isReading = true; view.isEditable = false; view.isRichText = true; view.allowsUndo = false
             view.readingCoordinator = coordinator; coordinator.view = view
-            coordinator.update(ReadingText(mathService: mathService, document: document, path: "note.md", vault: editing.vault.path,
+            coordinator.update(ReadingText(mathService: mathService, document: document, path: editing.path, vault: editing.vault.path,
                 fontSize: size, service: editing.service, core: editing.core, openSource: openSource,
                 remember: { _, _ in }, knowledgeHandle: knowledgeHandle))
             try await ready()
@@ -559,6 +561,23 @@ struct ReadingTests {
         #expect(diagrams == 1 && failures == 1)
         #expect(f.view.string.contains("gantt"))
         await f.close()
+    }
+
+    @Test(arguments: ["note.md", "note.mmd"])
+    func readingExportUsesMountedDiagramSource(_ path: String) async throws {
+        let diagram = "flowchart LR\nA[Origin] --> B[Destination]\n"
+        let source = path.hasSuffix(".mmd") ? diagram : "# Diagram\n\n```mermaid\n" + diagram + "```\n"
+        let fixture = try Fixture(source, path: path)
+        try await fixture.start()
+        #expect(fixture.view.window != nil)
+        #expect(fixture.view.string != source)
+        let view = try #require(fixture.view.diagramViews[1])
+        let request = try #require(view.exportRequestProvider?())
+        #expect(request.note == path)
+        let svg = try await request.svg()
+        #expect(svg.hasPrefix("<svg"))
+        #expect(svg.contains("Destination"))
+        await fixture.close()
     }
 
     @Test func sequenceDiagramsRenderNativelyInTheReadingView() async throws {

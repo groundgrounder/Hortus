@@ -310,8 +310,8 @@ struct ReadingText: NSViewRepresentable {
             view.exportRequestProvider = { [weak self, weak view] ordinal in
                 guard let self, let view, let input = self.input,
                       let block = self.rendered.first(where: { $0.ordinal == ordinal }),
-                      let prepared = block.prepared else { return nil }
-                let source = view.string
+                      let prepared = block.prepared, !self.source.isEmpty else { return nil }
+                let source = self.source
                 let mmd = input.path.lowercased().hasSuffix(".mmd")
                 let width = prepared.scene.width
                 let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua

@@ -86,6 +86,20 @@ struct DiagramExportAndLinksTests {
         #expect(!text.contains("/Subtype/Image"))
     }
 
+    @Test func exportStringsUseTheSharedLocalizationTable() {
+        let strings = [
+            ("Export Diagram", DiagramExportStrings.exportDiagram),
+            ("Export", DiagramExportStrings.export),
+            ("Open Linked Note", DiagramExportStrings.openLinkedNote),
+            ("Export Failed", DiagramExportStrings.exportFailed),
+            ("The diagram could not be rendered or written.", DiagramExportStrings.exportFailedMessage),
+        ]
+        for (key, value) in strings {
+            #expect(!value.isEmpty)
+            #expect(value == L10n.string(key))
+        }
+    }
+
     @Test func noPanelExportWritesRequestedFormat() async throws {
         let prepared = try prepared(source)
         let directory = FileManager.default.temporaryDirectory

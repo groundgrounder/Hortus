@@ -180,7 +180,7 @@ struct DiagramFocusTests {
     /// 专注覆盖层的真实窗口夹具：正文、会话和画布都走生产路径。
     @MainActor
     private final class FocusFixture {
-        final class Flag { var value = false }
+        @MainActor final class Flag { var value = false }
         let editing: EditingTests.Fixture
         let document: NoteDocument
         let session: DiagramFocusSession
@@ -275,6 +275,63 @@ struct DiagramFocusTests {
         let after = try #require(canvas.inspectionViewportCenter)
         #expect(hypot(after.x - center.x, after.y - center.y) < 1)
         #expect((canvas.inspectionMatches["visible"] as? Int ?? 0) > 0)
+        await fixture.close()
+    }
+
+    @Test func focusSelfLinkKeepsTheHeadingViewportAfterExit() async throws {
+        let source = "# Current\n\n```mermaid\nflowchart LR\nA[\"[[Current#Destination]]\"] --> B\n```\n\n"
+            + String(repeating: "Filler paragraph.\n\n", count: 100) + "# Destination\n\nText.\n"
+        let fixture = try ReadingTests.Fixture(source, path: "Current.md")
+        try await fixture.start()
+        let handle = try fixture.editing.core.openVault(path: fixture.editing.vault.path)
+        defer { handle.close() }
+        handle.updateSearchIndex(upserted: ["Current.md"], removed: [])
+        let workspace = Workspace()
+        workspace.context = VaultContext(handle: handle)
+        workspace.tabs = [NoteTab(path: "Current.md", document: fixture.document, loading: false)]
+        workspace.selected = "Current.md"
+        workspace.enterFocus(block: 1)
+        let session = try #require(workspace.focusSession)
+        let window = fixture.editing.window
+        let overlay = FocusModeView(session: session, core: fixture.editing.core, fontSize: 15,
+                                    onExit: {}, onJump: { _ in }, onCollapse: { _ in }, onPersist: { _, _, _ in },
+                                    onOpenLink: { workspace.openLinkFromFocus(session: session, target: $0, heading: $1) })
+        overlay.frame = try #require(window.contentView?.bounds)
+        window.contentView?.addSubview(overlay)
+        for _ in 0..<400 where !overlay.canvas.inspectionReady {
+            overlay.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let target = try #require(overlay.canvas.inspectionLinkHits().first {
+            $0["target"] as? String == "Current" && $0["heading"] as? String == "Destination"
+        }?["id"] as? String)
+        let heading = try #require(fixture.document.headings.first { $0.title == "Destination" })
+        let clip = fixture.editing.scroll.contentView
+        clip.scroll(to: CGPoint(x: session.scroll.x, y: session.scroll.y + 400))
+        fixture.editing.scroll.reflectScrolledClipView(clip)
+        try #require(clip.bounds.minY > session.scroll.y + 100)
+        // 即使后续的标题跳转再次滚动，也必须捕获中间帧是否恢复了旧视口。
+        let restoredOldViewport = FocusFixture.Flag()
+        clip.postsBoundsChangedNotifications = true
+        let observer = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                if abs(clip.bounds.minY - session.scroll.y) < 1 { restoredOldViewport.value = true }
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        overlay.canvas.inspectionClick(target, modifiers: [])
+        #expect(workspace.focusSession == nil)
+        overlay.removeFromSuperview()
+        for _ in 0..<300 where fixture.document.sourceAnchor != Int(heading.start) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        let scroll = fixture.editing.scroll.contentView.bounds.origin
+        #expect(fixture.document.sourceAnchor == Int(heading.start))
+        #expect(scroll.y > session.scroll.y + 100)
+        #expect(!restoredOldViewport.value)
         await fixture.close()
     }
 
