@@ -217,7 +217,10 @@ fn lifecycle_lists_and_calls_every_read_only_tool() {
     assert_eq!(initialize["result"]["capabilities"]["tools"], json!({}));
     assert_eq!(initialize["result"]["capabilities"]["resources"], json!({}));
     assert_eq!(initialize["result"]["serverInfo"]["name"], "hortus");
-    assert_eq!(initialize["result"]["serverInfo"]["version"], "0.4.0");
+    assert_eq!(
+        initialize["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
 
     server.notify("notifications/initialized", json!({}));
     let ping = server.request("ping", Value::Null);

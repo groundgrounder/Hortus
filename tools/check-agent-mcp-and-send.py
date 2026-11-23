@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -159,7 +160,10 @@ def run_mcp(base, output):
     check(initialize['result']['protocolVersion'] == '2024-11-05', initialize)
     check(initialize['result']['capabilities'] == {'tools': {}, 'resources': {}}, initialize)
     check(initialize['result']['serverInfo']['name'] == 'hortus', initialize)
-    check(initialize['result']['serverInfo']['version'] == '0.4.0', initialize)
+    cargo_version = re.search(
+        r'^version\s*=\s*"([^"]+)"', (ROOT / 'Cargo.toml').read_text(encoding='utf-8'), re.M
+    ).group(1)
+    check(initialize['result']['serverInfo']['version'] == cargo_version, initialize)
     server.notify('notifications/initialized', {})
     check(server.request('ping')['result'] == {}, 'ping')
     fallback = server.request('initialize', {'protocolVersion': '2099-01-01'})
