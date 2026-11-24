@@ -38,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +68,7 @@ import io.github.groundgrounder.hortus.DebugProbes.debugFocusBackTop
 import io.github.groundgrounder.hortus.MainActivity
 import io.github.groundgrounder.hortus.R
 import io.github.groundgrounder.hortus.core.settings.LaunchExtras
+import io.github.groundgrounder.hortus.core.settings.ThemeMode
 import io.github.groundgrounder.hortus.reader.model.readerPalette
 import io.github.groundgrounder.hortus.reader.render.DiagramExportFormat
 import io.github.groundgrounder.hortus.reader.render.DiagramExporter
@@ -106,8 +108,20 @@ internal class DiagramFocusActivity : ComponentActivity() {
         payloadToken = intent.getIntExtra(EXTRA_TOKEN, -1)
         payload = FocusPayloads.get(payloadToken)
         setContent {
-            HortusTheme {
-                FocusScreen(payload, viewModel, ::finish)
+            val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
+            val dark = when (appSettings.themeMode) {
+                ThemeMode.SYSTEM -> isSystemInDarkTheme()
+                ThemeMode.LIGHT -> false
+                ThemeMode.DARK -> true
+            }
+            SideEffect {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !dark
+                    isAppearanceLightNavigationBars = !dark
+                }
+            }
+            HortusTheme(darkTheme = dark) {
+                FocusScreen(payload, viewModel, dark, ::finish)
             }
         }
     }
@@ -137,12 +151,12 @@ private data class SaveRequest(
 private fun FocusScreen(
     payload: FocusPayload?,
     viewModel: FocusViewModel,
+    dark: Boolean,
     onClose: () -> Unit,
 ) {
     if (payload == null) return
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val dark = isSystemInDarkTheme()
     val palette = readerPalette()
     val density = LocalDensity.current
     val unitScale = viewModel.unitScale

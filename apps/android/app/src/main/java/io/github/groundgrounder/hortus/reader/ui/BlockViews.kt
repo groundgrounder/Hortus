@@ -127,7 +127,7 @@ internal fun TableBlockView(
 ) {
     val density = LocalDensity.current.density
     val tableFontSize = bodySizePx * 0.94f
-    val mathResults = remember(media.blockId, media.displayStart) {
+    val mathResults = remember(media.blockId, media.displayStart, tableFontSize) {
         mutableStateMapOf<String, MathRenderResult>()
     }
     LaunchedEffect(media.blockId, media.columns, tableFontSize) {
@@ -399,7 +399,7 @@ internal fun MathBlockView(
     modifier: Modifier = Modifier,
 ) {
     val verticalPadding = bodySizePx * 0.5f
-    val results = remember(formulas) { mutableStateMapOf<MathBlock, MathRenderResult>() }
+    val results = remember(formulas, bodySizePx) { mutableStateMapOf<MathBlock, MathRenderResult>() }
     LaunchedEffect(formulas, bodySizePx, results.size, notePath, itemKey) {
         if (results.size < formulas.size) {
             val values = renderBridge.prepareMath(formulas, bodySizePx)

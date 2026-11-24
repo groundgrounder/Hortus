@@ -79,6 +79,9 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
     private val _sideMode = MutableStateFlow(SideMode.FILES)
     val sideMode: StateFlow<SideMode> = _sideMode.asStateFlow()
 
+    private val _settingsOpen = MutableStateFlow(false)
+    val settingsOpen: StateFlow<Boolean> = _settingsOpen.asStateFlow()
+
     private lateinit var editorController: EditorSessionController
 
     private val syncController = ReaderSyncController(
@@ -97,6 +100,7 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
 
     val appSettings: StateFlow<AppSettings> = syncController.appSettings
     val bodySizePx: StateFlow<Float> = syncController.bodySizePx
+    val cacheClearedCount: StateFlow<Long> = syncController.cacheClearedCount
 
     init {
         editorController = EditorSessionController(
@@ -152,9 +156,11 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
             !it.externalPreview && it.readOnlyReason == null && !_readerState.value.loading
         } ?: false
 
-    fun setThemeMode(mode: ThemeMode) = syncController.setThemeMode(mode)
-    fun setFontSizeSp(fontSizeSp: Float) = syncController.setFontSizeSp(fontSizeSp)
-    fun clearCaches() = syncController.clearCaches()
+    fun setThemeMode(mode: ThemeMode): Job = syncController.setThemeMode(mode)
+    fun setFontSizeSp(fontSizeSp: Float): Job = syncController.setFontSizeSp(fontSizeSp)
+    fun clearCaches(): Job = syncController.clearCaches()
+    fun openSettings() { _settingsOpen.value = true }
+    fun closeSettings() { _settingsOpen.value = false }
 
     fun toggleSidePane() {
         _sidePaneOpen.value = !_sidePaneOpen.value
@@ -251,6 +257,7 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
     fun openExternalPreview(fileName: String, text: String): Job {
         val requestToken = openRequestSeq.incrementAndGet()
         return viewModelScope.launch {
+            settingsRepository.preload()
             loadMutex.withLock {
                 if (openRequestSeq.get() != requestToken) return@withLock
                 val previous = _readerState.value.content
@@ -333,6 +340,7 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
         notePath: String?,
         persistPreference: Boolean,
     ) {
+        settingsRepository.preload()
         DebugProbes.incrementOpenCount()
         persistSessionPreference = persistPreference
         editorController.reset()
@@ -509,6 +517,10 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
     fun refresh() = syncController.refresh()
 
     fun back(): Boolean {
+        if (_settingsOpen.value) {
+            _settingsOpen.value = false
+            return true
+        }
         if (editorController.isActive) {
             finishEditing()
             return true
@@ -537,7 +549,8 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun canGoBack(): Boolean =
-        editorController.isActive ||
+        _settingsOpen.value ||
+            editorController.isActive ||
             (_readerState.value.content?.externalPreview == true && previewReturn != null) ||
             navigation.canPop()
 

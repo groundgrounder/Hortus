@@ -76,17 +76,23 @@ internal fun ReaderApp(
 ) {
     val state by viewModel.readerState.collectAsStateWithLifecycle()
     val settings by viewModel.appSettings.collectAsStateWithLifecycle()
+    val settingsOpen by viewModel.settingsOpen.collectAsStateWithLifecycle()
     val palette = readerPalette()
     val dark = when (settings.themeMode) {
         ThemeMode.SYSTEM -> isSystemInDarkTheme()
         ThemeMode.LIGHT -> false
         ThemeMode.DARK -> true
     }
-    if (state.content == null) {
-        HomeScreen(viewModel, hasAccess, onRequestPermission, state)
-        return
+    Box(Modifier.fillMaxSize()) {
+        if (state.content == null) {
+            HomeScreen(viewModel, hasAccess, onRequestPermission, state)
+        } else {
+            ReaderScaffold(viewModel, state, palette, dark)
+        }
+        if (settingsOpen) {
+            SettingsScreen(viewModel = viewModel)
+        }
     }
-    ReaderScaffold(viewModel, state, palette, dark)
 }
 
 @Composable
@@ -406,6 +412,13 @@ private fun ReaderTopBar(
                         onClick = {
                             menu = false
                             viewModel.openNewNoteDialog()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.settings_title)) },
+                        onClick = {
+                            menu = false
+                            viewModel.openSettings()
                         },
                     )
                 }

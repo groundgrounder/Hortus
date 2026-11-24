@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.app.HortusServices
 import io.github.groundgrounder.hortus.core.SceneData
+import io.github.groundgrounder.hortus.core.settings.AppSettings
 import io.github.groundgrounder.hortus.reader.render.DiagramExportFormat
 import io.github.groundgrounder.hortus.reader.render.DiagramExporter
 import io.github.groundgrounder.hortus.reader.render.DiagramStateBus
@@ -35,6 +36,7 @@ internal class FocusViewModel(application: Application) : AndroidViewModel(appli
 
     private var initialized = false
     private var payload: FocusPayload? = null
+    private var lastDark: Boolean? = null
 
     @Volatile var viewportScale: Float = 0f
         private set
@@ -45,6 +47,11 @@ internal class FocusViewModel(application: Application) : AndroidViewModel(appli
 
     private val _uiState = MutableStateFlow(FocusUiState())
     val uiState: StateFlow<FocusUiState> = _uiState.asStateFlow()
+    val appSettings: StateFlow<AppSettings> = settings.settings
+
+    init {
+        viewModelScope.launch { settings.preload() }
+    }
 
     val unitScale: Float
         get() {
@@ -61,6 +68,7 @@ internal class FocusViewModel(application: Application) : AndroidViewModel(appli
         if (initialized) return
         initialized = true
         this.payload = payload
+        this.lastDark = dark
         _uiState.value = FocusUiState(collapsed = payload.collapsed)
         loadScene(payload, dark, payload.collapsed)
     }
@@ -87,6 +95,8 @@ internal class FocusViewModel(application: Application) : AndroidViewModel(appli
 
     fun onDarkModeChanged(dark: Boolean) {
         val currentPayload = payload ?: return
+        if (lastDark == dark) return
+        lastDark = dark
         loadScene(currentPayload, dark, _uiState.value.collapsed)
     }
 

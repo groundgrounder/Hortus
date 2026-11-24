@@ -5,6 +5,8 @@ import android.content.Context
 import android.util.TypedValue
 import io.github.groundgrounder.hortus.core.settings.AppSettings
 import io.github.groundgrounder.hortus.core.settings.AppSettingsRepository
+import io.github.groundgrounder.hortus.core.settings.MAX_READER_BODY_SP
+import io.github.groundgrounder.hortus.core.settings.MIN_READER_BODY_SP
 import io.github.groundgrounder.hortus.core.settings.ThemeMode
 import io.github.groundgrounder.hortus.data.DiagramRenderService
 import io.github.groundgrounder.hortus.data.DocumentRepository
@@ -48,6 +50,9 @@ internal class ReaderSyncController(
     private var noticeJob: Job? = null
     private var refreshJob: Job? = null
 
+    private val _cacheClearedCount = MutableStateFlow(0L)
+    val cacheClearedCount: StateFlow<Long> = _cacheClearedCount
+
     var contentWidthPx: Int = 0
         private set
 
@@ -73,31 +78,31 @@ internal class ReaderSyncController(
         return (metrics.widthPixels - 48 * metrics.density).toInt().coerceAtLeast(1)
     }
 
-    fun setThemeMode(mode: ThemeMode) {
-        scope.launch { settingsRepository.setThemeMode(mode) }
+    fun setThemeMode(mode: ThemeMode): Job = scope.launch {
+        settingsRepository.setThemeMode(mode)
     }
 
-    fun setFontSizeSp(fontSizeSp: Float) {
-        scope.launch {
-            settingsRepository.setFontSizeSp(fontSizeSp)
-            DiagramPreviewCache.reset()
-            diagramService.clearCache()
-            val content = readerState.value.content ?: return@launch
-            val width = resolvedWidthPx()
-            val sizePx = bodySizePx.value
-            loadMutex.withLock {
-                val updated = withContext(Dispatchers.IO) {
-                    documentRepository.rebuildForWidth(content, width, sizePx)
-                }
-                if (readerState.value.content?.path == updated.path) {
-                    readerState.value = readerState.value.copy(content = updated)
-                }
+    fun setFontSizeSp(fontSizeSp: Float): Job = scope.launch {
+        val clamped = fontSizeSp.coerceIn(MIN_READER_BODY_SP, MAX_READER_BODY_SP)
+        settingsRepository.setFontSizeSp(clamped)
+        DiagramPreviewCache.reset()
+        diagramService.clearCache()
+        val sizePx = spToPx(clamped)
+        val width = resolvedWidthPx()
+        loadMutex.withLock {
+            val content = readerState.value.content ?: return@withLock
+            val updated = withContext(Dispatchers.IO) {
+                documentRepository.rebuildForWidth(content, width, sizePx)
+            }
+            if (readerState.value.content?.path == updated.path) {
+                readerState.value = readerState.value.copy(content = updated)
             }
         }
     }
 
-    fun clearCaches() {
-        scope.launch { onClearCaches() }
+    fun clearCaches(): Job = scope.launch {
+        onClearCaches()
+        _cacheClearedCount.value += 1L
     }
 
     fun observeRepository() {
@@ -126,13 +131,14 @@ internal class ReaderSyncController(
     fun setContentWidth(width: Int) {
         if (width <= 0 || width == contentWidthPx) return
         contentWidthPx = width
-        val content = readerState.value.content ?: return
-        val sizePx = bodySizePx.value
+        val initial = readerState.value.content ?: return
         widthJob?.cancel()
         widthJob = scope.launch {
             delay(120)
             loadMutex.withLock {
-                if (readerState.value.content?.path != content.path) return@withLock
+                val content = readerState.value.content ?: return@withLock
+                if (content.path != initial.path) return@withLock
+                val sizePx = spToPx(settingsRepository.settings.value.fontSizeSp)
                 val updated = documentRepository.rebuildForWidth(content, width, sizePx)
                 if (readerState.value.content?.path == updated.path) {
                     readerState.value = readerState.value.copy(content = updated)
@@ -148,7 +154,7 @@ internal class ReaderSyncController(
     suspend fun refreshInternal() {
         val content = readerState.value.content ?: return
         val width = resolvedWidthPx()
-        val sizePx = bodySizePx.value
+        val sizePx = spToPx(settingsRepository.settings.value.fontSizeSp)
         if (isEditorActive() && !content.externalPreview) {
             if (!onHandleExternalRefreshWhileEditing()) return
         }
