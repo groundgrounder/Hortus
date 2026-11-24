@@ -75,15 +75,19 @@ async fn run_layout_width_checks(win: &Rc<WindowInner>) -> serde_json::Value {
             let Some(tab) = st.tabs.get(&note) else {
                 return false;
             };
-            let target =
-                f64::from(tab.reading_viewport.last_allocated_width()).clamp(260.0, 1400.0);
+            let target = f64::from(tab.reading_viewport.last_allocated_width()).max(260.0);
             let scene_grew = tab
                 .prepared_diagrams
                 .iter()
                 .filter_map(|diagram| diagram.scene.as_ref())
                 .any(|scene| scene.width > before_scene + 200.0);
+            let pending = tab
+                .reading
+                .as_ref()
+                .is_some_and(crate::reading::ReadingSurfaceHandle::has_pending_diagram_relayout);
             tab.layout_width > before_layout + 200.0
                 && scene_grew
+                && !pending
                 && (tab.layout_width - target).abs() < 24.0
         })
         .await;
@@ -190,8 +194,13 @@ async fn run_live_resize_checks(win: &Rc<WindowInner>, report_path: &Path) -> se
             let Some(tab) = st.tabs.get(&note) else {
                 return false;
             };
-            let vp_w = f64::from(tab.reading_viewport.last_allocated_width()).clamp(260.0, 1400.0);
+            let vp_w = f64::from(tab.reading_viewport.last_allocated_width()).max(260.0);
+            let pending = tab
+                .reading
+                .as_ref()
+                .is_some_and(crate::reading::ReadingSurfaceHandle::has_pending_diagram_relayout);
             let reflow_done = tab.reading_viewport.reflow_count() > prev_reflows
+                && !pending
                 && (tab.layout_width - vp_w).abs() < 24.0;
             w_ok && reflow_done
         })
@@ -308,6 +317,13 @@ async fn run_wikilink_checks(win: &Rc<WindowInner>) -> serde_json::Value {
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0)
             >= 520
+            && win.reading_surface(map).is_some_and(|surface| {
+                !surface.has_pending_diagram_relayout()
+                    && surface
+                        .diagram_widgets()
+                        .first()
+                        .is_some_and(|w| w.height() >= 180)
+            })
     })
     .await;
     glib::timeout_future(Duration::from_millis(120)).await;
@@ -317,6 +333,7 @@ async fn run_wikilink_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     );
     report.insert("learning_map_widths".into(), win.layout_snapshot(map));
     if let Some(ref screenshot_path) = win.options.screenshot {
+        win.window.queue_draw();
         glib::timeout_future(Duration::from_millis(500)).await;
         if let Err(err) = win.capture_window_png(screenshot_path) {
             eprintln!("screenshot failed: {err}");
@@ -325,7 +342,7 @@ async fn run_wikilink_checks(win: &Rc<WindowInner>) -> serde_json::Value {
 
     let _ = wait_for(4000, || {
         win.reading_surface(map)
-            .and_then(|surface| surface.text_view)
+            .and_then(|surface| surface.text_views().into_iter().next().map(|(v, _)| v))
             .is_some_and(|view| view.is_mapped() && view.width() > 0)
     })
     .await;
@@ -368,7 +385,7 @@ async fn run_wikilink_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     report.insert("boundary_loaded".into(), serde_json::json!(boundary_loaded));
     let _ = wait_for(4000, || {
         win.reading_surface(boundary)
-            .and_then(|surface| surface.text_view)
+            .and_then(|surface| surface.text_views().into_iter().next().map(|(v, _)| v))
             .is_some_and(|view| view.is_mapped() && view.width() > 0)
     })
     .await;

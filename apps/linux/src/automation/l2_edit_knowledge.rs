@@ -385,6 +385,69 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
         "autosave_ms".into(),
         serde_json::json!(autosave_started.elapsed().as_millis() as u64),
     );
+
+    // L2d-2：验证未保存与已保存编辑内容切回阅读视图后立即刷新预览及大纲。
+    if !win.tab_facts(note).is_some_and(|f| f.editing) {
+        win.switch_edit_mode(false);
+        let _ = wait_for(2000, || win.tab_facts(note).is_some_and(|f| f.editing)).await;
+    }
+    let unsaved_marker = "L2d2-即时预览校验-未保存";
+    win.insert_into_edit(note, &format!("\n\n{unsaved_marker}\n"));
+    let rev_unsaved = win.tab_facts(note).map(|f| f.revision).unwrap_or(0);
+    win.switch_edit_mode(false);
+    let unsaved_synced = wait_for(4000, || {
+        win.state.borrow().tabs.get(note).is_some_and(|tab| {
+            !tab.editing
+                && tab.reading_revision == rev_unsaved
+                && tab
+                    .reading
+                    .as_ref()
+                    .is_some_and(|s| s.plain_text().contains(unsaved_marker))
+        })
+    })
+    .await;
+
+    win.switch_edit_mode(false);
+    let _ = wait_for(2000, || win.tab_facts(note).is_some_and(|f| f.editing)).await;
+    let saved_heading = "L2d2-已保存大纲标题";
+    let saved_marker = "L2d2-即时预览校验-已保存";
+    win.insert_into_edit(note, &format!("\n\n## {saved_heading}\n\n{saved_marker}\n"));
+    let saves_sync = win.tab_facts(note).map(|f| f.saves).unwrap_or(0);
+    win.request_save(note, SaveChoice::Normal, false);
+    let saved_ok = wait_for(6000, || {
+        win.tab_facts(note)
+            .is_some_and(|f| !f.dirty && f.saves > saves_sync)
+    })
+    .await;
+    let rev_saved = win.tab_facts(note).map(|f| f.revision).unwrap_or(0);
+    win.switch_edit_mode(false);
+    let saved_synced = wait_for(4000, || {
+        win.state.borrow().tabs.get(note).is_some_and(|tab| {
+            !tab.editing
+                && tab.reading_revision == rev_saved
+                && tab
+                    .reading
+                    .as_ref()
+                    .is_some_and(|s| s.plain_text().contains(saved_marker))
+        })
+    })
+    .await;
+    let outline_updated = win
+        .state
+        .borrow()
+        .tabs
+        .get(note)
+        .is_some_and(|tab| tab.headings.iter().any(|h| h.title.contains(saved_heading)));
+    edit.insert(
+        "edit_preview_sync".into(),
+        serde_json::json!({
+            "unsaved_reflected": unsaved_synced,
+            "saved_ok": saved_ok,
+            "saved_reflected": saved_synced,
+            "outline_updated": outline_updated,
+        }),
+    );
+
     let _ = gio::spawn_blocking(|| {}).await;
     report.insert("edit".into(), serde_json::Value::Object(edit));
 
@@ -393,6 +456,7 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     let _ = win.select_tab(note);
     win.request_save(note, SaveChoice::Normal, false);
     let _ = wait_for(3000, || win.tab_facts(note).is_some_and(|f| !f.dirty)).await;
+    glib::timeout_future(Duration::from_millis(120)).await;
     if let Some(reading) = win
         .state
         .borrow()
@@ -402,7 +466,7 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     {
         reading.scroll_fraction(0.4);
     }
-    glib::timeout_future(Duration::from_millis(140)).await;
+    glib::timeout_future(Duration::from_millis(180)).await;
     let scroll_before = win
         .state
         .borrow()
@@ -728,6 +792,10 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     stage!("C-find");
     let mut find = serde_json::Map::new();
     let _ = win.select_tab(note);
+    if !win.tab_facts(note).is_some_and(|f| f.editing) {
+        win.switch_edit_mode(false);
+        let _ = wait_for(2000, || win.tab_facts(note).is_some_and(|f| f.editing)).await;
+    }
     let _ = gtk4::prelude::WidgetExt::activate_action(&win.window, "win.find-in-note", None);
     let find_bar = win.state.borrow().tabs.get(note).map(|t| t.find.clone());
     if let Some(find_bar) = find_bar {
@@ -795,6 +863,59 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
             }),
         );
         read_find.close();
+    }
+
+    // L2d-2：验证阅读视图跨多 TextSegment 的 Ctrl+F 查找与 Next 跨段跳转。
+    let cross_note = "Markdown field guide.md";
+    win.open_note_at(cross_note, None);
+    let _ = wait_for(6000, || {
+        win.state
+            .borrow()
+            .tabs
+            .get(cross_note)
+            .is_some_and(|tab| tab.reading_loaded)
+    })
+    .await;
+    let _ = gtk4::prelude::WidgetExt::activate_action(&win.window, "win.find-in-note", None);
+    let cross_find = win
+        .state
+        .borrow()
+        .tabs
+        .get(cross_note)
+        .map(|tab| tab.find.clone());
+    if let Some(cross_find) = cross_find {
+        cross_find.set_query("example");
+        let _ = wait_for(2000, || {
+            let st = cross_find.stats();
+            st.matches >= 2 && st.segments >= 2
+        })
+        .await;
+        let initial = cross_find.stats();
+        let mut visited_segments = Vec::new();
+        if let Some(seg) = initial.current_segment {
+            visited_segments.push(seg);
+        }
+        let steps = initial.matches.clamp(1, 16);
+        for _ in 0..steps {
+            cross_find.next();
+            let st = cross_find.stats();
+            if let Some(seg) = st.current_segment
+                && !visited_segments.contains(&seg)
+            {
+                visited_segments.push(seg);
+            }
+        }
+        find.insert(
+            "reading_cross_segment".into(),
+            serde_json::json!({
+                "open": initial.open,
+                "editable": initial.editable,
+                "matches": initial.matches,
+                "segments": initial.segments,
+                "visited_segments": visited_segments.len(),
+            }),
+        );
+        cross_find.close();
     }
     report.insert("find".into(), serde_json::Value::Object(find));
 

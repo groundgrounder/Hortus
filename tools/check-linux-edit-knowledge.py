@@ -25,7 +25,7 @@ SCENE_EXPECTATIONS = {
         "extra": [],
     },
     "tags": {
-        "filename": "l2-tags-browser-and-reading.png",
+        "filename": "l2-block-reading-table-and-tags.png",
         "label": "左侧标签浏览 + 正文阅读视图",
         "open": ["L2-编辑目标.md"],
         "extra": [],
@@ -452,6 +452,11 @@ def assert_report(report: dict, vault: Path, env: dict, real_trash_before: list[
     check(edit["styles_clear_of_undo"] is True, "样式标签进入了原生撤销栈")
     check(edit["ctrl_s_saved"] is True, "Ctrl+S 未完成原子保存")
     check(edit["disk_matches_session"] is True, "磁盘内容与会话正文不一致")
+    preview_sync = edit.get("edit_preview_sync") or {}
+    check(preview_sync.get("unsaved_reflected") is True, f"未保存编辑切回阅读未立即刷新：{preview_sync}")
+    check(preview_sync.get("saved_ok") is True, f"编辑后保存失败：{preview_sync}")
+    check(preview_sync.get("saved_reflected") is True, f"已保存编辑切回阅读未刷新：{preview_sync}")
+    check(preview_sync.get("outline_updated") is True, f"编辑保存切回阅读后右侧大纲未更新：{preview_sync}")
     check(edit["temp_leftovers_in_vault"] == [], f"笔记库内残留临时文件：{edit['temp_leftovers_in_vault']}")
     check(edit["checkpoint_written"] is True, "脏状态未写入恢复稿")
     check(edit["checkpoint_cleared_after_save"] is True, "保存成功后恢复稿未清理")
@@ -498,6 +503,10 @@ def assert_report(report: dict, vault: Path, env: dict, real_trash_before: list[
     check(find["reading_view"]["open"] is True, "阅读视图未打开查找条")
     check(find["reading_view"]["editable"] is False, "阅读视图不应展开替换行")
     check(find["reading_view"]["matches"] > 0, "阅读视图查找无匹配")
+    cross_find = find.get("reading_cross_segment") or {}
+    check(cross_find.get("open") is True and cross_find.get("editable") is False, f"跨段阅读查找条状态异常：{cross_find}")
+    check(cross_find.get("matches", 0) >= 2 and cross_find.get("segments", 0) >= 2, f"阅读视图未跨多 TextSegment 命中：{cross_find}")
+    check(cross_find.get("visited_segments", 0) >= 2, f"Next 未跨越多个 TextSegment：{cross_find}")
 
     big = report["big_doc"]
     check(big["loaded"] is True, "1 MiB 文档未打开")
@@ -918,11 +927,20 @@ def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: d
     wide_widgets = wide.get("diagram_widget_widths") or []
     wide_scenes = wide.get("diagram_scene_widths") or []
     wide_content = wide.get("content_width_measured", 0)
+    wide_text_widths = wide.get("text_view_widths") or []
     check(wide.get("left_show") is False and wide.get("right_show") is False, f"侧栏未收起：{wide}")
-    check(wide_scenes and wide_scenes[0] >= 850, f"宽屏图表未扩栏：{wide}")
+    check(wide_scenes and wide_scenes[0] >= 1200, f"宽屏图表未铺满宽容器：{wide}")
     check(
-        wide_widgets and wide_widgets[0] >= 850,
-        f"宽屏图表控件未扩宽：{wide}",
+        wide_widgets and wide_widgets[0] >= 1200,
+        f"宽屏图表控件未铺满宽容器：{wide}",
+    )
+    check(
+        wide_text_widths and max(wide_text_widths) <= 960,
+        f"宽屏正文段未收窄在 920px~960px 栏内：{wide}",
+    )
+    check(
+        wide.get("text_view_centered") is True,
+        f"宽屏正文段未居中排版：{wide}",
     )
     check(
         wide_scenes[0] - base_scenes[0] >= 200,
@@ -1129,8 +1147,8 @@ def run_live_resize_regression(
     report_path = output_dir / "layout-live-resize.json"
     stage_path = report_path.with_suffix(".stage")
     cmd_path = report_path.with_suffix(".cmd")
-    shot_1020 = media_dir / "l2-live-resize-1020.png"
-    shot_1520 = media_dir / "l2-live-resize-1520.png"
+    shot_1020 = media_dir / "l2-block-reading-live-resize-1020.png"
+    shot_1520 = media_dir / "l2-block-reading-live-resize-1520.png"
     media_dir.mkdir(parents=True, exist_ok=True)
     for path in (report_path, stage_path, cmd_path, shot_1020, shot_1520):
         path.unlink(missing_ok=True)
@@ -1247,10 +1265,12 @@ def run_live_resize_regression(
 
     check(init_stage.get("ready") is True and init_stage.get("allocated") is True, f"实时缩放首屏未就绪：{init_stage}")
     check(init_snap.get("left_collapsed") is False and init_snap.get("right_collapsed") is False, f"1400px 不应折叠侧栏：{init_snap}")
+    check(init_snap.get("surface_rebuilds") == 0, f"首屏不应重建 ReadingSurface：{init_snap}")
     init_scene = (init_snap.get("diagram_scene_widths") or [0])[0]
     check(init_scene >= 520, f"1400px 初始图表宽不足：{init_snap}")
 
     check(s1.get("resized_and_reflowed") is True, f"1020px 实时重排未完成：{s1}")
+    check(snap_1020.get("surface_rebuilds") == 0, f"1020px 缩窗不应重建 ReadingSurface：{snap_1020}")
     scene_1020 = (snap_1020.get("diagram_scene_widths") or [0])[0]
     check(
         snap_1020.get("reflow_count", 0) > init_snap.get("reflow_count", 0),
@@ -1259,6 +1279,7 @@ def run_live_resize_regression(
     check(scene_1020 < init_scene - 150, f"1020px 未随 X11 缩窗真实收缩：{init_scene} -> {scene_1020}")
 
     check(s2.get("resized_and_reflowed") is True, f"760px 实时重排未完成：{s2}")
+    check(snap_760.get("surface_rebuilds") == 0, f"760px 缩窗不应重建 ReadingSurface：{snap_760}")
     check(
         snap_760.get("left_collapsed") is True and snap_760.get("right_collapsed") is True,
         f"760px 未触发 819px 侧栏断点折叠：{snap_760}",
@@ -1269,6 +1290,11 @@ def run_live_resize_regression(
     )
 
     check(s3.get("resized_and_reflowed") is True, f"1520px 实时重排未完成：{s3}")
+    check(snap_1520.get("surface_rebuilds") == 0, f"1520px 扩窗不应重建 ReadingSurface：{snap_1520}")
+    check(
+        snap_1520.get("in_place_relayouts", 0) >= 3,
+        f"三次实时缩放后 in_place_relayouts 不足 3 次：{snap_1520}",
+    )
     scene_1520 = (snap_1520.get("diagram_scene_widths") or [0])[0]
     check(
         snap_1520.get("left_collapsed") is False and snap_1520.get("right_collapsed") is False,
@@ -1415,7 +1441,7 @@ def main():
             wikilink_vault,
             tmp_path,
             output_dir,
-            media_dir / "l2-learning-map-1280-adapted.png",
+            media_dir / "l2-wikilink-learning-map-1280.png",
         )
         # 阅读视图宽度适配回归：默认窗、收起侧栏、994px 窄平铺与表格/图片/嵌入卡片。
         layout_1280 = run_layout_width(
@@ -1427,6 +1453,7 @@ def main():
             "Learning/Learning map.md",
             1280,
             860,
+            screenshot=media_dir / "l2-block-reading-1280.png",
         )
         layout_wide = run_layout_width(
             gui_bin,
@@ -1438,7 +1465,7 @@ def main():
             1440,
             860,
             hide_sidebars=True,
-            screenshot=media_dir / "l2-learning-map-wide-adapted.png",
+            screenshot=media_dir / "l2-block-reading-wide-920prose.png",
         )
         layout_narrow = run_layout_width(
             gui_bin,

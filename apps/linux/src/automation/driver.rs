@@ -295,14 +295,25 @@ impl WindowInner {
         };
         let reading = tab.reading.as_ref();
         let scrolled_width = reading.map(|r| r.scrolled.width()).unwrap_or(0);
-        let text_width = reading
-            .and_then(|r| r.text_view.as_ref())
-            .map(|view| view.width())
-            .unwrap_or(0);
-        let widths = |widgets: Option<&Vec<gtk4::Widget>>| -> Vec<i32> {
-            widgets
-                .map(|list| list.iter().map(|widget| widget.width()).collect())
-                .unwrap_or_default()
+        let reading_box_width = reading.map(|r| r.content_box.width()).unwrap_or(0);
+        let text_layouts = reading
+            .map(ReadingSurfaceHandle::text_segment_layouts)
+            .unwrap_or_default();
+        let text_widths: Vec<i32> = text_layouts.iter().map(|(w, _)| *w).collect();
+        let text_offsets: Vec<f64> = text_layouts.iter().map(|(_, x)| *x).collect();
+        let text_width = text_widths.first().copied().unwrap_or(0);
+        let text_centered = !text_layouts.is_empty()
+            && text_layouts.iter().all(|&(w, x)| {
+                if reading_box_width <= w + 4 {
+                    true
+                } else {
+                    let expected_x = f64::from(reading_box_width - w) / 2.0;
+                    (x - expected_x).abs() <= 2.5
+                }
+            });
+        let pad = if scrolled_width < 820 { 40.0 } else { 88.0 };
+        let widths = |widgets: Vec<gtk4::Widget>| -> Vec<i32> {
+            widgets.into_iter().map(|widget| widget.width()).collect()
         };
         serde_json::json!({
             "found": true,
@@ -314,12 +325,18 @@ impl WindowInner {
             "right_collapsed": right_collapsed,
             "layout_width": tab.layout_width,
             "scrolled_width": scrolled_width,
+            "reading_box_width": reading_box_width,
             "text_view_width": text_width,
-            "content_width_measured": (f64::from(scrolled_width) - 96.0).max(0.0),
+            "text_view_widths": text_widths,
+            "text_view_offsets": text_offsets,
+            "text_view_centered": text_centered,
+            "content_width_measured": (f64::from(scrolled_width) - pad).max(0.0),
             "viewport_last_alloc": tab.reading_viewport.last_allocated_width(),
             "viewport_settled": tab.reading_viewport.settled_width(),
             "resize_alloc_count": tab.reading_viewport.resize_alloc_count(),
             "reflow_count": tab.reading_viewport.reflow_count(),
+            "surface_rebuilds": tab.surface_rebuilds,
+            "in_place_relayouts": tab.in_place_relayouts,
             "diagram_scene_widths": tab
                 .prepared_diagrams
                 .iter()
@@ -330,10 +347,10 @@ impl WindowInner {
                 .iter()
                 .filter_map(|diagram| diagram.scene.as_ref().map(|scene| scene.height))
                 .collect::<Vec<f64>>(),
-            "diagram_widget_widths": widths(reading.map(|r| &r.diagram_widgets)),
-            "table_widget_widths": widths(reading.map(|r| &r.table_widgets)),
-            "image_widget_widths": widths(reading.map(|r| &r.image_widgets)),
-            "embed_widget_widths": widths(reading.map(|r| &r.embed_widgets)),
+            "diagram_widget_widths": reading.map(|r| widths(r.diagram_widgets())).unwrap_or_default(),
+            "table_widget_widths": reading.map(|r| widths(r.table_widgets())).unwrap_or_default(),
+            "image_widget_widths": reading.map(|r| widths(r.image_widgets())).unwrap_or_default(),
+            "embed_widget_widths": reading.map(|r| widths(r.embed_widgets())).unwrap_or_default(),
         })
     }
 }

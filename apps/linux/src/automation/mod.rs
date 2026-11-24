@@ -181,15 +181,46 @@ pub fn run_automation(win: &Rc<WindowInner>) {
     if let Some(scene) = win.options.edit_knowledge_scene.clone() {
         scenes::setup_l2_scene(win, &scene);
         let weak = Rc::downgrade(win);
-        let src = glib::timeout_add_local_once(Duration::from_millis(1100), move || {
-            let Some(w) = weak.upgrade() else { return };
-            w.automation_source_done();
-            if let Some(ref screenshot_path) = w.options.screenshot
-                && let Err(err) = scenes::capture_scene_pngs(&w, screenshot_path)
-            {
-                eprintln!("screenshot failed: {err}");
+        let started = std::time::Instant::now();
+        let src = glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(w) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let elapsed = started.elapsed().as_millis();
+            let layout_settled = if elapsed < 1100 {
+                false
+            } else if let Some(active) = w.active_tab_path() {
+                w.state.borrow().tabs.get(&active).is_some_and(|tab| {
+                    if tab.editing {
+                        tab.source_loaded
+                    } else {
+                        tab.reading_loaded
+                            && tab.reading.as_ref().is_some_and(|surface| {
+                                surface.table_widgets().iter().all(|tw| tw.height() > 0)
+                                    && surface.diagram_widgets().iter().all(|dw| dw.height() > 0)
+                            })
+                    }
+                })
+            } else {
+                true
+            };
+            if !layout_settled && elapsed < 3500 {
+                return glib::ControlFlow::Continue;
             }
-            w.close_now_clean();
+            w.automation_source_done();
+            let weak_cap = Rc::downgrade(&w);
+            let src_cap = glib::timeout_add_local_once(Duration::from_millis(160), move || {
+                let Some(w2) = weak_cap.upgrade() else { return };
+                w2.automation_source_done();
+                if let Some(ref screenshot_path) = w2.options.screenshot
+                    && let Err(err) = scenes::capture_scene_pngs(&w2, screenshot_path)
+                {
+                    eprintln!("screenshot failed: {err}");
+                }
+                w2.close_now_clean();
+            });
+            w.state.borrow_mut().automation_source = Some(src_cap);
+            glib::ControlFlow::Break
         });
         win.state.borrow_mut().automation_source = Some(src);
         return;
