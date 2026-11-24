@@ -671,10 +671,12 @@ def assert_a4(device: Device, results: Results, media: Path) -> None:
 
     # 跨过 600 dp 断点：笔记与滚动位置不丢失。
     device.rotate(False)
-    device.dump('a4-breakpoint-start.json', note='M2a/Long outline.md', wait_ms=1500)
-    device.shell('input swipe 800 2200 800 700')
-    time.sleep(1.2)
-    before = device.dump('a4-breakpoint-before.json', wait_ms=1300)
+    outline = device.dump('a4-breakpoint-outline.json', note='M2a/Long outline.md',
+                          action='side', extra=['--es', 'debug_tab', 'outline'], wait_ms=1600)
+    hit = tap_hit(device, outline, 'outline', 'Beta')
+    results.check('A4', 'outline scroll prepared before the breakpoint', hit is not None,
+                  outline.get('panelHits', [])[:4])
+    before = device.dump('a4-breakpoint-before.json', wait_ms=1500)
     device.shell('wm size 1000x1600')
     time.sleep(1.5)
     narrow = device.dump('a4-breakpoint-phone.json', wait_ms=1500)
