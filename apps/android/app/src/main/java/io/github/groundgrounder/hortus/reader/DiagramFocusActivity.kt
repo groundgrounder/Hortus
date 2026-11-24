@@ -19,9 +19,14 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
@@ -45,14 +50,15 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import io.github.groundgrounder.hortus.AndroidFonts
 import io.github.groundgrounder.hortus.CoreEnvironment
 import io.github.groundgrounder.hortus.MainActivity
@@ -65,6 +71,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -90,10 +97,6 @@ internal class DiagramFocusActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        WindowInsetsControllerCompat(window, window.decorView).apply {
-            hide(WindowInsetsCompat.Type.systemBars())
-            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
         payload = FocusPayloads.get(intent.getIntExtra(EXTRA_TOKEN, -1))
         setContent {
             HortusTheme {
@@ -105,7 +108,7 @@ internal class DiagramFocusActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         val value = payload ?: return
-        FocusDebug.write(applicationContext, FocusDebug.stateJson())
+        FocusDebug.write(applicationContext, focusDebugState())
         val scale = FocusStateRegistry.lastScale
         if (scale <= 0f) return
         val appContext = applicationContext
@@ -141,6 +144,20 @@ internal object FocusCounts {
     @Volatile var counts = SceneCounts()
 }
 
+/** 顶栏与系统安全区的实测像素值，随 focus-state.json 输出，供验收脚本断言。 */
+private object FocusChromeMetrics {
+    @Volatile var topInsetPx: Int = 0
+    @Volatile var topBarContentTopPx: Int = 0
+    @Volatile var topBarBottomPx: Int = 0
+}
+
+private fun focusDebugState(): JSONObject =
+    FocusDebug.stateJson().apply {
+        put("topInsetPx", FocusChromeMetrics.topInsetPx)
+        put("topBarContentTopPx", FocusChromeMetrics.topBarContentTopPx)
+        put("topBarBottomPx", FocusChromeMetrics.topBarBottomPx)
+    }
+
 private data class SaveRequest(
     val bytes: ByteArray,
     val name: String,
@@ -154,10 +171,14 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     val dark = isSystemInDarkTheme()
     val palette = readerPalette()
+    val density = LocalDensity.current
+    val systemInsets = WindowInsets.statusBars.union(WindowInsets.displayCutout)
+    val topInsetPx = systemInsets.getTop(density)
     var scene by remember { mutableStateOf<SceneData?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var collapsed by remember { mutableStateOf(payload.collapsed) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
+    var topBarBottomPx by remember { mutableStateOf(0f) }
     var scale by remember { mutableStateOf(0f) }
     var offsetX by remember { mutableStateOf(0f) }
     var offsetY by remember { mutableStateOf(0f) }
@@ -199,24 +220,28 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
         if (viewport.width == 0 || viewport.height == 0) return x to y
         val width = value.width.toFloat() * newScale
         val height = value.height.toFloat() * newScale
+        val top = topBarBottomPx
+        val contentHeight = (viewport.height - top).coerceAtLeast(1f)
         val marginX = viewport.width * 0.5f
-        val marginY = viewport.height * 0.5f
+        val marginY = contentHeight * 0.5f
         val minX = min(0f, (viewport.width - width) / 2f) - marginX
         val maxX = max(0f, (width - viewport.width) / 2f) + marginX
-        val minY = min(0f, (viewport.height - height) / 2f) - marginY
-        val maxY = max(0f, (height - viewport.height) / 2f) + marginY
+        val minY = top + min(0f, (contentHeight - height) / 2f) - marginY
+        val maxY = top + max(0f, (height - contentHeight) / 2f) + marginY
         return x.coerceIn(minX, maxX) to y.coerceIn(minY, maxY)
     }
 
     fun applyFit() {
         val value = scene ?: return
         val fit = fitScale()
+        val top = topBarBottomPx
+        val contentHeight = (viewport.height - top).coerceAtLeast(1f)
         scale = fit
         offsetX = (viewport.width - value.width.toFloat() * fit) / 2f
-        offsetY = if (value.height.toFloat() * fit <= viewport.height) {
-            (viewport.height - value.height.toFloat() * fit) / 2f
+        offsetY = if (value.height.toFloat() * fit <= contentHeight) {
+            top + (contentHeight - value.height.toFloat() * fit) / 2f
         } else {
-            0f
+            top
         }
         val (x, y) = clampOffsets(scale, offsetX, offsetY)
         offsetX = x
@@ -225,9 +250,11 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
 
     fun applyActual() {
         val value = scene ?: return
+        val top = topBarBottomPx
+        val contentHeight = (viewport.height - top).coerceAtLeast(1f)
         scale = 1f
         offsetX = (viewport.width - value.width.toFloat()) / 2f
-        offsetY = (viewport.height - value.height.toFloat()) / 2f
+        offsetY = top + (contentHeight - value.height.toFloat()) / 2f
         val (x, y) = clampOffsets(scale, offsetX, offsetY)
         offsetX = x
         offsetY = y
@@ -262,7 +289,7 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
         collapsed = next
         DiagramStateBus.publish(payload.notePath, payload.ordinal, next)
         FocusStateRegistry.collapsed = next
-        FocusDebug.write(context, FocusDebug.stateJson())
+        FocusDebug.write(context, focusDebugState())
         scope.launch {
             try {
                 engine.rememberCollapsed(next)
@@ -353,9 +380,9 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             scene = null
         }
     }
-    LaunchedEffect(scene, viewport) {
+    LaunchedEffect(scene, viewport, topBarBottomPx) {
         val value = scene ?: return@LaunchedEffect
-        if (viewport.width == 0 || viewport.height == 0) return@LaunchedEffect
+        if (viewport.width == 0 || viewport.height == 0 || topBarBottomPx <= 0f) return@LaunchedEffect
         if (scale == 0f) {
             val fit = fitScale()
             val stored = engine.loadFocus()
@@ -367,9 +394,13 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             } else {
                 applyFit()
             }
+        } else {
+            val (x, y) = clampOffsets(scale, offsetX, offsetY)
+            offsetX = x
+            offsetY = y
         }
         rememberNow()
-        FocusDebug.write(context, FocusDebug.stateJson())
+        FocusDebug.write(context, focusDebugState())
     }
     LaunchedEffect(scale, offsetX, offsetY, scene, collapsed) { rememberNow() }
 
@@ -484,10 +515,25 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.92f))
+                .windowInsetsPadding(systemInsets)
+                .onGloballyPositioned { coordinates ->
+                    val bottom = coordinates.positionInRoot().y + coordinates.size.height
+                    FocusChromeMetrics.topInsetPx = topInsetPx
+                    FocusChromeMetrics.topBarBottomPx = bottom.roundToInt()
+                    if (kotlin.math.abs(bottom - topBarBottomPx) > 0.5f) {
+                        topBarBottomPx = bottom
+                    }
+                }
                 .padding(horizontal = 4.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onClose) {
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier.onGloballyPositioned { coordinates ->
+                    FocusChromeMetrics.topBarContentTopPx =
+                        coordinates.positionInRoot().y.roundToInt()
+                },
+            ) {
                 Icon(Icons.Default.ArrowBack, contentDescription = stringResource(R.string.reader_back))
             }
             Text(

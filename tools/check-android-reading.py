@@ -85,6 +85,17 @@ class Device:
         if 'Success' not in result:
             raise RuntimeError(f'APK 安装失败：{result}')
 
+    def installed(self) -> bool:
+        return 'package:' in self.shell(f'pm path {PACKAGE}', check=False)
+
+    def ensure_installed(self, apk: Path) -> None:
+        # Macrobenchmark 结束时 Gradle 会卸载应用；--skip-tests 复跑前要补装。
+        if self.installed():
+            return
+        self.install(apk)
+        self.shell(f'pm clear {PACKAGE}', check=False)
+        self.grant()
+
     def grant(self) -> None:
         self.shell(f'appops set {PACKAGE} MANAGE_EXTERNAL_STORAGE allow')
 
@@ -561,8 +572,13 @@ def focus_screen_point(hit: dict, state: dict) -> tuple[float, float]:
 def focus_menu(device: Device) -> bool:
     if ui_click(device, ['图表选项', 'Diagram options'], timeout=3):
         return True
+    state = pull_focus_state(device, 'focus-menu-state.json')
+    top = int(state.get('topBarContentTopPx', 0))
+    bottom = int(state.get('topBarBottomPx', 0))
+    if bottom <= top:
+        return False
     width, _, _ = device.screen()
-    device.tap(width - 55, 105)
+    device.tap(width - 55, (top + bottom) / 2)
     return True
 
 
@@ -1135,6 +1151,16 @@ def assert_a7(device: Device, results: Results, media: Path) -> None:
     note = 'Synthetic/Diagrams/Interactive.md'
     state = open_focus_from_inline(device, note, dump_name='a7-focus-open.json')
     results.check('A7', 'focus state has scene font', state.get('sceneFontSize', 0) > 0, state)
+    top_inset = int(state.get('topInsetPx', 0))
+    content_top = int(state.get('topBarContentTopPx', 0))
+    bar_bottom = int(state.get('topBarBottomPx', 0))
+    results.check('A7', 'status bar inset recorded', top_inset > 0,
+                  {'topInsetPx': top_inset})
+    results.check('A7', 'focus top bar content below status bar', content_top >= top_inset,
+                  {'topInsetPx': top_inset, 'topBarContentTopPx': content_top,
+                   'topBarBottomPx': bar_bottom})
+    time.sleep(0.6)
+    dump_screenshot(device, media, 'focus-normal-light.png')
     share_mimes = {}
     for label, fmt, mime in (
         ('PNG', 'png', 'image/png'),
@@ -1152,6 +1178,8 @@ def assert_a7(device: Device, results: Results, media: Path) -> None:
         results.check('A7', f'{label} share panel appears', appeared, top_activity(device))
         if appeared:
             dump_screenshot(device, media, f'a7-share-{fmt}.png')
+            if fmt == 'png':
+                dump_screenshot(device, media, 'focus-share-png.png')
             device.key(4)
             time.sleep(0.8)
         share_mimes[mime] = appeared
@@ -1401,7 +1429,7 @@ def metric_value(record: dict | None, name: str, key: str) -> float | None:
         return None
 
 
-def restart_device(device: Device) -> None:
+def restart_device(device: Device, apk: Path) -> None:
     device.run('reboot', check=False)
     subprocess.run([str(device.adb), '-s', device.serial, 'wait-for-device'],
                    capture_output=True, timeout=300)
@@ -1413,6 +1441,7 @@ def restart_device(device: Device) -> None:
     time.sleep(5)
     device.shell('wm dismiss-keyguard', check=False)
     device.shell('input keyevent 82', check=False)
+    device.ensure_installed(apk)
     device.grant()
 
 
@@ -1431,7 +1460,7 @@ def measure_settings_baseline(device: Device, results: Results, attempt: int) ->
     return {'attempt': attempt, **parse_gfxinfo(raw)}
 
 
-def assert_a8(device: Device, results: Results, stage: Path) -> None:
+def assert_a8(device: Device, results: Results, stage: Path, apk: Path) -> None:
     final = device.dump('a8-main-thread.json', wait_ms=800)
     for name, value in final.get('mainThread', {}).items():
         results.check('A8', f'main thread {name}', value == 0, value)
@@ -1477,7 +1506,7 @@ def assert_a8(device: Device, results: Results, stage: Path) -> None:
         invalid = results.output / 'benchmark-invalid-1'
         if (results.output / 'benchmark').is_dir():
             shutil.copytree(results.output / 'benchmark', invalid, dirs_exist_ok=True)
-        restart_device(device)
+        restart_device(device, apk)
         passed, records, tail = run_macrobenchmark(results)
         baseline = measure_settings_baseline(device, results, 2)
     results.check('A8', 'macrobenchmark produced JSON', passed, tail)
@@ -1680,20 +1709,28 @@ def main() -> int:
 
         wanted = {item.strip().upper() for item in args.items.split(',') if item.strip()}
         if 'A2' in wanted:
+            device.ensure_installed(args.apk.expanduser().resolve())
             assert_a2(device, results, media)
         if 'A3' in wanted:
+            device.ensure_installed(args.apk.expanduser().resolve())
             assert_a3(device, results, media, manifest, cli)
         if 'A4' in wanted:
+            device.ensure_installed(args.apk.expanduser().resolve())
             assert_a4(device, results, baseline)
         if 'A5' in wanted:
+            device.ensure_installed(args.apk.expanduser().resolve())
             assert_a5(device, results, media)
         if 'A6' in wanted:
+            device.ensure_installed(args.apk.expanduser().resolve())
             assert_a6(device, results)
         if 'A7' in wanted:
+            device.ensure_installed(args.apk.expanduser().resolve())
             assert_a7(device, results, media)
         if 'A8' in wanted:
-            assert_a8(device, results, stage)
+            device.ensure_installed(args.apk.expanduser().resolve())
+            assert_a8(device, results, stage, args.apk.expanduser().resolve())
         if 'A10' in wanted:
+            device.ensure_installed(args.apk.expanduser().resolve())
             assert_a10(device, results, args.apk.expanduser().resolve(), sdk)
         if 'A9' in wanted:
             assert_a9(results, args.apk, args.release_apk, sdk)
