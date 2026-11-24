@@ -79,7 +79,12 @@ impl WindowInner {
             let Some(tab) = st.tabs.get(note_path) else {
                 return;
             };
-            let char_off = utf16_offset_to_char_offset(&tab.text, start_utf16 as usize);
+            let char_off = if tab.editing {
+                let edit = tab.edit_state.borrow();
+                utf16_offset_to_char_offset(&edit.text, start_utf16 as usize)
+            } else {
+                utf16_offset_to_char_offset(&tab.text, start_utf16 as usize)
+            };
             (
                 tab.editing,
                 tab.edit_view.clone(),

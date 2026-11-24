@@ -271,6 +271,15 @@ impl WindowInner {
         self.window.add_action(&rename_active);
 
         let weak = Rc::downgrade(self);
+        let copy_note_text = gio::SimpleAction::new("copy-note-text", None);
+        copy_note_text.connect_activate(move |_, _| {
+            if let Some(win) = weak.upgrade() {
+                win.copy_active_note_plain_text();
+            }
+        });
+        self.window.add_action(&copy_note_text);
+
+        let weak = Rc::downgrade(self);
         let about = gio::SimpleAction::new("about", None);
         about.connect_activate(move |_, _| {
             if let Some(win) = weak.upgrade() {
@@ -504,6 +513,7 @@ pub fn build_primary_menu() -> gio::Menu {
     file_sec.append(Some("新建文件夹"), Some("win.new-folder"));
     file_sec.append(Some("重命名当前笔记…"), Some("win.rename-active"));
     file_sec.append(Some("保存笔记 (Ctrl+S)"), Some("win.save-note"));
+    file_sec.append(Some("复制整篇笔记纯文本"), Some("win.copy-note-text"));
     file_sec.append(Some("文内查找 (Ctrl+F)"), Some("win.find-in-note"));
     file_sec.append(Some("文内替换 (Ctrl+H)"), Some("win.replace-in-note"));
     file_sec.append(Some("全文搜索 (Ctrl+Shift+F)"), Some("win.focus-search"));

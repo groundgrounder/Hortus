@@ -395,29 +395,24 @@ impl WindowInner {
             self.show_toast("请先打开一篇笔记");
             return;
         };
-        let (editing, find, edit_view, edit_buffer, reading_view, reading_buffer) = {
+        let (editing, find, edit_view, edit_buffer, reading) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(&path) else {
                 return;
-            };
-            let (rv, rb) = match tab.reading.as_ref().and_then(|r| r.text_view.as_ref()) {
-                Some(view) => (Some(view.clone()), Some(view.buffer())),
-                None => (None, None),
             };
             (
                 tab.editing,
                 tab.find.clone(),
                 tab.edit_view.clone(),
                 tab.edit_buffer.clone(),
-                rv,
-                rb,
+                tab.reading.clone(),
             )
         };
         if editing {
             find.bind(&edit_view, &edit_buffer, true);
             find.open(replace);
-        } else if let (Some(rv), Some(rb)) = (reading_view, reading_buffer) {
-            find.bind(&rv, &rb, false);
+        } else if let Some(surface) = reading {
+            find.bind_reading(&surface);
             find.open(false);
         } else {
             self.show_toast("当前阅读页面尚未完成装载");

@@ -568,7 +568,10 @@ impl WindowInner {
             if is_active {
                 win.render_outline(&path, &headings);
             }
-            win.refresh_reading_tab(&path, fraction);
+            win.refresh_reading_tab(
+                &path,
+                fraction.map(crate::window::reading_layout::ReadingScrollTarget::Fraction),
+            );
             win.update_disk_stamp(&path);
             win.update_tab_title(&path);
             win.update_tab_notice(&path);

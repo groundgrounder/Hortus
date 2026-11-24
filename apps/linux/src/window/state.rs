@@ -26,6 +26,7 @@ pub struct OpenNoteTab {
     pub path: String,
     pub page: adw::TabPage,
     pub content_stack: gtk4::Stack,
+    pub reading_scrolled: gtk4::ScrolledWindow,
     pub reading_viewport: HortusReadingViewport,
     pub reading_slot: gtk4::Box,
     pub reading: Option<ReadingSurfaceHandle>,
@@ -34,6 +35,12 @@ pub struct OpenNoteTab {
     pub layout_width: f64,
     /// 阅读表面重建代号：丢弃过期的后台重排结果。
     pub reading_generation: u64,
+    /// 当前阅读表面对应的文档修订号：用于判断切回阅读态是否需要刷新预览。
+    pub reading_revision: u64,
+    /// 阅读表面整棵销毁重建次数（窗口缩放期间应保持为 0）。
+    pub surface_rebuilds: u32,
+    /// 原地宽度重排次数。
+    pub in_place_relayouts: u32,
     pub edit_scrolled: gtk4::ScrolledWindow,
     pub edit_view: gtk4::TextView,
     pub edit_buffer: gtk4::TextBuffer,

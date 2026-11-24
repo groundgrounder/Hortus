@@ -82,7 +82,14 @@ impl WindowInner {
                 }
             });
         }
-        content_stack.add_named(&reading_viewport, Some("reading"));
+        let reading_scrolled = gtk4::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk4::PolicyType::Never)
+            .vscrollbar_policy(gtk4::PolicyType::Automatic)
+            .vexpand(true)
+            .hexpand(true)
+            .child(&reading_viewport)
+            .build();
+        content_stack.add_named(&reading_scrolled, Some("reading"));
 
         let tag_table = create_tag_table();
         let edit_buffer = gtk4::TextBuffer::new(Some(&tag_table));
@@ -158,12 +165,16 @@ impl WindowInner {
                 path: relpath.to_string(),
                 page: page.clone(),
                 content_stack,
+                reading_scrolled,
                 reading_viewport,
                 reading_slot,
                 reading: None,
                 prepared_diagrams: Vec::new(),
                 layout_width: 0.0,
                 reading_generation: 0,
+                reading_revision: 0,
+                surface_rebuilds: 0,
+                in_place_relayouts: 0,
                 edit_scrolled,
                 edit_view,
                 edit_buffer,
@@ -308,6 +319,8 @@ impl WindowInner {
         let rel_collapse = rel.to_string();
         let vault_collapse = vault_root;
         let core_collapse = Arc::clone(&services.core);
+        let weak_scene = Rc::downgrade(self);
+        let rel_scene = rel.to_string();
 
         let surface = build_reading_surface(
             &prepared,
@@ -331,9 +344,21 @@ impl WindowInner {
                     item.scene = Some(new_scene);
                 }
             }),
+            Rc::new(move |ordinal, new_scene| {
+                if let Some(win) = weak_scene.upgrade()
+                    && let Some(tab) = win.state.borrow_mut().tabs.get_mut(&rel_scene)
+                    && let Some(item) = tab
+                        .prepared_diagrams
+                        .iter_mut()
+                        .find(|d| d.ordinal == ordinal)
+                {
+                    item.previous = new_scene.previous.clone();
+                    item.scene = Some(new_scene);
+                }
+            }),
         );
 
-        let revision = session.snapshot().map(|snap| snap.revision).unwrap_or(0);
+        let revision = prepared.revision;
         let (edit_view, edit_buffer, edit_state, reading_slot) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(rel) else {
@@ -382,6 +407,7 @@ impl WindowInner {
             let old_diagrams = std::mem::replace(&mut tab.prepared_diagrams, prepared.diagrams);
             tab.layout_width = content_width;
             tab.reading_generation = tab.reading_generation.wrapping_add(1);
+            tab.reading_revision = revision;
             tab.text = text;
             tab.headings = headings;
             tab.session = Some(session);
@@ -398,12 +424,12 @@ impl WindowInner {
 
         let alloc_w = viewport.last_allocated_width();
         if alloc_w > 240 {
-            let clamped = f64::from(alloc_w).clamp(260.0, 1400.0);
+            let clamped = f64::from(alloc_w).max(260.0);
             if (clamped - content_width).abs() < 16.0 {
                 viewport.set_settled_width(alloc_w);
             } else {
-                viewport.set_settled_width(content_width as i32);
-                self.refresh_reading_tab(rel, None);
+                viewport.set_settled_width(alloc_w);
+                self.relayout_reading_width(rel, clamped);
             }
         }
 

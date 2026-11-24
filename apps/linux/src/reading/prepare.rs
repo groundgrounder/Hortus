@@ -4,6 +4,7 @@
 
 //! 后台阅读模型解码与全量媒体/公式/Mermaid/嵌入准备（完全在工作线程执行）。
 
+use crate::core::model::HeadingItem;
 use crate::render::diagram::{RenderedDiagram, format_diagram_failure, render_block_with_engine};
 use crate::render::embed::{EmbedRequest, PreparedEmbed, prepare_embed_bg};
 use crate::render::math::{MathRenderService, PreparedMathBlock};
@@ -195,7 +196,9 @@ pub struct NoteReadingStats {
 pub struct PreparedReadingNote {
     pub path: String,
     pub is_mmd: bool,
+    pub revision: u64,
     pub source_text: String,
+    pub headings: Vec<HeadingItem>,
     pub model: DecodedReadingModel,
     pub diagrams: Vec<RenderedDiagram>,
     pub math: Vec<PreparedMathBlock>,
@@ -233,6 +236,11 @@ pub fn prepare_reading_note_bg(req: &PrepareReadingRequest) -> Result<PreparedRe
         .snapshot()
         .map_err(|e| format!("读取文档快照失败：{e}"))?;
     let source_text = snapshot.text;
+    let headings: Vec<HeadingItem> = req
+        .session
+        .outline()
+        .map(|o| o.headings.into_iter().map(HeadingItem::from).collect())
+        .unwrap_or_default();
 
     let math_blocks = req.session.math_blocks().unwrap_or_default();
     let raw_media_blocks = req
@@ -395,7 +403,9 @@ pub fn prepare_reading_note_bg(req: &PrepareReadingRequest) -> Result<PreparedRe
     Ok(PreparedReadingNote {
         path: req.note_path.clone(),
         is_mmd,
+        revision: wire.revision,
         source_text,
+        headings,
         model,
         diagrams,
         math: prepared_math,

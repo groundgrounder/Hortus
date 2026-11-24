@@ -23,6 +23,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Clone, Copy, Debug)]
+pub enum ReadingScrollTarget {
+    Fraction(f64),
+    SourceUtf16(u64),
+}
+
 impl WindowInner {
     pub fn make_reading_env(
         self: &Rc<Self>,
@@ -81,6 +87,12 @@ impl WindowInner {
         };
 
         let rel_src = note_path.to_string();
+        let scrolled = self
+            .state
+            .borrow()
+            .tabs
+            .get(note_path)
+            .map(|tab| tab.reading_scrolled.clone());
         ReadingEnv {
             note_path: note_path.to_string(),
             vault_root,
@@ -93,6 +105,7 @@ impl WindowInner {
             ancestors: vec![note_path.to_string()],
             depth: 0,
             parent_window: Some(self.window.clone().upcast()),
+            scrolled,
             callbacks,
             on_open_source: Rc::new(move |byte_start, _| {
                 if let Some(win) = weak_src.upgrade() {
@@ -161,7 +174,11 @@ impl WindowInner {
         }
     }
 
-    pub fn refresh_reading_tab(self: &Rc<Self>, note_path: &str, restore_fraction: Option<f64>) {
+    pub fn refresh_reading_tab(
+        self: &Rc<Self>,
+        note_path: &str,
+        restore_scroll: Option<ReadingScrollTarget>,
+    ) {
         let (session, generation) = {
             let mut st = self.state.borrow_mut();
             let Some(tab) = st.tabs.get_mut(note_path) else {
@@ -237,6 +254,8 @@ impl WindowInner {
                 let rel_c = rel.clone();
                 let vault_c = vault_root;
                 let core_c = Arc::clone(&services.core);
+                let weak_scene = Rc::downgrade(&win);
+                let rel_scene = rel.clone();
                 let surface = build_reading_surface(
                     &prepared,
                     &env,
@@ -259,6 +278,18 @@ impl WindowInner {
                             d.scene = Some(new_scene);
                         }
                     }),
+                    Rc::new(move |ordinal, new_scene| {
+                        if let Some(win_s) = weak_scene.upgrade()
+                            && let Some(tab) = win_s.state.borrow_mut().tabs.get_mut(&rel_scene)
+                            && let Some(d) = tab
+                                .prepared_diagrams
+                                .iter_mut()
+                                .find(|d| d.ordinal == ordinal)
+                        {
+                            d.previous = new_scene.previous.clone();
+                            d.scene = Some(new_scene);
+                        }
+                    }),
                 );
                 let reading_slot = win
                     .state
@@ -271,34 +302,46 @@ impl WindowInner {
                 };
                 clear_box(&reading_slot);
                 reading_slot.append(&surface.root);
-                let old = {
+                let updated_headings = prepared.headings.clone();
+                let (find_bar, editing_now, old) = {
                     let mut st = win.state.borrow_mut();
                     let Some(tab) = st.tabs.get_mut(&rel) else {
                         return;
                     };
-                    let old_reading = tab.reading.replace(surface);
+                    let old_reading = tab.reading.replace(surface.clone());
                     let old_diagrams =
                         std::mem::replace(&mut tab.prepared_diagrams, prepared.diagrams);
                     tab.reading_loaded = true;
+                    tab.reading_revision = prepared.revision;
+                    tab.text = prepared.source_text;
+                    tab.headings = updated_headings.clone();
                     tab.layout_width = content_width;
-                    (old_reading, old_diagrams)
+                    tab.surface_rebuilds = tab.surface_rebuilds.saturating_add(1);
+                    let alloc_w = tab.reading_viewport.last_allocated_width();
+                    if alloc_w > 240 {
+                        tab.reading_viewport.set_settled_width(alloc_w);
+                    }
+                    (tab.find.clone(), tab.editing, (old_reading, old_diagrams))
                 };
                 drop(old);
-                if let Some(fraction) = restore_fraction {
-                    let weak_restore = Rc::downgrade(&win);
-                    let rel_restore = rel.clone();
-                    glib::timeout_add_local_once(Duration::from_millis(60), move || {
-                        if let Some(win_r) = weak_restore.upgrade()
-                            && let Some(reading) = win_r
-                                .state
-                                .borrow()
-                                .tabs
-                                .get(&rel_restore)
-                                .and_then(|tab| tab.reading.clone())
-                        {
-                            reading.scroll_fraction(fraction);
-                        }
-                    });
+                if !editing_now && find_bar.is_open() {
+                    find_bar.bind_reading(&surface);
+                    find_bar.recompute_if_open();
+                }
+                if win.active_tab_path().as_deref() == Some(rel.as_str()) {
+                    win.render_outline(&rel, &updated_headings);
+                }
+                if let Some(target) = restore_scroll {
+                    let expected_token = surface.scroll_token();
+                    schedule_reading_scroll_restore(
+                        Rc::downgrade(&win),
+                        rel.clone(),
+                        target,
+                        expected_token,
+                        0.0,
+                        0,
+                        12,
+                    );
                 }
             }
         });
@@ -315,11 +358,12 @@ impl WindowInner {
             })
             .unwrap_or(0);
         if viewport_alloc > 240 {
-            return f64::from(viewport_alloc).clamp(260.0, 1400.0);
+            return f64::from(viewport_alloc).max(260.0);
         }
         let tab_view_width = f64::from(self.tab_view.width());
         if tab_view_width > 160.0 {
-            return (tab_view_width - 96.0).clamp(260.0, 1400.0);
+            let pad = if tab_view_width < 820.0 { 40.0 } else { 88.0 };
+            return (tab_view_width - pad).max(260.0);
         }
         let window_w = f64::from(self.window.width()).max(720.0);
         let sidebar_width = |w: f64| (w * 0.22).clamp(220.0, 320.0);
@@ -330,15 +374,34 @@ impl WindowInner {
         if self.right_split.shows_sidebar() && !self.right_split.is_collapsed() {
             content -= sidebar_width(window_w);
         }
-        (content - 96.0).clamp(260.0, 1400.0)
+        let pad = if content < 820.0 { 40.0 } else { 88.0 };
+        (content - pad).max(260.0)
+    }
+
+    pub fn relayout_reading_width(&self, note_path: &str, target_width: f64) {
+        let reading = {
+            let mut st = self.state.borrow_mut();
+            let Some(tab) = st.tabs.get_mut(note_path) else {
+                return;
+            };
+            if !tab.reading_loaded {
+                return;
+            }
+            tab.layout_width = target_width;
+            tab.in_place_relayouts = tab.in_place_relayouts.saturating_add(1);
+            tab.reading.clone()
+        };
+        if let Some(surface) = reading {
+            surface.relayout_to_width(target_width);
+        }
     }
 
     pub fn apply_relayout_width(self: &Rc<Self>, avail_w: i32) {
         let Some(path) = self.active_tab_path() else {
             return;
         };
-        let target = f64::from(avail_w).clamp(260.0, 1400.0);
-        let (loaded, editing, current, fraction, viewport) = {
+        let target = f64::from(avail_w).max(260.0);
+        let (loaded, editing, current, viewport) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(&path) else {
                 return;
@@ -347,10 +410,6 @@ impl WindowInner {
                 tab.reading_loaded,
                 tab.editing,
                 tab.layout_width,
-                tab.reading
-                    .as_ref()
-                    .map(ReadingSurfaceHandle::scroll_fraction_value)
-                    .unwrap_or(0.0),
                 tab.reading_viewport.clone(),
             )
         };
@@ -363,14 +422,14 @@ impl WindowInner {
         if current > 0.0 && (target - current).abs() < 16.0 {
             return;
         }
-        self.refresh_reading_tab(&path, Some(fraction));
+        self.relayout_reading_width(&path, target);
     }
 
     pub fn check_active_tab_width_alignment(self: &Rc<Self>) {
         let Some(path) = self.active_tab_path() else {
             return;
         };
-        let (loaded, editing, current, alloc_w, fraction, viewport) = {
+        let (loaded, editing, current, alloc_w, viewport) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(&path) else {
                 return;
@@ -380,20 +439,45 @@ impl WindowInner {
                 tab.editing,
                 tab.layout_width,
                 tab.reading_viewport.last_allocated_width(),
-                tab.reading
-                    .as_ref()
-                    .map(ReadingSurfaceHandle::scroll_fraction_value)
-                    .unwrap_or(0.0),
                 tab.reading_viewport.clone(),
             )
         };
         if !loaded || editing || alloc_w <= 240 {
             return;
         }
-        let target = f64::from(alloc_w).clamp(260.0, 1400.0);
+        let target = f64::from(alloc_w).max(260.0);
         if current > 0.0 && (target - current).abs() >= 16.0 {
             viewport.mark_reflowed_width(alloc_w);
-            self.refresh_reading_tab(&path, Some(fraction));
+            self.relayout_reading_width(&path, target);
+        }
+    }
+
+    pub fn copy_active_note_plain_text(&self) {
+        let Some(path) = self.active_tab_path() else {
+            self.show_toast("请先打开一篇笔记");
+            return;
+        };
+        let text = {
+            let st = self.state.borrow();
+            let Some(tab) = st.tabs.get(&path) else {
+                return;
+            };
+            if !tab.editing
+                && let Some(ref surface) = tab.reading
+            {
+                let plain = surface.plain_text();
+                if !plain.is_empty() {
+                    plain
+                } else {
+                    tab.edit_state.borrow().text.clone()
+                }
+            } else {
+                tab.edit_state.borrow().text.clone()
+            }
+        };
+        if let Some(display) = gtk4::gdk::Display::default() {
+            display.clipboard().set_text(&text);
+            self.show_toast("已复制整篇笔记纯文本");
         }
     }
 
@@ -425,29 +509,40 @@ impl WindowInner {
             self.show_toast("请先打开一篇笔记");
             return;
         };
-        let (new_editing, anchor_u16, edit_view, content_stack) = {
+        let (new_editing, needs_reading_refresh, anchor_u16, edit_view, content_stack) = {
             let mut st = self.state.borrow_mut();
             let Some(tab) = st.tabs.get_mut(&path) else {
                 return;
             };
-            let target_u16 = if !tab.editing {
-                tab.reading
+            let (target_u16, needs_refresh) = if !tab.editing {
+                let u16_off = tab
+                    .reading
                     .as_ref()
                     .map(ReadingSurfaceHandle::current_source_utf16)
-                    .unwrap_or(0)
+                    .unwrap_or(0);
+                (u16_off, false)
             } else {
                 let top_y = tab.edit_scrolled.vadjustment().value().max(0.0) as i32;
                 let (iter, _) = tab.edit_view.line_at_y(top_y + 12);
                 let char_off = iter.offset().max(0) as usize;
-                tab.text
+                let edit = tab.edit_state.borrow();
+                let u16_off: u64 = edit
+                    .text
                     .chars()
                     .take(char_off)
                     .map(|c| c.len_utf16() as u64)
-                    .sum()
+                    .sum();
+                let edit_text = edit.text.clone();
+                let edit_rev = edit.revision;
+                drop(edit);
+                tab.text = edit_text;
+                let dirty_rev = edit_rev != tab.reading_revision || !tab.reading_loaded;
+                (u16_off, dirty_rev)
             };
             tab.editing = !tab.editing;
             (
                 tab.editing,
+                needs_refresh,
                 target_u16,
                 tab.edit_view.clone(),
                 tab.content_stack.clone(),
@@ -456,10 +551,14 @@ impl WindowInner {
         content_stack.set_visible_child_name(if new_editing { "edit" } else { "reading" });
         self.sync_active_tab_ui();
         if !new_editing {
-            self.check_active_tab_width_alignment();
-        }
-        self.scroll_to_utf16_offset(&path, anchor_u16);
-        if new_editing {
+            if needs_reading_refresh {
+                self.refresh_reading_tab(&path, Some(ReadingScrollTarget::SourceUtf16(anchor_u16)));
+            } else {
+                self.check_active_tab_width_alignment();
+                self.scroll_to_utf16_offset(&path, anchor_u16);
+            }
+        } else {
+            self.scroll_to_utf16_offset(&path, anchor_u16);
             edit_view.grab_focus();
         }
         if announce {
@@ -470,4 +569,58 @@ impl WindowInner {
             }
         }
     }
+}
+
+fn schedule_reading_scroll_restore(
+    weak_win: std::rc::Weak<WindowInner>,
+    rel: String,
+    target: ReadingScrollTarget,
+    expected_token: u64,
+    last_upper: f64,
+    stable_ticks: u8,
+    attempts_left: u8,
+) {
+    glib::idle_add_local_once(move || {
+        let Some(win) = weak_win.upgrade() else {
+            return;
+        };
+        let reading = win
+            .state
+            .borrow()
+            .tabs
+            .get(&rel)
+            .and_then(|tab| tab.reading.clone());
+        let Some(reading) = reading else {
+            return;
+        };
+        if reading.scroll_token() != expected_token {
+            return;
+        }
+        let adj = reading.scrolled.vadjustment();
+        let cur_upper = adj.upper();
+        let unsettled_height = reading.content_box.height() <= 0 || cur_upper <= 0.0;
+        let next_stable = if !unsettled_height && (cur_upper - last_upper).abs() <= 1.0 {
+            stable_ticks.saturating_add(1)
+        } else {
+            0
+        };
+        if (unsettled_height || next_stable < 2) && attempts_left > 0 {
+            glib::timeout_add_local_once(Duration::from_millis(24), move || {
+                schedule_reading_scroll_restore(
+                    weak_win,
+                    rel,
+                    target,
+                    expected_token,
+                    cur_upper,
+                    next_stable,
+                    attempts_left - 1,
+                );
+            });
+            return;
+        }
+        match target {
+            ReadingScrollTarget::Fraction(fraction) => reading.scroll_fraction(fraction),
+            ReadingScrollTarget::SourceUtf16(u16_off) => reading.scroll_to_source_utf16(u16_off),
+        }
+    });
 }
