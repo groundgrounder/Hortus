@@ -45,14 +45,20 @@ internal fun DiagramBlock(
     dark: Boolean,
     palette: ReaderPalette,
     repository: ReaderRepository,
+    vaultPath: String,
     notePath: String,
+    revision: Long,
     onFocus: (DiagramItem, SceneData, List<String>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var collapsed by remember(item.documentKey, item.ordinal) { mutableStateOf<List<String>?>(null) }
-    var result by remember(item.documentKey, item.ordinal) { mutableStateOf<DiagramRenderResult?>(null) }
-    LaunchedEffect(item.documentKey, item.ordinal, DiagramStateBus.version) {
-        collapsed = DiagramStateBus.nodes(notePath, item.ordinal)
+    var collapsed by remember(vaultPath, item.documentKey, item.ordinal) {
+        mutableStateOf<List<String>?>(null)
+    }
+    var result by remember(vaultPath, item.documentKey, item.ordinal) {
+        mutableStateOf<DiagramRenderResult?>(null)
+    }
+    LaunchedEffect(vaultPath, item.documentKey, item.ordinal, DiagramStateBus.version) {
+        collapsed = DiagramStateBus.nodes(vaultPath, notePath, item.ordinal)
             ?: withContext(Dispatchers.IO) {
                 repository.collapsedNodes(notePath, item.ordinal)
             }
@@ -61,8 +67,10 @@ internal fun DiagramBlock(
     val unitScale = diagramUnitScale(bodySizePx, density)
     val layoutWidth = (contentWidth / unitScale).toDouble()
     LaunchedEffect(
+        vaultPath,
         item.documentKey,
         item.ordinal,
+        revision,
         engineText.hashCode(),
         contentWidth,
         bodySizePx,
@@ -80,7 +88,7 @@ internal fun DiagramBlock(
                 width = layoutWidth,
                 dark = dark,
                 collapsed = current,
-                revision = engineText.hashCode().toLong(),
+                revision = revision,
             )
         }
     }
@@ -111,12 +119,13 @@ internal fun DiagramBlock(
     Box(modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         if (scene != null) {
             val key = buildString {
+                append(vaultPath).append('|')
                 append(item.documentKey).append('#').append(item.ordinal)
                 append('@').append(contentWidth).append('/').append(dark)
                 append('/').append(palette.textArgb)
                 append('/').append(unitScale).append('/').append(drawZoom)
                 append('/').append(collapsed.orEmpty().joinToString(","))
-                append('/').append(engineText.hashCode())
+                append('/').append(revision).append(':').append(engineText.hashCode())
             }
             val renderNode = remember(scene, key) {
                 DiagramPreviewCache.renderNode(

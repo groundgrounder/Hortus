@@ -22,12 +22,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job as CoroutineJob
+import java.util.concurrent.atomic.AtomicLong
 
 internal data class ScrollTarget(val itemIndex: Int, val offsetPx: Int)
 internal data class ReaderAnchor(val blockId: Long, val offsetPx: Int)
@@ -50,13 +51,16 @@ internal class ReaderController(context: Context) : AutoCloseable {
     private val preferences = ReaderPreferences(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val loadMutex = Mutex()
+    private val saveMutex = Mutex()
+    private val openRequestSeq = AtomicLong(0)
+    private var persistSessionPreference = true
     private val stack = ArrayList<Destination>()
     private val anchors = HashMap<String, ReaderAnchor>()
     private var treeJob: Job? = null
     private var externalJob: Job? = null
     private var widthJob: Job? = null
     private var noticeJob: Job? = null
-    private var refreshJob: CoroutineJob? = null
+    private var activeSaveJob: Job? = null
     private var foreground = false
     var state by mutableStateOf(ReaderUiState())
         private set
@@ -374,9 +378,9 @@ internal class ReaderController(context: Context) : AutoCloseable {
         )
     }
 
-    fun finishEditing() {
-        if (!editState.active) return
-        scope.launch {
+    fun finishEditing(): Job? {
+        if (!editState.active) return null
+        val job = scope.launch {
             if (!editState.dirty) {
                 editState = editState.copy(active = false)
                 return@launch
@@ -386,74 +390,92 @@ internal class ReaderController(context: Context) : AutoCloseable {
                 notice(appContext.getString(R.string.editor_saved))
             }
         }
+        activeSaveJob = job
+        return job
     }
 
-    fun saveEditedNote() {
-        if (!editState.active) return
-        scope.launch {
+    fun saveEditedNote(): Job? {
+        if (!editState.active) return null
+        val job = scope.launch {
             if (saveEditSuspending(SaveChoice.NORMAL)) {
                 notice(appContext.getString(R.string.editor_saved))
             }
         }
+        activeSaveJob = job
+        return job
     }
 
-    fun keepMine() {
-        if (!editState.active) return
+    fun keepMine(): Job? {
+        if (!editState.active) return null
         val choice = if (editState.issue == "missing") SaveChoice.RECREATE else SaveChoice.KEEP_MINE
-        scope.launch {
+        val job = scope.launch {
             if (saveEditSuspending(choice)) {
                 editState = editState.copy(active = false)
                 notice(appContext.getString(R.string.editor_saved))
             }
         }
+        activeSaveJob = job
+        return job
     }
 
-    fun useDiskVersion() {
-        if (!editState.active) return
-        scope.launch {
-            editState = editState.copy(saving = true)
-            val update = try {
-                loadMutex.withLock {
-                    withContext(Dispatchers.IO) { repository.useDiskVersion() }
+    fun useDiskVersion(): Job? {
+        if (!editState.active) return null
+        val job = scope.launch {
+            saveMutex.withLock {
+                if (!editState.active) return@withLock
+                editState = editState.copy(saving = true)
+                val update = try {
+                    loadMutex.withLock {
+                        withContext(Dispatchers.IO) { repository.useDiskVersion() }
+                    }
+                } catch (_: Exception) {
+                    null
                 }
-            } catch (_: Exception) {
-                null
-            }
-            val text = update?.text
-            if (text != null) {
-                editState = editState.copy(
-                    active = false,
-                    field = TextFieldValue(text),
-                    savedText = text,
-                    dirty = false,
-                    saving = false,
-                    issue = null,
-                    lastSaveOk = false,
-                )
-                refreshInternal()
-                notice(appContext.getString(R.string.editor_disk_loaded))
-            } else {
-                editState = editState.copy(saving = false, issue = "save_failed")
+                val text = update?.text
+                if (text != null) {
+                    editState = editState.copy(
+                        active = false,
+                        field = TextFieldValue(text),
+                        savedText = text,
+                        dirty = false,
+                        saving = false,
+                        issue = null,
+                        lastSaveOk = false,
+                    )
+                    loadMutex.withLock { refreshInternal() }
+                    notice(appContext.getString(R.string.editor_disk_loaded))
+                } else {
+                    editState = editState.copy(saving = false, issue = "save_failed")
+                }
             }
         }
+        activeSaveJob = job
+        return job
     }
 
-    fun saveConflictCopy() {
-        if (!editState.active) return
-        scope.launch {
+    fun saveConflictCopy(): Job? {
+        if (!editState.active) return null
+        val job = scope.launch {
             if (saveEditSuspending(SaveChoice.CONFLICT_COPY)) {
                 editState = editState.copy(active = false)
             }
         }
+        activeSaveJob = job
+        return job
     }
 
-    fun autoSaveEdit() {
-        if (!editState.active || !editState.dirty || editState.saving) return
-        scope.launch { saveEditSuspending(SaveChoice.NORMAL) }
+    fun autoSaveEdit(): Job? {
+        if (!editState.active || !editState.dirty || editState.saving) return null
+        val job = scope.launch { saveEditSuspending(SaveChoice.NORMAL) }
+        activeSaveJob = job
+        return job
     }
 
-    private suspend fun saveEditSuspending(choice: SaveChoice): Boolean {
-        if (!editState.active) return true
+    private suspend fun saveEditSuspending(choice: SaveChoice): Boolean = saveMutex.withLock {
+        if (!editState.active) return@withLock true
+        if (choice == SaveChoice.NORMAL && !editState.dirty && editState.issue == null) {
+            return@withLock true
+        }
         val text = editState.field.text
         editState = editState.copy(saving = true, issue = null, choice = choice.name)
         val temporary = (appContext.externalCacheDir ?: appContext.cacheDir).path
@@ -473,7 +495,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
         if (update == null) {
             DebugProbes.recordSaveIssue("io.failure")
             editState = editState.copy(saving = false, issue = "save_failed", lastSaveOk = false)
-            return false
+            return@withLock false
         }
         DebugProbes.recordSaveIssue(update.issue.name)
         if (update.copyPath != null) {
@@ -492,11 +514,11 @@ internal class ReaderController(context: Context) : AutoCloseable {
                 lastSaveOk = true,
                 issue = null,
             )
-            refreshInternal()
+            loadMutex.withLock { refreshInternal() }
             notice(appContext.getString(R.string.editor_copy_saved, copy))
-            return true
+            return@withLock true
         }
-        return when (update.issue) {
+        return@withLock when (update.issue) {
             DocumentIssue.CONFLICT -> {
                 editState = editState.copy(saving = false, issue = "conflict", lastSaveOk = false)
                 false
@@ -518,7 +540,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
                     lastSaveOk = true,
                     lastSaveMicros = update.saveMicros.toLong(),
                 )
-                refreshInternal()
+                loadMutex.withLock { refreshInternal() }
                 true
             }
         }
@@ -526,6 +548,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
 
     fun openNewNoteDialog(parent: String? = null) {
         val content = state.content
+        if (content?.externalPreview == true) return
         val defaultParent = parent
             ?: content?.path?.substringBeforeLast('/', "")
             ?: ""
@@ -544,16 +567,17 @@ internal class ReaderController(context: Context) : AutoCloseable {
         newNoteState = newNoteState.copy(parent = parent, error = null)
     }
 
-    fun createNewNote() {
-        if (newNoteState.creating) return
+    fun createNewNote(): Job? {
+        if (newNoteState.creating) return null
         val name = newNoteState.name.trim()
         if (name.isEmpty()) {
             newNoteState = newNoteState.copy(error = "vault.invalid_name")
-            return
+            return null
         }
         val parent = newNoteState.parent
         newNoteState = newNoteState.copy(creating = true, error = null)
-        scope.launch {
+        val requestToken = openRequestSeq.incrementAndGet()
+        return scope.launch {
             val entry = try {
                 withContext(Dispatchers.IO) {
                     DebugProbes.traceMainThread("createNote") {
@@ -573,24 +597,28 @@ internal class ReaderController(context: Context) : AutoCloseable {
             DebugProbes.recordCreatedNote(entry.path)
             newNoteState = NewNoteState()
             pendingEditPath = entry.path
-            openNote(entry.path)
+            openNoteInternal(entry.path, null, requestToken)
         }
     }
 
-    fun pinCurrentNote() {
-        val content = state.content ?: return
+    fun pinCurrentNote(): Job? {
+        val content = state.content ?: return null
         if (content.externalPreview) {
             notice(appContext.getString(R.string.shortcut_unsupported))
-            return
+            return null
         }
-        val pinned = shortcuts.requestPin(
-            RecentNote(content.vaultPath, content.path, content.title, System.currentTimeMillis()),
-        )
-        notice(
-            appContext.getString(
-                if (pinned) R.string.shortcut_pinned else R.string.shortcut_unsupported,
-            ),
-        )
+        return scope.launch {
+            val pinned = withContext(Dispatchers.IO) {
+                shortcuts.requestPin(
+                    RecentNote(content.vaultPath, content.path, content.title, System.currentTimeMillis()),
+                )
+            }
+            notice(
+                appContext.getString(
+                    if (pinned) R.string.shortcut_pinned else R.string.shortcut_unsupported,
+                ),
+            )
+        }
     }
 
     fun launchShortcut(index: Int): Boolean {
@@ -607,9 +635,11 @@ internal class ReaderController(context: Context) : AutoCloseable {
 
     fun shortcutNotes(): List<RecentNote> = shortcuts.load()
 
-    fun openExternalPreview(fileName: String, text: String) {
-        scope.launch {
+    fun openExternalPreview(fileName: String, text: String): Job {
+        val requestToken = openRequestSeq.incrementAndGet()
+        return scope.launch {
             loadMutex.withLock {
+                if (openRequestSeq.get() != requestToken) return@withLock
                 val previous = state.content
                 if (previous != null && !previous.externalPreview) previewReturn = previous
                 val width = if (contentWidthPx > 0) contentWidthPx else defaultWidth()
@@ -638,55 +668,90 @@ internal class ReaderController(context: Context) : AutoCloseable {
 
     fun setForeground(value: Boolean) {
         foreground = value
-        refreshJob?.cancel()
-        refreshJob = null
-        if (value) {
-            refreshJob = scope.launch {
-                while (true) {
-                    delay(900)
-                    if (!foreground || state.content == null || state.loading) continue
-                    loadMutex.withLock {
-                        try {
-                            refreshInternal()
-                        } catch (_: Exception) {
-                            Unit
-                        }
-                    }
-                }
-            }
-        } else {
+        if (!value) {
             autoSaveEdit()
         }
     }
 
-    fun start(vaultPath: String?, notePath: String?) {
-        if (vaultPath == null) return
-        scope.launch {
+    fun start(
+        vaultPath: String?,
+        notePath: String?,
+        persistPreference: Boolean = true,
+    ): Job? {
+        if (vaultPath == null) return null
+        val requestToken = openRequestSeq.incrementAndGet()
+        return scope.launch {
             loadMutex.withLock {
-                DebugProbes.incrementOpenCount()
-                editState = EditState()
-                searchState = SearchState()
-                knowledgeState = KnowledgeState()
-                sideMode = SideMode.FILES
-                previewReturn = null
-                state = state.copy(loading = true, error = null)
-                try {
-                    withContext(Dispatchers.IO) {
-                        repository.openVault(vaultPath)
-                        repository.awaitScan()
-                    }
-                    state = state.copy(vaultPath = vaultPath, tree = repository.tree.value)
-                    preferences.save(vaultPath, notePath ?: state.content?.path)
-                    observeRepository()
-                    if (notePath != null) {
-                        openInternal(notePath, null, push = true, restoreAnchor = true)
-                    } else {
-                        state = state.copy(loading = false)
-                    }
-                } catch (error: Exception) {
-                    state = state.copy(loading = false, error = error.message ?: "vault.open_failed")
+                if (openRequestSeq.get() != requestToken) return@withLock
+                startLocked(vaultPath, notePath, heading = null, persistPreference = persistPreference)
+            }
+        }
+    }
+
+    fun openVaultAndPath(
+        vaultPath: String,
+        notePath: String,
+        heading: String? = null,
+        persistPreference: Boolean = true,
+    ): Job {
+        val requestToken = openRequestSeq.incrementAndGet()
+        return scope.launch {
+            loadMutex.withLock {
+                if (openRequestSeq.get() != requestToken) return@withLock
+                if (state.vaultPath != vaultPath) {
+                    startLocked(vaultPath, notePath = null, heading = null, persistPreference = persistPreference)
+                }
+                if (openRequestSeq.get() != requestToken) return@withLock
+                val resolved = withContext(Dispatchers.IO) {
+                    repository.resolveLink("", notePath)
+                } ?: notePath
+                if (resolved.endsWith(".md", ignoreCase = true) ||
+                    resolved.endsWith(".mmd", ignoreCase = true)
+                ) {
+                    openInternal(resolved, heading, push = true, restoreAnchor = false)
+                } else {
+                    pendingScroll = null
+                    pendingEditPath = null
+                    notice(appContext.getString(R.string.link_not_found))
                 }
             }
+        }
+    }
+
+    private suspend fun startLocked(
+        vaultPath: String,
+        notePath: String?,
+        heading: String?,
+        persistPreference: Boolean,
+    ) {
+        DebugProbes.incrementOpenCount()
+        persistSessionPreference = persistPreference
+        editState = EditState()
+        searchState = SearchState()
+        knowledgeState = KnowledgeState()
+        sideMode = SideMode.FILES
+        previewReturn = null
+        pendingScroll = null
+        pendingEditPath = null
+        repository.cleanupExternalPreview()
+        state = state.copy(loading = true, error = null)
+        try {
+            withContext(Dispatchers.IO) {
+                repository.openVault(vaultPath)
+                repository.awaitScan()
+            }
+            state = state.copy(vaultPath = vaultPath, tree = repository.tree.value)
+            if (persistPreference) {
+                preferences.save(vaultPath, notePath ?: state.content?.path)
+            }
+            observeRepository()
+            if (notePath != null) {
+                openInternal(notePath, heading, push = true, restoreAnchor = true)
+            } else {
+                state = state.copy(loading = false)
+            }
+        } catch (error: Exception) {
+            state = state.copy(loading = false, error = error.message ?: "vault.open_failed")
         }
     }
 
@@ -699,63 +764,88 @@ internal class ReaderController(context: Context) : AutoCloseable {
         }
         externalJob?.cancel()
         externalJob = scope.launch {
-            repository.externalChanges.collectLatest { path ->
-                delay(250)
-                if (path == state.content?.path) refresh()
-            }
-        }
-    }
-
-    fun openNote(path: String, heading: String? = null) {
-        scope.launch {
-            if (editState.active) {
-                if (editState.dirty && !saveEditSuspending(SaveChoice.NORMAL)) return@launch
-                editState = EditState()
-            }
-            loadMutex.withLock {
-                val current = state.content
-                if (current?.path == path && !current.externalPreview) {
-                    if (heading != null) scrollToHeading(current, heading)
-                    return@withLock
+            repository.externalChanges
+                .filter { path -> path == state.content?.path }
+                .collectLatest { path ->
+                    delay(250)
+                    if (path == state.content?.path) {
+                        loadMutex.withLock { refreshInternal() }
+                    }
                 }
-                openInternal(path, heading, push = true, restoreAnchor = false)
-            }
         }
     }
 
-    fun openPath(path: String, heading: String?) {
+    fun openNote(path: String, heading: String? = null): Job {
+        val requestToken = openRequestSeq.incrementAndGet()
+        return scope.launch {
+            openNoteInternal(path, heading, requestToken)
+        }
+    }
+
+    private suspend fun openNoteInternal(path: String, heading: String?, requestToken: Long) {
+        if (openRequestSeq.get() != requestToken) return
+        if (editState.active) {
+            if (editState.dirty && !saveEditSuspending(SaveChoice.NORMAL)) {
+                pendingScroll = null
+                pendingEditPath = null
+                return
+            }
+            editState = EditState()
+        }
+        loadMutex.withLock {
+            if (openRequestSeq.get() != requestToken) return@withLock
+            val current = state.content
+            if (current?.path == path && !current.externalPreview) {
+                if (heading != null) scrollToHeading(current, heading)
+                return@withLock
+            }
+            openInternal(path, heading, push = true, restoreAnchor = false)
+        }
+    }
+
+    fun openPath(path: String, heading: String?): Job? {
         val content = state.content
+        val requestToken = openRequestSeq.incrementAndGet()
         if (content == null) {
-            scope.launch {
+            return scope.launch {
                 loadMutex.withLock {
+                    if (openRequestSeq.get() != requestToken) return@withLock
                     val resolved = withContext(Dispatchers.IO) {
                         repository.resolveLink("", path)
                     } ?: path
+                    if (openRequestSeq.get() != requestToken) return@withLock
                     if (resolved.endsWith(".md", ignoreCase = true) ||
                         resolved.endsWith(".mmd", ignoreCase = true)
                     ) {
                         openInternal(resolved, heading, push = true, restoreAnchor = false)
                     } else {
-                        notice(appContext.getString(io.github.groundgrounder.hortus.R.string.link_not_found))
+                        pendingScroll = null
+                        pendingEditPath = null
+                        notice(appContext.getString(R.string.link_not_found))
                     }
                 }
             }
-            return
         }
         if (path == content.path) {
-            if (heading != null) scrollToHeading(content, heading) else Unit
-            return
+            if (heading != null) scrollToHeading(content, heading)
+            return null
         }
-        scope.launch {
+        val sourcePath = content.path
+        return scope.launch {
             val resolved = withContext(Dispatchers.IO) {
-                repository.resolveLink(content.path, path)
+                repository.resolveLink(sourcePath, path)
             } ?: path
+            if (openRequestSeq.get() != requestToken || state.content?.path != sourcePath) {
+                return@launch
+            }
             if (resolved.endsWith(".md", ignoreCase = true) ||
                 resolved.endsWith(".mmd", ignoreCase = true)
             ) {
-                openNote(resolved, heading)
+                openNoteInternal(resolved, heading, requestToken)
             } else {
-                notice(appContext.getString(io.github.groundgrounder.hortus.R.string.link_not_found))
+                pendingScroll = null
+                pendingEditPath = null
+                notice(appContext.getString(R.string.link_not_found))
             }
         }
     }
@@ -775,6 +865,9 @@ internal class ReaderController(context: Context) : AutoCloseable {
 
     private suspend fun openInternal(path: String, heading: String?, push: Boolean, restoreAnchor: Boolean) {
         DebugProbes.markOpenStarted()
+        if (state.content?.externalPreview == true) {
+            repository.cleanupExternalPreview()
+        }
         state = state.copy(loading = true, error = null, notice = null)
         val width = if (contentWidthPx > 0) contentWidthPx else defaultWidth()
         try {
@@ -808,7 +901,9 @@ internal class ReaderController(context: Context) : AutoCloseable {
                 openSequence = state.openSequence + 1,
             )
             DebugProbes.markContentInstalled()
-            preferences.save(content.vaultPath, content.path)
+            if (persistSessionPreference) {
+                preferences.save(content.vaultPath, content.path)
+            }
             DebugProbes.clearAllHits()
             rememberShortcut(content)
             if (pendingEditPath == content.path) {
@@ -816,6 +911,8 @@ internal class ReaderController(context: Context) : AutoCloseable {
                 startEditing()
             }
         } catch (error: Exception) {
+            pendingScroll = null
+            pendingEditPath = null
             state = state.copy(
                 loading = false,
                 error = error.message ?: "document.open_failed",
@@ -973,10 +1070,13 @@ internal class ReaderController(context: Context) : AutoCloseable {
         }
         val current = state.content
         if (current?.externalPreview == true) {
+            repository.cleanupExternalPreview()
             val previous = previewReturn ?: return false
             previewReturn = null
+            val requestToken = openRequestSeq.incrementAndGet()
             scope.launch {
                 loadMutex.withLock {
+                    if (openRequestSeq.get() != requestToken) return@withLock
                     openInternal(previous.path, null, push = false, restoreAnchor = true)
                 }
             }
@@ -1048,8 +1148,24 @@ internal class ReaderController(context: Context) : AutoCloseable {
 
     fun repository(): ReaderRepository = repository
 
+    internal suspend fun awaitSearchIdle() {
+        searchJob?.join()
+    }
+
+    internal suspend fun awaitKnowledgeIdle() {
+        knowledgeJob?.join()
+        tagJob?.join()
+    }
+
+    internal suspend fun awaitSaveIdle() {
+        activeSaveJob?.join()
+    }
+
     override fun close() {
-        refreshJob?.cancel()
+        treeJob?.cancel()
+        externalJob?.cancel()
+        widthJob?.cancel()
+        noticeJob?.cancel()
         searchJob?.cancel()
         knowledgeJob?.cancel()
         tagJob?.cancel()

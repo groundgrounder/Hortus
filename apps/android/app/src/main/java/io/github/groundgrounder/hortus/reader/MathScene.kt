@@ -132,7 +132,7 @@ private data class Metrik(val codepoint: Int, val width: Double, val height: Dou
 internal class MathSceneRenderer(
     private val assets: AssetManager,
     private val engine: io.github.groundgrounder.hortus.core.MathEngine,
-) {
+) : AutoCloseable {
     private val faces = ConcurrentHashMap<String, Typeface>()
     private val fallbackFaces = ConcurrentHashMap<Int, Typeface>()
     private val metrics = ConcurrentHashMap<Int, Metrik>()
@@ -376,5 +376,17 @@ internal class MathSceneRenderer(
             (rgba.optDouble(1) * 255).toInt().coerceIn(0, 255),
             (rgba.optDouble(2) * 255).toInt().coerceIn(0, 255),
         )
+    }
+
+    override fun close() {
+        synchronized(lock) {
+            cache.clear()
+            failed.clear()
+        }
+        try {
+            engine.close()
+        } catch (_: Exception) {
+            Unit
+        }
     }
 }

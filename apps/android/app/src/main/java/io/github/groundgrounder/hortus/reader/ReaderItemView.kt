@@ -45,7 +45,9 @@ internal fun ReaderItemView(
     dark: Boolean,
     palette: ReaderPalette,
     repository: ReaderRepository,
+    vaultPath: String,
     notePath: String,
+    revision: Long,
     ancestors: List<String>,
     callbacks: ReaderCallbacks,
     modifier: Modifier = Modifier,
@@ -96,13 +98,17 @@ internal fun ReaderItemView(
             dark = dark,
             palette = palette,
             repository = repository,
+            vaultPath = vaultPath,
             notePath = notePath,
+            revision = revision,
             onFocus = callbacks.onFocus,
             modifier = modifier,
         )
         is EmbedItem -> EmbedBlockView(
             item = item,
+            vaultPath = vaultPath,
             notePath = notePath,
+            revision = revision,
             ancestors = ancestors,
             contentWidth = contentWidth,
             bodySizePx = bodySizePx,
@@ -118,7 +124,9 @@ internal fun ReaderItemView(
 @Composable
 internal fun EmbedBlockView(
     item: EmbedItem,
+    vaultPath: String,
     notePath: String,
+    revision: Long,
     ancestors: List<String>,
     contentWidth: Int,
     bodySizePx: Float,
@@ -128,8 +136,10 @@ internal fun EmbedBlockView(
     callbacks: ReaderCallbacks,
     modifier: Modifier = Modifier,
 ) {
-    var embedded by remember(item.key, notePath, contentWidth) { mutableStateOf<EmbeddedContent?>(null) }
-    LaunchedEffect(item.key, notePath, ancestors, contentWidth, bodySizePx) {
+    var embedded by remember(vaultPath, item.key, notePath, contentWidth, revision) {
+        mutableStateOf<EmbeddedContent?>(null)
+    }
+    LaunchedEffect(vaultPath, item.key, notePath, ancestors, contentWidth, bodySizePx, revision) {
         embedded = withContext(Dispatchers.IO) {
             repository.resolveEmbed(
                 sourcePath = notePath,
@@ -206,7 +216,9 @@ internal fun EmbedBlockView(
                             dark = dark,
                             palette = palette,
                             repository = repository,
+                            vaultPath = vaultPath,
                             notePath = info.resolvedPath ?: notePath,
+                            revision = revision,
                             ancestors = nextAncestors,
                             callbacks = callbacks,
                         )
@@ -238,7 +250,9 @@ internal fun EmbedBlockView(
                     dark = dark,
                     palette = palette,
                     repository = repository,
+                    vaultPath = vaultPath,
                     notePath = info.resolvedPath ?: notePath,
+                    revision = revision,
                     onFocus = callbacks.onFocus,
                 )
             }

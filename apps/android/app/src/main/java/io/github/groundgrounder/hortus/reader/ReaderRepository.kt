@@ -2,17 +2,14 @@
 package io.github.groundgrounder.hortus.reader
 
 import android.content.Context
-import io.github.groundgrounder.hortus.AndroidFonts
-import io.github.groundgrounder.hortus.CoreEnvironment
 import io.github.groundgrounder.hortus.DebugProbes
-import io.github.groundgrounder.hortus.core.DiagramEngine
+import io.github.groundgrounder.hortus.app.HortusServices
 import io.github.groundgrounder.hortus.core.DiagramFailure
 import io.github.groundgrounder.hortus.core.DocumentOutline
 import io.github.groundgrounder.hortus.core.DocumentSession
 import io.github.groundgrounder.hortus.core.EmbedContentInfo
 import io.github.groundgrounder.hortus.core.KnowledgeMarkupInfo
 import io.github.groundgrounder.hortus.core.MathBlock
-import io.github.groundgrounder.hortus.core.MathStyle
 import io.github.groundgrounder.hortus.core.MediaBlock
 import io.github.groundgrounder.hortus.core.ReadingModel
 import io.github.groundgrounder.hortus.core.SaveChoice
@@ -21,14 +18,13 @@ import io.github.groundgrounder.hortus.core.SearchCancellation
 import io.github.groundgrounder.hortus.core.TreeBatch
 import io.github.groundgrounder.hortus.core.TreeEntry
 import io.github.groundgrounder.hortus.core.VaultHandle
-import io.github.groundgrounder.hortus.core.WorkspaceCore
 import io.github.groundgrounder.hortus.core.diagramBlocks
-import io.github.groundgrounder.hortus.core.mathTypographyScale
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -36,12 +32,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 internal data class NoteContent(
@@ -80,9 +74,9 @@ internal data class DiagramRenderResult(
 
 internal class ReaderRepository(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
+    private val services = HortusServices.get(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Mutex()
-    private var workspace: WorkspaceCore? = null
     private var vault: VaultHandle? = null
     private var document: DocumentSession? = null
     private var vaultPath: String? = null
@@ -92,12 +86,10 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
     private val entries = LinkedHashMap<String, TreeEntry>()
     private val _tree = MutableStateFlow<List<TreeEntry>>(emptyList())
     val tree: StateFlow<List<TreeEntry>> = _tree.asStateFlow()
-    private val _externalChanges = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    private val _externalChanges = MutableSharedFlow<String>(extraBufferCapacity = 64)
     val externalChanges: SharedFlow<String> = _externalChanges.asSharedFlow()
 
-    private var diagramEngine: DiagramEngine? = null
-    private var mathRenderer: MathSceneRenderer? = null
-    private val requestGeneration = AtomicLong()
+    private val embedVersion = AtomicLong(1L)
     private val diagramCache = object : LinkedHashMap<String, DiagramRenderResult>(48, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DiagramRenderResult>): Boolean =
             size > 24
@@ -106,17 +98,24 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, EmbeddedContent>): Boolean =
             size > 16
     }
-    private val fontPaths: List<String> by lazy {
-        AndroidFonts.discover().mapNotNull { it.file?.path }.distinct()
-    }
 
     val vaultRoot: String? get() = vaultPath
     val currentPath: String? get() = notePath
 
-    private fun requireWorkspace(): WorkspaceCore = workspace ?: throw IllegalStateException("workspace not opened")
+    private fun invalidateEmbedCache() {
+        embedVersion.incrementAndGet()
+        synchronized(embedCache) { embedCache.clear() }
+    }
+
+    private fun clearDiagramCaches() {
+        synchronized(diagramCache) { diagramCache.clear() }
+        DiagramPreviewCache.reset()
+        DiagramStateBus.clear()
+    }
 
     suspend fun openVault(path: String) = lock.withLock {
         if (vaultPath == path && vault != null) return@withLock
+        vaultPath?.let { services.unregisterActiveVault(it) }
         closeDocument()
         stopScan()
         vault?.stopWatching()
@@ -125,10 +124,12 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         vaultPath = null
         entries.clear()
         _tree.value = emptyList()
-        val core = workspace ?: CoreEnvironment.createWorkspaceCore(appContext).also { workspace = it }
-        val handle = core.openVault(path)
+        clearDiagramCaches()
+        invalidateEmbedCache()
+        val handle = services.withWorkspace { it.openVault(path) }
         vault = handle
         vaultPath = path
+        services.registerActiveVault(path) { source, target -> resolveLink(source, target) }
         scanReady = CompletableDeferred()
         scanJob = scope.launch { scan(handle) }
     }
@@ -147,22 +148,19 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
                             batch.upserted.map { it.path },
                             batch.removed,
                         )
+                        invalidateEmbedCache()
                     }
                     for (entry in batch.upserted) {
                         entries[entry.path] = entry
                         changed = true
+                        _externalChanges.tryEmit(entry.path)
                     }
                     for (removed in batch.removed) {
                         entries.remove(removed)
                         changed = true
+                        _externalChanges.tryEmit(removed)
                     }
                     if (batch.scanComplete) scanReady.complete(Unit)
-                    val current = notePath
-                    if (current != null && (batch.removed.contains(current) ||
-                            batch.upserted.any { it.path == current })
-                    ) {
-                        _externalChanges.tryEmit(current)
-                    }
                 }
                 if (changed) {
                     _tree.value = entries.values.sortedWith(
@@ -191,25 +189,6 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         scanJob = null
     }
 
-    private fun ensureDiagramEngine(): DiagramEngine {
-        diagramEngine?.let { return it }
-        val engine = DebugProbes.traceMainThread("diagramRender") {
-            DiagramEngine.withFontPaths(fontPaths)
-        }
-        diagramEngine = engine
-        return engine
-    }
-
-    private fun ensureMathRenderer(): MathSceneRenderer {
-        mathRenderer?.let { return it }
-        val engine = DebugProbes.traceMainThread("mathRender") {
-            io.github.groundgrounder.hortus.core.MathEngine()
-        }
-        val renderer = MathSceneRenderer(appContext.assets, engine)
-        mathRenderer = renderer
-        return renderer
-    }
-
     suspend fun openNote(
         path: String,
         width: Int,
@@ -218,16 +197,10 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         val root = vaultPath ?: throw IllegalStateException("vault not opened")
         awaitScan()
         closeDocument()
-        val core = requireWorkspace()
-        val session = try {
-            core.openDocument(root, path)
-        } catch (error: Exception) {
-            throw error
-        }
+        val session = services.withWorkspace { it.openDocument(root, path) }
         document = session
         notePath = path
-        val content = buildContent(session, root, path, width, bodySize)
-        content
+        buildContent(session, root, path, width, bodySize)
     }
 
     private fun buildContent(
@@ -365,21 +338,8 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         )
     }
 
-    suspend fun prepareMath(formulas: List<MathBlock>, bodySize: Float): List<MathRenderResult> = lock.withLock {
-        if (formulas.isEmpty()) return@withLock emptyList()
-        val renderer = ensureMathRenderer()
-        val em = (bodySize * mathTypographyScale()).toFloat()
-        val note = notePath ?: ""
-        formulas.map { formula ->
-            val result = if (formula.latex.isBlank()) {
-                MathRenderResult(null, null, 0)
-            } else {
-                renderer.render(formula.latex, formula.style, em)
-            }
-            DebugProbes.recordMath(note, formula, result, bodySize)
-            result
-        }
-    }
+    suspend fun prepareMath(formulas: List<MathBlock>, bodySize: Float): List<MathRenderResult> =
+        services.prepareMath(formulas, bodySize, notePath ?: "")
 
     suspend fun renderDiagram(
         documentKey: String,
@@ -390,33 +350,23 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         dark: Boolean,
         collapsed: List<String>,
         revision: Long,
-    ): DiagramRenderResult = lock.withLock {
-        val key = "${engineText.hashCode()}:${engineText.length}:$mmd:$ordinal:${width.toInt()}:$dark:${collapsed.sorted()}:$documentKey:$revision"
+    ): DiagramRenderResult {
+        val root = vaultPath ?: ""
+        val key = "$root|${engineText.hashCode()}:${engineText.length}:$mmd:$ordinal:${width.toInt()}:$dark:${collapsed.sorted()}:$documentKey:$revision"
         synchronized(diagramCache) {
-            diagramCache[key]?.let { return@withLock it }
+            diagramCache[key]?.let { return it }
         }
-        val engine = ensureDiagramEngine()
-        val request = requestGeneration.incrementAndGet()
-        val identity = io.github.groundgrounder.hortus.core.DiagramIdentity(
-            document = documentKey,
-            block = ordinal.toUInt(),
-            revision = revision.toULong(),
-            dark = dark,
-            fontGeneration = fontPaths.size.toULong(),
-            requestGeneration = request.toULong(),
-        )
-        try {
-            val scene = DebugProbes.traceMainThread("diagramRender") {
-                engine.renderRequest(
-                    source = engineText,
-                    mmd = mmd,
-                    width = width,
-                    collapsed = collapsed,
-                    identity = identity,
-                    previous = null,
-                    viewport = emptyList(),
-                )
-            }
+        return try {
+            val scene = services.renderDiagram(
+                documentKey = documentKey,
+                engineText = engineText,
+                mmd = mmd,
+                ordinal = ordinal,
+                width = width,
+                dark = dark,
+                collapsed = collapsed,
+                revision = revision,
+            )
             DebugProbes.recordDiagram(documentKey, ordinal, width, dark, collapsed, scene)
             val result = DiagramRenderResult(scene, null, scene.identity, scene.width, scene.height)
             synchronized(diagramCache) { diagramCache[key] = result }
@@ -424,11 +374,11 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         } catch (failure: DiagramFailure) {
             val reason = diagramFailureText(failure)
             DebugProbes.recordDiagramFailure("${documentKey}#${ordinal}", ordinal, reason)
-            DiagramRenderResult(null, reason, identity, 0.0, 0.0)
+            DiagramRenderResult(null, reason, null, 0.0, 0.0)
         } catch (error: Exception) {
             val reason = error.message ?: error.javaClass.simpleName
             DebugProbes.recordDiagramFailure("${documentKey}#${ordinal}", ordinal, reason)
-            DiagramRenderResult(null, reason, identity, 0.0, 0.0)
+            DiagramRenderResult(null, reason, null, 0.0, 0.0)
         }
     }
 
@@ -472,7 +422,8 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
             emptyList(),
             emptyList(),
         )
-        val key = "$sourcePath|$target|$heading|$alias|${ancestors.joinToString(">")}|${width.toInt()}|${size.toInt()}"
+        val root = vaultPath ?: ""
+        val key = "$root|${embedVersion.get()}|$sourcePath|$target|$heading|$alias|${ancestors.joinToString(">")}|${width.toInt()}|${size.toInt()}"
         synchronized(embedCache) { embedCache[key]?.let { return@withLock it } }
         val info = DebugProbes.traceMainThread("resolveEmbed") {
             handle.resolveEmbed(
@@ -491,50 +442,25 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         content
     }
 
-    suspend fun collapsedNodes(note: String, block: Int): List<String> = lock.withLock {
-        val root = vaultPath ?: return@withLock emptyList()
-        try {
-            requireWorkspace().collapsedNodes(root, note, block.toUInt())
-        } catch (_: Exception) {
-            emptyList()
-        }
+    suspend fun collapsedNodes(note: String, block: Int): List<String> {
+        val root = vaultPath ?: return emptyList()
+        return services.collapsedNodes(root, note, block)
     }
 
-    suspend fun rememberCollapsed(note: String, block: Int, collapsed: List<String>) = lock.withLock {
-        val root = vaultPath ?: return@withLock
-        try {
-            requireWorkspace().rememberDiagram(root, note, block.toUInt(), collapsed)
-        } catch (_: Exception) {
-            Unit
-        }
+    suspend fun rememberCollapsed(note: String, block: Int, collapsed: List<String>) {
+        val root = vaultPath ?: return
+        services.rememberCollapsed(root, note, block, collapsed)
     }
 
-    suspend fun focusState(note: String, block: Int): io.github.groundgrounder.hortus.core.DiagramFocus? =
-        lock.withLock {
-            val root = vaultPath ?: return@withLock null
-            try {
-                requireWorkspace().diagramFocus(root, note, block.toUInt())
-            } catch (_: Exception) {
-                null
-            }
-        }
+    suspend fun focusState(note: String, block: Int): io.github.groundgrounder.hortus.core.DiagramFocus? {
+        val root = vaultPath ?: return null
+        return services.diagramFocus(root, note, block)
+    }
 
-    suspend fun rememberFocus(note: String, block: Int, scale: Double, offsetX: Double, offsetY: Double) =
-        lock.withLock {
-            val root = vaultPath ?: return@withLock
-            try {
-                requireWorkspace().rememberDiagramFocus(
-                    root,
-                    note,
-                    block.toUInt(),
-                    scale,
-                    offsetX,
-                    offsetY,
-                )
-            } catch (_: Exception) {
-                Unit
-            }
-        }
+    suspend fun rememberFocus(note: String, block: Int, scale: Double, offsetX: Double, offsetY: Double) {
+        val root = vaultPath ?: return
+        services.rememberDiagramFocus(root, note, block, scale, offsetX, offsetY)
+    }
 
     suspend fun exportSvg(
         engineText: String,
@@ -543,12 +469,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         width: Double,
         dark: Boolean,
         collapsed: List<String>,
-    ): String = lock.withLock {
-        val engine = ensureDiagramEngine()
-        DebugProbes.traceMainThread("diagramRender") {
-            engine.renderSvg(engineText, mmd, ordinal.toUInt(), width, dark, collapsed)
-        }
-    }
+    ): String = services.renderSvg(engineText, mmd, ordinal, width, dark, collapsed)
 
     suspend fun resolveLink(sourcePath: String, rawTarget: String): String? = lock.withLock {
         try {
@@ -659,6 +580,9 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
             !update.dirty && update.copyPath == null
         ) {
             notePath?.let { vault?.upsertNoteContent(it, text) }
+            invalidateEmbedCache()
+        } else if (update.copyPath != null) {
+            invalidateEmbedCache()
         }
         update
     }
@@ -675,7 +599,10 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
     suspend fun useDiskVersion(): io.github.groundgrounder.hortus.core.DocumentUpdate? = lock.withLock {
         val session = document ?: return@withLock null
         val update = session.useDisk()
-        if (update.text != null) session.acceptExternal(update.revision)
+        if (update.text != null) {
+            session.acceptExternal(update.revision)
+            invalidateEmbedCache()
+        }
         update
     }
 
@@ -687,9 +614,16 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
                     compareBy<TreeEntry> { !it.directory }.thenBy { it.path.lowercase() },
                 )
                 vault?.upsertNoteContent(entry.path, "")
+                invalidateEmbedCache()
             }
         } catch (error: Exception) {
             throw error
+        }
+    }
+
+    fun cleanupExternalPreview() {
+        runCatching {
+            File(appContext.cacheDir, "external-preview").deleteRecursively()
         }
     }
 
@@ -700,7 +634,6 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         bodySize: Float,
     ): NoteContent = lock.withLock {
         closeDocument()
-        val core = requireWorkspace()
         val directory = File(appContext.cacheDir, "external-preview").apply {
             if (exists()) deleteRecursively()
             mkdirs()
@@ -716,7 +649,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
             "$cleaned.md"
         }
         File(directory, safe).writeText(text)
-        val session = core.openDocument(directory.absolutePath, safe)
+        val session = services.withWorkspace { it.openDocument(directory.absolutePath, safe) }
         document = session
         notePath = null
         buildContent(session, directory.absolutePath, safe, width, bodySize).copy(
@@ -731,8 +664,10 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
             ?: path.substringAfterLast('/').substringBeforeLast('.')
 
     override fun close() {
+        vaultPath?.let { services.unregisterActiveVault(it) }
         stopScan()
         closeDocument()
+        cleanupExternalPreview()
         try {
             vault?.stopWatching()
             vault?.close()
@@ -740,24 +675,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
             Unit
         }
         vault = null
-        try {
-            document?.close()
-        } catch (_: Exception) {
-            Unit
-        }
-        document = null
-        try {
-            diagramEngine?.close()
-        } catch (_: Exception) {
-            Unit
-        }
-        diagramEngine = null
-        try {
-            workspace?.close()
-        } catch (_: Exception) {
-            Unit
-        }
-        workspace = null
+        vaultPath = null
         scope.cancel()
     }
 }

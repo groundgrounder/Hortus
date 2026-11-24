@@ -56,8 +56,20 @@ private data class SceneTextKey(
 )
 
 internal object SceneTextMetrics {
-    private val scales = java.util.concurrent.ConcurrentHashMap<SceneTextKey, Float>()
-    private val paints = java.util.concurrent.ConcurrentHashMap<String, Paint>()
+    internal const val MAX_SCALES = 2048
+    internal const val MAX_PAINTS = 64
+
+    private val scalesLock = Any()
+    private val paintsLock = Any()
+
+    private val scales = object : LinkedHashMap<SceneTextKey, Float>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<SceneTextKey, Float>): Boolean =
+            size > MAX_SCALES
+    }
+    private val paints = object : LinkedHashMap<String, Paint>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Paint>): Boolean =
+            size > MAX_PAINTS
+    }
 
     fun scaleX(span: SceneText, zoom: Float): Float {
         val key = SceneTextKey(
@@ -67,45 +79,69 @@ internal object SceneTextMetrics {
             span.fontSize.toFloat(),
             zoom,
         )
-        return scales.getOrPut(key) {
-            val paint = basePaint(span, zoom, 0)
-            val target = (span.width * zoom * 16.0).toFloat()
-            repeat(5) {
-                val raw = paint.measureText(span.text)
-                if (raw <= 0f) return@repeat
-                if (abs(target - raw) <= 0.01f) return@repeat
-                paint.textScaleX *= target / raw
-            }
-            paint.textScaleX
+        synchronized(scalesLock) {
+            scales[key]?.let { return it }
         }
+        val paint = Paint(templatePaint(span, zoom))
+        val target = (span.width * zoom * 16.0).toFloat()
+        repeat(5) {
+            val raw = paint.measureText(span.text)
+            if (raw <= 0f) return@repeat
+            if (abs(target - raw) <= 0.01f) return@repeat
+            paint.textScaleX *= target / raw
+        }
+        val computed = paint.textScaleX
+        synchronized(scalesLock) {
+            scales[key] = computed
+        }
+        return computed
     }
 
     fun put(span: SceneText, zoom: Float, value: Float) {
-        scales[SceneTextKey(span.text, span.fontFamily, span.fontWeight.toInt(), span.fontSize.toFloat(), zoom)] = value
-    }
-
-    fun paint(span: SceneText, zoom: Float, color: Int): Paint {
-        // 先算横向比例再取画笔：scaleX 会复用同一支 Paint 测量，不能让它覆盖最终颜色。
-        val scale = scaleX(span, zoom)
-        val paint = basePaint(span, zoom, color)
-        paint.textScaleX = scale
-        return paint
-    }
-
-    private fun basePaint(span: SceneText, zoom: Float, color: Int): Paint {
-        val key = "${span.fontFamily}|${span.fontWeight}|${span.fontSize}|${zoom}"
-        val paint = paints.getOrPut(key) {
-            Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG).apply {
-                typeface = DiagramFonts.typeface(span.fontFamily, span.fontWeight.toInt())
-                textSize = span.fontSize.toFloat() * zoom * 16f
-                isLinearText = true
-                isSubpixelText = true
-                hinting = Paint.HINTING_OFF
-                textLocale = DiagramFonts.localeFor(span.fontFamily)
-            }
+        val key = SceneTextKey(
+            span.text,
+            span.fontFamily,
+            span.fontWeight.toInt(),
+            span.fontSize.toFloat(),
+            zoom,
+        )
+        synchronized(scalesLock) {
+            scales[key] = value
         }
-        paint.color = color
-        return paint
+    }
+
+    /** 返回独立 Paint 副本，避免主线程与后台线程竞争修改同一个共享 Paint。 */
+    fun paint(span: SceneText, zoom: Float, color: Int): Paint {
+        val scale = scaleX(span, zoom)
+        val template = templatePaint(span, zoom)
+        return Paint(template).apply {
+            textScaleX = scale
+            this.color = color
+        }
+    }
+
+    private fun templatePaint(span: SceneText, zoom: Float): Paint {
+        val key = "${span.fontFamily}|${span.fontWeight}|${span.fontSize}|$zoom"
+        synchronized(paintsLock) {
+            paints[key]?.let { return it }
+        }
+        val created = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG).apply {
+            typeface = DiagramFonts.typeface(span.fontFamily, span.fontWeight.toInt())
+            textSize = span.fontSize.toFloat() * zoom * 16f
+            isLinearText = true
+            isSubpixelText = true
+            hinting = Paint.HINTING_OFF
+            textLocale = DiagramFonts.localeFor(span.fontFamily)
+        }
+        synchronized(paintsLock) {
+            return paints[key] ?: created.also { paints[key] = it }
+        }
+    }
+
+    internal fun cacheSizes(): Pair<Int, Int> {
+        val s = synchronized(scalesLock) { scales.size }
+        val p = synchronized(paintsLock) { paints.size }
+        return s to p
     }
 }
 

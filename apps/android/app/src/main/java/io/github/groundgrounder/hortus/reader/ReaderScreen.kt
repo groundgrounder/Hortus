@@ -382,6 +382,7 @@ private fun ReaderTopBar(
                     )
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.new_note)) },
+                        enabled = state.content?.externalPreview != true,
                         onClick = {
                             menu = false
                             controller.openNewNoteDialog()
@@ -568,7 +569,9 @@ private fun ReaderContent(
                     dark = dark,
                     palette = palette,
                     repository = controller.repository(),
+                    vaultPath = content.vaultPath,
                     notePath = content.path,
+                    revision = content.revision,
                     ancestors = listOf(content.path),
                     callbacks = callbacks,
                     modifier = Modifier

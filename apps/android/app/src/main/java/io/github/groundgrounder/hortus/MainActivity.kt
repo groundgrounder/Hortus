@@ -23,6 +23,7 @@ import io.github.groundgrounder.hortus.reader.ReaderApp
 import io.github.groundgrounder.hortus.reader.ReaderController
 import io.github.groundgrounder.hortus.ui.HortusTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -35,6 +36,8 @@ class MainActivity : ComponentActivity() {
     }
 
     internal lateinit var controller: ReaderController
+        private set
+    internal var pendingIntentJob: Job? = null
         private set
     private var hasAccess by mutableStateOf(false)
     private var path by mutableStateOf("")
@@ -122,8 +125,38 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        if (isFinishing) controller.close()
+        controller.close()
         super.onDestroy()
+    }
+
+    private fun isStorageRoot(directory: File): Boolean {
+        val canonical = runCatching { directory.canonicalFile }.getOrNull() ?: return true
+        val rootPath = canonical.path
+        if (rootPath == "/" || rootPath == "/storage" || rootPath == "/storage/emulated" ||
+            rootPath == "/storage/emulated/0" || rootPath == "/sdcard" ||
+            rootPath == "/mnt" || rootPath == "/mnt/sdcard"
+        ) {
+            return true
+        }
+        val externalRoot = runCatching {
+            android.os.Environment.getExternalStorageDirectory()?.canonicalPath
+        }.getOrNull()
+        if (externalRoot != null && rootPath == externalRoot) return true
+        if (canonical.parentFile?.path == "/storage" && canonical.name != "emulated") return true
+        return false
+    }
+
+    private fun isValidRelativeNotePath(note: String): Boolean {
+        if (note.isBlank() || '\u0000' in note) return false
+        if (note.startsWith('/') || note.startsWith('\\')) return false
+        return note.split('/', '\\').none { it == ".." || it == "." }
+    }
+
+    private fun isValidVaultDirectory(vault: String): Boolean {
+        if (vault.isBlank() || '\u0000' in vault) return false
+        if (vault.split('/', '\\').any { it == ".." }) return false
+        val dir = File(vault)
+        return dir.isAbsolute && dir.isDirectory && !isStorageRoot(dir)
     }
 
     private fun handleExternalIntent(intent: Intent) {
@@ -141,26 +174,52 @@ class MainActivity : ComponentActivity() {
             val vault: String
             val note: String
             val mode: String
+            val persistPreference: Boolean
             if (knownRoot != null && canonical.startsWith(knownRoot + File.separator)) {
                 vault = knownRoot
                 note = canonical.removePrefix(knownRoot + File.separator)
                 mode = "vault"
+                persistPreference = true
             } else {
-                vault = file.parentFile?.absolutePath ?: return
+                val parent = file.parentFile ?: return
+                if (isStorageRoot(parent)) {
+                    pendingIntentJob = lifecycleScope.launch {
+                        val loaded = withContext(Dispatchers.IO) {
+                            runCatching {
+                                if (file.length() > 8L * 1024 * 1024) {
+                                    throw IllegalStateException("preview.too_large")
+                                }
+                                file.name to file.readText(Charsets.UTF_8)
+                            }.getOrNull()
+                        }
+                        if (loaded == null) {
+                            controller.notice(getString(R.string.preview_error))
+                        } else {
+                            controller.openExternalPreview(loaded.first, loaded.second)
+                        }
+                    }
+                    return
+                }
+                vault = parent.absolutePath
                 note = file.name
                 mode = "parent_vault"
+                persistPreference = false
             }
             if (controller.state.vaultPath == vault) {
                 DebugProbes.recordExternalMode(mode)
-                controller.openNote(note.replace(File.separatorChar, '/'))
+                pendingIntentJob = controller.openNote(note.replace(File.separatorChar, '/'))
             } else {
-                path = vault
-                controller.start(vault, note.replace(File.separatorChar, '/'))
+                if (persistPreference) path = vault
+                pendingIntentJob = controller.start(
+                    vault,
+                    note.replace(File.separatorChar, '/'),
+                    persistPreference = persistPreference,
+                )
                 DebugProbes.recordExternalMode(mode)
             }
             return
         }
-        lifecycleScope.launch {
+        pendingIntentJob = lifecycleScope.launch {
             val loaded = withContext(Dispatchers.IO) {
                 runCatching {
                     val name = displayName(uri) ?: "Preview.md"
@@ -235,26 +294,26 @@ class MainActivity : ComponentActivity() {
     }.getOrNull()
 
     private fun handleOpenIntent(intent: Intent) {
-        val note = intent.getStringExtra(EXTRA_OPEN_NOTE) ?: return
+        val note = intent.getStringExtra(EXTRA_OPEN_NOTE)?.takeIf(::isValidRelativeNotePath) ?: return
         val heading = intent.getStringExtra(EXTRA_OPEN_HEADING)
-        val vault = intent.getStringExtra(EXTRA_OPEN_VAULT)?.takeIf { it.isNotBlank() }
+        val explicitVault = intent.getStringExtra(EXTRA_OPEN_VAULT)
+        if (explicitVault != null && !isValidVaultDirectory(explicitVault)) return
+        val vault = explicitVault
             ?: controller.state.vaultPath
             ?: path.takeIf { it.isNotBlank() }
             ?: controller.preferencesState.vaultPath
             ?: return
-        path = vault
-        if (controller.state.vaultPath == null) {
-            controller.start(vault, null)
-            lifecycleScope.launch {
-                var waited = 0
-                while (controller.state.vaultPath == null && waited < 5000) {
-                    kotlinx.coroutines.delay(50)
-                    waited += 50
-                }
-                controller.openPath(note, heading)
-            }
-        } else {
+        if (!isValidVaultDirectory(vault)) return
+        val savedVault = controller.preferencesState.vaultPath
+        val knownShortcut = controller.shortcutNotes().any { it.vault == vault }
+        val persistPreference = (vault == controller.state.vaultPath) ||
+            (vault == savedVault) ||
+            knownShortcut
+        if (persistPreference) path = vault
+        pendingIntentJob = if (controller.state.vaultPath == vault) {
             controller.openPath(note, heading)
+        } else {
+            controller.openVaultAndPath(vault, note, heading, persistPreference)
         }
     }
 

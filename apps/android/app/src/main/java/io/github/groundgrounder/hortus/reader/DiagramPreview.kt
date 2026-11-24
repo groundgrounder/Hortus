@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package io.github.groundgrounder.hortus.reader
 
+import android.content.ComponentCallbacks2
 import android.graphics.RenderNode
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -32,12 +33,13 @@ internal fun diagramMainFontSize(scene: SceneData): Float {
 
 /**
  * 正文里的图只记录一次矢量绘制命令，滚动时重放同一份记录。
- * 身份包含文档、块、宽度、深浅色与折叠状态，任一变化才重新录制。
+ * 身份包含库路径、文档、块、宽度、深浅色与折叠状态，任一变化才重新录制。
  */
 internal object DiagramPreviewCache {
+    private const val MAX_ENTRIES = 12
     private val entries = object : LinkedHashMap<String, RenderNode>(6, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, RenderNode>): Boolean =
-            size > 12
+            size > MAX_ENTRIES
     }
 
     fun size(): Int = synchronized(entries) { entries.size }
@@ -69,6 +71,15 @@ internal object DiagramPreviewCache {
         node
     }
 
+    @Suppress("DEPRECATION")
+    fun trimMemory(level: Int) = synchronized(entries) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ||
+            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+        ) {
+            entries.clear()
+        }
+    }
+
     fun reset() = synchronized(entries) {
         entries.clear()
     }
@@ -76,19 +87,26 @@ internal object DiagramPreviewCache {
 
 /**
  * 全屏页改变折叠状态后，正文预览不用重新打开笔记就能看到新状态。
- * 只在内存里传递，状态仍由内核写进缓存目录。
+ * 键包含库路径，切换笔记库时清空，避免跨库同名笔记串扰。
  */
 internal object DiagramStateBus {
     var version by mutableIntStateOf(0)
         private set
     private val collapsed = ConcurrentHashMap<String, List<String>>()
 
-    private fun key(notePath: String, ordinal: Int): String = "$notePath|$ordinal"
+    private fun key(vaultPath: String, notePath: String, ordinal: Int): String =
+        "$vaultPath|$notePath|$ordinal"
 
-    fun publish(notePath: String, ordinal: Int, nodes: List<String>) {
-        collapsed[key(notePath, ordinal)] = nodes.toList()
+    fun publish(vaultPath: String, notePath: String, ordinal: Int, nodes: List<String>) {
+        collapsed[key(vaultPath, notePath, ordinal)] = nodes.toList()
         version += 1
     }
 
-    fun nodes(notePath: String, ordinal: Int): List<String>? = collapsed[key(notePath, ordinal)]
+    fun nodes(vaultPath: String, notePath: String, ordinal: Int): List<String>? =
+        collapsed[key(vaultPath, notePath, ordinal)]
+
+    fun clear() {
+        collapsed.clear()
+        version += 1
+    }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package io.github.groundgrounder.hortus.reader
 
+import android.content.ComponentCallbacks2
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -28,6 +29,17 @@ internal object ImageLoader {
     private val cache = object : LruCache<String, LoadedImage>(64 * 1024 * 1024) {
         override fun sizeOf(key: String, value: LoadedImage): Int =
             value.bitmap?.allocationByteCount ?: 1
+    }
+
+    @Suppress("DEPRECATION")
+    fun trimMemory(level: Int) {
+        when {
+            level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> cache.evictAll()
+            level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> cache.trimToSize(cache.maxSize() / 4)
+            level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> cache.trimToSize(cache.maxSize() / 2)
+        }
     }
 
     private fun stamp(path: String): String? {

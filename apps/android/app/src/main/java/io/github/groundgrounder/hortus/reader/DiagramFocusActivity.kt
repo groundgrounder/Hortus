@@ -60,17 +60,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
-import io.github.groundgrounder.hortus.AndroidFonts
-import io.github.groundgrounder.hortus.CoreEnvironment
 import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.DebugProbes.debugFocusBackTop
 import io.github.groundgrounder.hortus.MainActivity
 import io.github.groundgrounder.hortus.R
-import io.github.groundgrounder.hortus.core.DiagramEngine
+import io.github.groundgrounder.hortus.app.HortusServices
 import io.github.groundgrounder.hortus.core.SceneData
-import io.github.groundgrounder.hortus.core.WorkspaceCore
 import io.github.groundgrounder.hortus.ui.HortusTheme
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -99,6 +95,7 @@ internal class DiagramFocusActivity : ComponentActivity() {
             Intent(context, DiagramFocusActivity::class.java).putExtra(EXTRA_TOKEN, token)
     }
 
+    private var payloadToken: Int = -1
     private var payload: FocusPayload? = null
     private val viewportState = FocusViewportState()
 
@@ -106,7 +103,8 @@ internal class DiagramFocusActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        payload = FocusPayloads.get(intent.getIntExtra(EXTRA_TOKEN, -1))
+        payloadToken = intent.getIntExtra(EXTRA_TOKEN, -1)
+        payload = FocusPayloads.get(payloadToken)
         setContent {
             HortusTheme {
                 FocusScreen(payload, viewportState, ::finish)
@@ -120,34 +118,21 @@ internal class DiagramFocusActivity : ComponentActivity() {
         DebugProbes.writeFocusDebug(applicationContext)
         val scale = viewportState.scale
         if (scale <= 0f) return
-        val offsetX = viewportState.offsetX
-        val offsetY = viewportState.offsetY
-        val appContext = applicationContext
-        CoroutineScope(Dispatchers.IO).launch {
-            val core = try {
-                CoreEnvironment.createWorkspaceCore(appContext)
-            } catch (_: Exception) {
-                return@launch
-            }
-            try {
-                core.rememberDiagramFocus(
-                    value.vaultPath,
-                    value.notePath,
-                    value.ordinal.toUInt(),
-                    scale.toDouble(),
-                    offsetX.toDouble(),
-                    offsetY.toDouble(),
-                )
-            } catch (_: Exception) {
-                Unit
-            } finally {
-                try {
-                    core.close()
-                } catch (_: Exception) {
-                    Unit
-                }
-            }
+        HortusServices.get(applicationContext).persistDiagramFocusAsync(
+            vaultPath = value.vaultPath,
+            note = value.notePath,
+            block = value.ordinal,
+            scale = scale.toDouble(),
+            offsetX = viewportState.offsetX.toDouble(),
+            offsetY = viewportState.offsetY.toDouble(),
+        )
+    }
+
+    override fun onDestroy() {
+        if (isFinishing && payloadToken >= 0) {
+            FocusPayloads.remove(payloadToken)
         }
+        super.onDestroy()
     }
 }
 
@@ -187,7 +172,7 @@ private fun FocusScreen(
     var offsetY by remember { mutableStateOf(0f) }
     var menuOpen by remember { mutableStateOf(false) }
     var pendingSave by remember { mutableStateOf<SaveRequest?>(null) }
-    val engine = remember { FocusEngine(context.applicationContext) }
+    val services = remember { HortusServices.get(context.applicationContext) }
 
     val documentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -288,23 +273,18 @@ private fun FocusScreen(
     fun toggleNode(nodeId: String) {
         val next = if (nodeId in collapsed) collapsed - nodeId else collapsed + nodeId
         collapsed = next
-        DiagramStateBus.publish(payload.notePath, payload.ordinal, next)
+        DiagramStateBus.publish(payload.vaultPath, payload.notePath, payload.ordinal, next)
         DebugProbes.recordFocusCollapsed(next)
         DebugProbes.writeFocusDebug(context)
         scope.launch {
-            try {
-                engine.rememberCollapsed(next)
-            } catch (_: Exception) {
-                Unit
-            }
+            services.rememberCollapsed(payload.vaultPath, payload.notePath, payload.ordinal, next)
         }
     }
 
     fun openNote(target: String, heading: String?) {
         scope.launch {
-            val resolved = withContext(Dispatchers.IO) {
-                runCatching { engine.resolveTarget(target) }.getOrNull()
-            } ?: target
+            val resolved = services.resolveVaultLink(payload.vaultPath, payload.notePath, target)
+                ?: target
             context.startActivity(
                 Intent(context, MainActivity::class.java).apply {
                     putExtra(MainActivity.EXTRA_OPEN_NOTE, resolved)
@@ -318,7 +298,14 @@ private fun FocusScreen(
     suspend fun encode(format: DiagramExportFormat): ByteArray {
         val value = scene ?: throw IllegalStateException("diagram unavailable")
         return when (format) {
-            DiagramExportFormat.Svg -> engine.renderSvg(payload, collapsed, dark)
+            DiagramExportFormat.Svg -> services.renderSvg(
+                engineText = payload.engineText,
+                mmd = payload.mmd,
+                ordinal = payload.ordinal,
+                width = payload.renderWidth,
+                dark = dark,
+                collapsed = collapsed,
+            ).toByteArray(Charsets.UTF_8)
             DiagramExportFormat.Png -> DiagramExporter.encodePng(value, dark)
             DiagramExportFormat.Pdf -> DiagramExporter.encodePdf(value, dark)
         }
@@ -374,7 +361,16 @@ private fun FocusScreen(
 
     LaunchedEffect(payload.documentKey, payload.ordinal, dark, collapsed) {
         try {
-            val rendered = engine.render(payload, collapsed, dark)
+            val rendered = services.renderDiagram(
+                documentKey = payload.documentKey,
+                engineText = payload.engineText,
+                mmd = payload.mmd,
+                ordinal = payload.ordinal,
+                width = payload.renderWidth,
+                dark = dark,
+                collapsed = collapsed,
+                revision = payload.revision,
+            )
             scene = rendered
             failure = null
             if (DebugProbes.enabled) {
@@ -392,7 +388,7 @@ private fun FocusScreen(
         if (viewport.width == 0 || viewport.height == 0 || topBarBottomPx <= 0f) return@LaunchedEffect
         if (scale == 0f) {
             val fit = fitScale()
-            val stored = engine.loadFocus()
+            val stored = services.diagramFocus(payload.vaultPath, payload.notePath, payload.ordinal)
             if (stored != null && stored.scale >= fit - 0.01 && stored.scale <= 4.0) {
                 scale = stored.scale.toFloat().coerceIn(fit, 4f)
                 val (x, y) = clampOffsets(scale, stored.offsetX.toFloat(), stored.offsetY.toFloat())
@@ -595,99 +591,6 @@ private fun FocusScreen(
                         )
                     }
                 }
-            }
-        }
-    }
-}
-
-private class FocusEngine(private val appContext: Context) {
-    private var engine: DiagramEngine? = null
-    private var workspace: WorkspaceCore? = null
-    private var vault: io.github.groundgrounder.hortus.core.VaultHandle? = null
-    private var payload: FocusPayload? = null
-
-    suspend fun resolveTarget(target: String): String? {
-        val value = payload ?: return null
-        prepare()
-        return withContext(Dispatchers.IO) {
-            try {
-                val handle = vault ?: workspace?.openVault(value.vaultPath)?.also { vault = it }
-                handle?.resolveLink("", target)?.resolvedPath
-            } catch (_: Exception) {
-                null
-            }
-        }
-    }
-
-    private suspend fun prepare() {
-        if (engine != null) return
-        withContext(Dispatchers.IO) {
-            val paths = AndroidFonts.discover().mapNotNull { it.file?.path }.distinct()
-            engine = DiagramEngine.withFontPaths(paths)
-            workspace = CoreEnvironment.createWorkspaceCore(appContext)
-        }
-    }
-
-    suspend fun render(value: FocusPayload, collapsed: List<String>, dark: Boolean): SceneData {
-        prepare()
-        payload = value
-        return withContext(Dispatchers.IO) {
-            val diagram = engine ?: throw IllegalStateException("diagram engine unavailable")
-            diagram.renderRequest(
-                source = value.engineText,
-                mmd = value.mmd,
-                width = value.renderWidth,
-                collapsed = collapsed,
-                identity = io.github.groundgrounder.hortus.core.DiagramIdentity(
-                    document = value.documentKey,
-                    block = value.ordinal.toUInt(),
-                    revision = value.revision.toULong(),
-                    dark = dark,
-                    fontGeneration = 1u,
-                    requestGeneration = 1u,
-                ),
-                previous = null,
-                viewport = emptyList(),
-            )
-        }
-    }
-
-    suspend fun renderSvg(value: FocusPayload, collapsed: List<String>, dark: Boolean): ByteArray {
-        prepare()
-        payload = value
-        return withContext(Dispatchers.IO) {
-            val diagram = engine ?: throw IllegalStateException("diagram engine unavailable")
-            diagram.renderSvg(
-                value.engineText,
-                value.mmd,
-                value.ordinal.toUInt(),
-                value.renderWidth,
-                dark,
-                collapsed,
-            ).toByteArray(Charsets.UTF_8)
-        }
-    }
-
-    suspend fun rememberCollapsed(collapsed: List<String>) {
-        val value = payload ?: return
-        prepare()
-        withContext(Dispatchers.IO) {
-            try {
-                workspace?.rememberDiagram(value.vaultPath, value.notePath, value.ordinal.toUInt(), collapsed)
-            } catch (_: Exception) {
-                Unit
-            }
-        }
-    }
-
-    suspend fun loadFocus(): io.github.groundgrounder.hortus.core.DiagramFocus? {
-        val value = payload ?: return null
-        prepare()
-        return withContext(Dispatchers.IO) {
-            try {
-                workspace?.diagramFocus(value.vaultPath, value.notePath, value.ordinal.toUInt())
-            } catch (_: Exception) {
-                null
             }
         }
     }

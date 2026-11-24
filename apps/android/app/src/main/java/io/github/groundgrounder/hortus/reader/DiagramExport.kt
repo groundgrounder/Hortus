@@ -101,7 +101,6 @@ object DiagramExporter {
     fun shareFile(context: Context, name: String, bytes: ByteArray): File {
         val directory = shareDirectory(context)
         directory.mkdirs()
-        cleanupShareCache(context)
         val file = File(directory, name)
         val temporary = File(directory, ".$name.tmp")
         temporary.writeBytes(bytes)
@@ -119,7 +118,7 @@ object DiagramExporter {
                 java.nio.file.StandardCopyOption.REPLACE_EXISTING,
             )
         }
-        file.setReadable(true, false)
+        cleanupShareCache(context)
         return file
     }
 
@@ -169,19 +168,22 @@ data class FocusPayload(
 )
 
 object FocusPayloads {
+    internal const val MAX_PAYLOADS = 8
     private var next = 1
-    private val payloads = HashMap<Int, FocusPayload>()
+    private val payloads = object : LinkedHashMap<Int, FocusPayload>(16, 0.75f, false) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, FocusPayload>): Boolean =
+            size > MAX_PAYLOADS
+    }
 
-    fun put(payload: FocusPayload): Int {
-        synchronized(this) {
-            val token = next++
-            payloads[token] = payload
-            if (payloads.size > 8) payloads.keys.firstOrNull()?.let(payloads::remove)
-            return token
-        }
+    fun put(payload: FocusPayload): Int = synchronized(this) {
+        val token = next++
+        payloads[token] = payload
+        token
     }
 
     fun get(token: Int): FocusPayload? = synchronized(this) { payloads[token] }
 
-    fun remove(token: Int) = synchronized(this) { payloads.remove(token) }
+    fun remove(token: Int): FocusPayload? = synchronized(this) { payloads.remove(token) }
+
+    fun clear() = synchronized(this) { payloads.clear() }
 }
