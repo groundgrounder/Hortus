@@ -13,6 +13,16 @@ plugins {
 val hortusVersionCode: Int =
     (project.findProperty("hortusVersionCode") as String?)?.toIntOrNull() ?: 1
 
+val releaseKeystorePath = System.getenv("HORTUS_ANDROID_KEYSTORE")?.takeIf { it.isNotBlank() }
+val releaseKeystorePassword = System.getenv("HORTUS_ANDROID_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
+val releaseKeyAlias = System.getenv("HORTUS_ANDROID_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+val releaseKeyPassword = System.getenv("HORTUS_ANDROID_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+val releaseKeystoreFile = releaseKeystorePath?.let(::file)?.takeIf { it.isFile }
+val hasReleaseSigning = releaseKeystoreFile != null &&
+    releaseKeystorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null
+
 android {
     namespace = "io.github.groundgrounder.hortus"
     compileSdk = 36
@@ -36,6 +46,17 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    if (hasReleaseSigning) {
+        signingConfigs {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         getByName("debug") {
             // 与 Release 一样裁除不可达平台代码；调试构建仍保持可调试。
@@ -50,6 +71,9 @@ android {
         getByName("release") {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             matchingFallbacks += listOf("benchmark")
         }
         create("benchmark") {

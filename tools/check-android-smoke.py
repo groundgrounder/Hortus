@@ -55,7 +55,58 @@ def find_aapt2(sdk_root: Path) -> Path:
     return candidates[0]
 
 
-def static_audit_apk(apk_path: Path, sdk_root: Path, release: bool) -> dict:
+def find_apksigner(sdk_root: Path) -> Path:
+    build_tools = sdk_root / 'build-tools'
+    if not build_tools.is_dir():
+        raise SystemExit(f'未找到 build-tools 目录：{build_tools}')
+    candidates = sorted(
+        (p / 'apksigner' for p in build_tools.iterdir() if (p / 'apksigner').is_file()),
+        reverse=True,
+    )
+    if not candidates:
+        raise SystemExit(f'未在 {build_tools} 中找到 apksigner')
+    return candidates[0]
+
+
+def normalize_sha256_fingerprint(raw: str) -> str:
+    hex_only = re.sub(r'[^0-9a-fA-F]', '', raw).upper()
+    if len(hex_only) != 64:
+        return raw.strip().upper()
+    return ':'.join(hex_only[i:i + 2] for i in range(0, 64, 2))
+
+
+def verify_apk_signature(apk_path: Path, sdk_root: Path, expected_sha256: str | None) -> tuple[dict, list[str]]:
+    apksigner = find_apksigner(sdk_root)
+    completed = subprocess.run(
+        [str(apksigner), 'verify', '--verbose', '--print-certs', str(apk_path)],
+        capture_output=True,
+        text=True,
+    )
+    output = (completed.stdout or '') + (completed.stderr or '')
+    match = re.search(r'Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F:]+)', output)
+    actual_sha256 = normalize_sha256_fingerprint(match.group(1)) if match else None
+    violations: list[str] = []
+    if completed.returncode != 0:
+        violations.append(f'apksigner verify 失败 (exit={completed.returncode}): {output.strip()}')
+    if not actual_sha256:
+        violations.append('未能从 apksigner 输出解析 Signer #1 SHA-256 指纹')
+    elif expected_sha256:
+        expected_norm = normalize_sha256_fingerprint(expected_sha256)
+        if actual_sha256 != expected_norm:
+            violations.append(f'签名证书 SHA-256 不匹配: actual={actual_sha256}, expected={expected_norm}')
+    return {
+        'verified': completed.returncode == 0,
+        'signerSha256': actual_sha256,
+        'output': output.strip(),
+    }, violations
+
+
+def static_audit_apk(
+    apk_path: Path,
+    sdk_root: Path,
+    release: bool,
+    expect_signer_sha256: str | None = None,
+) -> dict:
     if not apk_path.is_file():
         raise SystemExit(f'APK 不存在：{apk_path}')
 
@@ -168,6 +219,11 @@ def static_audit_apk(apk_path: Path, sdk_root: Path, release: bool) -> dict:
         violations.append(f'APK 包名与预期 {PACKAGE_NAME} 不一致')
     if not re.search(r"(?m)^(?:minSdkVersion|sdkVersion):'29'$", badging) or "targetSdkVersion:'36'" not in badging:
         violations.append('APK 的 minSdk 或 targetSdk 与预期不符')
+
+    if expect_signer_sha256 or (release and 'unsigned' not in apk_path.name.lower()):
+        sig_info, sig_violations = verify_apk_signature(apk_path, sdk_root, expect_signer_sha256)
+        details['signature'] = sig_info
+        violations.extend(sig_violations)
 
     details['violations'] = violations
     details['passed'] = len(violations) == 0
@@ -472,7 +528,8 @@ def main() -> int:
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/android-smoke')
     parser.add_argument('--media', type=Path, default=None)
     parser.add_argument('--static-only', action='store_true')
-    parser.add_argument('--release', action='store_true', help='审计未签名 Release APK')
+    parser.add_argument('--release', action='store_true', help='审计 Release APK')
+    parser.add_argument('--expect-signer-sha256', default=None, help='校验 APK 签名证书 SHA-256 指纹')
     parser.add_argument('--keep-emulator', action='store_true')
     args = parser.parse_args()
     if args.release and not args.static_only:
@@ -483,7 +540,12 @@ def main() -> int:
     media_dir = (args.media.expanduser().resolve() if args.media else output_dir / 'media')
 
     sdk_root = find_sdk_root()
-    static_report = static_audit_apk(args.apk.expanduser().resolve(), sdk_root, args.release)
+    static_report = static_audit_apk(
+        args.apk.expanduser().resolve(),
+        sdk_root,
+        args.release,
+        args.expect_signer_sha256,
+    )
     (output_dir / 'static-audit.json').write_text(json.dumps(static_report, ensure_ascii=False, indent=2) + '\n')
 
     if not static_report['passed']:

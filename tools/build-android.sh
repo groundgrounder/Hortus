@@ -182,10 +182,23 @@ python3 -B tools/third-party-notices.py --rust-only --output "$assets_out/ThirdP
 
 # 6. 通过 Gradle Wrapper 组装 APK
 build_number="$(git rev-list --count HEAD)"
+has_release_signing=0
 if [[ "$mode" == "release" ]]; then
+  if [[ -n "${HORTUS_ANDROID_KEYSTORE:-}" &&
+        -n "${HORTUS_ANDROID_KEYSTORE_PASSWORD:-}" &&
+        -n "${HORTUS_ANDROID_KEY_ALIAS:-}" &&
+        -n "${HORTUS_ANDROID_KEY_PASSWORD:-}" &&
+        -f "${HORTUS_ANDROID_KEYSTORE}" ]]; then
+    has_release_signing=1
+  fi
   gradle_task=":app:assembleRelease"
-  apk_src="apps/android/app/build/outputs/apk/release/app-release-unsigned.apk"
-  apk_dst="build/android/hortus-release-unsigned.apk"
+  if (( has_release_signing == 1 )); then
+    apk_src="apps/android/app/build/outputs/apk/release/app-release.apk"
+    apk_dst="build/android/hortus-release-arm64.apk"
+  else
+    apk_src="apps/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+    apk_dst="build/android/hortus-release-unsigned.apk"
+  fi
 else
   gradle_task=":app:assembleDebug"
   apk_src="apps/android/app/build/outputs/apk/debug/app-debug.apk"
@@ -200,4 +213,11 @@ print "构建 Android APK ($mode, versionCode=$build_number)..."
 
 mkdir -p build/android
 cp "$apk_src" "$apk_dst"
+if [[ "$mode" == "release" ]] && (( has_release_signing == 1 )); then
+  (
+    cd build/android
+    shasum -a 256 "hortus-release-arm64.apk" > "hortus-release-arm64.apk.sha256"
+  )
+  print "生成校验文件：$PWD/${apk_dst}.sha256"
+fi
 print "构建完成：$PWD/$apk_dst"

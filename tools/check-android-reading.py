@@ -1364,7 +1364,7 @@ def parse_gfxinfo(text: str) -> dict:
     }
 
 
-def run_macrobenchmark(results: Results) -> tuple[bool, list[dict], str]:
+def run_macrobenchmark(results: Results, serial: str) -> tuple[bool, list[dict], str]:
     env = dict(os.environ)
     sdk = find_sdk_root()
     java_home = Path('/Applications/Android Studio.app/Contents/jbr/Contents/Home')
@@ -1372,6 +1372,7 @@ def run_macrobenchmark(results: Results) -> tuple[bool, list[dict], str]:
         env['JAVA_HOME'] = str(java_home)
     env['ANDROID_HOME'] = str(sdk)
     env['ANDROID_SDK_ROOT'] = str(sdk)
+    env['ANDROID_SERIAL'] = serial
     version_code = subprocess.run(
         ['git', 'rev-list', '--count', 'HEAD'], cwd=ROOT, capture_output=True, text=True,
     ).stdout.strip() or '1'
@@ -1501,15 +1502,15 @@ def assert_a8(device: Device, results: Results, stage: Path, apk: Path) -> None:
     cold_probe = device.dump('a8-cold-probe.json', note='Markdown field guide.md', cold=True, wait_ms=2200)
     app_fully_drawn_ms = cold_probe.get('appFullyDrawnMs', -1)
 
-    passed, records, tail = run_macrobenchmark(results)
+    passed, records, tail = run_macrobenchmark(results, device.serial)
     baseline = measure_settings_baseline(device, results, 1)
-    if baseline.get('jankyPercent') is None or baseline['jankyPercent'] > 2.0:
+    if (baseline.get('jankyPercent') is None or baseline['jankyPercent'] > 2.0) and device.serial.startswith('emulator-'):
         # 基线无效时按任务书重启模拟器，整轮重测（无效轮次保留）。
         invalid = results.output / 'benchmark-invalid-1'
         if (results.output / 'benchmark').is_dir():
             shutil.copytree(results.output / 'benchmark', invalid, dirs_exist_ok=True)
         restart_device(device, apk)
-        passed, records, tail = run_macrobenchmark(results)
+        passed, records, tail = run_macrobenchmark(results, device.serial)
         baseline = measure_settings_baseline(device, results, 2)
     results.check('A8', 'macrobenchmark produced JSON', passed, tail)
     if not records:
@@ -1630,6 +1631,7 @@ def main() -> int:
     parser.add_argument('--apk', type=Path, default=ROOT / 'build/android/hortus-debug.apk')
     parser.add_argument('--release-apk', type=Path, default=ROOT / 'build/android/hortus-release-unsigned.apk')
     parser.add_argument('--avd', default='Medium_Phone_API_36.1')
+    parser.add_argument('--serial', default=None, help='显式指定 adb 设备序列号（真机或已启动模拟器）')
     parser.add_argument('--output', type=Path, default=ROOT / 'target/reports/android-reading')
     parser.add_argument('--media', type=Path, default=None)
     parser.add_argument('--keep-emulator', action='store_true')
@@ -1644,7 +1646,10 @@ def main() -> int:
     media.mkdir(parents=True, exist_ok=True)
     results = Results(output)
     sdk = find_sdk_root()
-    serial, emulator_proc = ensure_emulator(sdk, args.avd, output)
+    if args.serial:
+        serial, emulator_proc = args.serial, None
+    else:
+        serial, emulator_proc = ensure_emulator(sdk, args.avd, output)
     adb = sdk / 'platform-tools/adb'
     device = Device(adb, serial, output)
     log(f'设备：{serial}')
@@ -1671,6 +1676,7 @@ def main() -> int:
                 env['JAVA_HOME'] = str(java_home)
             env['ANDROID_HOME'] = str(sdk)
             env['ANDROID_SDK_ROOT'] = str(sdk)
+            env['ANDROID_SERIAL'] = serial
             version_code = subprocess.run(
                 ['git', 'rev-list', '--count', 'HEAD'], cwd=ROOT, capture_output=True, text=True,
             ).stdout.strip() or '1'
