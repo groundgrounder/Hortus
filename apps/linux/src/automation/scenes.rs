@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::automation::driver::capture_widget_png;
+use crate::core::StaticToolKind;
 use crate::files;
 use crate::window::shell::WindowInner;
 use gtk4::prelude::*;
@@ -14,16 +15,15 @@ pub fn setup_l2_scene(win: &Rc<WindowInner>, scene: &str) {
         "search-backlinks" => {
             win.left_split.set_show_sidebar(true);
             win.right_split.set_show_sidebar(true);
-            win.switch_left_panel("search");
+            win.activate_static_tool(StaticToolKind::Search);
             win.search_panel.set_query("Hortus");
-            win.right_stack.set_visible_child_name("backlinks");
-            win.rebuild_panel_switchers();
+            win.activate_static_tool(StaticToolKind::Backlinks);
             win.refresh_backlinks(true);
             win.focus_search_panel();
         }
         "tags" => {
             win.left_split.set_show_sidebar(true);
-            win.switch_left_panel("tags");
+            win.activate_static_tool(StaticToolKind::Tags);
             let first_tag = win
                 .state
                 .borrow()

@@ -94,11 +94,11 @@ async fn run_reading_checks(win: &Rc<WindowInner>) -> ReadingSelfCheckReport {
     let _ = gtk4::prelude::WidgetExt::activate_action(&win.window, "win.toggle-bottom-panel", None);
     let opened_sync = win.state.borrow().bottom_revealed
         && win.bottom_toggle.is_active()
-        && win.bottom_revealer.reveals_child();
+        && win.is_bottom_panel_revealed();
     let _ = gtk4::prelude::WidgetExt::activate_action(&win.window, "win.toggle-bottom-panel", None);
     let closed_sync = !win.state.borrow().bottom_revealed
         && !win.bottom_toggle.is_active()
-        && !win.bottom_revealer.reveals_child();
+        && !win.is_bottom_panel_revealed();
     let ctrl_j_sync_ok = opened_sync && closed_sync;
 
     let (

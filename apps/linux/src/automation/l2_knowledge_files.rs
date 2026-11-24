@@ -5,6 +5,8 @@
 //! L2 全流程自检后半段（E 知识导航异步查询、F 文件管理与回收站、G L0 观察）。
 
 use crate::automation::driver::{collect_temp_leftovers, wait_for};
+use crate::core::{PanelRegion, StaticToolKind};
+use crate::dock::DockTabId;
 use crate::files::operations::count_dir_files;
 use crate::render::media::markdown_cell_links;
 use crate::window::shell::WindowInner;
@@ -43,7 +45,7 @@ pub async fn run_knowledge_files_and_misc(
 
     stage!("E-knowledge");
     let mut knowledge = serde_json::Map::new();
-    win.switch_left_panel("search");
+    win.activate_static_tool(StaticToolKind::Search);
     win.search_panel.run_query_now("Hortus");
     let _ = wait_for(6000, || {
         let stats = win.search_panel.stats();
@@ -89,7 +91,7 @@ pub async fn run_knowledge_files_and_misc(
         }),
     );
 
-    win.switch_left_panel("tags");
+    win.activate_static_tool(StaticToolKind::Tags);
     win.tags_panel.refresh();
     let _ = wait_for(6000, || {
         !win.tags_panel.is_loading() && win.tags_panel.stats().total_tags > 0
@@ -113,10 +115,9 @@ pub async fn run_knowledge_files_and_misc(
         let _ = wait_for(4000, || !win.tags_panel.is_loading()).await;
     }
     let tags_view_active = win
-        .left_stack
-        .visible_child_name()
-        .map(|name| name.to_string())
-        .unwrap_or_default();
+        .tool_dock
+        .active_tab_in_region(PanelRegion::Left)
+        .is_some_and(|id| id == DockTabId::Static(StaticToolKind::Tags));
     knowledge.insert(
         "tags".into(),
         serde_json::json!({
@@ -128,7 +129,7 @@ pub async fn run_knowledge_files_and_misc(
             "filter_after_click": tag_stats_after_click.filter,
             "visible_tags": tag_stats_after_click.visible_tags,
             "clicked_note": clicked_note,
-            "reading_click_switches_panel": tags_view_active == "tags",
+            "reading_click_switches_panel": tags_view_active,
             "filter_after_reading_click": win.tags_panel.filter_text(),
             "note_after_click": reading_tag_note,
         }),

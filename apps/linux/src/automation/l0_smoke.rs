@@ -2,7 +2,8 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::core::{PanelRegion, PlaceholderKind};
+use crate::core::{PanelRegion, StaticToolKind};
+use crate::dock::DockTabId;
 use crate::window::shell::WindowInner;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -175,25 +176,23 @@ pub fn execute_smoke_checks(win: &Rc<WindowInner>, smoke_path: PathBuf) {
         .unwrap_or(false);
 
     let _ = gtk4::prelude::WidgetExt::activate_action(&win.window, "win.toggle-bottom-panel", None);
-    let bottom_synced_on = win.bottom_toggle.is_active() && win.bottom_revealer.reveals_child();
+    let bottom_synced_on = win.bottom_toggle.is_active() && win.is_bottom_panel_revealed();
     let _ = gtk4::prelude::WidgetExt::activate_action(&win.window, "win.toggle-bottom-panel", None);
-    let bottom_synced_off = !win.bottom_toggle.is_active() && !win.bottom_revealer.reveals_child();
+    let bottom_synced_off = !win.bottom_toggle.is_active() && !win.is_bottom_panel_revealed();
 
-    win.toggle_placeholder_region(PlaceholderKind::Backlinks);
-    let moved_to_bottom = win
-        .state
-        .borrow()
-        .placement
-        .region_of(PlaceholderKind::Backlinks)
-        == PanelRegion::Bottom
+    win.tool_dock.move_tab(
+        DockTabId::Static(StaticToolKind::Backlinks),
+        PanelRegion::Bottom,
+    );
+    let moved_to_bottom = win.tool_dock.static_tool_region(StaticToolKind::Backlinks)
+        == Some(PanelRegion::Bottom)
         && win.bottom_toggle.is_active();
-    win.toggle_placeholder_region(PlaceholderKind::Backlinks);
-    let moved_back_to_right = win
-        .state
-        .borrow()
-        .placement
-        .region_of(PlaceholderKind::Backlinks)
-        == PanelRegion::Right;
+    win.tool_dock.move_tab(
+        DockTabId::Static(StaticToolKind::Backlinks),
+        PanelRegion::Right,
+    );
+    let moved_back_to_right =
+        win.tool_dock.static_tool_region(StaticToolKind::Backlinks) == Some(PanelRegion::Right);
     let panel_move_verified =
         moved_to_bottom && moved_back_to_right && bottom_synced_on && bottom_synced_off;
 

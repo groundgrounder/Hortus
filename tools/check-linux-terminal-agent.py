@@ -15,10 +15,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_PNGS = [
-    "l3-terminal-and-shell.png",
-    "l3-agent-changes-diff.png",
-    "l3-settings-dialog.png",
-    "l3-multi-window-sync.png",
+    "l3-v2-bottom-single-bar-terminal.png",
+    "l3-v2-terminal-in-right-sidebar.png",
+    "l3-v2-tool-add-menu-and-close.png",
+    "l3-v2-agent-changes-and-multi-window.png",
 ]
 
 
@@ -307,8 +307,9 @@ def main() -> int:
 
             data = json.loads(main_json.read_text(encoding="utf-8"))
             check(data.get("ok") is True, f"L3 主套校验失败: {data}")
-            for section in ("terminal", "settings", "agent_changes", "multi_window", "screenshots"):
+            for section in ("dock_v2", "terminal", "settings", "agent_changes", "multi_window", "screenshots"):
                 sec_val = data.get(section, {})
+                check(isinstance(sec_val, dict) and len(sec_val) > 0, f"缺少检查段 {section}: {data}")
                 for k, v in sec_val.items():
                     if isinstance(v, bool):
                         check(v is True, f"检查项 {section}.{k} 未通过: {data}")

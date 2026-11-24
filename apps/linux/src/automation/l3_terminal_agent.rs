@@ -2,11 +2,12 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! L3 端到端自动化验证：VTE4 多标签终端、发送安全防注入、Agent 快照闸门与三级回滚、
-//! 设置热重载与冲突保护、多窗口实时同步与会话恢复（不恢复 PTY）。
+//! L3 端到端自动化验证：统一单层三区工具标签栏、`+`/`×` 与无损跨区迁移、
+//! VTE4 终端安全发送、Agent 快照闸门与三级回滚、设置热重载、多窗口实时同步与会话恢复。
 
 use crate::automation::driver::{capture_widget_png, wait_for};
-use crate::core::{CliOptions, PlaceholderKind};
+use crate::core::{CliOptions, PanelRegion, StaticToolKind};
+use crate::dock::DockTabId;
 use crate::services::AppServices;
 use crate::settings::SettingsPage;
 use crate::terminal::process::is_pid_alive;
@@ -79,6 +80,62 @@ fn capture_dual_window_png(
     Ok(())
 }
 
+fn capture_window_with_menu_button_popover(
+    win: &adw::ApplicationWindow,
+    btn: &gtk4::MenuButton,
+    out: &Path,
+) -> Result<(), String> {
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tex_win = render_window_texture(win)?;
+    let bytes_win = tex_win.save_to_png_bytes();
+    let mut cur_win = Cursor::new(bytes_win.as_ref());
+    let surf_win = gtk4::cairo::ImageSurface::create_from_png(&mut cur_win)
+        .map_err(|e| format!("读取窗口 PNG 失败：{e}"))?;
+    let win_w = surf_win.width();
+    let win_h = surf_win.height();
+    let canvas = gtk4::cairo::ImageSurface::create(gtk4::cairo::Format::ARgb32, win_w, win_h)
+        .map_err(|e| format!("创建合成画布失败：{e}"))?;
+    {
+        let cr = gtk4::cairo::Context::new(&canvas).map_err(|e| e.to_string())?;
+        let _ = cr.set_source_surface(&surf_win, 0.0, 0.0);
+        let _ = cr.paint();
+
+        if let Some(popover) = btn.popover()
+            && popover.is_visible()
+            && let Some(renderer) = gtk4::prelude::NativeExt::renderer(&popover)
+        {
+            let pw = popover.width().max(1);
+            let ph = popover.height().max(1);
+            let paint = gtk4::WidgetPaintable::new(Some(&popover));
+            let snap = gtk4::Snapshot::new();
+            paint.snapshot(&snap, f64::from(pw), f64::from(ph));
+            if let Some(node) = snap.to_node() {
+                let bounds = gtk4::graphene::Rect::new(0.0, 0.0, pw as f32, ph as f32);
+                let ptex = renderer.render_texture(&node, Some(&bounds));
+                let pbytes = ptex.save_to_png_bytes();
+                let mut pcur = Cursor::new(pbytes.as_ref());
+                if let Ok(psurf) = gtk4::cairo::ImageSurface::create_from_png(&mut pcur)
+                    && let Some(rect) = btn.compute_bounds(win)
+                {
+                    let px = (f64::from(rect.x() + rect.width()) - f64::from(pw))
+                        .clamp(8.0, f64::from(win_w - pw - 8).max(8.0));
+                    let py = f64::from(rect.y() + rect.height())
+                        .clamp(8.0, f64::from(win_h - ph - 8).max(8.0));
+                    let _ = cr.set_source_surface(&psurf, px, py);
+                    let _ = cr.paint();
+                }
+            }
+        }
+    }
+    let mut file = std::fs::File::create(out).map_err(|e| e.to_string())?;
+    canvas
+        .write_to_png(&mut file)
+        .map_err(|e| format!("写出带菜单 PNG 失败：{e}"))?;
+    Ok(())
+}
+
 pub fn execute_terminal_agent_checks(
     win: &Rc<WindowInner>,
     json_path: PathBuf,
@@ -97,6 +154,7 @@ pub fn execute_terminal_agent_checks(
     });
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_suite(
     win: &Rc<WindowInner>,
     media_dir: Option<&Path>,
@@ -122,7 +180,19 @@ async fn run_suite(
     let vault_path = PathBuf::from(&vault_root);
 
     // -------------------------------------------------------------------------
-    // Part 1: VTE4 原生终端 + 发送路径/选区防注入 + 退出不自重启 + 进程清理
+    // Part 0 (L3b D1/D2/D3): 单层工具标签栏结构、+ 添加、× 关闭、自动收起与布局持久化
+    // -------------------------------------------------------------------------
+    let single_bar_left = win.tool_dock.region_visible_tab_bars(PanelRegion::Left) == 1;
+    let single_bar_right = win.tool_dock.region_visible_tab_bars(PanelRegion::Right) == 1;
+    let single_bar_bottom = win.tool_dock.region_visible_tab_bars(PanelRegion::Bottom) == 1;
+    let all_regions_have_add = PanelRegion::ALL
+        .iter()
+        .all(|r| win.tool_dock.region_has_add_button(*r));
+    let sidebar_max_480_ok = (win.left_split.max_sidebar_width() - 480.0).abs() < 0.1
+        && (win.right_split.max_sidebar_width() - 480.0).abs() < 0.1;
+
+    // -------------------------------------------------------------------------
+    // Part 1: VTE4 原生终端 + 单层底栏 + 跨三区无损迁移 + 发送安全 + 退出/回收
     // -------------------------------------------------------------------------
     win.open_note_at("alpha.md", None);
     let alpha_loaded = wait_for(4000, || {
@@ -134,7 +204,7 @@ async fn run_suite(
     })
     .await;
 
-    win.reveal_placeholder_panel(PlaceholderKind::Terminal);
+    win.set_bottom_panel_revealed(true);
     let shell_ready = wait_for(4000, || {
         let ids = win.terminal_host.tab_ids();
         ids.len() == 1
@@ -146,16 +216,32 @@ async fn run_suite(
     .await;
 
     let shell_id = win.terminal_host.tab_ids().first().copied().unwrap_or(0);
+    let bottom_titles_init = win.tool_dock.region_tab_titles(PanelRegion::Bottom);
+    let bottom_single_bar_titles_ok =
+        bottom_titles_init.len() == 1 && bottom_titles_init[0].contains("终端");
     let shell_snap_init = win.terminal_host.tab_snapshot(shell_id);
     let shell_pid = shell_snap_init
         .as_ref()
         .and_then(|s| s["pid"].as_i64())
         .unwrap_or(0) as i32;
 
+    // Paned 底部面板可调节高度验证
+    let paned_h = win.center_paned.height();
+    if paned_h > 320 {
+        win.center_paned.set_position(paned_h - 300);
+        glib::timeout_future(Duration::from_millis(80)).await;
+    }
+    let paned_resizable_ok =
+        paned_h <= 320 || (win.state.borrow().bottom_height - 300.0).abs() < 20.0;
+    if paned_h > 320 {
+        win.center_paned.set_position(paned_h - 255);
+        glib::timeout_future(Duration::from_millis(80)).await;
+    }
+
     let probe_file = temp_dir.join("l3_term_probe.txt");
     let _ = std::fs::remove_file(&probe_file);
     let probe_cmd = format!(
-        "printf 'PWD=%s\\nLANG=%s\\nHORTUS=%s\\n' \"$PWD\" \"${{LANG:-}}\" \"$(command -v hortus || true)\" > '{}' && echo 'PTY_APPEND_LINE' >> alpha.md && echo '__L3_TERM_OK__'\n",
+        "printf 'PWD=%s\\nLANG=%s\\nHORTUS=%s\\n' \"$PWD\" \"${{LANG:-}}\" \"$(command -v hortus || true)\" > '{}' && echo 'PTY_APPEND_LINE' >> alpha.md && echo '__L3B_MIGRATION_MARKER__'\n",
         probe_file.to_string_lossy()
     );
     let _ = win.terminal_host.feed_tab_command(shell_id, &probe_cmd);
@@ -165,7 +251,7 @@ async fn run_suite(
             && win.terminal_host.tab_snapshot(shell_id).is_some_and(|s| {
                 s["screen_text"]
                     .as_str()
-                    .is_some_and(|txt| txt.contains("__L3_TERM_OK__"))
+                    .is_some_and(|txt| txt.contains("__L3B_MIGRATION_MARKER__"))
             })
     })
     .await;
@@ -190,7 +276,9 @@ async fn run_suite(
 
     // 测试发送笔记路径（含带空格路径引用）
     win.send_path_to_terminal();
-    let quoted_space_path = win.terminal_host.send_note_path("folder/sub note.md");
+    let (_, _, quoted_space_path) = win
+        .terminal_host
+        .send_note_path("folder/sub note.md", PanelRegion::Bottom);
 
     // 切编辑态构造含 \n + \x1b[201~ bracketed-paste spoof 的选区，验证不执行且仅作安全文本发送
     win.switch_edit_mode(false);
@@ -218,7 +306,6 @@ async fn run_suite(
         buf.select_range(&s_it, &e_it);
     }
     win.send_selection_to_terminal();
-    // 等待 paste 到达并验证未自动执行，先在干净阅读态下截图，随后再用 Ctrl+U/Ctrl+C 清空行缓冲
     glib::timeout_future(Duration::from_millis(350)).await;
     let spoof_blocked = !spoof_marker.exists();
     if let Some(buf) = win
@@ -234,8 +321,9 @@ async fn run_suite(
     win.switch_edit_mode(false);
     glib::timeout_future(Duration::from_millis(300)).await;
 
-    let shot_terminal = if let Some(dir) = media_dir {
-        let p = dir.join("l3-terminal-and-shell.png");
+    // 截图 1: 底部面板单层标签栏 + VTE4 终端 + `+` 按钮
+    let shot_bottom_single_bar = if let Some(dir) = media_dir {
+        let p = dir.join("l3-v2-bottom-single-bar-terminal.png");
         capture_widget_png(&win.window, &p).is_ok() && p.exists()
     } else {
         false
@@ -243,8 +331,165 @@ async fn run_suite(
     let _ = win.terminal_host.feed_tab_command(shell_id, "\x03\x15\n");
     glib::timeout_future(Duration::from_millis(120)).await;
 
-    // 测试 Shell 退出非自动重启 + 关闭标签进程树回收
-    let shell2_id = win.terminal_host.open_shell_tab();
+    // 终端右键菜单检查与跨三区无损迁移（底 -> 右 -> 左 -> 底，全程 PID 与缓冲不变）
+    let ctx_labels_bottom = win
+        .tool_dock
+        .context_menu_labels_for(DockTabId::Terminal(shell_id));
+    let ctx_menu_bottom_ok = ctx_labels_bottom.iter().any(|l| l.contains("左侧栏"))
+        && ctx_labels_bottom.iter().any(|l| l.contains("右侧栏"))
+        && !ctx_labels_bottom.iter().any(|l| l.contains("底部面板"))
+        && ctx_labels_bottom.iter().any(|l| l == "关闭标签");
+
+    let _ = gtk4::prelude::WidgetExt::activate_action(
+        &win.window,
+        "win.dock-move-tab",
+        Some(&format!("right:term:{shell_id}").to_variant()),
+    );
+    glib::timeout_future(Duration::from_millis(250)).await;
+    let moved_right_pid = win
+        .terminal_host
+        .tab_snapshot(shell_id)
+        .and_then(|s| s["pid"].as_i64())
+        .unwrap_or(-1) as i32;
+    let moved_right_buf = win
+        .terminal_host
+        .tab_snapshot(shell_id)
+        .and_then(|s| s["screen_text"].as_str().map(str::to_string))
+        .unwrap_or_default()
+        .contains("__L3B_MIGRATION_MARKER__");
+    let bottom_auto_collapsed_on_move = !win.is_bottom_panel_revealed();
+
+    // 截图 2: 终端直接停靠在右侧栏并与大纲/反链/改动同层并列
+    let shot_right_sidebar_terminal = if let Some(dir) = media_dir {
+        let p = dir.join("l3-v2-terminal-in-right-sidebar.png");
+        capture_widget_png(&win.window, &p).is_ok() && p.exists()
+    } else {
+        false
+    };
+
+    let _ = gtk4::prelude::WidgetExt::activate_action(
+        &win.window,
+        "win.dock-move-tab",
+        Some(&format!("left:term:{shell_id}").to_variant()),
+    );
+    glib::timeout_future(Duration::from_millis(200)).await;
+    let moved_left_pid = win
+        .terminal_host
+        .tab_snapshot(shell_id)
+        .and_then(|s| s["pid"].as_i64())
+        .unwrap_or(-1) as i32;
+    let moved_left_region = win.tool_dock.tab_region(DockTabId::Terminal(shell_id));
+
+    let _ = gtk4::prelude::WidgetExt::activate_action(
+        &win.window,
+        "win.dock-move-tab",
+        Some(&format!("bottom:term:{shell_id}").to_variant()),
+    );
+    glib::timeout_future(Duration::from_millis(200)).await;
+    let moved_back_pid = win
+        .terminal_host
+        .tab_snapshot(shell_id)
+        .and_then(|s| s["pid"].as_i64())
+        .unwrap_or(-1) as i32;
+    let lossless_3_region_migration = shell_pid > 0
+        && moved_right_pid == shell_pid
+        && moved_left_pid == shell_pid
+        && moved_back_pid == shell_pid
+        && is_pid_alive(shell_pid)
+        && moved_right_buf
+        && moved_left_region == Some(PanelRegion::Left)
+        && bottom_auto_collapsed_on_move
+        && win.tool_dock.tab_region(DockTabId::Terminal(shell_id)) == Some(PanelRegion::Bottom);
+
+    // 测试工具栏 × 关闭与 + 菜单添加/跨区移入
+    let left_count_before = win.tool_dock.tab_count(PanelRegion::Left);
+    win.tool_dock
+        .close_tab(DockTabId::Static(StaticToolKind::Tags));
+    glib::timeout_future(Duration::from_millis(120)).await;
+    let left_count_after_close = win.tool_dock.tab_count(PanelRegion::Left);
+    let tags_closed = left_count_after_close + 1 == left_count_before
+        && win
+            .tool_dock
+            .static_tool_region(StaticToolKind::Tags)
+            .is_none();
+
+    let right_add_labels = win.tool_dock.add_menu_labels(PanelRegion::Right);
+    let add_menu_items_ok = right_add_labels.iter().any(|l| l == "新建终端")
+        && right_add_labels.iter().any(|l| l == "启动 Agent")
+        && right_add_labels.iter().any(|l| l == "标签")
+        && right_add_labels.iter().any(|l| l == "文件（移至此处）");
+
+    // 弹出右侧栏 + 菜单截图展示工具添加与关闭效果
+    win.tool_dock.popup_add_menu(PanelRegion::Right);
+    glib::timeout_future(Duration::from_millis(250)).await;
+    let shot_tool_add_menu = if let Some(dir) = media_dir {
+        let p = dir.join("l3-v2-tool-add-menu-and-close.png");
+        let btn = win.tool_dock.add_button_widget(PanelRegion::Right);
+        let ok = if let Some(btn) = btn {
+            capture_window_with_menu_button_popover(&win.window, &btn, &p).is_ok()
+        } else {
+            capture_widget_png(&win.window, &p).is_ok()
+        };
+        ok && p.exists()
+    } else {
+        false
+    };
+    win.tool_dock.popdown_add_menu(PanelRegion::Right);
+    glib::timeout_future(Duration::from_millis(120)).await;
+
+    let _ = gtk4::prelude::WidgetExt::activate_action(
+        &win.window,
+        "win.dock-add-tool",
+        Some(&"right:tags".to_variant()),
+    );
+    glib::timeout_future(Duration::from_millis(150)).await;
+    let tags_reopened_right =
+        win.tool_dock.static_tool_region(StaticToolKind::Tags) == Some(PanelRegion::Right);
+
+    // 移回左侧并立即持久化 layout.toml 验证不含动态终端 UUID
+    let _ = gtk4::prelude::WidgetExt::activate_action(
+        &win.window,
+        "win.dock-add-tool",
+        Some(&"left:tags".to_variant()),
+    );
+    win.persist_layout_now();
+    glib::timeout_future(Duration::from_millis(250)).await;
+    let layout_toml_path = Path::new(&services.config.snapshot().config_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("layout.toml");
+    let layout_toml_ok = std::fs::read_to_string(&layout_toml_path).is_ok_and(|txt| {
+        txt.contains("files")
+            && txt.contains("terminal")
+            && !txt.contains(&format!("term:{shell_id}"))
+    });
+
+    // 测试从右侧栏 `+` 新建终端（win.dock-new-shell('right')）
+    let right_shell_before = win.terminal_host.tab_ids().len();
+    let _ = gtk4::prelude::WidgetExt::activate_action(
+        &win.window,
+        "win.dock-new-shell",
+        Some(&"right".to_variant()),
+    );
+    let right_shell_spawned = wait_for(3000, || {
+        win.terminal_host.tab_ids().len() > right_shell_before
+            && win.terminal_host.tab_ids().iter().any(|id| {
+                win.terminal_host
+                    .tab_snapshot(*id)
+                    .is_some_and(|s| s["region"] == "right" && s["pid"].as_i64().is_some())
+            })
+    })
+    .await;
+    if let Some(right_sid) =
+        win.terminal_host.tab_ids().into_iter().find(|id| {
+            win.tool_dock.tab_region(DockTabId::Terminal(*id)) == Some(PanelRegion::Right)
+        })
+    {
+        win.terminal_host.close_tab_by_id(right_sid);
+    }
+
+    // 测试 Shell 退出非自动重启 + 关闭最后一个标签自动收起 + 再次展开自动新建终端
+    let shell2_id = win.terminal_host.open_shell_in_region(PanelRegion::Bottom);
     let shell2_spawned = wait_for(3000, || {
         win.terminal_host
             .tab_snapshot(shell2_id)
@@ -276,6 +521,7 @@ async fn run_suite(
     win.terminal_host.close_tab_by_id(shell2_id);
     win.terminal_host.close_tab_by_id(shell_id);
     let shell1_reaped = wait_for(2000, || shell_pid > 0 && !is_pid_alive(shell_pid)).await;
+    let bottom_auto_collapsed_on_close = !win.is_bottom_panel_revealed();
 
     // -------------------------------------------------------------------------
     // Part 2: 启动闸门负面拦截测试（无有效 Agent 配置）
@@ -341,14 +587,7 @@ async fn run_suite(
     }
     dlg.set_agent(&mock_agent, &["{guide}".into()]);
     let probe_ok = wait_for(3000, || dlg.last_probe().is_some_and(|p| p.available)).await;
-    glib::timeout_future(Duration::from_millis(300)).await;
-
-    let shot_settings = if let Some(dir) = media_dir {
-        let p = dir.join("l3-settings-dialog.png");
-        capture_widget_png(&win.window, &p).is_ok() && p.exists()
-    } else {
-        false
-    };
+    glib::timeout_future(Duration::from_millis(200)).await;
 
     dlg.set_font_size(19.0);
     dlg.set_terminal_font("Monospace 13");
@@ -364,7 +603,6 @@ async fn run_suite(
     let toml_after_save = std::fs::read_to_string(&config_path).unwrap_or_default();
     let comments_preserved = toml_after_save.contains("# L3-PRESERVED-COMMENT");
 
-    // 外部编辑冲突保护（digest 不一致时 save_config_now(false) 触发 config.externally_modified）
     let mut modified_toml = toml_after_save.replace("font_size = 19", "font_size = 17");
     if modified_toml == toml_after_save {
         modified_toml.push_str("\n# external bump\n");
@@ -373,7 +611,6 @@ async fn run_suite(
     dlg.save_config_now(false);
     let conflict_detected = wait_for(2500, || dlg.last_conflict()).await;
 
-    // 强制覆盖恢复默认 view 并测试 gio::FileMonitor 外部编辑热重载
     dlg.set_default_view(false);
     dlg.set_font_size(16.0);
     dlg.save_config_now(true);
@@ -383,7 +620,6 @@ async fn run_suite(
     })
     .await;
 
-    // agent-guide.md 覆盖与恢复默认
     dlg.set_guide_text("# L3 自定义 Agent 指南\n请遵循白名单约束。\n");
     dlg.save_guide_now();
     let guide_overridden = wait_for(2000, || {
@@ -395,7 +631,6 @@ async fn run_suite(
     dlg.close();
     glib::timeout_future(Duration::from_millis(200)).await;
 
-    // 通过外部写 config.toml 触发 gio::FileMonitor 热重载 font_size -> 15 + default_view -> "editing" 再恢复
     let disk_edit = std::fs::read_to_string(&config_path)
         .unwrap_or_default()
         .replace("font_size = 16", "font_size = 18")
@@ -406,7 +641,6 @@ async fn run_suite(
         (snap.font_size - 18.0).abs() < 0.01 && snap.default_view == "editing"
     })
     .await;
-    // 打开新笔记验证 default_view="editing" 生效，然后恢复 reading
     win.open_note_at("folder/sub note.md", None);
     let sub_opened_editing = wait_for(3000, || {
         win.state
@@ -435,9 +669,13 @@ async fn run_suite(
     .await;
 
     // -------------------------------------------------------------------------
-    // Part 4: Agent 启动快照闸门 + Changes 面板 + 彩色 Diff + 三级回滚 + review_stale
+    // Part 4: 右侧栏直接启动 Agent + 快照闸门 + Changes 面板 + 红绿 Diff + 多窗口合成截图
     // -------------------------------------------------------------------------
-    win.launch_agent_action();
+    let _ = gtk4::prelude::WidgetExt::activate_action(
+        &win.window,
+        "win.dock-launch-agent",
+        Some(&"right".to_variant()),
+    );
     let agent_exited = wait_for(10000, || {
         win.changes_panel
             .sessions()
@@ -449,6 +687,10 @@ async fn run_suite(
                 .is_some_and(|sum| sum.entries.len() >= 3)
     })
     .await;
+    let right_agent_launched_ok =
+        win.terminal_host.tab_ids().iter().any(|id| {
+            win.tool_dock.tab_region(DockTabId::Terminal(*id)) == Some(PanelRegion::Right)
+        });
 
     let agent_tab_ids = win.terminal_host.tab_ids();
     let agent_session_id = win
@@ -464,7 +706,7 @@ async fn run_suite(
             .is_some_and(|sum| sum.session_id == agent_session_id && sum.entries.len() >= 3)
     })
     .await;
-    win.reveal_placeholder_panel(PlaceholderKind::Changes);
+    win.activate_static_tool(StaticToolKind::Changes);
     let selected_ok = win.changes_panel.select_entry("multi-hunk.md");
     let detail_loaded = wait_for(4000, || {
         win.changes_panel
@@ -473,89 +715,10 @@ async fn run_suite(
     })
     .await;
     glib::timeout_future(Duration::from_millis(300)).await;
-
     let changes_title = win.changes_panel.title_text();
-    let shot_changes = if let Some(dir) = media_dir {
-        let p = dir.join("l3-agent-changes-diff.png");
-        capture_widget_png(&win.window, &p).is_ok() && p.exists()
-    } else {
-        false
-    };
-
-    // 1) 单 hunk 回滚（仅回滚 hunk 0）
-    let hunk_rb_started = win.changes_panel.rollback_hunk_now(0);
-    let hunk_rb_ok = wait_for(4000, || {
-        win.changes_panel.last_rollback_report().as_deref() == Some("reverted")
-            && std::fs::read_to_string(vault_path.join("multi-hunk.md"))
-                .is_ok_and(|c| c.contains("TOP_ORIGINAL") && c.contains("BOT_AGENT_EDIT"))
-    })
-    .await;
-    let _ = wait_for(3000, || {
-        win.changes_panel
-            .summary_snapshot()
-            .is_some_and(|s| s.entries.iter().any(|e| e.id == "multi-hunk.md"))
-    })
-    .await;
-
-    // 2) history.review_stale 冲突保护：审阅后外部改盘，立即触发单条回滚必须被拒绝
-    let multi_path = vault_path.join("multi-hunk.md");
-    let before_stale = std::fs::read_to_string(&multi_path).unwrap_or_default();
-    let _ = std::fs::write(
-        &multi_path,
-        format!("{before_stale}\nSTALE_EXTERNAL_MARKER\n"),
-    );
-    let _ = win.changes_panel.rollback_entry_now("multi-hunk.md");
-    let stale_blocked = wait_for(3000, || {
-        win.changes_panel.last_error().as_deref() == Some("history.review_stale")
-    })
-    .await;
-    let stale_untouched =
-        std::fs::read_to_string(&multi_path).is_ok_and(|c| c.contains("STALE_EXTERNAL_MARKER"));
-    // 恢复 clean 状态后刷新审阅，继续验证单文件回滚与整会话回滚
-    let _ = std::fs::write(&multi_path, &before_stale);
-    win.changes_panel.refresh();
-    let _ = wait_for(3000, || {
-        win.changes_panel
-            .summary_snapshot()
-            .is_some_and(|s| s.entries.iter().any(|e| e.id == "agent-created.md"))
-    })
-    .await;
-
-    // 3) 单文件回滚（删除新增的 agent-created.md）
-    let _ = win.changes_panel.rollback_entry_now("agent-created.md");
-    let entry_rb_ok = wait_for(3500, || !vault_path.join("agent-created.md").exists()).await;
-    let _ = wait_for(3000, || {
-        win.changes_panel
-            .summary_snapshot()
-            .is_some_and(|s| !s.entries.iter().any(|e| e.id == "agent-created.md"))
-    })
-    .await;
-
-    // 4) 整会话回滚（恢复被删除的 to-delete.md 以及 multi-hunk.md）
-    let _ = win.changes_panel.rollback_session_now();
-    let session_rb_ok = wait_for(4000, || {
-        vault_path.join("to-delete.md").exists()
-            && std::fs::read_to_string(&multi_path)
-                .is_ok_and(|c| c.contains("TOP_ORIGINAL") && c.contains("BOT_ORIGINAL"))
-    })
-    .await;
-
-    // 5) 删除会话快照而不损伤当前 Vault 文件
-    win.changes_panel.delete_session_now(&agent_session_id);
-    let session_deleted = wait_for(3000, || {
-        !win.changes_panel
-            .sessions()
-            .iter()
-            .any(|s| s.id == agent_session_id)
-    })
-    .await;
-    let vault_intact_after_delete = vault_path.join("to-delete.md").exists();
-    for id in agent_tab_ids {
-        win.terminal_host.close_tab_by_id(id);
-    }
 
     // -------------------------------------------------------------------------
-    // Part 5: 多窗口同步（同库共享 + 切库隔离 + 独立关闭零泄漏）
+    // Part 5: 多窗口同步（含 Agent 改动 + 双窗口同库同步合成截图）
     // -------------------------------------------------------------------------
     win.open_note_at("alpha.md", None);
     let mut multi_win_sync_ok = false;
@@ -565,7 +728,7 @@ async fn run_suite(
     let mut isolated_vault_ok = false;
     let mut win2_closed_clean = false;
     let mut win2_pty_reaped = false;
-    let mut shot_multi = false;
+    let mut shot_agent_changes_multi = false;
 
     if let Some(win2) = win.open_new_window_with_vault(None) {
         let win2_ready = wait_for(5000, || {
@@ -603,7 +766,6 @@ async fn run_suite(
             })
             .await;
 
-            // win1 写入并保存 alpha.md，验证 win2 自动同库刷新 + 同步保存可见
             win.open_note_at("alpha.md", None);
             win.switch_edit_mode(false);
             if let Some(buf) = win
@@ -635,13 +797,14 @@ async fn run_suite(
             win.switch_edit_mode(false);
             glib::timeout_future(Duration::from_millis(300)).await;
 
+            // 截图 4: Agent 退出后「本次会话改动」红绿 diff + 双窗口同库同步
             if let Some(dir) = media_dir {
-                let p = dir.join("l3-multi-window-sync.png");
-                shot_multi = capture_dual_window_png(&win.window, &win2.inner.window, &p).is_ok()
-                    && p.exists();
+                let p = dir.join("l3-v2-agent-changes-and-multi-window.png");
+                shot_agent_changes_multi =
+                    capture_dual_window_png(&win.window, &win2.inner.window, &p).is_ok()
+                        && p.exists();
             }
 
-            // 将 win2 切换到第二知识库，验证目录、终端 cwd、Changes 面板完全隔离
             if let Some(v2) = vault2_opt {
                 win2.inner.open_vault_path(v2.to_path_buf());
                 let v2_ready = wait_for(4000, || {
@@ -650,8 +813,7 @@ async fn run_suite(
                             == Some(v2.to_string_lossy().as_ref())
                 })
                 .await;
-                win2.inner
-                    .reveal_placeholder_panel(PlaceholderKind::Terminal);
+                win2.inner.set_bottom_panel_revealed(true);
                 let win2_term_ok = wait_for(3000, || {
                     !win2.inner.terminal_host.all_child_pids().is_empty()
                 })
@@ -684,13 +846,97 @@ async fn run_suite(
         }
     }
 
-    // 为后续独立进程 `--restore-session-json` 写入包含已打开标签的窗口会话
+    // 执行三级安全回滚（单 hunk -> review_stale -> 单文件 -> 整会话 -> 删除快照）
+    let hunk_rb_started = win.changes_panel.rollback_hunk_now(0);
+    let hunk_rb_ok = wait_for(4000, || {
+        win.changes_panel.last_rollback_report().as_deref() == Some("reverted")
+            && std::fs::read_to_string(vault_path.join("multi-hunk.md"))
+                .is_ok_and(|c| c.contains("TOP_ORIGINAL") && c.contains("BOT_AGENT_EDIT"))
+    })
+    .await;
+    let _ = wait_for(3000, || {
+        win.changes_panel
+            .summary_snapshot()
+            .is_some_and(|s| s.entries.iter().any(|e| e.id == "multi-hunk.md"))
+    })
+    .await;
+
+    let multi_path = vault_path.join("multi-hunk.md");
+    let before_stale = std::fs::read_to_string(&multi_path).unwrap_or_default();
+    let _ = std::fs::write(
+        &multi_path,
+        format!("{before_stale}\nSTALE_EXTERNAL_MARKER\n"),
+    );
+    let _ = win.changes_panel.rollback_entry_now("multi-hunk.md");
+    let stale_blocked = wait_for(3000, || {
+        win.changes_panel.last_error().as_deref() == Some("history.review_stale")
+    })
+    .await;
+    let stale_untouched =
+        std::fs::read_to_string(&multi_path).is_ok_and(|c| c.contains("STALE_EXTERNAL_MARKER"));
+    let _ = std::fs::write(&multi_path, &before_stale);
+    win.changes_panel.refresh();
+    let _ = wait_for(3000, || {
+        win.changes_panel
+            .summary_snapshot()
+            .is_some_and(|s| s.entries.iter().any(|e| e.id == "agent-created.md"))
+    })
+    .await;
+
+    let _ = win.changes_panel.rollback_entry_now("agent-created.md");
+    let entry_rb_ok = wait_for(3500, || !vault_path.join("agent-created.md").exists()).await;
+    let _ = wait_for(3000, || {
+        win.changes_panel
+            .summary_snapshot()
+            .is_some_and(|s| !s.entries.iter().any(|e| e.id == "agent-created.md"))
+    })
+    .await;
+
+    let _ = win.changes_panel.rollback_session_now();
+    let session_rb_ok = wait_for(4000, || {
+        vault_path.join("to-delete.md").exists()
+            && std::fs::read_to_string(&multi_path)
+                .is_ok_and(|c| c.contains("TOP_ORIGINAL") && c.contains("BOT_ORIGINAL"))
+    })
+    .await;
+
+    win.changes_panel.delete_session_now(&agent_session_id);
+    let session_deleted = wait_for(3000, || {
+        !win.changes_panel
+            .sessions()
+            .iter()
+            .any(|s| s.id == agent_session_id)
+    })
+    .await;
+    let vault_intact_after_delete = vault_path.join("to-delete.md").exists();
+    for id in agent_tab_ids {
+        win.terminal_host.close_tab_by_id(id);
+    }
+
     if let Some(entry) = win.build_session_entry() {
         crate::window::session::write_session_entries_to_core(&services.core, &[entry]);
     }
 
     serde_json::json!({
         "ok": true,
+        "dock_v2": {
+            "single_bar_left": single_bar_left,
+            "single_bar_right": single_bar_right,
+            "single_bar_bottom": single_bar_bottom,
+            "all_regions_have_add": all_regions_have_add,
+            "sidebar_max_480_ok": sidebar_max_480_ok,
+            "bottom_single_bar_titles_ok": bottom_single_bar_titles_ok,
+            "paned_resizable_ok": paned_resizable_ok,
+            "ctx_menu_bottom_ok": ctx_menu_bottom_ok,
+            "lossless_3_region_migration": lossless_3_region_migration,
+            "tags_closed": tags_closed,
+            "add_menu_items_ok": add_menu_items_ok,
+            "tags_reopened_right": tags_reopened_right,
+            "layout_toml_ok": layout_toml_ok,
+            "right_shell_spawned": right_shell_spawned,
+            "right_agent_launched_ok": right_agent_launched_ok,
+            "bottom_auto_collapsed_on_close": bottom_auto_collapsed_on_close,
+        },
         "terminal": {
             "alpha_loaded": alpha_loaded,
             "shell_ready": shell_ready,
@@ -743,10 +989,10 @@ async fn run_suite(
             "win2_pty_reaped": win2_pty_reaped,
         },
         "screenshots": {
-            "terminal": shot_terminal,
-            "settings": shot_settings,
-            "changes": shot_changes,
-            "multi_window": shot_multi,
+            "bottom_single_bar": shot_bottom_single_bar,
+            "right_sidebar_terminal": shot_right_sidebar_terminal,
+            "tool_add_menu": shot_tool_add_menu,
+            "agent_changes_multi": shot_agent_changes_multi,
         },
     })
 }
