@@ -299,6 +299,10 @@ impl WindowInner {
         let text_layouts = reading
             .map(ReadingSurfaceHandle::text_segment_layouts)
             .unwrap_or_default();
+        let text_scrolled_offsets = reading
+            .map(ReadingSurfaceHandle::text_segment_scrolled_offsets)
+            .unwrap_or_default();
+        let first_text_scrolled_x = text_scrolled_offsets.first().copied().unwrap_or(0.0);
         let text_widths: Vec<i32> = text_layouts.iter().map(|(w, _)| *w).collect();
         let text_offsets: Vec<f64> = text_layouts.iter().map(|(_, x)| *x).collect();
         let text_width = text_widths.first().copied().unwrap_or(0);
@@ -311,7 +315,8 @@ impl WindowInner {
                     (x - expected_x).abs() <= 2.5
                 }
             });
-        let pad = if scrolled_width < 820 { 40.0 } else { 88.0 };
+        let h_pad = crate::platform::viewport::responsive_horizontal_padding(scrolled_width);
+        let pad = f64::from(h_pad);
         let widths = |widgets: Vec<gtk4::Widget>| -> Vec<i32> {
             widgets.into_iter().map(|widget| widget.width()).collect()
         };
@@ -329,6 +334,9 @@ impl WindowInner {
             "text_view_width": text_width,
             "text_view_widths": text_widths,
             "text_view_offsets": text_offsets,
+            "text_view_scrolled_offsets": text_scrolled_offsets,
+            "first_text_scrolled_x": first_text_scrolled_x,
+            "viewport_horizontal_padding": h_pad,
             "text_view_centered": text_centered,
             "content_width_measured": (f64::from(scrolled_width) - pad).max(0.0),
             "viewport_last_alloc": tab.reading_viewport.last_allocated_width(),

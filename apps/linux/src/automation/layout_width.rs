@@ -105,6 +105,8 @@ async fn run_layout_width_checks(win: &Rc<WindowInner>) -> serde_json::Value {
         "allocated": allocated,
         "sidebars_hidden": sidebars_hidden,
         "reflowed": reflowed,
+        "first_text_scrolled_x": after["first_text_scrolled_x"],
+        "left_margin_ok": after["first_text_scrolled_x"].as_f64().is_some_and(|x| x >= 20.0),
         "before": before,
         "after": after,
     })
@@ -217,6 +219,7 @@ async fn run_live_resize_checks(win: &Rc<WindowInner>, report_path: &Path) -> se
             "seq": current_seq,
             "target_width": target_w,
             "resized_and_reflowed": resized,
+            "left_margin_ok": snap["first_text_scrolled_x"].as_f64().is_some_and(|x| x >= 20.0),
             "snapshot": snap,
         });
         write_json_atomic(&stage_path, &stage_obj);

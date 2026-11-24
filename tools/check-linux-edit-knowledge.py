@@ -25,7 +25,7 @@ SCENE_EXPECTATIONS = {
         "extra": [],
     },
     "tags": {
-        "filename": "l2-block-reading-table-and-tags.png",
+        "filename": "l2-typography-table-and-tags.png",
         "label": "左侧标签浏览 + 正文阅读视图",
         "open": ["L2-编辑目标.md"],
         "extra": [],
@@ -911,11 +911,17 @@ def run_layout_width(
 
 
 def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: dict):
-    """A5 宽度适配断言：默认窗、收起侧栏扩栏与 994px 窄平铺。"""
+    """A5 宽度适配与阅读区左留白断言：默认窗、收起侧栏扩栏与 994px 窄平铺。"""
     base = layout_1280["report"]["after"]
     base_widgets = base.get("diagram_widget_widths") or []
     base_scenes = base.get("diagram_scene_widths") or []
     base_content = base.get("content_width_measured", 0)
+    base_left_x = base.get("first_text_scrolled_x", 0.0)
+    check(base.get("surface_rebuilds", -1) == 0, f"1280 不应重建 ReadingSurface：{base}")
+    check(
+        base_left_x >= 20.0,
+        f"1280x860 双侧栏阅读区左留白不足（需 >=20px，实测 {base_left_x}px）：{base}",
+    )
     check(base_widgets and base_widgets[0] >= 520, f"1280 图表控件被压扁：{base}")
     check(base_scenes and base_scenes[0] >= 520, f"1280 图表场景宽不足：{base}")
     check(
@@ -928,7 +934,13 @@ def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: d
     wide_scenes = wide.get("diagram_scene_widths") or []
     wide_content = wide.get("content_width_measured", 0)
     wide_text_widths = wide.get("text_view_widths") or []
+    wide_left_x = wide.get("first_text_scrolled_x", 0.0)
+    check(wide.get("surface_rebuilds", -1) == 0, f"1440px 不应重建 ReadingSurface：{wide}")
     check(wide.get("left_show") is False and wide.get("right_show") is False, f"侧栏未收起：{wide}")
+    check(
+        wide_left_x >= 20.0,
+        f"1440px 阅读区左留白不足（实测 {wide_left_x}px）：{wide}",
+    )
     check(wide_scenes and wide_scenes[0] >= 1200, f"宽屏图表未铺满宽容器：{wide}")
     check(
         wide_widgets and wide_widgets[0] >= 1200,
@@ -955,29 +967,50 @@ def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: d
     narrow_widgets = narrow.get("diagram_widget_widths") or []
     narrow_scenes = narrow.get("diagram_scene_widths") or []
     narrow_content = narrow.get("content_width_measured", 0)
+    narrow_left_x = narrow.get("first_text_scrolled_x", 0.0)
+    check(
+        narrow_left_x >= 20.0,
+        f"994px 阅读区左留白不足（需 >=20px，实测 {narrow_left_x}px）：{narrow}",
+    )
     check(narrow_widgets and narrow_widgets[0] >= 320, f"994px 图表被压扁：{narrow}")
     check(
         narrow_scenes and narrow_scenes[0] <= narrow_content + 24,
         f"994px 图表横向溢出：scene={narrow_scenes} content={narrow_content}",
     )
     return {
-        "base_1280": {"widget": base_widgets[0], "scene": base_scenes[0], "content": base_content},
-        "wide": {"widget": wide_widgets[0], "scene": wide_scenes[0], "content": wide_content},
+        "base_1280": {
+            "widget": base_widgets[0],
+            "scene": base_scenes[0],
+            "content": base_content,
+            "left_margin_x": base_left_x,
+        },
+        "wide": {
+            "widget": wide_widgets[0],
+            "scene": wide_scenes[0],
+            "content": wide_content,
+            "left_margin_x": wide_left_x,
+        },
         "narrow_994": {
             "widget": narrow_widgets[0],
             "scene": narrow_scenes[0],
             "content": narrow_content,
+            "left_margin_x": narrow_left_x,
         },
     }
 
 
 def verify_media_widths(layout_media: dict):
-    """表格、本地图片与嵌入卡片不再被 180/120/220px 压扁。"""
+    """表格、本地图片与嵌入卡片不再被 180/120/220px 压扁，且保留阅读区左留白。"""
     after = layout_media["report"]["after"]
     content = after.get("content_width_measured", 0)
     tables = after.get("table_widget_widths") or []
     images = after.get("image_widget_widths") or []
     embeds = after.get("embed_widget_widths") or []
+    left_x = after.get("first_text_scrolled_x", 0.0)
+    check(
+        left_x >= 20.0,
+        f"1280x860 Markdown field guide 阅读区左留白不足（需 >=20px，实测 {left_x}px）：{after}",
+    )
     check(tables and max(tables) >= 360, f"表格被压扁（需 >=360px）：{after}")
     check(images and max(images) >= 320, f"图片被压扁（需 >=320px）：{after}")
     check(
@@ -990,6 +1023,7 @@ def verify_media_widths(layout_media: dict):
         "image_widget_widths": images,
         "embed_widget_widths": embeds,
         "content_width_measured": content,
+        "left_margin_x": left_x,
     }
 
 
@@ -1266,11 +1300,24 @@ def run_live_resize_regression(
     check(init_stage.get("ready") is True and init_stage.get("allocated") is True, f"实时缩放首屏未就绪：{init_stage}")
     check(init_snap.get("left_collapsed") is False and init_snap.get("right_collapsed") is False, f"1400px 不应折叠侧栏：{init_snap}")
     check(init_snap.get("surface_rebuilds") == 0, f"首屏不应重建 ReadingSurface：{init_snap}")
+    check(
+        init_snap.get("first_text_scrolled_x", 0.0) >= 20.0,
+        f"1400px 双侧栏阅读区左留白不足：{init_snap}",
+    )
     init_scene = (init_snap.get("diagram_scene_widths") or [0])[0]
     check(init_scene >= 520, f"1400px 初始图表宽不足：{init_snap}")
 
     check(s1.get("resized_and_reflowed") is True, f"1020px 实时重排未完成：{s1}")
     check(snap_1020.get("surface_rebuilds") == 0, f"1020px 缩窗不应重建 ReadingSurface：{snap_1020}")
+    check(
+        snap_1020.get("left_collapsed") is False and snap_1020.get("right_collapsed") is False,
+        f"1020px 不应折叠双侧栏：{snap_1020}",
+    )
+    left_1020 = snap_1020.get("first_text_scrolled_x", 0.0)
+    check(
+        left_1020 >= 20.0,
+        f"1020x860 双侧栏阅读区左留白不足（需 >=20px，实测 {left_1020}px）：{snap_1020}",
+    )
     scene_1020 = (snap_1020.get("diagram_scene_widths") or [0])[0]
     check(
         snap_1020.get("reflow_count", 0) > init_snap.get("reflow_count", 0),
@@ -1285,12 +1332,20 @@ def run_live_resize_regression(
         f"760px 未触发 819px 侧栏断点折叠：{snap_760}",
     )
     check(
+        snap_760.get("first_text_scrolled_x", 0.0) >= 20.0,
+        f"760px 阅读区左留白不足：{snap_760}",
+    )
+    check(
         snap_760.get("reflow_count", 0) > snap_1020.get("reflow_count", 0),
         f"760px reflow_count 未递增：{snap_1020} -> {snap_760}",
     )
 
     check(s3.get("resized_and_reflowed") is True, f"1520px 实时重排未完成：{s3}")
     check(snap_1520.get("surface_rebuilds") == 0, f"1520px 扩窗不应重建 ReadingSurface：{snap_1520}")
+    check(
+        snap_1520.get("first_text_scrolled_x", 0.0) >= 20.0,
+        f"1520px 阅读区左留白不足：{snap_1520}",
+    )
     check(
         snap_1520.get("in_place_relayouts", 0) >= 3,
         f"三次实时缩放后 in_place_relayouts 不足 3 次：{snap_1520}",
@@ -1332,6 +1387,7 @@ def run_live_resize_regression(
         "scene_1020": scene_1020,
         "scene_760": (snap_760.get("diagram_scene_widths") or [0])[0],
         "scene_1520": scene_1520,
+        "left_margin_1020": left_1020,
         "reflow_counts": [
             init_snap.get("reflow_count", 0),
             snap_1020.get("reflow_count", 0),
@@ -1453,7 +1509,7 @@ def main():
             "Learning/Learning map.md",
             1280,
             860,
-            screenshot=media_dir / "l2-block-reading-1280.png",
+            screenshot=media_dir / "l2-typography-1280-learning-map.png",
         )
         layout_wide = run_layout_width(
             gui_bin,
@@ -1465,7 +1521,7 @@ def main():
             1440,
             860,
             hide_sidebars=True,
-            screenshot=media_dir / "l2-block-reading-wide-920prose.png",
+            screenshot=media_dir / "l2-typography-wide-920prose.png",
         )
         layout_narrow = run_layout_width(
             gui_bin,
@@ -1487,6 +1543,7 @@ def main():
             "Markdown field guide.md",
             1280,
             860,
+            screenshot=media_dir / "l2-typography-markdown-guide.png",
         )
         layout_verified = verify_diagram_widths(layout_1280, layout_wide, layout_narrow)
         media_widths = verify_media_widths(layout_media)
@@ -1527,8 +1584,10 @@ def main():
                 "media_1280": layout_media["report_path"],
             },
             "screenshots": {
+                "default_1280": layout_1280["screenshot"],
                 "wide": layout_wide["screenshot"],
                 "narrow_994": layout_narrow["screenshot"],
+                "markdown_guide": layout_media["screenshot"],
             },
         },
         "vault_unchanged_except": sorted(allowed_changes),
