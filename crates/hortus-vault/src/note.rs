@@ -291,13 +291,56 @@ fn android_cache_to_shared_vault(temporary: &Path, vault: &Path) -> bool {
 }
 
 fn publish_new(staged: &Path, path: &Path) -> Result<(), WriteFailure> {
-    fs::hard_link(staged, path).map_err(|e| {
-        if e.kind() == io::ErrorKind::AlreadyExists {
-            WriteFailure::Changed
-        } else {
-            e.into()
+    match fs::hard_link(staged, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Android 共享存储的 FUSE 拒绝硬链接（EACCES）；独占创建保持不覆盖既有文件的契约。
+            #[cfg(target_os = "android")]
+            if matches!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied
+                    | io::ErrorKind::Unsupported
+                    | io::ErrorKind::CrossesDevices
+            ) {
+                return publish_new_exclusive(staged, path);
+            }
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                Err(WriteFailure::Changed)
+            } else {
+                Err(error.into())
+            }
         }
-    })
+    }
+}
+
+/// 不带硬链接的独占发布：目标必须不存在，失败时删除刚创建的目标文件。
+#[cfg(any(target_os = "android", test))]
+fn publish_new_exclusive(staged: &Path, path: &Path) -> Result<(), WriteFailure> {
+    let mut target = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(WriteFailure::Changed);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let written = (|| -> io::Result<()> {
+        let mut source = fs::File::open(staged)?;
+        io::copy(&mut source, &mut target)?;
+        if let Ok(metadata) = fs::metadata(staged) {
+            target.set_permissions(metadata.permissions())?;
+        }
+        target.sync_all()
+    })();
+    if let Err(error) = written {
+        drop(target);
+        let _ = fs::remove_file(path);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 fn volume_root_replacement(temporary: &Path, vault: &Path) -> bool {
@@ -435,6 +478,33 @@ mod tests {
         fs::write(&path, "theirs").unwrap();
         assert!(matches!(
             publish_new(&staged, &path),
+            Err(WriteFailure::Changed)
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
+    }
+
+    #[test]
+    fn exclusive_publish_writes_the_staged_bytes() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("note.md");
+        let staged = base.path().join("staged");
+        fs::write(&staged, b"# new\n\xe4\xb8\xad\xe6\x96\x87\n").unwrap();
+        publish_new_exclusive(&staged, &path).unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"# new\n\xe4\xb8\xad\xe6\x96\x87\n"
+        );
+    }
+
+    #[test]
+    fn exclusive_publish_keeps_an_existing_target() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("note.md");
+        let staged = base.path().join("staged");
+        fs::write(&staged, "mine").unwrap();
+        fs::write(&path, "theirs").unwrap();
+        assert!(matches!(
+            publish_new_exclusive(&staged, &path),
             Err(WriteFailure::Changed)
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
