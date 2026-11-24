@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.render
 
 import android.content.res.AssetManager
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
@@ -12,13 +13,17 @@ import android.graphics.Typeface
 import android.graphics.text.TextRunShaper
 import android.os.Build
 import io.github.groundgrounder.hortus.DebugProbes
+import io.github.groundgrounder.hortus.core.MathEngine
 import io.github.groundgrounder.hortus.core.MathFailure
 import io.github.groundgrounder.hortus.core.MathGlyphMetrics
 import io.github.groundgrounder.hortus.core.MathStyle
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.max
 
 private const val FOREGROUND = Int.MIN_VALUE
+
+internal fun mathInlinePadding(em: Float): Float = max(1f, em * 0.08f)
 
 internal data class MathRenderResult(
     val prepared: PreparedMath?,
@@ -51,6 +56,7 @@ internal sealed interface MathShape {
 
 /**
  * 公式场景已在后台解析并选好字体；绘制只提交不可变几何，主线程不做测量或加载。
+ * 在循环外复用局部绘制 Paint，消除逐字形/逐线段高频分配。
  */
 internal class PreparedMath(
     val width: Float,
@@ -66,52 +72,66 @@ internal class PreparedMath(
 ) {
     fun draw(canvas: Canvas, originX: Float, originY: Float, foreground: Int) {
         fun resolve(color: Int): Int = if (color == FOREGROUND) foreground else color
+        val glyphPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+            isLinearText = true
+            hinting = Paint.HINTING_OFF
+        }
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+        }
+        var lastDashThickness = -1f
+        var lastDashEffect: DashPathEffect? = null
         canvas.save()
         canvas.translate(originX, originY)
         for (shape in shapes) {
             when (shape) {
                 is MathShape.Glyph -> {
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
-                        typeface = shape.typeface
-                        textSize = shape.textSize
-                        isLinearText = true
-                        hinting = Paint.HINTING_OFF
-                        color = resolve(shape.color)
-                    }
-                    canvas.drawText(shape.text, shape.x, shape.baseline, paint)
+                    glyphPaint.typeface = shape.typeface
+                    glyphPaint.textSize = shape.textSize
+                    glyphPaint.color = resolve(shape.color)
+                    canvas.drawText(shape.text, shape.x, shape.baseline, glyphPaint)
                 }
                 is MathShape.Line -> {
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = resolve(shape.color)
-                        strokeWidth = maxOf(shape.thickness, 0.5f)
-                        style = Paint.Style.FILL_AND_STROKE
-                    }
+                    val resolved = resolve(shape.color)
                     if (shape.dashed) {
-                        paint.style = Paint.Style.STROKE
-                        val dash = 4 * maxOf(shape.thickness, 0.5f)
-                        paint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(dash, dash), 0f)
-                        canvas.drawLine(shape.x, shape.y, shape.x + shape.width, shape.y, paint)
+                        val stroke = maxOf(shape.thickness, 0.5f)
+                        if (lastDashThickness != stroke || lastDashEffect == null) {
+                            val dash = 4 * stroke
+                            lastDashEffect = DashPathEffect(floatArrayOf(dash, dash), 0f)
+                            lastDashThickness = stroke
+                        }
+                        strokePaint.color = resolved
+                        strokePaint.strokeWidth = stroke
+                        strokePaint.pathEffect = lastDashEffect
+                        canvas.drawLine(shape.x, shape.y, shape.x + shape.width, shape.y, strokePaint)
                     } else {
+                        fillPaint.color = resolved
                         canvas.drawRect(
                             shape.x,
                             shape.y - shape.thickness / 2,
                             shape.x + shape.width,
                             shape.y + shape.thickness / 2,
-                            Paint(Paint.ANTI_ALIAS_FLAG).apply { color = resolve(shape.color) },
+                            fillPaint,
                         )
                     }
                 }
-                is MathShape.Rect -> canvas.drawRect(
-                    shape.rect,
-                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = resolve(shape.color) },
-                )
+                is MathShape.Rect -> {
+                    fillPaint.color = resolve(shape.color)
+                    canvas.drawRect(shape.rect, fillPaint)
+                }
                 is MathShape.PathShape -> {
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = resolve(shape.color)
-                        style = if (shape.fill) Paint.Style.FILL else Paint.Style.STROKE
-                        strokeWidth = 1.5f
+                    if (shape.fill) {
+                        fillPaint.color = resolve(shape.color)
+                        canvas.drawPath(shape.path, fillPaint)
+                    } else {
+                        strokePaint.color = resolve(shape.color)
+                        strokePaint.strokeWidth = 1.5f
+                        strokePaint.pathEffect = null
+                        canvas.drawPath(shape.path, strokePaint)
                     }
-                    canvas.drawPath(shape.path, paint)
                 }
             }
         }
@@ -131,7 +151,7 @@ private data class Metrik(val codepoint: Int, val width: Double, val height: Dou
 
 internal class MathSceneRenderer(
     private val assets: AssetManager,
-    private val engine: io.github.groundgrounder.hortus.core.MathEngine,
+    private val engine: MathEngine,
 ) : AutoCloseable {
     private val faces = ConcurrentHashMap<String, Typeface>()
     private val fallbackFaces = ConcurrentHashMap<Int, Typeface>()
@@ -255,7 +275,6 @@ internal class MathSceneRenderer(
                 synchronized(lock) { cache[key] = prepared }
                 MathRenderResult(prepared, null, measured)
             } catch (error: MathFailure) {
-                // 只把 RaTeX 给出的原因交给界面，不暴露生成的异常类名。
                 val reason = mathFailureDetail(error)
                 synchronized(lock) { failed[key] = reason }
                 MathRenderResult(null, reason, 0)
@@ -273,6 +292,7 @@ internal class MathSceneRenderer(
         var glyphs = 0
         var fallbacks = 0
         var unresolved = 0
+        val glyphCheckPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         for (index in 0 until items.length()) {
             val item = items.getJSONObject(index)
             val x = (item.optDouble("x", 0.0) * em).toFloat()
@@ -296,7 +316,8 @@ internal class MathSceneRenderer(
                     if (useFallback) {
                         fallbacks += 1
                     }
-                    if (!Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = face }.hasGlyph(text)) {
+                    glyphCheckPaint.typeface = face
+                    if (!glyphCheckPaint.hasGlyph(text)) {
                         unresolved += 1
                     }
                     shapes += MathShape.Glyph(face, text, x, y, em * scale, color)
@@ -343,7 +364,7 @@ internal class MathSceneRenderer(
                             }
                         }
                     }
-                            shapes += MathShape.PathShape(path, item.optBoolean("fill"), color)
+                    shapes += MathShape.PathShape(path, item.optBoolean("fill"), color)
                 }
             }
         }
@@ -378,11 +399,15 @@ internal class MathSceneRenderer(
         )
     }
 
-    override fun close() {
+    fun clearCache() {
         synchronized(lock) {
             cache.clear()
             failed.clear()
         }
+    }
+
+    override fun close() {
+        clearCache()
         try {
             engine.close()
         } catch (_: Exception) {

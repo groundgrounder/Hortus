@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.data
 
 import android.content.ComponentCallbacks2
 import android.graphics.Bitmap
@@ -8,6 +8,7 @@ import android.graphics.Canvas
 import android.util.LruCache
 import com.caverock.androidsvg.SVG
 import io.github.groundgrounder.hortus.DebugProbes
+import io.github.groundgrounder.hortus.core.model.LoadedImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -15,15 +16,6 @@ import java.io.FileInputStream
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
-
-internal data class LoadedImage(
-    val bitmap: Bitmap?,
-    val widthPx: Int,
-    val heightPx: Int,
-    val intrinsicWidth: Int,
-    val intrinsicHeight: Int,
-    val reason: String,
-)
 
 internal object ImageLoader {
     private val cache = object : LruCache<String, LoadedImage>(64 * 1024 * 1024) {
@@ -40,6 +32,10 @@ internal object ImageLoader {
             level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ||
                 level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> cache.trimToSize(cache.maxSize() / 2)
         }
+    }
+
+    fun clear() {
+        cache.evictAll()
     }
 
     private fun stamp(path: String): String? {

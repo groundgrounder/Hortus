@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.render
 
 import android.content.ComponentCallbacks2
 import android.graphics.RenderNode
@@ -11,6 +11,7 @@ import io.github.groundgrounder.hortus.core.SceneData
 import io.github.groundgrounder.hortus.core.ScenePrimitive
 import java.util.TreeMap
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.min
 
 /** 图表引擎的主文字逻辑字号；屏幕上应按正文像素字号绘制。 */
 internal const val DIAGRAM_LOGICAL_FONT_SIZE = 15f
@@ -19,6 +20,14 @@ internal const val DIAGRAM_LOGICAL_FONT_SIZE = 15f
 internal fun diagramUnitScale(bodySizePx: Float, density: Float): Float =
     (bodySizePx / DIAGRAM_LOGICAL_FONT_SIZE).takeIf { it > 0f && it.isFinite() }
         ?: (density * (16f / DIAGRAM_LOGICAL_FONT_SIZE))
+
+/** 主正文预览绘制倍率，IO 预热与 UI 绘制共用同一公式以精确命中 SceneTextMetrics 缓存。 */
+internal fun previewDrawZoom(sceneWidth: Double, contentWidthPx: Int, unitScale: Float): Float =
+    if (sceneWidth > 0.0 && contentWidthPx > 0) {
+        min(unitScale, contentWidthPx.toFloat() / sceneWidth.toFloat())
+    } else {
+        unitScale
+    }
 
 /** 图中出现次数最多的文本字号，即节点主文字的逻辑字号。 */
 internal fun diagramMainFontSize(scene: SceneData): Float {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.render
 
 import android.graphics.Canvas
 import android.graphics.Color
@@ -97,6 +97,15 @@ internal object SceneTextMetrics {
         return computed
     }
 
+    fun prewarmScene(scene: SceneData, zoom: Float) {
+        if (zoom <= 0f || !zoom.isFinite()) return
+        for (primitive in scene.primitives) {
+            if (primitive is ScenePrimitive.Text && primitive.span.fontSize > 0.0) {
+                scaleX(primitive.span, zoom)
+            }
+        }
+    }
+
     fun put(span: SceneText, zoom: Float, value: Float) {
         val key = SceneTextKey(
             span.text,
@@ -118,6 +127,14 @@ internal object SceneTextMetrics {
             textScaleX = scale
             this.color = color
         }
+    }
+
+    /** 复用调用方局部 Paint（仅单次 draw 内部线程局部使用），消除逐文本图元分配。 */
+    fun configurePaint(target: Paint, span: SceneText, zoom: Float, color: Int) {
+        val scale = scaleX(span, zoom)
+        target.set(templatePaint(span, zoom))
+        target.textScaleX = scale
+        target.color = color
     }
 
     private fun templatePaint(span: SceneText, zoom: Float): Paint {
@@ -146,13 +163,48 @@ internal object SceneTextMetrics {
 }
 
 internal object SceneRenderer {
+    private class DrawScratch(clip: android.graphics.Rect) {
+        val clipF = RectF(clip)
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+        val pathPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+        }
+        val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeCap = Paint.Cap.ROUND }
+        val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        val textPaint = Paint()
+        val rect = RectF()
+        val textBounds = RectF()
+        val innerOval = RectF()
+        val path = Path()
+        val detailPath = Path()
+        val markerPath = Path()
+        var lastDashZoom = -1f
+        var lastDashEffect: DashPathEffect? = null
+
+        fun dashEffect(zoom: Float): DashPathEffect {
+            if (lastDashZoom != zoom || lastDashEffect == null) {
+                val dash = 4f * zoom
+                lastDashEffect = DashPathEffect(floatArrayOf(dash, dash), 0f)
+                lastDashZoom = zoom
+            }
+            return lastDashEffect!!
+        }
+    }
+
     fun alpha(color: SceneColor): Int = (color.a * 255).toInt().coerceIn(0, 255)
 
     fun colorInt(color: SceneColor, foreground: Int): Int {
         val a = alpha(color)
         if (a == 0 && color.r == 0.0 && color.g == 0.0 && color.b == 0.0) return 0
-        return Color.argb(a, (color.r * 255).toInt().coerceIn(0, 255),
-            (color.g * 255).toInt().coerceIn(0, 255), (color.b * 255).toInt().coerceIn(0, 255))
+        return Color.argb(
+            a,
+            (color.r * 255).toInt().coerceIn(0, 255),
+            (color.g * 255).toInt().coerceIn(0, 255),
+            (color.b * 255).toInt().coerceIn(0, 255),
+        )
     }
 
     fun draw(
@@ -165,88 +217,77 @@ internal object SceneRenderer {
         includeText: Boolean = true,
     ) {
         val clip = canvas.clipBounds
+        val scratch = DrawScratch(clip)
         canvas.save()
         canvas.translate(translateX, translateY)
         for (primitive in scene.primitives) {
             when (primitive) {
                 is ScenePrimitive.RoundedRect -> {
-                    val rect = primitive.rect.toRectF(zoom)
-                    if (rect.intersects(clip.left.toFloat(), clip.top.toFloat(), clip.right.toFloat(), clip.bottom.toFloat())) {
-                        canvas.drawRoundRect(rect, primitive.radius.toFloat() * zoom,
-                            primitive.radius.toFloat() * zoom,
-                            Paint(Paint.ANTI_ALIAS_FLAG).apply { color = colorInt(primitive.color, foreground) })
+                    primitive.rect.writeTo(scratch.rect, zoom)
+                    if (RectF.intersects(scratch.rect, scratch.clipF)) {
+                        scratch.fillPaint.color = colorInt(primitive.color, foreground)
+                        val r = primitive.radius.toFloat() * zoom
+                        canvas.drawRoundRect(scratch.rect, r, r, scratch.fillPaint)
                     }
                 }
                 is ScenePrimitive.Line -> {
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = colorInt(primitive.color, foreground)
-                        strokeWidth = primitive.width.toFloat() * zoom
-                        strokeCap = Paint.Cap.ROUND
-                    }
+                    scratch.linePaint.color = colorInt(primitive.color, foreground)
+                    scratch.linePaint.strokeWidth = primitive.width.toFloat() * zoom
                     canvas.drawLine(
                         primitive.from.x.toFloat() * zoom,
                         primitive.from.y.toFloat() * zoom,
                         primitive.to.x.toFloat() * zoom,
                         primitive.to.y.toFloat() * zoom,
-                        paint,
+                        scratch.linePaint,
                     )
                 }
                 is ScenePrimitive.GraphPath -> {
                     val points = primitive.points
                     if (points.isNotEmpty()) {
-                        val path = roundedPath(points, primitive.cornerRadius, zoom)
-                        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                            color = colorInt(primitive.color, foreground)
-                            strokeWidth = primitive.width.toFloat() * zoom
-                            style = Paint.Style.STROKE
-                            strokeJoin = Paint.Join.ROUND
-                            strokeCap = Paint.Cap.ROUND
-                            if (primitive.line == "Dotted") {
-                                val dash = 4f * zoom
-                                pathEffect = DashPathEffect(floatArrayOf(dash, dash), 0f)
-                            }
+                        writeRoundedPath(scratch.path, points, primitive.cornerRadius, zoom)
+                        scratch.pathPaint.color = colorInt(primitive.color, foreground)
+                        scratch.pathPaint.strokeWidth = primitive.width.toFloat() * zoom
+                        scratch.pathPaint.pathEffect = if (primitive.line == "Dotted") {
+                            scratch.dashEffect(zoom)
+                        } else {
+                            null
                         }
-                        canvas.drawPath(path, paint)
-                        marker(primitive.start, points, true, primitive.color, foreground, zoom, canvas)
-                        marker(primitive.end, points, false, primitive.color, foreground, zoom, canvas)
+                        canvas.drawPath(scratch.path, scratch.pathPaint)
+                        marker(primitive.start, points, true, primitive.color, foreground, zoom, canvas, scratch)
+                        marker(primitive.end, points, false, primitive.color, foreground, zoom, canvas, scratch)
                     }
                 }
                 is ScenePrimitive.GraphShape -> {
-                    val rect = primitive.rect.toRectF(zoom)
-                    val body = if (primitive.outline.isEmpty()) {
-                        standardShape(primitive.shape, rect)
+                    primitive.rect.writeTo(scratch.rect, zoom)
+                    if (primitive.outline.isEmpty()) {
+                        writeStandardShape(scratch.path, primitive.shape, scratch.rect, scratch.innerOval)
                     } else {
-                        path(primitive.outline, zoom).also { it.close() }
-                    }
-                    val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = colorInt(primitive.fill, foreground)
-                        style = Paint.Style.FILL
+                        writePath(scratch.path, primitive.outline, zoom)
+                        scratch.path.close()
                     }
                     if (alpha(primitive.fill) > 0 || primitive.fill.r + primitive.fill.g + primitive.fill.b > 0.0) {
-                        canvas.drawPath(body, fill)
+                        scratch.fillPaint.color = colorInt(primitive.fill, foreground)
+                        canvas.drawPath(scratch.path, scratch.fillPaint)
                     }
-                    val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = colorInt(primitive.stroke, foreground)
-                        strokeWidth = primitive.strokeWidth.toFloat() * zoom
-                        style = Paint.Style.STROKE
-                        strokeJoin = Paint.Join.ROUND
-                    }
-                    canvas.drawPath(body, stroke)
+                    scratch.strokePaint.color = colorInt(primitive.stroke, foreground)
+                    scratch.strokePaint.strokeWidth = primitive.strokeWidth.toFloat() * zoom
+                    scratch.strokePaint.strokeJoin = Paint.Join.ROUND
+                    canvas.drawPath(scratch.path, scratch.strokePaint)
                     if (primitive.details.isNotEmpty()) {
                         for (detail in primitive.details) {
-                            canvas.drawPath(path(detail, zoom), stroke)
+                            writePath(scratch.detailPath, detail, zoom)
+                            canvas.drawPath(scratch.detailPath, scratch.strokePaint)
                         }
                     }
                 }
                 is ScenePrimitive.LabelBackground -> {
-                    canvas.drawRect(
-                        primitive.rect.toRectF(zoom),
-                        Paint(Paint.ANTI_ALIAS_FLAG).apply { color = colorInt(primitive.color, foreground) },
-                    )
+                    primitive.rect.writeTo(scratch.rect, zoom)
+                    scratch.fillPaint.color = colorInt(primitive.color, foreground)
+                    canvas.drawRect(scratch.rect, scratch.fillPaint)
                 }
                 is ScenePrimitive.Text -> {
                     if (!includeText) continue
-                    drawText(canvas, primitive.span, foreground, zoom, clip)
+                    drawText(canvas, primitive.span, foreground, zoom, scratch)
                 }
             }
         }
@@ -258,25 +299,25 @@ internal object SceneRenderer {
         span: SceneText,
         foreground: Int,
         zoom: Float,
-        clip: android.graphics.Rect,
+        scratch: DrawScratch,
     ) {
         val supersample = 16f
         val size = span.fontSize.toFloat() * zoom
         if (size <= 0f) return
-        val paint = SceneTextMetrics.paint(span, zoom, colorInt(span.color, foreground))
         val x = span.baseline.x.toFloat() * zoom
         val y = span.baseline.y.toFloat() * zoom
-        val bounds = RectF(
+        scratch.textBounds.set(
             x - 2f,
             y - size * 1.5f,
             x + (span.width * zoom).toFloat() + 4f,
             y + size * 0.6f,
         )
-        if (!RectF.intersects(bounds, RectF(clip))) return
+        if (!RectF.intersects(scratch.textBounds, scratch.clipF)) return
+        SceneTextMetrics.configurePaint(scratch.textPaint, span, zoom, colorInt(span.color, foreground))
         canvas.save()
         canvas.translate(x, y)
         canvas.scale(1f / supersample, 1f / supersample)
-        canvas.drawText(span.text, 0f, 0f, paint)
+        canvas.drawText(span.text, 0f, 0f, scratch.textPaint)
         canvas.restore()
     }
 
@@ -288,9 +329,9 @@ internal object SceneRenderer {
         foreground: Int,
         zoom: Float,
         canvas: Canvas,
+        scratch: DrawScratch,
     ) {
-        if (kind == "None") return
-        if (points.size < 2) return
+        if (kind == "None" || points.size < 2) return
         val tip = if (atStart) points.first() else points.last()
         val next = if (atStart) points[1] else points[points.size - 2]
         val dx = tip.x - next.x
@@ -299,13 +340,12 @@ internal object SceneRenderer {
         if (length <= 0.0) return
         val ux = dx / length
         val uy = dy / length
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = colorInt(sceneColor, foreground)
-            strokeWidth = 1.5f * zoom
-        }
+        scratch.markerPaint.color = colorInt(sceneColor, foreground)
+        scratch.markerPaint.strokeWidth = 1.5f * zoom
         when (kind) {
             "Arrow" -> {
-                val path = Path()
+                val path = scratch.markerPath
+                path.rewind()
                 path.moveTo(tip.x.toFloat() * zoom, tip.y.toFloat() * zoom)
                 path.lineTo(
                     (tip.x - ux * 9 - uy * 4).toFloat() * zoom,
@@ -316,32 +356,46 @@ internal object SceneRenderer {
                     (tip.y - uy * 9 - ux * 4).toFloat() * zoom,
                 )
                 path.close()
-                canvas.drawPath(path, paint.apply { style = Paint.Style.FILL })
+                scratch.markerPaint.style = Paint.Style.FILL
+                canvas.drawPath(path, scratch.markerPaint)
             }
             "Circle" -> {
                 val cx = (tip.x - ux * 4.25).toFloat() * zoom
                 val cy = (tip.y - uy * 4.25).toFloat() * zoom
-                canvas.drawCircle(cx, cy, 3.5f * zoom, paint.apply { style = Paint.Style.STROKE })
+                scratch.markerPaint.style = Paint.Style.STROKE
+                canvas.drawCircle(cx, cy, 3.5f * zoom, scratch.markerPaint)
             }
             "Cross" -> {
                 val cx = (tip.x - ux * 5).toFloat() * zoom
                 val cy = (tip.y - uy * 5).toFloat() * zoom
-                paint.style = Paint.Style.STROKE
-                for (sign in listOf(-1.0, 1.0)) {
-                    canvas.drawLine(
-                        (cx - ux * 3 - uy * 3 * sign).toFloat() * zoom,
-                        (cy - uy * 3 + ux * 3 * sign).toFloat() * zoom,
-                        (cx + ux * 3 + uy * 3 * sign).toFloat() * zoom,
-                        (cy + uy * 3 - ux * 3 * sign).toFloat() * zoom,
-                        paint,
-                    )
-                }
+                scratch.markerPaint.style = Paint.Style.STROKE
+                drawCrossLine(canvas, cx, cy, ux, uy, -1.0, zoom, scratch.markerPaint)
+                drawCrossLine(canvas, cx, cy, ux, uy, 1.0, zoom, scratch.markerPaint)
             }
         }
     }
 
-    private fun standardShape(shape: String, rect: RectF): Path {
-        val path = Path()
+    private fun drawCrossLine(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        ux: Double,
+        uy: Double,
+        sign: Double,
+        zoom: Float,
+        paint: Paint,
+    ) {
+        canvas.drawLine(
+            (cx - ux * 3 - uy * 3 * sign).toFloat() * zoom,
+            (cy - uy * 3 + ux * 3 * sign).toFloat() * zoom,
+            (cx + ux * 3 + uy * 3 * sign).toFloat() * zoom,
+            (cy + uy * 3 - ux * 3 * sign).toFloat() * zoom,
+            paint,
+        )
+    }
+
+    private fun writeStandardShape(path: Path, shape: String, rect: RectF, innerOval: RectF) {
+        path.rewind()
         when (shape) {
             "Stadium" -> {
                 val radius = min(rect.width(), rect.height()) / 2
@@ -350,30 +404,30 @@ internal object SceneRenderer {
             "Circle", "DoubleCircle" -> {
                 path.addOval(rect, Path.Direction.CW)
                 if (shape == "DoubleCircle") {
-                    path.addOval(
-                        RectF(rect.left + 2.5f, rect.top + 2.5f, rect.right - 2.5f, rect.bottom - 2.5f),
-                        Path.Direction.CW,
-                    )
+                    innerOval.set(rect.left + 2.5f, rect.top + 2.5f, rect.right - 2.5f, rect.bottom - 2.5f)
+                    path.addOval(innerOval, Path.Direction.CW)
                 }
             }
-            else -> path.addRoundRect(rect, min(10f, rect.height() / 2), min(10f, rect.height() / 2), Path.Direction.CW)
+            else -> {
+                val r = min(10f, rect.height() / 2)
+                path.addRoundRect(rect, r, r, Path.Direction.CW)
+            }
         }
-        return path
     }
 
-    private fun path(points: List<ScenePoint>, zoom: Float): Path {
-        val result = Path()
-        val first = points.firstOrNull() ?: return result
+    private fun writePath(result: Path, points: List<ScenePoint>, zoom: Float) {
+        result.rewind()
+        val first = points.firstOrNull() ?: return
         result.moveTo(first.x.toFloat() * zoom, first.y.toFloat() * zoom)
-        for (point in points.drop(1)) {
+        for (i in 1 until points.size) {
+            val point = points[i]
             result.lineTo(point.x.toFloat() * zoom, point.y.toFloat() * zoom)
         }
-        return result
     }
 
-    private fun roundedPath(points: List<ScenePoint>, radius: Double, zoom: Float): Path {
-        val result = Path()
-        val first = points.firstOrNull() ?: return result
+    private fun writeRoundedPath(result: Path, points: List<ScenePoint>, radius: Double, zoom: Float) {
+        result.rewind()
+        val first = points.firstOrNull() ?: return
         result.moveTo(first.x.toFloat() * zoom, first.y.toFloat() * zoom)
         if (points.size > 2) {
             for (index in 1 until points.size - 1) {
@@ -402,17 +456,25 @@ internal object SceneRenderer {
         }
         val last = points.last()
         result.lineTo(last.x.toFloat() * zoom, last.y.toFloat() * zoom)
-        return result
     }
 
-    fun SceneRect.toRectF(zoom: Float): RectF = RectF(
-        x.toFloat() * zoom,
-        y.toFloat() * zoom,
-        (x + width).toFloat() * zoom,
-        (y + height).toFloat() * zoom,
-    )
+    private fun SceneRect.writeTo(out: RectF, zoom: Float) {
+        out.set(
+            x.toFloat() * zoom,
+            y.toFloat() * zoom,
+            (x + width).toFloat() * zoom,
+            (y + height).toFloat() * zoom,
+        )
+    }
 
-    fun hitAt(scene: SceneData, x: Float, y: Float, zoom: Float = 1f, translateX: Float = 0f, translateY: Float = 0f): SceneHit? {
+    fun hitAt(
+        scene: SceneData,
+        x: Float,
+        y: Float,
+        zoom: Float = 1f,
+        translateX: Float = 0f,
+        translateY: Float = 0f,
+    ): SceneHit? {
         val sceneX = (x - translateX) / zoom
         val sceneY = (y - translateY) / zoom
         return scene.hitRegions.lastOrNull { hit ->

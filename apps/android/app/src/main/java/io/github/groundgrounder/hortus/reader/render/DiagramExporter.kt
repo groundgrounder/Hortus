@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.render
 
 import android.content.Context
 import android.content.Intent
@@ -14,9 +14,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import kotlin.math.ceil
-import kotlin.math.roundToInt
 
 enum class DiagramExportFormat(val extension: String, val mime: String) {
     Svg("svg", "image/svg+xml"),
@@ -66,19 +66,6 @@ object DiagramExporter {
         return output.toByteArray()
     }
 
-    internal suspend fun svg(
-        repository: ReaderRepository,
-        engineText: String,
-        mmd: Boolean,
-        ordinal: Int,
-        width: Double,
-        dark: Boolean,
-        collapsed: List<String>,
-    ): ByteArray = withContext(Dispatchers.IO) {
-        repository.exportSvg(engineText, mmd, ordinal, width, dark, collapsed)
-            .toByteArray(Charsets.UTF_8)
-    }
-
     suspend fun png(scene: SceneData, dark: Boolean): ByteArray = withContext(Dispatchers.IO) {
         encodePng(scene, dark)
     }
@@ -87,7 +74,7 @@ object DiagramExporter {
         encodePdf(scene, dark)
     }
 
-    fun write(context: Context, uri: android.net.Uri, bytes: ByteArray) {
+    fun write(context: Context, uri: Uri, bytes: ByteArray) {
         context.contentResolver.openOutputStream(uri, "w")?.use { it.write(bytes) }
             ?: throw IllegalStateException("output stream unavailable")
     }
@@ -105,17 +92,17 @@ object DiagramExporter {
         val temporary = File(directory, ".$name.tmp")
         temporary.writeBytes(bytes)
         try {
-            java.nio.file.Files.move(
+            Files.move(
                 temporary.toPath(),
                 file.toPath(),
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
             )
         } catch (_: Exception) {
-            java.nio.file.Files.move(
+            Files.move(
                 temporary.toPath(),
                 file.toPath(),
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.REPLACE_EXISTING,
             )
         }
         cleanupShareCache(context)
@@ -151,39 +138,4 @@ object DiagramExporter {
     } catch (_: Exception) {
         null
     }
-}
-
-data class FocusPayload(
-    val vaultPath: String,
-    val notePath: String,
-    val documentKey: String,
-    val engineText: String,
-    val mmd: Boolean,
-    val ordinal: Int,
-    val revision: Long,
-    val dark: Boolean,
-    val collapsed: List<String>,
-    val title: String,
-    val renderWidth: Double,
-)
-
-object FocusPayloads {
-    internal const val MAX_PAYLOADS = 8
-    private var next = 1
-    private val payloads = object : LinkedHashMap<Int, FocusPayload>(16, 0.75f, false) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, FocusPayload>): Boolean =
-            size > MAX_PAYLOADS
-    }
-
-    fun put(payload: FocusPayload): Int = synchronized(this) {
-        val token = next++
-        payloads[token] = payload
-        token
-    }
-
-    fun get(token: Int): FocusPayload? = synchronized(this) { payloads[token] }
-
-    fun remove(token: Int): FocusPayload? = synchronized(this) { payloads.remove(token) }
-
-    fun clear() = synchronized(this) { payloads.clear() }
 }
