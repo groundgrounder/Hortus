@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -974,6 +975,347 @@ def verify_media_widths(layout_media: dict):
     }
 
 
+def _pad4(n: int) -> int:
+    return (4 - (n % 4)) % 4
+
+
+class X11Client:
+    """纯 Python 标准库 X11 协议客户端：无外部依赖，直接向 Xvfb 发送 ConfigureWindow。"""
+
+    def __init__(self, display: str | None = None):
+        disp = display or os.environ.get("DISPLAY") or ":0"
+        if ":" not in disp:
+            raise AssertionError(f"无效 DISPLAY：{disp}")
+        _, rest = disp.split(":", 1)
+        dnum = int(rest.split(".", 1)[0])
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        unix_path = f"/tmp/.X11-unix/X{dnum}"
+        try:
+            self.sock.connect(unix_path)
+        except OSError:
+            self.sock.connect(f"\x00/tmp/.X11-unix/X{dnum}")
+        self.sock.settimeout(5.0)
+        self.seq = 0
+        self.root_window = self._handshake()
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def _recv_exact(self, n: int) -> bytes:
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise AssertionError(f"X11 连接提前关闭（期望 {n} 字节，实得 {len(buf)}）")
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _handshake(self) -> int:
+        hello = struct.pack("<BxHHHHxx", ord("l"), 11, 0, 0, 0)
+        self.sock.sendall(hello)
+        head = self._recv_exact(8)
+        status, reason_len, _, _, extra_words = struct.unpack("<BBHHH", head)
+        body = self._recv_exact(extra_words * 4)
+        if status != 1:
+            reason = body[:reason_len].decode("utf-8", errors="replace")
+            raise AssertionError(f"X11 握手失败 status={status}: {reason}")
+        vendor_len, _, _num_roots, num_formats = struct.unpack_from("<HHBB", body, 16)
+        offset = 32 + vendor_len + _pad4(vendor_len) + num_formats * 8
+        return struct.unpack_from("<I", body, offset)[0]
+
+    def _send_req(self, data: bytes) -> int:
+        self.seq = (self.seq + 1) & 0xFFFF
+        self.sock.sendall(data)
+        return self.seq
+
+    def _read_reply(self, expected_seq: int) -> bytes:
+        while True:
+            head = self._recv_exact(32)
+            kind = head[0]
+            if kind == 1:
+                _, _, seq, extra_words = struct.unpack_from("<BBHI", head, 0)
+                extra = self._recv_exact(extra_words * 4) if extra_words else b""
+                if seq == expected_seq:
+                    return head + extra
+            elif kind == 0:
+                _, code, seq, val, minor, major = struct.unpack_from("<BBHIHB", head, 0)
+                raise AssertionError(f"X11 错误 code={code} seq={seq} val={val} op={major}.{minor}")
+            else:
+                # 忽略异步事件通知，继续等待对应序号的响应包。
+                continue
+
+    def sync(self):
+        seq = self._send_req(struct.pack("<BBH", 43, 0, 1))
+        self._read_reply(seq)
+
+    def intern_atom(self, name: str) -> int:
+        raw = name.encode("utf-8")
+        padded = raw + b"\x00" * _pad4(len(raw))
+        req = struct.pack("<BBHHH", 16, 0, 2 + len(padded) // 4, len(raw), 0) + padded
+        seq = self._send_req(req)
+        rep = self._read_reply(seq)
+        return struct.unpack_from("<I", rep, 8)[0]
+
+    def query_tree(self, wid: int) -> list[int]:
+        seq = self._send_req(struct.pack("<BBHI", 15, 0, 2, wid))
+        rep = self._read_reply(seq)
+        n_children = struct.unpack_from("<H", rep, 16)[0]
+        if n_children == 0:
+            return []
+        return list(struct.unpack_from(f"<{n_children}I", rep, 32))
+
+    def is_viewable(self, wid: int) -> bool:
+        seq = self._send_req(struct.pack("<BBHI", 3, 0, 2, wid))
+        rep = self._read_reply(seq)
+        return rep[26] == 2
+
+    def get_property(self, wid: int, prop_atom: int) -> tuple[int, int, bytes]:
+        seq = self._send_req(struct.pack("<BBHIIIII", 20, 0, 6, wid, prop_atom, 0, 0, 64))
+        rep = self._read_reply(seq)
+        fmt = rep[1]
+        nitems = struct.unpack_from("<I", rep, 16)[0]
+        unit = fmt // 8 if fmt in (8, 16, 32) else 0
+        payload = rep[32 : 32 + nitems * unit]
+        return fmt, nitems, payload
+
+    def find_window_for_pid(self, pid: int, title_hint: str = "Hortus") -> int | None:
+        pid_atom = self.intern_atom("_NET_WM_PID")
+        wm_name_atom = 39
+        candidates = list(reversed(self.query_tree(self.root_window)))
+        # 一并扫描两层（无 WM 直接挂 root，有 WM 时再向下一层）。
+        queue = list(candidates)
+        visited = set()
+        fallback = None
+        while queue:
+            wid = queue.pop(0)
+            if wid in visited:
+                continue
+            visited.add(wid)
+            try:
+                if not self.is_viewable(wid):
+                    continue
+                fmt, nitems, pid_bytes = self.get_property(wid, pid_atom)
+                if fmt == 32 and nitems >= 1 and len(pid_bytes) >= 4:
+                    win_pid = struct.unpack_from("<I", pid_bytes, 0)[0]
+                    if win_pid == pid:
+                        return wid
+                _, _, name_bytes = self.get_property(wid, wm_name_atom)
+                if title_hint.encode("utf-8") in name_bytes:
+                    fallback = wid
+                queue.extend(self.query_tree(wid))
+            except AssertionError:
+                continue
+        return fallback
+
+    def configure_window(self, wid: int, width: int, height: int):
+        # value-mask: Width (0x0004) | Height (0x0008) = 0x000C
+        req = struct.pack("<BBHIHHII", 12, 0, 5, wid, 0x000C, 0, width, height)
+        self._send_req(req)
+        self.sync()
+
+
+def run_live_resize_regression(
+    gui_bin: Path,
+    vault: Path,
+    tmp_path: Path,
+    output_dir: Path,
+    media_dir: Path,
+):
+    """用真实 X11 ConfigureWindow 执行 1400 -> 1020 -> 760 -> 1520 实时缩放回归。"""
+    env = isolated_env(tmp_path / "live-resize")
+    report_path = output_dir / "layout-live-resize.json"
+    stage_path = report_path.with_suffix(".stage")
+    cmd_path = report_path.with_suffix(".cmd")
+    shot_1020 = media_dir / "l2-live-resize-1020.png"
+    shot_1520 = media_dir / "l2-live-resize-1520.png"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    for path in (report_path, stage_path, cmd_path, shot_1020, shot_1520):
+        path.unlink(missing_ok=True)
+
+    cmd = [
+        str(gui_bin),
+        "--vault",
+        str(vault),
+        "--open",
+        "Learning/Learning map.md",
+        "--width",
+        "1400",
+        "--height",
+        "860",
+        "--live-resize-json",
+        str(report_path),
+    ]
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    sockets = []
+    peak_rss_kib = 0
+
+    def sample_proc():
+        nonlocal peak_rss_kib
+        sockets.extend(process_network_sockets(proc.pid))
+        rss = read_rss_kib(proc.pid)
+        if rss and rss > peak_rss_kib:
+            peak_rss_kib = rss
+
+    def wait_stage(expected_seq: int, timeout: float = 20.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if stage_path.is_file():
+                try:
+                    data = json.loads(stage_path.read_text(encoding="utf-8"))
+                    if data.get("seq", -1) >= expected_seq:
+                        return data
+                except json.JSONDecodeError:
+                    pass
+            sample_proc()
+            if proc.poll() is not None:
+                if stage_path.is_file():
+                    try:
+                        data = json.loads(stage_path.read_text(encoding="utf-8"))
+                        if data.get("seq", -1) >= expected_seq:
+                            return data
+                    except json.JSONDecodeError:
+                        pass
+                raise AssertionError(f"实时缩放进程意外提前退出 code={proc.returncode}")
+            time.sleep(0.05)
+        raise AssertionError(f"等待实时缩放阶段 seq={expected_seq} 超时")
+
+    x11 = X11Client(env.get("DISPLAY"))
+    try:
+        init_stage = wait_stage(0, timeout=25.0)
+        wid = None
+        find_deadline = time.monotonic() + 10.0
+        while time.monotonic() < find_deadline and wid is None:
+            wid = x11.find_window_for_pid(proc.pid, "Hortus")
+            if wid is None:
+                time.sleep(0.05)
+        check(wid is not None, "未能通过 X11 QueryTree 定位 Hortus 主窗口")
+
+        resize_plan = [
+            (1, 1020, 860, str(shot_1020)),
+            (2, 760, 860, ""),
+            (3, 1520, 900, str(shot_1520)),
+        ]
+        stages = {}
+        for seq, target_w, target_h, shot in resize_plan:
+            x11.configure_window(wid, target_w, target_h)
+            tmp_cmd = cmd_path.parent / (cmd_path.name + ".tmp")
+            tmp_cmd.write_text(
+                json.dumps({"seq": seq, "target_width": target_w, "screenshot": shot}),
+                encoding="utf-8",
+            )
+            os.replace(tmp_cmd, cmd_path)
+            stages[seq] = wait_stage(seq, timeout=20.0)
+            sample_proc()
+
+        stdout, stderr = proc.communicate(timeout=20)
+    except Exception:
+        proc.kill()
+        proc.communicate(timeout=10)
+        raise
+    finally:
+        x11.close()
+        stage_path.unlink(missing_ok=True)
+        cmd_path.unlink(missing_ok=True)
+
+    run = {
+        "label": "L2 X11 实时缩放回归",
+        "returncode": proc.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "sockets": sockets,
+        "peak_rss_mib": round(peak_rss_kib / 1024.0, 2),
+    }
+    assert_clean_run(run, "L2 X11 实时缩放回归")
+    check(report_path.is_file(), f"X11 实时缩放未生成 JSON：{report_path}")
+
+    init_snap = init_stage["snapshot"]
+    s1 = stages[1]
+    s2 = stages[2]
+    s3 = stages[3]
+    snap_1020 = s1["snapshot"]
+    snap_760 = s2["snapshot"]
+    snap_1520 = s3["snapshot"]
+
+    check(init_stage.get("ready") is True and init_stage.get("allocated") is True, f"实时缩放首屏未就绪：{init_stage}")
+    check(init_snap.get("left_collapsed") is False and init_snap.get("right_collapsed") is False, f"1400px 不应折叠侧栏：{init_snap}")
+    init_scene = (init_snap.get("diagram_scene_widths") or [0])[0]
+    check(init_scene >= 520, f"1400px 初始图表宽不足：{init_snap}")
+
+    check(s1.get("resized_and_reflowed") is True, f"1020px 实时重排未完成：{s1}")
+    scene_1020 = (snap_1020.get("diagram_scene_widths") or [0])[0]
+    check(
+        snap_1020.get("reflow_count", 0) > init_snap.get("reflow_count", 0),
+        f"1020px reflow_count 未递增：{init_snap} -> {snap_1020}",
+    )
+    check(scene_1020 < init_scene - 150, f"1020px 未随 X11 缩窗真实收缩：{init_scene} -> {scene_1020}")
+
+    check(s2.get("resized_and_reflowed") is True, f"760px 实时重排未完成：{s2}")
+    check(
+        snap_760.get("left_collapsed") is True and snap_760.get("right_collapsed") is True,
+        f"760px 未触发 819px 侧栏断点折叠：{snap_760}",
+    )
+    check(
+        snap_760.get("reflow_count", 0) > snap_1020.get("reflow_count", 0),
+        f"760px reflow_count 未递增：{snap_1020} -> {snap_760}",
+    )
+
+    check(s3.get("resized_and_reflowed") is True, f"1520px 实时重排未完成：{s3}")
+    scene_1520 = (snap_1520.get("diagram_scene_widths") or [0])[0]
+    check(
+        snap_1520.get("left_collapsed") is False and snap_1520.get("right_collapsed") is False,
+        f"1520px 扩窗后未自动恢复双侧栏：{snap_1520}",
+    )
+    check(scene_1520 > init_scene + 50, f"1520px 图表未随之扩展：{init_scene} -> {scene_1520}")
+    check(
+        snap_1520.get("reflow_count", 0) > snap_760.get("reflow_count", 0),
+        f"1520px reflow_count 未递增：{snap_760} -> {snap_1520}",
+    )
+
+    shots = {}
+    for key, shot_path, expected_w in (
+        ("1020", shot_1020, 1020),
+        ("1520", shot_1520, 1520),
+    ):
+        check(shot_path.is_file(), f"实时缩放截图缺失：{shot_path}")
+        w, h = png_dimensions(shot_path)
+        check(abs(w - expected_w) <= 12 and h >= 700, f"{shot_path.name} 尺寸异常：{w}x{h}")
+        check(shot_path.stat().st_size > 40_000, f"{shot_path.name} 内容过于简单")
+        shots[key] = {
+            "path": str(shot_path.resolve()),
+            "width": w,
+            "height": h,
+            "size_bytes": shot_path.stat().st_size,
+            "sha256": hashlib.sha256(shot_path.read_bytes()).hexdigest(),
+        }
+
+    return {
+        "returncode": run["returncode"],
+        "network_connections": len(sockets),
+        "peak_rss_mib": run["peak_rss_mib"],
+        "report_path": str(report_path.resolve()),
+        "init_scene": init_scene,
+        "scene_1020": scene_1020,
+        "scene_760": (snap_760.get("diagram_scene_widths") or [0])[0],
+        "scene_1520": scene_1520,
+        "reflow_counts": [
+            init_snap.get("reflow_count", 0),
+            snap_1020.get("reflow_count", 0),
+            snap_760.get("reflow_count", 0),
+            snap_1520.get("reflow_count", 0),
+        ],
+        "screenshots": shots,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--gui-bin", type=Path, default=None)
@@ -1121,6 +1463,7 @@ def main():
         )
         layout_verified = verify_diagram_widths(layout_1280, layout_wide, layout_narrow)
         media_widths = verify_media_widths(layout_media)
+        live_resize = run_live_resize_regression(gui_bin, wikilink_vault, tmp_path, output_dir, media_dir)
 
     if display is not None:
         display.terminate()
@@ -1149,6 +1492,7 @@ def main():
         "layout_width": {
             "learning_map": layout_verified,
             "media": media_widths,
+            "live_resize": live_resize,
             "reports": {
                 "default_1280": layout_1280["report_path"],
                 "wide": layout_wide["report_path"],
