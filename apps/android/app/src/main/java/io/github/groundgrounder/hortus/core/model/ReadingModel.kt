@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.core.model
 
 import io.github.groundgrounder.hortus.core.ReadingModel
 import java.nio.ByteBuffer

@@ -3,6 +3,7 @@ package io.github.groundgrounder.hortus
 
 import android.app.Application
 import io.github.groundgrounder.hortus.app.HortusServices
+import io.github.groundgrounder.hortus.core.CoreEnvironment
 
 class HortusApplication : Application() {
     internal lateinit var services: HortusServices

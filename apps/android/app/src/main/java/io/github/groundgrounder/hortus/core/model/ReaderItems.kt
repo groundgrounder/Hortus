@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.core.model
 
 import io.github.groundgrounder.hortus.core.EmbedBlockInfo
 import io.github.groundgrounder.hortus.core.EmbedContentInfo
@@ -176,7 +176,7 @@ internal fun buildReaderItems(
     val embedLinks = knowledge.links.filter { it.embed && !it.attachment && !it.inDiagram }
     val items = ArrayList<ReaderItem>(model.blocks.size)
     var diagramOrdinal = 0
-    for ((index, block) in model.blocks.withIndex()) {
+    for (block in model.blocks) {
         val blockText = model.blockText(block)
         val blockMedia = mediaByBlock[block.id].orEmpty()
         val blockMath = mathByBlock[block.id].orEmpty()

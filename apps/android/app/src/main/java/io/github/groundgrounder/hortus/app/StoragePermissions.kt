@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus
+package io.github.groundgrounder.hortus.app
 
 import android.Manifest
 import android.content.Context
