@@ -54,6 +54,14 @@ pub struct CliOptions {
     pub layout_hide_sidebars: bool,
     #[cfg(feature = "automation")]
     pub live_resize_json: Option<PathBuf>,
+    #[cfg(feature = "automation")]
+    pub terminal_agent_json: Option<PathBuf>,
+    #[cfg(feature = "automation")]
+    pub terminal_agent_media: Option<PathBuf>,
+    #[cfg(feature = "automation")]
+    pub terminal_agent_vault2: Option<PathBuf>,
+    #[cfg(feature = "automation")]
+    pub restore_session_json: Option<PathBuf>,
 }
 
 impl CliOptions {
@@ -84,6 +92,8 @@ impl CliOptions {
             || self.wikilink_json.is_some()
             || self.layout_width_json.is_some()
             || self.live_resize_json.is_some()
+            || self.terminal_agent_json.is_some()
+            || self.restore_session_json.is_some()
             || self.screenshot.is_some()
             || self.focus_diagram.is_some()
             || self.edit_mode
@@ -91,6 +101,11 @@ impl CliOptions {
             || self.overview
             || self.hide_top_bar
             || self.quit_after_ms.is_some()
+    }
+
+    #[cfg(not(feature = "automation"))]
+    pub fn has_automation_mode(&self) -> bool {
+        false
     }
 
     #[cfg(feature = "automation")]
@@ -245,6 +260,34 @@ impl CliOptions {
                 "--live-resize-json" => {
                     let value = iter.next().ok_or("--live-resize-json 需要提供输出路径")?;
                     options.live_resize_json = Some(PathBuf::from(value));
+                }
+                #[cfg(feature = "automation")]
+                "--terminal-agent-json" => {
+                    let value = iter
+                        .next()
+                        .ok_or("--terminal-agent-json 需要提供输出路径")?;
+                    options.terminal_agent_json = Some(PathBuf::from(value));
+                }
+                #[cfg(feature = "automation")]
+                "--terminal-agent-media" => {
+                    let value = iter
+                        .next()
+                        .ok_or("--terminal-agent-media 需要提供目录路径")?;
+                    options.terminal_agent_media = Some(PathBuf::from(value));
+                }
+                #[cfg(feature = "automation")]
+                "--terminal-agent-vault2" => {
+                    let value = iter
+                        .next()
+                        .ok_or("--terminal-agent-vault2 需要提供目录路径")?;
+                    options.terminal_agent_vault2 = Some(PathBuf::from(value));
+                }
+                #[cfg(feature = "automation")]
+                "--restore-session-json" => {
+                    let value = iter
+                        .next()
+                        .ok_or("--restore-session-json 需要提供输出路径")?;
+                    options.restore_session_json = Some(PathBuf::from(value));
                 }
                 other => return Err(format!("未知参数：{other}")),
             }

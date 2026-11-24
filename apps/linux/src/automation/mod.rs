@@ -7,6 +7,7 @@ pub mod l0_smoke;
 pub mod l1_reading;
 pub mod l2_edit_knowledge;
 pub mod l2_knowledge_files;
+pub mod l3_terminal_agent;
 pub mod layout_width;
 pub mod scenes;
 
@@ -50,6 +51,7 @@ pub fn maybe_schedule_automation(win: &Rc<WindowInner>) {
         && opts.wikilink_json.is_none()
         && opts.layout_width_json.is_none()
         && opts.live_resize_json.is_none()
+        && opts.terminal_agent_json.is_none()
         && opts.screenshot.is_none()
         && opts.focus_diagram.is_none()
         && !opts.edit_mode
@@ -162,6 +164,15 @@ pub fn maybe_schedule_automation(win: &Rc<WindowInner>) {
 }
 
 pub fn run_automation(win: &Rc<WindowInner>) {
+    if let Some(ref json_path) = win.options.terminal_agent_json {
+        l3_terminal_agent::execute_terminal_agent_checks(
+            win,
+            json_path.clone(),
+            win.options.terminal_agent_media.clone(),
+            win.options.terminal_agent_vault2.clone(),
+        );
+        return;
+    }
     if let Some(ref json_path) = win.options.live_resize_json {
         layout_width::execute_live_resize_checks(win, json_path.clone());
         return;
