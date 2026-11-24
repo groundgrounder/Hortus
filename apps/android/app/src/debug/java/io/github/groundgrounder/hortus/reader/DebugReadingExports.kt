@@ -15,12 +15,24 @@ import java.io.File
 import java.util.regex.Pattern
 
 internal object DebugReadingExports {
-    suspend fun exportAll(activity: MainActivity, name: String, expectedNote: String? = null) {
+    suspend fun exportAll(
+        activity: MainActivity,
+        name: String,
+        expectedNote: String? = null,
+        expectedVault: String? = null,
+        minSequence: Long = 0L,
+        openJob: kotlinx.coroutines.Job? = null,
+    ) {
+        openJob?.join()
         var waited = 0L
         while (waited < 12_000) {
-            val current = activity.controller.state.content
-            if (current != null && (expectedNote == null || current.path == expectedNote) &&
-                !activity.controller.state.loading
+            val state = activity.controller.state
+            val current = state.content
+            if (current != null &&
+                !state.loading &&
+                (expectedVault == null || state.vaultPath == expectedVault) &&
+                (expectedNote == null || current.path == expectedNote) &&
+                state.openSequence >= minSequence
             ) {
                 break
             }

@@ -23,7 +23,15 @@ private fun occurrences(text: String, needle: String): Int {
 }
 
 internal object DebugInspection {
-    suspend fun write(activity: MainActivity, name: String, waitMs: Long, expectedNote: String? = null) {
+    suspend fun write(
+        activity: MainActivity,
+        name: String,
+        waitMs: Long,
+        expectedNote: String? = null,
+        expectedVault: String? = null,
+        minSequence: Long = 0L,
+        openJob: kotlinx.coroutines.Job? = null,
+    ) {
         runCatching {
             withContext(Dispatchers.IO) {
                 val directory = checkNotNull(activity.getExternalFilesDir(null))
@@ -32,11 +40,16 @@ internal object DebugInspection {
                     .also { File(directory, "early-$name").setReadable(true, false) }
             }
         }
+        openJob?.join()
         var waited = 0L
         while (waited < 12_000) {
-            val current = activity.controller.state.content
-            if (current != null && (expectedNote == null || current.path == expectedNote) &&
-                !activity.controller.state.loading
+            val state = activity.controller.state
+            val current = state.content
+            if (current != null &&
+                !state.loading &&
+                (expectedVault == null || state.vaultPath == expectedVault) &&
+                (expectedNote == null || current.path == expectedNote) &&
+                state.openSequence >= minSequence
             ) {
                 break
             }
@@ -66,6 +79,13 @@ internal object DebugInspection {
         val dark = (activity.resources.configuration.uiMode and
             android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
+        val density = activity.resources.displayMetrics.density
+        val unitScale = diagramUnitScale(content.bodySize, density)
+        val mainLayoutWidth = (content.width / unitScale).toDouble()
+        val innerWidth = (content.width - (24 * density).toInt()).coerceAtLeast(1)
+        val innerBodySize = content.bodySize * 0.94f
+        val innerUnitScale = diagramUnitScale(innerBodySize, density)
+        val innerLayoutWidth = (innerWidth / innerUnitScale).toDouble()
         withContext(Dispatchers.IO) {
             kotlinx.coroutines.withTimeoutOrNull(30_000) {
                 repository.prepareMath(content.math, content.bodySize)
@@ -83,7 +103,7 @@ internal object DebugInspection {
                         engineText = item.engineText,
                         mmd = item.mmd,
                         ordinal = item.ordinal,
-                        width = content.width.toDouble(),
+                        width = mainLayoutWidth,
                         dark = dark,
                         collapsed = collapsed,
                         revision = content.revision,
@@ -97,20 +117,20 @@ internal object DebugInspection {
                         heading = embed.heading,
                         alias = embed.alias,
                         ancestors = ancestors,
-                        width = content.width.toDouble(),
-                        size = content.bodySize.toDouble(),
+                        width = innerWidth.toDouble(),
+                        size = innerBodySize.toDouble(),
                     )
-                    repository.prepareMath(resolved.math, content.bodySize)
+                    repository.prepareMath(resolved.math, innerBodySize)
                     if (resolved.info.kind == "diagram") {
                         repository.renderDiagram(
                             documentKey = resolved.info.resolvedPath ?: embed.target,
                             engineText = resolved.info.content,
                             mmd = resolved.info.isMmd,
                             ordinal = 1,
-                            width = content.width.toDouble(),
+                            width = innerLayoutWidth,
                             dark = dark,
                             collapsed = emptyList(),
-                            revision = 1,
+                            revision = content.revision,
                         )
                     }
                     if (resolved.info.kind == "note") {
@@ -120,10 +140,10 @@ internal object DebugInspection {
                                 engineText = diagram.engineText,
                                 mmd = diagram.mmd,
                                 ordinal = diagram.ordinal,
-                                width = content.width.toDouble(),
+                                width = innerLayoutWidth,
                                 dark = dark,
                                 collapsed = emptyList(),
-                                revision = 1,
+                                revision = content.revision,
                             )
                         }
                     }

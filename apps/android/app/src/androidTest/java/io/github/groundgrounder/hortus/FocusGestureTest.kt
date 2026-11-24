@@ -4,6 +4,7 @@ package io.github.groundgrounder.hortus
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.groundgrounder.hortus.app.HortusServices
 import io.github.groundgrounder.hortus.reader.DiagramFocusActivity
 import io.github.groundgrounder.hortus.reader.FocusPayload
 import io.github.groundgrounder.hortus.reader.FocusPayloads
@@ -31,12 +32,14 @@ class FocusGestureTest {
         vault = File(context.getExternalFilesDir(null), "focus-vault").apply { mkdirs() }
         File(vault, "diagram.md").writeText("# Diagram\n")
         runBlocking {
-            val core = CoreEnvironment.createWorkspaceCore(context)
-            try {
-                core.rememberDiagramFocus(vault.absolutePath, "diagram.md", 1u, 0.0, 0.0, 0.0)
-            } finally {
-                core.close()
-            }
+            HortusServices.get(context).rememberDiagramFocus(
+                vaultPath = vault.absolutePath,
+                note = "diagram.md",
+                block = 1,
+                scale = 0.0,
+                offsetX = 0.0,
+                offsetY = 0.0,
+            )
         }
         FocusStateRegistry.lastScale = 0f
         FocusStateRegistry.lastOffsetX = 0f
