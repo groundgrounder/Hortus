@@ -4,7 +4,7 @@
 
 //! 表格排版、本地图片解码及远程图片零联网占位组件。
 
-use crate::core::{utf16_range_to_char_range, utf16_slice};
+use crate::core::Utf16Mapper;
 use crate::render::math::{MathRenderService, PreparedMathBlock, build_inline_math_widget};
 use crate::render::svg::{checked_within_vault, sanitize_svg_bytes};
 use gtk4::gdk;
@@ -14,6 +14,7 @@ use gtk4::glib;
 use gtk4::pango;
 use gtk4::prelude::*;
 use hortus_ffi::MathBlock;
+use libadwaita as adw;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -98,7 +99,6 @@ pub struct PreparedMedia {
     pub block: LocalMediaBlock,
     pub texture: Option<gdk::Texture>,
     pub image_width: f64,
-    pub image_height: f64,
     pub reason: String,
     pub cell_math: Vec<Vec<PreparedMathBlock>>,
     #[allow(dead_code)]
@@ -177,7 +177,6 @@ pub fn prepare_media_blocks_bg(
                     block: block.clone(),
                     texture: None,
                     image_width: 0.0,
-                    image_height: 0.0,
                     reason: String::new(),
                     cell_math,
                     sanitized_svg_external_refs: 0,
@@ -190,7 +189,6 @@ pub fn prepare_media_blocks_bg(
                     block: block.clone(),
                     texture: None,
                     image_width: 0.0,
-                    image_height: 0.0,
                     reason: block.image_reason.clone(),
                     cell_math: Vec::new(),
                     sanitized_svg_external_refs: 0,
@@ -208,7 +206,6 @@ pub fn prepare_media_blocks_bg(
                     block: block.clone(),
                     texture: None,
                     image_width: 0.0,
-                    image_height: 0.0,
                     reason,
                     cell_math: Vec::new(),
                     sanitized_svg_external_refs: 0,
@@ -219,12 +216,10 @@ pub fn prepare_media_blocks_bg(
             match decode_local_image(&safe_path) {
                 Ok((texture, ext_refs, scripts)) => {
                     let w = f64::from(texture.width()).max(1.0);
-                    let h = f64::from(texture.height()).max(1.0);
                     PreparedMedia {
                         block: block.clone(),
                         texture: Some(texture),
                         image_width: w,
-                        image_height: h,
                         reason: String::new(),
                         cell_math: Vec::new(),
                         sanitized_svg_external_refs: ext_refs,
@@ -235,7 +230,6 @@ pub fn prepare_media_blocks_bg(
                     block: block.clone(),
                     texture: None,
                     image_width: 0.0,
-                    image_height: 0.0,
                     reason,
                     cell_math: Vec::new(),
                     sanitized_svg_external_refs: 0,
@@ -246,45 +240,50 @@ pub fn prepare_media_blocks_bg(
         .collect()
 }
 
+/// 原生块级图片控件句柄：外层容器与实际等比图片控件分离，支持零锁自适应与精确测宽。
+#[derive(Clone)]
+pub struct ImageBlock {
+    root: gtk4::Widget,
+    #[cfg_attr(not(feature = "automation"), allow(dead_code))]
+    measured: gtk4::Widget,
+}
+
+impl ImageBlock {
+    pub fn widget(&self) -> &gtk4::Widget {
+        &self.root
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn measured_widget(&self) -> &gtk4::Widget {
+        &self.measured
+    }
+}
+
 /// 构造图片（或远程禁止联网占位 / 错误降级卡片）GTK4 控件。
 pub fn build_image_widget(
     media: &PreparedMedia,
-    max_width: f64,
+    _max_width: f64,
     parent_window: Option<&gtk4::Window>,
-) -> gtk4::Widget {
+) -> ImageBlock {
     let block = &media.block;
     if let Some(ref texture) = media.texture {
-        let target_w = block
+        let target_nat_w = block
             .image_width
             .map(f64::from)
             .unwrap_or(media.image_width)
-            .min(max_width.max(120.0))
-            .max(16.0);
-        let aspect = if media.image_width > 0.0 {
-            media.image_height / media.image_width
-        } else {
-            1.0
-        };
-        let target_h = (target_w * aspect).ceil().max(16.0);
+            .round()
+            .max(16.0) as i32;
 
         let container = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
         container.add_css_class("hortus-image-box");
+        container.set_hexpand(true);
+        container.set_halign(gtk4::Align::Fill);
 
         let picture = gtk4::Picture::for_paintable(texture);
         picture.set_can_shrink(true);
         picture.set_content_fit(gtk4::ContentFit::Contain);
-        picture.set_size_request(target_w.round() as i32, target_h.round() as i32);
-        picture.set_halign(gtk4::Align::Start);
-        let picture_scroll = gtk4::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk4::PolicyType::Automatic)
-            .vscrollbar_policy(gtk4::PolicyType::Never)
-            .propagate_natural_width(true)
-            .propagate_natural_height(true)
-            .child(&picture)
-            .build();
-        picture_scroll.add_css_class("hortus-image-scroll");
-        picture_scroll.set_size_request(target_w.round() as i32, -1);
-        let picture = picture_scroll;
+        picture.set_hexpand(true);
+        picture.set_halign(gtk4::Align::Fill);
 
         if !block.image_path.is_empty() {
             let path = PathBuf::from(&block.image_path);
@@ -305,15 +304,26 @@ pub fn build_image_widget(
         if !block.image_alt.is_empty() {
             picture.set_tooltip_text(Some(&block.image_alt));
         }
-        container.append(&picture);
-        return container.upcast();
+
+        let clamp = adw::Clamp::builder()
+            .maximum_size(target_nat_w)
+            .tightening_threshold(target_nat_w)
+            .hexpand(true)
+            .halign(gtk4::Align::Fill)
+            .child(&picture)
+            .build();
+        container.append(&clamp);
+        return ImageBlock {
+            root: container.upcast(),
+            measured: picture.upcast(),
+        };
     }
 
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     card.add_css_class("hortus-media-placeholder");
     card.set_halign(gtk4::Align::Fill);
     card.set_hexpand(true);
-    card.set_size_request((max_width - 16.0).max(240.0).round() as i32, -1);
+    card.set_size_request(120, -1);
 
     let title_text = if block.image_alt.is_empty() {
         block.image_target.clone()
@@ -360,19 +370,46 @@ pub fn build_image_widget(
         card.append(&label);
     }
 
-    card.upcast()
+    let root: gtk4::Widget = card.upcast();
+    ImageBlock {
+        measured: root.clone(),
+        root,
+    }
 }
 
 pub type LinkOpenCallback = Rc<dyn Fn(String, Option<String>)>;
 pub type LinkOpenUriCallback = Rc<dyn Fn(String)>;
 
+/// 原生块级表格控件句柄：外层非传播自然宽的横向滚动容器包装 `GtkGrid`。
+#[derive(Clone)]
+pub struct TableBlock {
+    root: gtk4::Widget,
+}
+
+impl TableBlock {
+    pub fn widget(&self) -> &gtk4::Widget {
+        &self.root
+    }
+}
+
+/// 判断表格单元格是否包含双链或 Markdown 链接。
+fn cell_has_links(cell: &LocalTableCell) -> bool {
+    !cell.source.is_empty() && (cell.source.contains("[[") || cell.source.contains("]("))
+}
+
+/// 纯文本单元格判断：无行内样式、无行内公式、无双链/Markdown 链接时可直接走轻量 `gtk4::Label`。
+pub(crate) fn is_plain_table_cell(cell: &LocalTableCell, cell_math: &[PreparedMathBlock]) -> bool {
+    cell.runs.is_empty() && cell_math.is_empty() && !cell_has_links(cell)
+}
+
 /// 使用内核计算列宽、对齐方式、行内样式及单元格内公式构造原生 `GtkGrid` 表格。
+/// 纯文本单元格使用轻量 `gtk4::Label`，富文本/含链接/公式单元格共享一张表级 `TextTagTable`。
 pub fn build_table_widget(
     media: &PreparedMedia,
-    max_width: f64,
+    _max_width: f64,
     on_open_link: Option<LinkOpenCallback>,
     on_open_uri: Option<LinkOpenUriCallback>,
-) -> gtk4::Widget {
+) -> TableBlock {
     let block = &media.block;
     let cols = block.columns.len().max(1);
     let rows = usize::try_from(block.rows).unwrap_or(0);
@@ -384,6 +421,9 @@ pub fn build_table_widget(
     grid.set_hexpand(true);
     grid.set_halign(gtk4::Align::Fill);
 
+    let mut shared_table_cache: Option<(gtk4::TextTagTable, crate::platform::style::MaskTagSet)> =
+        None;
+
     for r in 0..rows {
         let is_header = r == 0;
         for c in 0..cols {
@@ -393,10 +433,59 @@ pub fn build_table_widget(
             };
             let col_w = block.columns.get(c).copied().unwrap_or(100.0).max(40.0);
             let align = block.alignments.get(c).copied().unwrap_or(0);
+            let cell_math_list = media
+                .cell_math
+                .get(cell_idx)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let is_plain = is_plain_table_cell(cell, cell_math_list);
 
-            let table = crate::platform::style::create_tag_table();
-            let buf = gtk4::TextBuffer::new(Some(&table));
+            let frame = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            frame.add_css_class(if is_header {
+                "hortus-table-header-cell"
+            } else {
+                "hortus-table-body-cell"
+            });
+            frame.set_hexpand(true);
+
+            if is_plain {
+                let lbl = gtk4::Label::new(Some(&cell.text));
+                lbl.set_wrap(true);
+                lbl.set_wrap_mode(pango::WrapMode::WordChar);
+                lbl.set_selectable(true);
+                lbl.set_hexpand(true);
+                lbl.set_xalign(match align {
+                    1 => 0.5,
+                    2 => 1.0,
+                    _ => 0.0,
+                });
+                lbl.set_justify(match align {
+                    1 => gtk4::Justification::Center,
+                    2 => gtk4::Justification::Right,
+                    _ => gtk4::Justification::Left,
+                });
+                lbl.set_margin_start(6);
+                lbl.set_margin_end(6);
+                lbl.set_margin_top(7);
+                lbl.set_margin_bottom(7);
+                lbl.set_size_request(col_w.round() as i32, -1);
+                lbl.add_css_class("hortus-table-cell-text");
+                if is_header {
+                    lbl.add_css_class("hortus-table-header");
+                }
+                frame.append(&lbl);
+                grid.attach(&frame, c as i32, r as i32, 1, 1);
+                continue;
+            }
+
+            let (table, tag_set) = shared_table_cache.get_or_insert_with(|| {
+                let tbl = crate::platform::style::create_tag_table();
+                let set = crate::platform::style::MaskTagSet::new(&tbl);
+                (tbl, set)
+            });
+            let buf = gtk4::TextBuffer::new(Some(table));
             buf.set_text(&cell.text);
+            let cell_mapper = Utf16Mapper::new(&cell.text);
 
             if is_header {
                 let s = buf.start_iter();
@@ -407,11 +496,12 @@ pub fn build_table_widget(
                 if run.length == 0 || run.mask == 0 {
                     continue;
                 }
-                let (cs, ce) =
-                    utf16_range_to_char_range(&cell.text, run.start as usize, run.length as usize);
+                let cs = cell_mapper.utf16_to_char(run.start as usize);
+                let ce = cell_mapper.utf16_to_char((run.start + run.length) as usize);
                 if cs < ce {
-                    crate::platform::style::apply_mask_tags(
+                    crate::platform::style::apply_mask_tags_cached(
                         &buf,
+                        tag_set,
                         &buf.iter_at_offset(cs as i32),
                         &buf.iter_at_offset(ce as i32),
                         run.mask,
@@ -440,46 +530,45 @@ pub fn build_table_widget(
             }
             tv.set_size_request(col_w.round() as i32, -1);
 
-            if let Some(cell_math_list) = media.cell_math.get(cell_idx) {
-                for math_item in cell_math_list {
-                    let (cs, ce) = utf16_range_to_char_range(
-                        &cell.text,
-                        math_item.block.display_start as usize,
-                        math_item.block.display_length as usize,
-                    );
-                    if let Some(ch) = cell.text.chars().nth(cs)
-                        && ch == '\u{fffc}'
-                        && ce > cs
-                    {
-                        let mut s_it = buf.iter_at_offset(cs as i32);
-                        let mut e_it = buf.iter_at_offset(ce as i32);
-                        buf.delete(&mut s_it, &mut e_it);
-                        let anchor = buf.create_child_anchor(&mut s_it);
-                        let w: gtk4::Widget = if math_item.math.is_some() {
-                            build_inline_math_widget(math_item)
-                        } else {
-                            let badge =
-                                gtk4::Label::new(Some(math_item.block.display_source.trim()));
-                            badge.add_css_class("hortus-math-inline-fallback");
-                            badge.add_css_class("monospace");
-                            badge.set_valign(gtk4::Align::Baseline);
-                            badge.set_ellipsize(pango::EllipsizeMode::End);
-                            badge.set_max_width_chars(14);
-                            badge.set_tooltip_text(Some(
-                                math_item.failure.as_deref().unwrap_or("公式语法错误"),
-                            ));
-                            badge.upcast()
-                        };
-                        tv.add_child_at_anchor(&w, &anchor);
-                    }
+            for math_item in cell_math_list {
+                let cs = cell_mapper.utf16_to_char(math_item.block.display_start as usize);
+                let ce = cell_mapper.utf16_to_char(
+                    (math_item.block.display_start + math_item.block.display_length) as usize,
+                );
+                let b0 = cell_mapper.char_to_byte(cs);
+                if cell
+                    .text
+                    .get(b0..)
+                    .is_some_and(|s| s.starts_with('\u{fffc}'))
+                    && ce > cs
+                {
+                    let mut s_it = buf.iter_at_offset(cs as i32);
+                    let mut e_it = buf.iter_at_offset(ce as i32);
+                    buf.delete(&mut s_it, &mut e_it);
+                    let anchor = buf.create_child_anchor(&mut s_it);
+                    let w: gtk4::Widget = if math_item.math.is_some() {
+                        build_inline_math_widget(math_item)
+                    } else {
+                        let badge = gtk4::Label::new(Some(math_item.block.display_source.trim()));
+                        badge.add_css_class("hortus-math-inline-fallback");
+                        badge.add_css_class("monospace");
+                        badge.set_valign(gtk4::Align::Baseline);
+                        badge.set_ellipsize(pango::EllipsizeMode::End);
+                        badge.set_max_width_chars(14);
+                        badge.set_tooltip_text(Some(
+                            math_item.failure.as_deref().unwrap_or("公式语法错误"),
+                        ));
+                        badge.upcast()
+                    };
+                    tv.add_child_at_anchor(&w, &anchor);
                 }
             }
 
-            if !cell.source.is_empty() && (cell.source.contains("[[") || cell.source.contains("]("))
-            {
+            if cell_has_links(cell) {
                 attach_simple_cell_links(
                     &tv,
                     &cell.text,
+                    &cell_mapper,
                     &cell.runs,
                     &cell.source,
                     on_open_link.clone(),
@@ -487,13 +576,6 @@ pub fn build_table_widget(
                 );
             }
 
-            let frame = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-            frame.add_css_class(if is_header {
-                "hortus-table-header-cell"
-            } else {
-                "hortus-table-body-cell"
-            });
-            frame.set_hexpand(true);
             tv.set_hexpand(true);
             frame.append(&tv);
             grid.attach(&frame, c as i32, r as i32, 1, 1);
@@ -503,14 +585,17 @@ pub fn build_table_widget(
     let scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Automatic)
         .vscrollbar_policy(gtk4::PolicyType::Never)
-        .propagate_natural_width(true)
+        .propagate_natural_width(false)
         .propagate_natural_height(true)
+        .min_content_width(160)
         .hexpand(true)
+        .halign(gtk4::Align::Fill)
         .child(&grid)
         .build();
     scroll.add_css_class("hortus-table-wrap");
-    scroll.set_size_request(max_width.round().max(240.0) as i32, -1);
-    scroll.upcast()
+    TableBlock {
+        root: scroll.upcast(),
+    }
 }
 
 #[derive(Clone)]
@@ -522,6 +607,7 @@ enum CellLinkAction {
 fn attach_simple_cell_links(
     tv: &gtk4::TextView,
     text: &str,
+    mapper: &Utf16Mapper,
     runs: &[LocalMediaRun],
     source: &str,
     on_open_link: Option<LinkOpenCallback>,
@@ -532,16 +618,23 @@ fn attach_simple_cell_links(
         if run.mask & (1 << 18) == 0 {
             continue;
         }
-        let (cs, ce) = utf16_range_to_char_range(text, run.start as usize, run.length as usize);
-        if let Some(target) = utf16_slice(text, run.start as usize, run.length as usize) {
-            link_ranges.push((cs as i32, ce as i32, CellLinkAction::Note(target)));
+        let cs = mapper.utf16_to_char(run.start as usize);
+        let ce = mapper.utf16_to_char((run.start + run.length) as usize);
+        let b0 = mapper.char_to_byte(cs);
+        let b1 = mapper.char_to_byte(ce);
+        if let Some(target) = text.get(b0..b1) {
+            link_ranges.push((
+                cs as i32,
+                ce as i32,
+                CellLinkAction::Note(target.to_string()),
+            ));
         }
     }
     let mut search_from = 0usize;
     for (label, url) in markdown_cell_links(source) {
         if let Some(pos) = text.get(search_from..).and_then(|tail| tail.find(&label)) {
             let byte_start = search_from + pos;
-            let char_start = text[..byte_start].chars().count() as i32;
+            let char_start = mapper.byte_to_char(byte_start) as i32;
             let char_end = char_start + label.chars().count() as i32;
             search_from = byte_start + label.len();
             if char_end > char_start
@@ -668,5 +761,39 @@ mod tests {
         );
         assert!(markdown_cell_links("[[内部双链]] 不是外链").is_empty());
         assert!(markdown_cell_links("[相对](Assets/a.png)").is_empty());
+    }
+
+    #[test]
+    fn table_cell_classification_routes_100_cells_correctly() {
+        let mut plain_count = 0usize;
+        let mut rich_count = 0usize;
+        for idx in 0..100 {
+            let cell = if idx % 10 == 0 {
+                LocalTableCell {
+                    source: "**粗体** [[页面]]".into(),
+                    text: "粗体 页面".into(),
+                    runs: vec![LocalMediaRun {
+                        start: 0,
+                        length: 2,
+                        mask: 1,
+                    }],
+                    math: Vec::new(),
+                }
+            } else {
+                LocalTableCell {
+                    source: format!("cell-{idx}"),
+                    text: format!("cell-{idx}"),
+                    runs: Vec::new(),
+                    math: Vec::new(),
+                }
+            };
+            if is_plain_table_cell(&cell, &[]) {
+                plain_count += 1;
+            } else {
+                rich_count += 1;
+            }
+        }
+        assert_eq!(plain_count, 90);
+        assert_eq!(rich_count, 10);
     }
 }

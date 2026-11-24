@@ -8,7 +8,7 @@ use crate::render::diagram::{
     DiagramExportKind, DiagramExportMeta, RenderedDiagram, format_diagram_failure,
     render_block_with_engine,
 };
-use crate::render::diagram_card::{DiagramCallbacks, build_diagram_card};
+use crate::render::diagram_card::{DiagramCallbacks, DiagramCard, build_diagram_card};
 use crate::render::math::{MathRenderService, PreparedMathBlock};
 use crate::render::media::{PreparedMedia, prepare_media_blocks_bg};
 use gtk4::gio;
@@ -16,6 +16,7 @@ use gtk4::glib;
 use gtk4::pango;
 use gtk4::prelude::*;
 use hortus_ffi::{DiagramEngine, DiagramIdentity, EmbedContentInfo, VaultHandle, WorkspaceCore};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -50,6 +51,12 @@ impl EmbedRequest {
     }
 }
 
+/// 嵌入正文回调返回值：控件及嵌套的可重排图表卡片列表。
+pub struct EmbedBodyResult {
+    pub widget: gtk4::Widget,
+    pub diagrams: Vec<DiagramCard>,
+}
+
 /// 由 `reading` 层注入的子正文构建回调，避免 `render` 反向依赖 `reading`。
 pub type EmbedBodyBuilder = Rc<
     dyn Fn(
@@ -59,8 +66,36 @@ pub type EmbedBodyBuilder = Rc<
         &[PreparedMathBlock],
         &[RenderedDiagram],
         &EmbedCallbacks,
-    ) -> gtk4::Widget,
+    ) -> EmbedBodyResult,
 >;
+
+/// 原生块级嵌入卡片句柄：支持原地向内传播宽度重排。
+#[derive(Clone)]
+pub struct EmbedCard {
+    root: gtk4::Widget,
+    diagrams: Rc<RefCell<Vec<DiagramCard>>>,
+}
+
+impl EmbedCard {
+    pub fn widget(&self) -> &gtk4::Widget {
+        &self.root
+    }
+
+    pub fn relayout_to_width(&self, avail_w: f64) {
+        let body_w = EmbedRequest::content_width(avail_w);
+        for card in self.diagrams.borrow().iter() {
+            card.relayout_to_width(body_w);
+        }
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn is_relayout_pending(&self) -> bool {
+        self.diagrams
+            .borrow()
+            .iter()
+            .any(DiagramCard::is_relayout_pending)
+    }
+}
 
 /// 必须在后台工作线程调用：解析嵌入内容、递归准备嵌套媒体/公式/Mermaid 图表。
 pub fn prepare_embed_bg(req: &EmbedRequest) -> Result<PreparedEmbed, String> {
@@ -217,11 +252,14 @@ pub fn build_embed_card(
     precomputed: Option<PreparedEmbed>,
     callbacks: EmbedCallbacks,
     body_builder: EmbedBodyBuilder,
-) -> gtk4::Widget {
+) -> EmbedCard {
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     card.add_css_class("hortus-embed-card");
-    card.set_halign(gtk4::Align::Start);
-    card.set_size_request((req.width - 16.0).max(240.0).round() as i32, -1);
+    card.set_halign(gtk4::Align::Fill);
+    card.set_hexpand(true);
+    card.set_size_request(120, -1);
+
+    let diagrams: Rc<RefCell<Vec<DiagramCard>>> = Rc::new(RefCell::new(Vec::new()));
 
     let header_btn = gtk4::Button::new();
     header_btn.add_css_class("flat");
@@ -262,6 +300,7 @@ pub fn build_embed_card(
             prepared,
             &callbacks,
             &body_builder,
+            &diagrams,
         );
     } else {
         let loading = gtk4::Label::new(Some("正在解析嵌入内容…"));
@@ -275,6 +314,7 @@ pub fn build_embed_card(
         let header_weak = header_btn.downgrade();
         let title_weak = title_label.downgrade();
         let icon_weak = icon.downgrade();
+        let diagrams_weak = Rc::downgrade(&diagrams);
         glib::MainContext::default().spawn_local(async move {
             let req_job = req_bg.clone();
             let res = gio::spawn_blocking(move || prepare_embed_bg(&req_job))
@@ -293,16 +333,19 @@ pub fn build_embed_card(
             }
             match res {
                 Ok(prepared) => {
-                    populate_embed_card(
-                        &body_slot,
-                        &header_btn,
-                        &title_label,
-                        &icon,
-                        &req_bg,
-                        prepared,
-                        &callbacks,
-                        &body_builder,
-                    );
+                    if let Some(diagrams_rc) = diagrams_weak.upgrade() {
+                        populate_embed_card(
+                            &body_slot,
+                            &header_btn,
+                            &title_label,
+                            &icon,
+                            &req_bg,
+                            prepared,
+                            &callbacks,
+                            &body_builder,
+                            &diagrams_rc,
+                        );
+                    }
                 }
                 Err(msg) => {
                     show_embed_message(&body_slot, &msg);
@@ -311,7 +354,10 @@ pub fn build_embed_card(
         });
     }
 
-    card.upcast()
+    EmbedCard {
+        root: card.upcast(),
+        diagrams,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -324,6 +370,7 @@ fn populate_embed_card(
     prepared: PreparedEmbed,
     callbacks: &EmbedCallbacks,
     body_builder: &EmbedBodyBuilder,
+    diagrams_out: &Rc<RefCell<Vec<DiagramCard>>>,
 ) {
     let info = &prepared.info;
     let mut title = if info.display_title.is_empty() {
@@ -356,7 +403,7 @@ fn populate_embed_card(
 
     match info.kind.as_str() {
         "note" => {
-            let body_widget = body_builder(
+            let body = body_builder(
                 req,
                 info,
                 &prepared.media,
@@ -364,7 +411,8 @@ fn populate_embed_card(
                 &prepared.diagrams,
                 callbacks,
             );
-            body_slot.append(&body_widget);
+            body_slot.append(&body.widget);
+            diagrams_out.borrow_mut().extend(body.diagrams);
         }
         "diagram" => {
             if let Some(diagram) = prepared.diagrams.into_iter().next() {
@@ -391,6 +439,7 @@ fn populate_embed_card(
                             let _ = core_bg.remember_diagram(vault_bg, note_bg, ordinal, collapsed);
                         });
                     }),
+                    on_scene_updated: Rc::new(|_, _| {}),
                     on_open_link: Rc::new(move |target, heading| {
                         let res = handle.resolve_link(src_for_links.clone(), target);
                         if let Some(path) = res.resolved_path {
@@ -401,7 +450,7 @@ fn populate_embed_card(
                     on_focus: Rc::new(move |ordinal| (focus_cb)(note_for_focus.clone(), ordinal)),
                     on_export: export_cb,
                 };
-                let diag_widget = build_diagram_card(
+                let diag_card = build_diagram_card(
                     target_note,
                     info.content.clone(),
                     true,
@@ -410,7 +459,8 @@ fn populate_embed_card(
                     diag_callbacks,
                     EmbedRequest::content_width(req.width),
                 );
-                body_slot.append(&diag_widget);
+                body_slot.append(diag_card.widget());
+                diagrams_out.borrow_mut().push(diag_card);
             } else {
                 show_embed_message(body_slot, "嵌入图表无法渲染");
             }

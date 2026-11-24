@@ -12,28 +12,55 @@ use gtk4::subclass::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
+/// 块级公式控件句柄：支持外层容器直接嵌入垂直阅读流。
+#[derive(Clone)]
+pub struct DisplayMathBlock {
+    root: gtk4::Widget,
+}
+
+impl DisplayMathBlock {
+    pub fn widget(&self) -> &gtk4::Widget {
+        &self.root
+    }
+}
+
 /// 构造居中可横向滚动的块级公式控件，失败时局部降级展示原公式文本与原因。
-pub fn build_display_math_widget(item: &PreparedMathBlock, max_width: f64) -> gtk4::Widget {
+pub fn build_display_math_widget(item: &PreparedMathBlock, max_width: f64) -> DisplayMathBlock {
     let Some(ref math) = item.math else {
-        return build_math_fallback_widget(
-            &item.block.display_source,
-            item.failure.as_deref().unwrap_or("公式渲染失败"),
-            true,
-            max_width,
-        );
+        return DisplayMathBlock {
+            root: build_math_fallback_widget(
+                &item.block.display_source,
+                item.failure.as_deref().unwrap_or("公式渲染失败"),
+                true,
+                max_width,
+            ),
+        };
     };
 
     let vpad = 8.0;
     let hpad = 12.0;
     let natural_w = (math.width_px + 2.0 * hpad).ceil().max(48.0);
     let natural_h = (math.height_px + 2.0 * vpad).ceil().max(24.0);
-    let draw_w = natural_w.max(max_width.max(120.0));
 
-    let drawing = DisplayMathCanvas::new(Arc::clone(math), draw_w, natural_h, hpad, vpad);
+    let drawing = DisplayMathCanvas::new(Arc::clone(math), natural_w, natural_h, hpad, vpad);
     drawing.set_tooltip_text(Some(&item.block.latex));
     drawing.set_hexpand(true);
+    drawing.set_halign(gtk4::Align::Fill);
     drawing.add_css_class("hortus-math-block");
-    drawing.upcast()
+
+    let scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Automatic)
+        .vscrollbar_policy(gtk4::PolicyType::Never)
+        .propagate_natural_width(false)
+        .propagate_natural_height(true)
+        .min_content_width(120)
+        .hexpand(true)
+        .halign(gtk4::Align::Fill)
+        .child(&drawing)
+        .build();
+    DisplayMathBlock {
+        root: scroll.upcast(),
+    }
 }
 
 mod display_imp {
@@ -207,13 +234,14 @@ pub fn build_math_fallback_widget(
     source: &str,
     reason: &str,
     block: bool,
-    max_width: f64,
+    _max_width: f64,
 ) -> gtk4::Widget {
     if block {
         let container = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
         container.add_css_class("hortus-math-fallback");
-        container.set_halign(gtk4::Align::Start);
-        container.set_size_request((max_width - 16.0).max(240.0).round() as i32, -1);
+        container.set_halign(gtk4::Align::Fill);
+        container.set_hexpand(true);
+        container.set_size_request(120, -1);
         let msg = gtk4::Label::new(Some(reason));
         msg.add_css_class("dim-label");
         msg.add_css_class("caption");

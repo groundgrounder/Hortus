@@ -23,6 +23,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct DiagramCallbacks {
     pub on_collapse_changed: Rc<dyn Fn(u32, Vec<String>, SceneData)>,
+    pub on_scene_updated: Rc<dyn Fn(u32, SceneData)>,
     pub on_open_link: Rc<dyn Fn(String, Option<String>)>,
     pub on_open_source: Rc<dyn Fn(u64, u64)>,
     pub on_focus: Rc<dyn Fn(u32)>,
@@ -38,10 +39,98 @@ struct DiagramCardState {
     collapsed: RefCell<Vec<String>>,
     previous: RefCell<Option<DiagramPrevious>>,
     hovered: RefCell<Option<SceneHit>>,
+    last_width: Cell<f64>,
     rerender_gen: Cell<u64>,
+    pending_relayouts: Cell<u32>,
     drawing: gtk4::DrawingArea,
     engine: Arc<DiagramEngine>,
     callbacks: DiagramCallbacks,
+}
+
+/// 原生块级 Mermaid 图表卡片句柄，支持原地宽度重排而不销毁重建控件。
+#[derive(Clone)]
+pub struct DiagramCard {
+    root: gtk4::Widget,
+    state: Option<Rc<DiagramCardState>>,
+}
+
+impl DiagramCard {
+    pub fn widget(&self) -> &gtk4::Widget {
+        &self.root
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn is_relayout_pending(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|st| st.pending_relayouts.get() > 0)
+    }
+
+    pub fn relayout_to_width(&self, avail_w: f64) {
+        let Some(ref st) = self.state else {
+            return;
+        };
+        let target_w = avail_w.max(240.0);
+        if (target_w - st.last_width.get()).abs() < 4.0 {
+            return;
+        }
+        st.last_width.set(target_w);
+        let token = st.rerender_gen.get().wrapping_add(1);
+        st.rerender_gen.set(token);
+        st.pending_relayouts
+            .set(st.pending_relayouts.get().saturating_add(1));
+
+        let prev = st.previous.borrow().clone();
+        let collapsed_bg = st.collapsed.borrow().clone();
+        let dark = adw::StyleManager::default().is_dark();
+        let engine_bg = Arc::clone(&st.engine);
+        let src_bg = st.source.clone();
+        let note_bg = st.note_path.clone();
+        let mmd = st.mmd;
+        let ordinal = st.ordinal;
+        let weak_done = Rc::downgrade(st);
+
+        glib::MainContext::default().spawn_local(async move {
+            let rendered = gio::spawn_blocking(move || {
+                render_block_with_engine(
+                    &engine_bg,
+                    &src_bg,
+                    mmd,
+                    target_w,
+                    &collapsed_bg,
+                    DiagramIdentity {
+                        document: note_bg,
+                        block: ordinal,
+                        revision: 1,
+                        dark,
+                        font_generation: 0,
+                        request_generation: token,
+                    },
+                    prev,
+                )
+            })
+            .await;
+
+            let Some(st) = weak_done.upgrade() else {
+                return;
+            };
+            st.pending_relayouts
+                .set(st.pending_relayouts.get().saturating_sub(1));
+            if st.rerender_gen.get() != token {
+                return;
+            }
+            if let Ok(Ok(new_scene)) = rendered {
+                *st.previous.borrow_mut() = new_scene.previous.clone();
+                st.drawing
+                    .set_content_width(new_scene.width.ceil().max(120.0) as i32);
+                st.drawing
+                    .set_content_height(new_scene.height.ceil().max(48.0) as i32);
+                *st.scene.borrow_mut() = new_scene.clone();
+                st.drawing.queue_draw();
+                (st.callbacks.on_scene_updated)(ordinal, new_scene);
+            }
+        });
+    }
 }
 
 /// 构造内联 Mermaid 图表控件（支持节点折叠、双链跳转、专注模式、SVG/PNG/PDF 导出及降级源码卡片）。
@@ -53,32 +142,36 @@ pub fn build_diagram_card(
     engine: Arc<DiagramEngine>,
     callbacks: DiagramCallbacks,
     content_width: f64,
-) -> gtk4::Widget {
+) -> DiagramCard {
     if let Some(reason) = initial.failure {
-        return build_diagram_fallback_card(
-            &source,
-            initial.source_start,
-            initial.source_end,
-            &reason,
-            content_width,
-        );
+        return DiagramCard {
+            root: build_diagram_fallback_card(
+                &source,
+                initial.source_start,
+                initial.source_end,
+                &reason,
+                content_width,
+            ),
+            state: None,
+        };
     }
     let Some(scene) = initial.scene else {
-        return build_diagram_fallback_card(
-            &source,
-            initial.source_start,
-            initial.source_end,
-            "图表场景为空",
-            content_width,
-        );
+        return DiagramCard {
+            root: build_diagram_fallback_card(
+                &source,
+                initial.source_start,
+                initial.source_end,
+                "图表场景为空",
+                content_width,
+            ),
+            state: None,
+        };
     };
 
     let ordinal = initial.ordinal;
     let drawing = gtk4::DrawingArea::new();
     drawing.set_content_width(scene.width.ceil().max(120.0) as i32);
     drawing.set_content_height(scene.height.ceil().max(48.0) as i32);
-    // 最小宽等于场景宽：若场景比目标栏宽略大，内层滚动容器可以真正横向滚动而不是裁切。
-    drawing.set_size_request(scene.width.ceil().max(120.0) as i32, -1);
     drawing.set_hexpand(true);
     drawing.set_halign(gtk4::Align::Fill);
 
@@ -91,7 +184,9 @@ pub fn build_diagram_card(
         collapsed: RefCell::new(initial.collapsed),
         previous: RefCell::new(initial.previous),
         hovered: RefCell::new(None),
+        last_width: Cell::new(content_width.max(240.0)),
         rerender_gen: Cell::new(0),
+        pending_relayouts: Cell::new(0),
         drawing: drawing.clone(),
         engine,
         callbacks,
@@ -203,7 +298,11 @@ pub fn build_diagram_card(
                 let token = st.rerender_gen.get().wrapping_add(1);
                 st.rerender_gen.set(token);
                 let prev = st.previous.borrow().clone();
-                let cur_width = f64::from(st.drawing.width()).max(st.scene.borrow().width);
+                let cur_width = st
+                    .last_width
+                    .get()
+                    .max(f64::from(st.drawing.width()))
+                    .max(240.0);
                 let dark = adw::StyleManager::default().is_dark();
                 let engine_bg = Arc::clone(&st.engine);
                 let src_bg = st.source.clone();
@@ -330,23 +429,25 @@ pub fn build_diagram_card(
     let canvas = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Automatic)
         .vscrollbar_policy(gtk4::PolicyType::Never)
-        .propagate_natural_width(true)
+        .propagate_natural_width(false)
         .propagate_natural_height(true)
+        .min_content_width(120)
+        .hexpand(true)
+        .halign(gtk4::Align::Fill)
         .child(&drawing)
         .build();
     canvas.add_css_class("hortus-diagram-canvas");
-    canvas.set_size_request(content_width.round().max(120.0) as i32, -1);
     let overlay = gtk4::Overlay::new();
     overlay.set_child(Some(&canvas));
     overlay.add_overlay(&tools);
     overlay.set_hexpand(true);
+    overlay.set_halign(gtk4::Align::Fill);
     overlay.add_css_class("hortus-diagram-card");
-    // 让状态随 Overlay 控件一起释放，不建立反向强引用环。
-    overlay.connect_destroy(move |_| {
-        let _ = &state;
-    });
 
-    overlay.upcast()
+    DiagramCard {
+        root: overlay.upcast(),
+        state: Some(state),
+    }
 }
 
 fn build_diagram_fallback_card(
@@ -354,7 +455,7 @@ fn build_diagram_fallback_card(
     start_byte: u64,
     end_byte: u64,
     reason: &str,
-    content_width: f64,
+    _content_width: f64,
 ) -> gtk4::Widget {
     let snippet = full_source
         .get(start_byte as usize..end_byte as usize)
@@ -364,7 +465,7 @@ fn build_diagram_fallback_card(
     card.add_css_class("hortus-diagram-fallback");
     card.set_halign(gtk4::Align::Fill);
     card.set_hexpand(true);
-    card.set_size_request(content_width.round().max(240.0) as i32, -1);
+    card.set_size_request(120, -1);
 
     let header = gtk4::Label::new(Some(reason));
     header.set_halign(gtk4::Align::Start);
