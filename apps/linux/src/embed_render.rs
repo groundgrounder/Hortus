@@ -208,7 +208,8 @@ pub fn build_embed_card(
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     card.add_css_class("hortus-embed-card");
     card.set_halign(gtk4::Align::Start);
-    card.set_size_request(220, -1);
+    // 卡片最小宽跟随阅读栏可用宽，而不是固定 220px 压扁内嵌正文。
+    card.set_size_request((req.width - 16.0).max(240.0).round() as i32, -1);
 
     let header_btn = gtk4::Button::new();
     header_btn.add_css_class("flat");
@@ -401,6 +402,7 @@ fn populate_embed_card(
                     diagram,
                     Arc::clone(&req.diagram_engine),
                     diag_callbacks,
+                    EmbedRequest::content_width(req.width),
                 );
                 body_slot.append(&diag_widget);
             } else {

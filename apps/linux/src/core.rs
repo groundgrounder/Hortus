@@ -164,6 +164,8 @@ pub struct CliOptions {
     pub edit_knowledge_json: Option<PathBuf>,
     pub edit_knowledge_scene: Option<String>,
     pub wikilink_json: Option<PathBuf>,
+    pub layout_width_json: Option<PathBuf>,
+    pub layout_hide_sidebars: bool,
     pub show_help: bool,
 }
 
@@ -292,6 +294,13 @@ impl CliOptions {
                     let value = iter.next().ok_or("--wikilink-json 需要提供输出路径")?;
                     options.wikilink_json = Some(PathBuf::from(value));
                 }
+                "--layout-width-json" => {
+                    let value = iter.next().ok_or("--layout-width-json 需要提供输出路径")?;
+                    options.layout_width_json = Some(PathBuf::from(value));
+                }
+                "--layout-hide-sidebars" => {
+                    options.layout_hide_sidebars = true;
+                }
                 other => return Err(format!("未知参数：{other}")),
             }
         }
@@ -315,6 +324,8 @@ impl CliOptions {
   --edit-knowledge-json <路径>
                              运行 L2 编辑/保存/知识导航/文件管理自检并导出 JSON 后退出
   --wikilink-json <路径>      运行阅读视图双链真实点击回归并导出 JSON 后退出
+  --layout-width-json <路径>  测量阅读视图图表/表格/图片实际宽与侧栏重排并导出 JSON 后退出
+  --layout-hide-sidebars      宽度适配回归后在测量前收起左右侧栏
   --edit-knowledge-scene <场景>
                              L2 界面截图场景：search-backlinks | tags | quick-open |
                              edit-find-completion | rename-links

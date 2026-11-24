@@ -473,6 +473,11 @@ pub struct ReadingSurfaceHandle {
     source_char_anchors: Vec<(u64, i32)>,
     link_spans: Rc<Vec<LinkSpan>>,
     click_gesture: Option<gtk4::GestureClick>,
+    /// 内联块控件引用：宽度适配自动化读取实际分配宽。
+    pub diagram_widgets: Vec<gtk4::Widget>,
+    pub table_widgets: Vec<gtk4::Widget>,
+    pub image_widgets: Vec<gtk4::Widget>,
+    pub embed_widgets: Vec<gtk4::Widget>,
     pub stats: NoteReadingStats,
 }
 
@@ -540,6 +545,17 @@ impl ReadingSurfaceHandle {
         let max_y = (adj.upper() - adj.page_size()).max(0.0);
         adj.set_value((max_y * fraction.clamp(0.0, 1.0)).max(0.0));
     }
+
+    /// 当前相对滚动位置；动态重排前读取，重建阅读表面后恢复。
+    pub fn scroll_fraction_value(&self) -> f64 {
+        let adj = self.scrolled.vadjustment();
+        let max_y = (adj.upper() - adj.page_size()).max(0.0);
+        if max_y <= 0.0 {
+            0.0
+        } else {
+            (adj.value() / max_y).clamp(0.0, 1.0)
+        }
+    }
 }
 
 fn map_source_utf16_to_reading_char(anchors: &[(u64, i32)], target: u64) -> i32 {
@@ -595,6 +611,7 @@ pub fn build_reading_surface(
             diag,
             Arc::clone(&env.diagram_engine),
             make_diagram_callbacks(env, prepared.path.clone(), on_diagram_collapse),
+            env.content_width,
         );
         let box_wrap = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
         box_wrap.set_margin_top(24);
@@ -617,6 +634,10 @@ pub fn build_reading_surface(
             source_char_anchors: Vec::new(),
             link_spans: Rc::new(Vec::new()),
             click_gesture: None,
+            diagram_widgets: Vec::new(),
+            table_widgets: Vec::new(),
+            image_widgets: Vec::new(),
+            embed_widgets: Vec::new(),
             stats,
         };
     }
@@ -650,6 +671,10 @@ pub fn build_reading_surface(
         source_char_anchors: assembled.source_char_anchors,
         link_spans,
         click_gesture,
+        diagram_widgets: assembled.diagram_widgets,
+        table_widgets: assembled.table_widgets,
+        image_widgets: assembled.image_widgets,
+        embed_widgets: assembled.embed_widgets,
         stats,
     }
 }
@@ -822,6 +847,11 @@ struct AssembledReadingBuffer {
     anchors: Vec<(usize, AnchorKind)>,
     source_char_anchors: Vec<(u64, i32)>,
     link_spans: Vec<LinkSpan>,
+    /// 内联块控件引用：宽度适配自动化直接读取其实际分配宽。
+    diagram_widgets: Vec<gtk4::Widget>,
+    table_widgets: Vec<gtk4::Widget>,
+    image_widgets: Vec<gtk4::Widget>,
+    embed_widgets: Vec<gtk4::Widget>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -885,6 +915,10 @@ fn assemble_reading_buffer_data(
     let mut link_spans: Vec<LinkSpan> = Vec::new();
     let mut source_char_anchors: Vec<(u64, i32)> = Vec::new();
     let mut seen_hr_chars = HashSet::new();
+    let mut diagram_widgets: Vec<gtk4::Widget> = Vec::new();
+    let mut table_widgets: Vec<gtk4::Widget> = Vec::new();
+    let mut image_widgets: Vec<gtk4::Widget> = Vec::new();
+    let mut embed_widgets: Vec<gtk4::Widget> = Vec::new();
 
     for (idx, blk) in model.blocks.iter().enumerate() {
         let blk_disp_u16 = block_disp_starts_u16[idx];
@@ -1012,7 +1046,9 @@ fn assemble_reading_buffer_data(
                 diag,
                 Arc::clone(&env.diagram_engine),
                 make_diagram_callbacks(env, env.note_path.clone(), on_diagram_collapse.clone()),
+                env.content_width,
             );
+            diagram_widgets.push(w.clone());
             anchors.push((char_pos, AnchorKind::Widget(w)));
         }
     }
@@ -1101,6 +1137,7 @@ fn assemble_reading_buffer_data(
                     diagrams: p.diagrams.clone(),
                 });
                 let card = build_embed_card(embed_req, pre, env.callbacks.clone());
+                embed_widgets.push(card.clone());
                 anchors.push((char_pos, AnchorKind::Widget(card)));
                 continue;
             }
@@ -1113,9 +1150,11 @@ fn assemble_reading_buffer_data(
                 Some(env.callbacks.on_open_note.clone()),
                 Some(env.callbacks.on_open_external.clone()),
             );
+            table_widgets.push(tbl.clone());
             anchors.push((char_pos, AnchorKind::Widget(tbl)));
         } else {
             let img = build_image_widget(item, env.content_width, env.parent_window.as_ref());
+            image_widgets.push(img.clone());
             anchors.push((char_pos, AnchorKind::Widget(img)));
         }
     }
@@ -1134,6 +1173,10 @@ fn assemble_reading_buffer_data(
         anchors,
         source_char_anchors,
         link_spans,
+        diagram_widgets,
+        table_widgets,
+        image_widgets,
+        embed_widgets,
     }
 }
 
@@ -1293,8 +1336,11 @@ fn install_text_view_with_anchors(
         click_gesture = Some(click);
     }
 
+    // 水平策略 Automatic 让外层滚动容器不把正文/锚点的最小宽向上传播到窗口：
+    // 窗口可缩到窄平铺宽度而不触发 AdwToastOverlay 最小宽警告；正文仍由 TextView
+    // 按视口宽 WordChar 换行，仅在内联块瞬时超出视口时短暂使用横向滚动。
     let scrolled = gtk4::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .hscrollbar_policy(gtk4::PolicyType::Automatic)
         .vscrollbar_policy(gtk4::PolicyType::Automatic)
         .vexpand(!embedded)
         .hexpand(true)

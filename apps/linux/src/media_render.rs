@@ -474,7 +474,8 @@ pub fn build_image_widget(
         picture.set_content_fit(gtk4::ContentFit::Contain);
         picture.set_size_request(target_w.round() as i32, target_h.round() as i32);
         picture.set_halign(gtk4::Align::Start);
-        // 图片的目标显示宽度是自然尺寸而非最小宽度：窄窗口下允许横向滚动而不是撑破窗口。
+        // 图片最小宽等于 min(自然宽, 可用宽)：TextView 按子锚点最小宽分配，
+        // 固定 120px 会把图片压扁；自然宽小于可用宽时保持原始清晰尺寸。
         let picture_scroll = gtk4::ScrolledWindow::builder()
             .hscrollbar_policy(gtk4::PolicyType::Automatic)
             .vscrollbar_policy(gtk4::PolicyType::Never)
@@ -483,7 +484,7 @@ pub fn build_image_widget(
             .child(&picture)
             .build();
         picture_scroll.add_css_class("hortus-image-scroll");
-        picture_scroll.set_size_request(120, -1);
+        picture_scroll.set_size_request(target_w.round() as i32, -1);
         let picture = picture_scroll;
 
         if !block.image_path.is_empty() {
@@ -508,12 +509,11 @@ pub fn build_image_widget(
         return container.upcast();
     }
 
-    let _ = max_width;
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     card.add_css_class("hortus-media-placeholder");
     card.set_halign(gtk4::Align::Fill);
     card.set_hexpand(true);
-    card.set_size_request(220, -1);
+    card.set_size_request((max_width - 16.0).max(240.0).round() as i32, -1);
 
     let title_text = if block.image_alt.is_empty() {
         block.image_target.clone()
@@ -572,7 +572,6 @@ pub fn build_table_widget(
     on_open_link: Option<LinkOpenCallback>,
     on_open_uri: Option<LinkOpenUriCallback>,
 ) -> gtk4::Widget {
-    let _ = max_width;
     let block = &media.block;
     let cols = block.columns.len().max(1);
     let rows = usize::try_from(block.rows).unwrap_or(0);
@@ -581,6 +580,8 @@ pub fn build_table_widget(
     grid.add_css_class("hortus-table-grid");
     grid.set_column_spacing(0);
     grid.set_row_spacing(0);
+    grid.set_hexpand(true);
+    grid.set_halign(gtk4::Align::Fill);
 
     for r in 0..rows {
         let is_header = r == 0;
@@ -693,6 +694,8 @@ pub fn build_table_widget(
             } else {
                 "hortus-table-body-cell"
             });
+            frame.set_hexpand(true);
+            tv.set_hexpand(true);
             frame.append(&tv);
             grid.attach(&frame, c as i32, r as i32, 1, 1);
         }
@@ -707,7 +710,9 @@ pub fn build_table_widget(
         .child(&grid)
         .build();
     scroll.add_css_class("hortus-table-wrap");
-    scroll.set_size_request(180, -1);
+    // TextView 按子锚点最小宽分配：表格容器必须撑到当前阅读栏可用宽，
+    // 不再压成 180px；列自然宽超过可用宽时由内层滚动容器横向滚动。
+    scroll.set_size_request(max_width.round().max(240.0) as i32, -1);
     scroll.upcast()
 }
 

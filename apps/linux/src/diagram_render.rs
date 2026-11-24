@@ -539,6 +539,7 @@ pub fn build_diagram_card(
     initial: RenderedDiagram,
     engine: Arc<DiagramEngine>,
     callbacks: DiagramCallbacks,
+    content_width: f64,
 ) -> gtk4::Widget {
     if let Some(reason) = initial.failure {
         return build_diagram_fallback_card(
@@ -546,6 +547,7 @@ pub fn build_diagram_card(
             initial.source_start,
             initial.source_end,
             &reason,
+            content_width,
         );
     }
     let Some(scene) = initial.scene else {
@@ -554,6 +556,7 @@ pub fn build_diagram_card(
             initial.source_start,
             initial.source_end,
             "图表场景为空",
+            content_width,
         );
     };
 
@@ -567,6 +570,8 @@ pub fn build_diagram_card(
     let drawing = gtk4::DrawingArea::new();
     drawing.set_content_width(scene.width.ceil().max(120.0) as i32);
     drawing.set_content_height(scene.height.ceil().max(48.0) as i32);
+    // 最小宽等于场景宽：若场景比目标栏宽略大，内层滚动容器可以真正横向滚动而不是裁切。
+    drawing.set_size_request(scene.width.ceil().max(120.0) as i32, -1);
     drawing.set_hexpand(true);
     drawing.set_halign(gtk4::Align::Fill);
 
@@ -803,7 +808,8 @@ pub fn build_diagram_card(
     tools.append(&focus_btn);
     tools.append(&export_btn);
 
-    // 图表画布的固定内容宽度只作为自然尺寸：放进水平滚动容器后，窄窗口可收缩而不撑破最小宽度。
+    // 画布最小宽度必须等于本次排版目标宽：TextView 按子锚点最小宽分配宽度，
+    // 只有最小宽等于目标宽时图表才能完整铺满阅读栏。窗口最小宽由外层阅读滚动容器解耦。
     let canvas = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Automatic)
         .vscrollbar_policy(gtk4::PolicyType::Never)
@@ -812,8 +818,7 @@ pub fn build_diagram_card(
         .child(&drawing)
         .build();
     canvas.add_css_class("hortus-diagram-canvas");
-    // 显式最小宽度：自然宽度仍为图表宽度，但窄平铺时可收缩而不撑大窗口最小宽度。
-    canvas.set_size_request(220, -1);
+    canvas.set_size_request(content_width.round().max(120.0) as i32, -1);
     let overlay = gtk4::Overlay::new();
     overlay.set_child(Some(&canvas));
     overlay.add_overlay(&tools);
@@ -828,6 +833,7 @@ fn build_diagram_fallback_card(
     start_byte: u64,
     end_byte: u64,
     reason: &str,
+    content_width: f64,
 ) -> gtk4::Widget {
     let snippet = full_source
         .get(start_byte as usize..end_byte as usize)
@@ -837,7 +843,7 @@ fn build_diagram_fallback_card(
     card.add_css_class("hortus-diagram-fallback");
     card.set_halign(gtk4::Align::Fill);
     card.set_hexpand(true);
-    card.set_size_request(220, -1);
+    card.set_size_request(content_width.round().max(240.0) as i32, -1);
 
     let header = gtk4::Label::new(Some(reason));
     header.set_halign(gtk4::Align::Start);

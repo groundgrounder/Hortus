@@ -368,6 +368,14 @@ def assert_clean_run(result, label: str):
         f"{label} 出现 ToastOverlay 最小宽度警告：\n{result['stderr']}",
     )
     check(
+        "AdwToastOverlay" not in result["stderr"],
+        f"{label} 出现 AdwToastOverlay 宽度警告：\n{result['stderr']}",
+    )
+    check(
+        "exceeds" not in result["stderr"].lower(),
+        f"{label} 出现最小宽度 exceeds 警告：\n{result['stderr']}",
+    )
+    check(
         "panicked at" not in result["stderr"],
         f"{label} 出现 panic：\n{result['stderr']}",
     )
@@ -776,6 +784,20 @@ def run_wikilink_regression(
     )
     bare = report.get("bare_target_resolve") or {}
     check(bare.get("active_is_study_loop") is True, f"裸目标解析分支失败：{bare}")
+    check(
+        report.get("learning_map_widths_ready") is True,
+        "Learning map 宽度未达到默认窗口目标（>=520px）",
+    )
+    widths = report.get("learning_map_widths") or {}
+    widget_widths = widths.get("diagram_widget_widths") or []
+    scene_widths = widths.get("diagram_scene_widths") or []
+    check(widget_widths and widget_widths[0] >= 520, f"Learning map 图表控件被压扁：{widths}")
+    check(scene_widths and scene_widths[0] >= 520, f"Learning map 图表场景宽不足：{widths}")
+    content_width = widths.get("content_width_measured", 0)
+    check(
+        scene_widths[0] <= content_width + 24,
+        f"Learning map 图表横向溢出：scene={scene_widths[0]} content={content_width}",
+    )
     shot = None
     if screenshot is not None:
         check(screenshot.is_file(), f"双链公开复核截图缺失：{screenshot}")
@@ -795,8 +817,160 @@ def run_wikilink_regression(
         "peak_rss_mib": run["peak_rss_mib"],
         "report_path": str(report_path.resolve()),
         "learning_map_nodes": opened.get("diagram_nodes"),
+        "learning_map_widths": widths,
         "screenshot": shot,
         "report": report,
+    }
+
+
+def run_layout_width(
+    gui_bin: Path,
+    vault: Path,
+    tmp_path: Path,
+    output_dir: Path,
+    name: str,
+    note: str,
+    width: int,
+    height: int,
+    hide_sidebars: bool = False,
+    screenshot: Path | None = None,
+):
+    """私有离屏测量阅读栏真实宽度与内联块分配宽；可选收起侧栏验证动态重排。"""
+    env = isolated_env(tmp_path / f"layout-{name}")
+    report_path = output_dir / f"layout-{name}.json"
+    report_path.unlink(missing_ok=True)
+    cmd = [
+        str(gui_bin),
+        "--vault",
+        str(vault),
+        "--open",
+        note,
+        "--width",
+        str(width),
+        "--height",
+        str(height),
+        "--color-scheme",
+        "light",
+        "--layout-width-json",
+        str(report_path),
+    ]
+    if hide_sidebars:
+        cmd.append("--layout-hide-sidebars")
+    if screenshot is not None:
+        screenshot.unlink(missing_ok=True)
+        cmd.extend(["--screenshot", str(screenshot)])
+    label = f"宽度适配 {name} ({width}x{height})"
+    run = supervise(cmd, env, label, timeout=120)
+    assert_clean_run(run, label)
+    check(report_path.is_file(), f"{label} 未生成 JSON 报告")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    check(report.get("ready") is True, f"{label} 首屏未就绪：{report}")
+    check(report.get("allocated") is True, f"{label} 阅读栏未分配宽度：{report}")
+    if hide_sidebars:
+        check(report.get("reflowed") is True, f"{label} 收起侧栏后未完成动态重排：{report}")
+    after = report.get("after") or {}
+    check(after.get("found") is True, f"{label} 缺少阅读表面：{report}")
+
+    shot = None
+    if screenshot is not None:
+        check(screenshot.is_file(), f"{label} 截图缺失：{screenshot}")
+        shot_width, shot_height = png_dimensions(screenshot)
+        check(
+            shot_width >= width - 30 and shot_height >= height - 30,
+            f"{label} 截图尺寸异常：{shot_width}x{shot_height}",
+        )
+        check(
+            screenshot.stat().st_size > 30_000,
+            f"{label} 截图内容过于简单：{screenshot.stat().st_size} bytes",
+        )
+        shot = {
+            "path": str(screenshot.resolve()),
+            "width": shot_width,
+            "height": shot_height,
+            "size_bytes": screenshot.stat().st_size,
+            "sha256": hashlib.sha256(screenshot.read_bytes()).hexdigest(),
+        }
+    return {
+        "returncode": run["returncode"],
+        "network_connections": len(run["sockets"]),
+        "peak_rss_mib": run["peak_rss_mib"],
+        "report_path": str(report_path.resolve()),
+        "screenshot": shot,
+        "report": report,
+    }
+
+
+def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: dict):
+    """A5 宽度适配断言：默认窗、收起侧栏扩栏与 994px 窄平铺。"""
+    base = layout_1280["report"]["after"]
+    base_widgets = base.get("diagram_widget_widths") or []
+    base_scenes = base.get("diagram_scene_widths") or []
+    base_content = base.get("content_width_measured", 0)
+    check(base_widgets and base_widgets[0] >= 520, f"1280 图表控件被压扁：{base}")
+    check(base_scenes and base_scenes[0] >= 520, f"1280 图表场景宽不足：{base}")
+    check(
+        base_scenes[0] <= base_content + 24,
+        f"1280 图表横向溢出：scene={base_scenes[0]} content={base_content}",
+    )
+
+    wide = layout_wide["report"]["after"]
+    wide_widgets = wide.get("diagram_widget_widths") or []
+    wide_scenes = wide.get("diagram_scene_widths") or []
+    wide_content = wide.get("content_width_measured", 0)
+    check(wide.get("left_show") is False and wide.get("right_show") is False, f"侧栏未收起：{wide}")
+    check(wide_scenes and wide_scenes[0] >= 850, f"宽屏图表未扩栏：{wide}")
+    check(
+        wide_widgets and wide_widgets[0] >= 850,
+        f"宽屏图表控件未扩宽：{wide}",
+    )
+    check(
+        wide_scenes[0] - base_scenes[0] >= 200,
+        f"侧栏收起后图表未明显变宽：base={base_scenes[0]} wide={wide_scenes[0]}",
+    )
+    check(
+        wide_scenes[0] <= wide_content + 24,
+        f"宽屏图表横向溢出：scene={wide_scenes[0]} content={wide_content}",
+    )
+
+    narrow = layout_narrow["report"]["after"]
+    narrow_widgets = narrow.get("diagram_widget_widths") or []
+    narrow_scenes = narrow.get("diagram_scene_widths") or []
+    narrow_content = narrow.get("content_width_measured", 0)
+    check(narrow_widgets and narrow_widgets[0] >= 320, f"994px 图表被压扁：{narrow}")
+    check(
+        narrow_scenes and narrow_scenes[0] <= narrow_content + 24,
+        f"994px 图表横向溢出：scene={narrow_scenes} content={narrow_content}",
+    )
+    return {
+        "base_1280": {"widget": base_widgets[0], "scene": base_scenes[0], "content": base_content},
+        "wide": {"widget": wide_widgets[0], "scene": wide_scenes[0], "content": wide_content},
+        "narrow_994": {
+            "widget": narrow_widgets[0],
+            "scene": narrow_scenes[0],
+            "content": narrow_content,
+        },
+    }
+
+
+def verify_media_widths(layout_media: dict):
+    """表格、本地图片与嵌入卡片不再被 180/120/220px 压扁。"""
+    after = layout_media["report"]["after"]
+    content = after.get("content_width_measured", 0)
+    tables = after.get("table_widget_widths") or []
+    images = after.get("image_widget_widths") or []
+    embeds = after.get("embed_widget_widths") or []
+    check(tables and max(tables) >= 360, f"表格被压扁（需 >=360px）：{after}")
+    check(images and max(images) >= 320, f"图片被压扁（需 >=320px）：{after}")
+    check(
+        images[0] <= content + 24,
+        f"图片横向溢出：image={images[0]} content={content}",
+    )
+    check(embeds and max(embeds) >= 300, f"嵌入卡片未跟随可用宽：{after}")
+    return {
+        "table_widget_widths": tables,
+        "image_widget_widths": images,
+        "embed_widget_widths": embeds,
+        "content_width_measured": content,
     }
 
 
@@ -899,8 +1073,54 @@ def main():
             wikilink_vault,
             tmp_path,
             output_dir,
-            media_dir / "l2-wikilink-click-learning-map.png",
+            media_dir / "l2-learning-map-1280-adapted.png",
         )
+        # 阅读视图宽度适配回归：默认窗、收起侧栏、994px 窄平铺与表格/图片/嵌入卡片。
+        layout_1280 = run_layout_width(
+            gui_bin,
+            wikilink_vault,
+            tmp_path,
+            output_dir,
+            "learning-map-1280",
+            "Learning/Learning map.md",
+            1280,
+            860,
+        )
+        layout_wide = run_layout_width(
+            gui_bin,
+            wikilink_vault,
+            tmp_path,
+            output_dir,
+            "learning-map-wide",
+            "Learning/Learning map.md",
+            1440,
+            860,
+            hide_sidebars=True,
+            screenshot=media_dir / "l2-learning-map-wide-adapted.png",
+        )
+        layout_narrow = run_layout_width(
+            gui_bin,
+            wikilink_vault,
+            tmp_path,
+            output_dir,
+            "learning-map-994",
+            "Learning/Learning map.md",
+            994,
+            700,
+            screenshot=media_dir / "l2-learning-map-narrow-994.png",
+        )
+        layout_media = run_layout_width(
+            gui_bin,
+            wikilink_vault,
+            tmp_path,
+            output_dir,
+            "media-1280",
+            "Markdown field guide.md",
+            1280,
+            860,
+        )
+        layout_verified = verify_diagram_widths(layout_1280, layout_wide, layout_narrow)
+        media_widths = verify_media_widths(layout_media)
 
     if display is not None:
         display.terminate()
@@ -926,6 +1146,20 @@ def main():
         "scenes": scenes,
         "narrow_width": narrow,
         "wikilink": wikilink,
+        "layout_width": {
+            "learning_map": layout_verified,
+            "media": media_widths,
+            "reports": {
+                "default_1280": layout_1280["report_path"],
+                "wide": layout_wide["report_path"],
+                "narrow_994": layout_narrow["report_path"],
+                "media_1280": layout_media["report_path"],
+            },
+            "screenshots": {
+                "wide": layout_wide["screenshot"],
+                "narrow_994": layout_narrow["screenshot"],
+            },
+        },
         "vault_unchanged_except": sorted(allowed_changes),
         "real_trash_untouched": True,
     }
@@ -942,7 +1176,11 @@ def main():
         f"completion={verified['knowledge']['completion']['items']}, "
         f"rename_rewrites={verified['files']['rename_note']['op']['rewrites']}, "
         f"trash_isolated=yes, 0 net, rss={run['peak_rss_mib']} MiB, scenes={len(scenes)}, "
-        f"wikilink_nodes={wikilink['learning_map_nodes']}"
+        f"wikilink_nodes={wikilink['learning_map_nodes']}, "
+        f"diagram_1280={layout_verified['base_1280']['scene']}px, "
+        f"diagram_wide={layout_verified['wide']['scene']}px, "
+        f"diagram_994={layout_verified['narrow_994']['widget']}px, "
+        f"table={media_widths['table_widget_widths'][0]}px"
     )
     return 0
 

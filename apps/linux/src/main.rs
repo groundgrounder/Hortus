@@ -57,6 +57,7 @@ fn main() -> std::process::ExitCode {
         || options.edit_knowledge_json.is_some()
         || options.edit_knowledge_scene.is_some()
         || options.wikilink_json.is_some()
+        || options.layout_width_json.is_some()
     {
         gio::ApplicationFlags::NON_UNIQUE
     } else {

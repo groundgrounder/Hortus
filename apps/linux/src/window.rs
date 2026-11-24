@@ -111,6 +111,10 @@ struct OpenNoteTab {
     reading_slot: gtk4::Box,
     reading: Option<ReadingSurfaceHandle>,
     prepared_diagrams: Vec<crate::diagram_render::RenderedDiagram>,
+    /// 当前阅读表面使用的排版内容宽；用于≥24px 阈值判断与自动化报告。
+    layout_width: f64,
+    /// 阅读表面重建代号：丢弃过期的后台重排结果。
+    reading_generation: u64,
     edit_scrolled: gtk4::ScrolledWindow,
     edit_view: gtk4::TextView,
     edit_buffer: gtk4::TextBuffer,
@@ -213,6 +217,8 @@ pub struct HortusWindow {
     left_stack: gtk4::Stack,
     state: Rc<RefCell<AppState>>,
     options: CliOptions,
+    /// 阅读宽度变化防抖源；窗口/侧栏/首次分配变化统一走 120ms 合并。
+    layout_debounce: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 #[derive(Serialize)]
@@ -621,10 +627,12 @@ impl HortusWindow {
             left_stack,
             state,
             options,
+            layout_debounce: Rc::new(RefCell::new(None)),
         };
 
         this.rebuild_panel_switchers();
         this.bind_signals(&bottom_close);
+        this.bind_width_adaptation();
         this.register_actions();
         this.init_knowledge_panels();
         this.install_tree_context_menu();
@@ -647,6 +655,7 @@ impl HortusWindow {
         let this = self.clone();
         self.tab_view.connect_selected_page_notify(move |_| {
             this.sync_active_tab_ui();
+            this.schedule_layout_adaptation();
         });
 
         // 关闭页面统一走保护流程：先保存未落盘内容，无法保存时由用户明确选择。
@@ -697,6 +706,32 @@ impl HortusWindow {
         let this = self.clone();
         self.window
             .connect_close_request(move |_| this.handle_window_close());
+    }
+
+    fn bind_width_adaptation(&self) {
+        // 窗口拉伸/niri 平铺调宽、标签视图与中心栈分配宽变化：统一防抖后重排当前阅读标签。
+        let this = self.clone();
+        self.window
+            .connect_notify_local(Some("width"), move |_, _| {
+                this.schedule_layout_adaptation();
+            });
+        let this = self.clone();
+        self.tab_view
+            .connect_notify_local(Some("width"), move |_, _| {
+                this.schedule_layout_adaptation();
+            });
+        let this = self.clone();
+        self.center_stack
+            .connect_notify_local(Some("width"), move |_, _| {
+                this.schedule_layout_adaptation();
+            });
+        // 左右侧栏显隐与 819px 断点折叠：都改变真实阅读栏宽。
+        for split in [&self.left_split, &self.right_split] {
+            let this = self.clone();
+            split.connect_show_sidebar_notify(move |_| this.schedule_layout_adaptation());
+            let this = self.clone();
+            split.connect_collapsed_notify(move |_| this.schedule_layout_adaptation());
+        }
     }
 
     fn register_actions(&self) {
@@ -1188,6 +1223,8 @@ impl HortusWindow {
                 reading_slot,
                 reading: None,
                 prepared_diagrams: Vec::new(),
+                layout_width: 0.0,
+                reading_generation: 0,
                 edit_scrolled,
                 edit_view,
                 edit_buffer,
@@ -1212,7 +1249,7 @@ impl HortusWindow {
         // append 第一页时自动选中发生在登记之前，这里补一次同步确保大纲与徽标正确。
         self.sync_active_tab_ui();
 
-        let content_width = self.estimated_note_content_width();
+        let content_width = self.reading_content_width();
         let dark = adw::StyleManager::default().is_dark();
         let main_thread = std::thread::current().id();
         let this = self.clone();
@@ -1263,7 +1300,15 @@ impl HortusWindow {
 
             match load_result {
                 Ok((session, text, headings, packed_runs, prepared)) => {
-                    this.install_loaded_tab(&rel, session, text, headings, &packed_runs, prepared);
+                    this.install_loaded_tab(
+                        &rel,
+                        session,
+                        text,
+                        headings,
+                        &packed_runs,
+                        prepared,
+                        content_width,
+                    );
                     this.sync_active_tab_ui();
                     this.maybe_schedule_automation();
                 }
@@ -1291,6 +1336,7 @@ impl HortusWindow {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn install_loaded_tab(
         &self,
         rel: &str,
@@ -1299,6 +1345,7 @@ impl HortusWindow {
         headings: Vec<HeadingItem>,
         packed_runs: &[u8],
         prepared: crate::reading::PreparedReadingNote,
+        content_width: f64,
     ) {
         let Some((core, vault_root, diagram_engine, math_service, handle)) = ({
             let st = self.state.borrow();
@@ -1406,6 +1453,8 @@ impl HortusWindow {
             };
             let old_reading = tab.reading.replace(surface);
             let old_diagrams = std::mem::replace(&mut tab.prepared_diagrams, prepared.diagrams);
+            tab.layout_width = content_width;
+            tab.reading_generation = tab.reading_generation.wrapping_add(1);
             tab.text = text;
             tab.headings = headings;
             tab.session = Some(session);
@@ -1424,6 +1473,8 @@ impl HortusWindow {
         self.update_disk_stamp(rel);
         self.update_tab_notice(rel);
         self.update_tab_title(rel);
+        // 首次呈现分配完成后校正宽度：估算与真实阅读栏宽相差 ≥24px 时自动重排。
+        self.schedule_layout_adaptation();
 
         if pending_heading.is_some() || pending_scroll.is_some() {
             let this_h = self.clone();
@@ -1487,7 +1538,7 @@ impl HortusWindow {
             diagram_engine,
             math_service,
             font_size: 15.0,
-            content_width: self.estimated_note_content_width(),
+            content_width: self.reading_content_width(),
             ancestors: vec![note_path.to_string()],
             depth: 0,
             parent_window: Some(self.window.clone().upcast()),
@@ -1549,18 +1600,22 @@ impl HortusWindow {
     }
 
     fn refresh_reading_tab(&self, note_path: &str, restore_fraction: Option<f64>) {
-        let (core, diagram_engine, math_service, vault_root, vault_handle, session) = {
-            let st = self.state.borrow();
-            let Some(tab) = st.tabs.get(note_path) else {
+        let (session, generation) = {
+            let mut st = self.state.borrow_mut();
+            let Some(tab) = st.tabs.get_mut(note_path) else {
                 return;
             };
+            tab.reading_generation = tab.reading_generation.wrapping_add(1);
+            (tab.session.clone(), tab.reading_generation)
+        };
+        let (core, diagram_engine, math_service, vault_root, vault_handle) = {
+            let st = self.state.borrow();
             (
                 st.core.clone(),
                 st.diagram_engine.clone(),
                 Arc::clone(&st.math_service),
                 st.vault_root.clone(),
                 st.vault_handle.clone(),
-                tab.session.clone(),
             )
         };
         let (Some(core), Some(diagram_engine), Some(vault_root), Some(session)) =
@@ -1569,7 +1624,7 @@ impl HortusWindow {
             return;
         };
 
-        let content_width = self.estimated_note_content_width();
+        let content_width = self.reading_content_width();
         let dark = adw::StyleManager::default().is_dark();
         let main_thread = std::thread::current().id();
         let this = self.clone();
@@ -1598,6 +1653,17 @@ impl HortusWindow {
             .await;
 
             if let Ok(Ok(prepared)) = res {
+                // 递增 generation 已在更新请求时写入；过期结果（更新的窗口/侧栏宽）
+                // 直接丢弃，避免旧排版覆盖新排版。
+                let current = this
+                    .state
+                    .borrow()
+                    .tabs
+                    .get(&rel)
+                    .map(|tab| tab.reading_generation);
+                if current != Some(generation) {
+                    return;
+                }
                 let Some(handle) = this.state.borrow().vault_handle.clone() else {
                     return;
                 };
@@ -1656,6 +1722,7 @@ impl HortusWindow {
                     let old_diagrams =
                         std::mem::replace(&mut tab.prepared_diagrams, prepared.diagrams);
                     tab.reading_loaded = true;
+                    tab.layout_width = content_width;
                     (old_reading, old_diagrams)
                 };
                 drop(old);
@@ -1675,6 +1742,9 @@ impl HortusWindow {
                         }
                     });
                 }
+                // 侧栏展开/收起带过渡动画：重排落到中间宽后再补一次检查，
+                // 稳定后 target 与 layout_width 相差 <24px 时自然停止。
+                this.schedule_layout_adaptation();
             }
         });
     }
@@ -1782,9 +1852,81 @@ impl HortusWindow {
         });
     }
 
-    fn estimated_note_content_width(&self) -> f64 {
-        let w = f64::from(self.window.width()).max(960.0);
-        (w * 0.52).clamp(480.0, 760.0)
+    /// 阅读栏真实可用内容宽：优先读取当前阅读滚动容器的已分配宽，
+    /// 减去 TextView 左右 44px 边距与 8px 余量（约 96px）；尚未首次分配时
+    /// 按窗口宽减去实际停靠且展开的左右侧栏估算。取消 760px 人为封顶。
+    fn reading_content_width(&self) -> f64 {
+        let actual = self
+            .active_tab_path()
+            .and_then(|path| {
+                let st = self.state.borrow();
+                st.tabs
+                    .get(&path)
+                    .and_then(|tab| tab.reading.as_ref())
+                    .map(|reading| f64::from(reading.scrolled.width()))
+            })
+            .unwrap_or(0.0);
+        if actual > 160.0 {
+            return (actual - 96.0).clamp(260.0, 1400.0);
+        }
+        // 首次打开时阅读表面尚未挂载；中心标签视图的已分配宽就是阅读栏宽。
+        let tab_view_width = f64::from(self.tab_view.width());
+        if tab_view_width > 160.0 {
+            return (tab_view_width - 96.0).clamp(260.0, 1400.0);
+        }
+        let window_w = f64::from(self.window.width()).max(720.0);
+        let sidebar_width = |w: f64| (w * 0.22).clamp(220.0, 320.0);
+        let mut content = window_w;
+        if self.left_split.shows_sidebar() && !self.left_split.is_collapsed() {
+            content -= sidebar_width(window_w);
+        }
+        if self.right_split.shows_sidebar() && !self.right_split.is_collapsed() {
+            content -= sidebar_width(window_w);
+        }
+        (content - 96.0).clamp(260.0, 1400.0)
+    }
+
+    /// 合并窗口缩放、首次分配与侧栏显隐引起的重排请求，120ms 内只执行最后一次。
+    fn schedule_layout_adaptation(&self) {
+        if let Some(id) = self.layout_debounce.borrow_mut().take() {
+            id.remove();
+        }
+        let this = self.clone();
+        let id = glib::timeout_add_local_once(Duration::from_millis(120), move || {
+            this.layout_debounce.borrow_mut().take();
+            this.apply_layout_adaptation();
+        });
+        *self.layout_debounce.borrow_mut() = Some(id);
+    }
+
+    fn apply_layout_adaptation(&self) {
+        let Some(path) = self.active_tab_path() else {
+            return;
+        };
+        let target = self.reading_content_width();
+        let (loaded, editing, current, fraction) = {
+            let st = self.state.borrow();
+            let Some(tab) = st.tabs.get(&path) else {
+                return;
+            };
+            (
+                tab.reading_loaded,
+                tab.editing,
+                tab.layout_width,
+                tab.reading
+                    .as_ref()
+                    .map(ReadingSurfaceHandle::scroll_fraction_value)
+                    .unwrap_or(0.0),
+            )
+        };
+        if !loaded || editing {
+            return;
+        }
+        if current > 0.0 && (target - current).abs() < 24.0 {
+            return;
+        }
+        // 重排走后台准备 + 主线程轻量重建；保留当前滚动比例与已折叠节点。
+        self.refresh_reading_tab(&path, Some(fraction));
     }
 
     fn handle_tab_closed(&self, closed_page: &adw::TabPage) {
@@ -1922,6 +2064,10 @@ impl HortusWindow {
         // Stack 切换在 AppState 借用之外执行，避免 notify 回调重入。
         content_stack.set_visible_child_name(if new_editing { "edit" } else { "reading" });
         self.sync_active_tab_ui();
+        if !new_editing {
+            // 编辑态期间窗口可能已改变宽度：切回阅读态时校正排版。
+            self.schedule_layout_adaptation();
+        }
         self.scroll_to_utf16_offset(&path, anchor_u16);
         if new_editing {
             edit_view.grab_focus();
@@ -2176,6 +2322,7 @@ impl HortusWindow {
             && self.options.edit_knowledge_json.is_none()
             && self.options.edit_knowledge_scene.is_none()
             && self.options.wikilink_json.is_none()
+            && self.options.layout_width_json.is_none()
             && self.options.screenshot.is_none()
             && self.options.focus_diagram.is_none()
             && !self.options.edit_mode
@@ -2263,6 +2410,11 @@ impl HortusWindow {
     }
 
     fn run_automation(&self) {
+        if let Some(ref json_path) = self.options.layout_width_json {
+            let path = json_path.clone();
+            self.execute_layout_width_checks(path);
+            return;
+        }
         if let Some(ref json_path) = self.options.wikilink_json {
             let path = json_path.clone();
             self.execute_wikilink_checks(path);
@@ -6508,6 +6660,153 @@ impl HortusWindow {
         serde_json::Value::Object(report)
     }
 
+    fn layout_snapshot(&self, note: &str) -> serde_json::Value {
+        let window_width = self.window.width();
+        let left_show = self.left_split.shows_sidebar();
+        let left_collapsed = self.left_split.is_collapsed();
+        let right_show = self.right_split.shows_sidebar();
+        let right_collapsed = self.right_split.is_collapsed();
+        let st = self.state.borrow();
+        let Some(tab) = st.tabs.get(note) else {
+            return serde_json::json!({
+                "found": false,
+                "window_width": window_width,
+                "left_show": left_show,
+                "left_collapsed": left_collapsed,
+                "right_show": right_show,
+                "right_collapsed": right_collapsed,
+            });
+        };
+        let reading = tab.reading.as_ref();
+        let scrolled_width = reading.map(|r| r.scrolled.width()).unwrap_or(0);
+        let text_width = reading
+            .and_then(|r| r.text_view.as_ref())
+            .map(|view| view.width())
+            .unwrap_or(0);
+        let widths = |widgets: Option<&Vec<gtk4::Widget>>| -> Vec<i32> {
+            widgets
+                .map(|list| list.iter().map(|widget| widget.width()).collect())
+                .unwrap_or_default()
+        };
+        serde_json::json!({
+            "found": true,
+            "note": note,
+            "window_width": window_width,
+            "left_show": left_show,
+            "left_collapsed": left_collapsed,
+            "right_show": right_show,
+            "right_collapsed": right_collapsed,
+            "layout_width": tab.layout_width,
+            "scrolled_width": scrolled_width,
+            "text_view_width": text_width,
+            "content_width_measured": (f64::from(scrolled_width) - 96.0).max(0.0),
+            "diagram_scene_widths": tab
+                .prepared_diagrams
+                .iter()
+                .filter_map(|diagram| diagram.scene.as_ref().map(|scene| scene.width))
+                .collect::<Vec<f64>>(),
+            "diagram_scene_heights": tab
+                .prepared_diagrams
+                .iter()
+                .filter_map(|diagram| diagram.scene.as_ref().map(|scene| scene.height))
+                .collect::<Vec<f64>>(),
+            "diagram_widget_widths": widths(reading.map(|r| &r.diagram_widgets)),
+            "table_widget_widths": widths(reading.map(|r| &r.table_widgets)),
+            "image_widget_widths": widths(reading.map(|r| &r.image_widgets)),
+            "embed_widget_widths": widths(reading.map(|r| &r.embed_widgets)),
+        })
+    }
+
+    fn execute_layout_width_checks(&self, report_path: PathBuf) {
+        let this = self.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let report = this.run_layout_width_checks().await;
+            let json = serde_json::to_string_pretty(&report)
+                .unwrap_or_else(|err| format!("{{\"error\":\"{err}\"}}"));
+            let _ = std::fs::write(&report_path, json + "\n");
+            this.close_now();
+        });
+    }
+
+    /// 阅读视图宽度适配回归：等待首屏排版，按需收起左右侧栏，触发 120ms 防抖重排，
+    /// 然后记录图表场景/控件、表格、图片与嵌入卡片的真实分配宽。
+    async fn run_layout_width_checks(&self) -> serde_json::Value {
+        let note = self.active_tab_path().unwrap_or_default();
+        let ready = wait_for(20000, || {
+            let st = self.state.borrow();
+            st.scan_complete
+                && st
+                    .tabs
+                    .get(&note)
+                    .is_some_and(|tab| tab.source_loaded && tab.reading_loaded)
+        })
+        .await;
+        let allocated = wait_for(5000, || {
+            self.state
+                .borrow()
+                .tabs
+                .get(&note)
+                .and_then(|tab| tab.reading.as_ref())
+                .is_some_and(|reading| reading.scrolled.width() > 160)
+        })
+        .await;
+        glib::timeout_future(Duration::from_millis(220)).await;
+        let before = self.layout_snapshot(&note);
+        let before_layout = before["layout_width"].as_f64().unwrap_or(0.0);
+        let before_scene = before["diagram_scene_widths"]
+            .as_array()
+            .and_then(|scenes| scenes.first())
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+
+        let mut sidebars_hidden = false;
+        let mut reflowed = true;
+        if self.options.layout_hide_sidebars {
+            self.left_split.set_show_sidebar(false);
+            self.right_split.set_show_sidebar(false);
+            sidebars_hidden = true;
+            // 等待防抖重排真正落到阅读表面与图表场景，而不是只看容器动画宽度。
+            reflowed = wait_for(12000, || {
+                let st = self.state.borrow();
+                let Some(tab) = st.tabs.get(&note) else {
+                    return false;
+                };
+                let scrolled = tab
+                    .reading
+                    .as_ref()
+                    .map(|r| r.scrolled.width())
+                    .unwrap_or(0);
+                let target = (f64::from(scrolled) - 96.0).max(0.0);
+                let scene_grew = tab
+                    .prepared_diagrams
+                    .iter()
+                    .filter_map(|diagram| diagram.scene.as_ref())
+                    .any(|scene| scene.width > before_scene + 200.0);
+                tab.layout_width > before_layout + 200.0
+                    && scene_grew
+                    && (tab.layout_width - target).abs() < 24.0
+            })
+            .await;
+            glib::timeout_future(Duration::from_millis(220)).await;
+        }
+        let after = self.layout_snapshot(&note);
+
+        if let Some(ref screenshot_path) = self.options.screenshot
+            && let Err(err) = self.capture_window_png(screenshot_path)
+        {
+            eprintln!("screenshot failed: {err}");
+        }
+        serde_json::json!({
+            "note": note,
+            "ready": ready,
+            "allocated": allocated,
+            "sidebars_hidden": sidebars_hidden,
+            "reflowed": reflowed,
+            "before": before,
+            "after": after,
+        })
+    }
+
     fn execute_wikilink_checks(&self, report_path: PathBuf) {
         let this = self.clone();
         glib::MainContext::default().spawn_local(async move {
@@ -6606,6 +6905,22 @@ impl HortusWindow {
                 "diagram_ok": map_nodes > 0,
             }),
         );
+        // 宽度适配回归：等待动态校正后的图表控件实际宽达到默认窗口目标（>=520px）。
+        let widths_ready = wait_for(8000, || {
+            self.layout_snapshot(map)["diagram_widget_widths"]
+                .as_array()
+                .and_then(|widths| widths.first())
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0)
+                >= 520
+        })
+        .await;
+        glib::timeout_future(Duration::from_millis(120)).await;
+        report.insert(
+            "learning_map_widths_ready".into(),
+            serde_json::json!(widths_ready),
+        );
+        report.insert("learning_map_widths".into(), self.layout_snapshot(map));
         if let Some(ref screenshot_path) = self.options.screenshot {
             // 公开复核图：Start here.md 与 Learning map.md 双标签 + 81 节点大图。
             glib::timeout_future(Duration::from_millis(500)).await;
