@@ -7,7 +7,7 @@ use gtk4::pango;
 use std::cell::RefCell;
 use std::sync::Once;
 
-#[cfg(any(test, feature = "automation"))]
+#[cfg(feature = "automation")]
 pub use crate::platform::source_styles::apply_source_styles_timed;
 pub use crate::platform::source_styles::{
     MaskTagSet, apply_mask_tags_cached, apply_source_styles, apply_source_styles_with,
@@ -258,6 +258,61 @@ const BASE_CSS: &str = r#"
     padding: 5px 10px;
     border-radius: 6px;
 }
+
+.hortus-terminal-status {
+    padding: 4px 10px;
+    background-color: alpha(@warning_bg_color, 0.16);
+    border-bottom: 1px solid alpha(currentColor, 0.10);
+}
+
+.hortus-terminal-toolbar {
+    padding: 2px 6px;
+    border-bottom: 1px solid alpha(currentColor, 0.10);
+}
+
+.hortus-diff-hunk-header {
+    padding: 4px 8px;
+    border-radius: 6px;
+    background-color: alpha(@accent_bg_color, 0.10);
+    font-family: monospace;
+    font-size: 0.88em;
+}
+
+.hortus-diff-add {
+    background-color: alpha(#2ec27e, 0.16);
+    color: @view_fg_color;
+    font-family: monospace;
+    font-size: 0.88em;
+}
+
+.hortus-diff-del {
+    background-color: alpha(#e01b24, 0.16);
+    color: @view_fg_color;
+    font-family: monospace;
+    font-size: 0.88em;
+}
+
+.hortus-diff-ctx {
+    font-family: monospace;
+    font-size: 0.88em;
+    opacity: 0.85;
+}
+
+.hortus-agent-badge-ok {
+    padding: 2px 8px;
+    border-radius: 999px;
+    background-color: alpha(#2ec27e, 0.18);
+    color: #26a269;
+    font-size: 0.84em;
+}
+
+.hortus-agent-badge-err {
+    padding: 2px 8px;
+    border-radius: 999px;
+    background-color: alpha(#e01b24, 0.16);
+    color: #c01c28;
+    font-size: 0.84em;
+}
 "#;
 
 static CSS_INSTALL_ONCE: Once = Once::new();
@@ -299,8 +354,7 @@ pub fn install_css() {
     });
 }
 
-/// 为 L3 字号热更新预留：仅刷新动态字号 `CssProvider`，不重复挂载全局样式表。
-#[allow(dead_code)]
+/// 实时刷新动态字号 `CssProvider`，不重复挂载全局样式表。
 pub fn update_editor_font_size_css(font_size_px: f64) {
     install_css();
     DYNAMIC_FONT_PROVIDER.with(|slot| {

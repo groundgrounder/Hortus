@@ -117,6 +117,7 @@
             buildInputs = with pkgs; [
               gtk4
               libadwaita
+              vte-gtk4
               pango
               cairo
               fontconfig
@@ -132,6 +133,9 @@
               "--set-default"
               "HORTUS_KATEX_FONTS_DIR"
               "${placeholder "out"}/share/hortus/fonts/KaTeX"
+              "--set-default"
+              "HORTUS_CLI_DIR"
+              "${self.packages.${system}.hortus-cli}/bin"
             ];
 
             preBuild = remapRustFlags;
@@ -236,6 +240,7 @@
             buildInputs = with pkgs; [
               gtk4
               libadwaita
+              vte-gtk4
               pango
               cairo
               fontconfig
