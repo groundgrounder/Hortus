@@ -259,8 +259,59 @@ const BASE_CSS: &str = r#"
     border-radius: 6px;
 }
 
-.hortus-tool-tabbar {
-    min-height: 34px;
+.hortus-tool-strip {
+    min-height: 32px;
+    padding: 2px 3px;
+    background-color: transparent;
+}
+
+.hortus-tool-tab {
+    min-width: 0;
+    min-height: 26px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: background-color 120ms ease;
+}
+
+.hortus-tool-tab.hortus-tool-tab-sidebar {
+    min-width: 0;
+    padding: 2px 4px;
+}
+
+.hortus-tool-tab.hortus-tool-tab-bottom {
+    padding: 2px 8px;
+}
+
+.hortus-tool-tab:hover {
+    background-color: alpha(currentColor, 0.06);
+}
+
+.hortus-tool-tab.selected {
+    background-color: alpha(currentColor, 0.11);
+    font-weight: 600;
+}
+
+.hortus-tool-tab-close {
+    min-width: 14px;
+    min-height: 14px;
+    padding: 0;
+    margin: 0;
+    border-radius: 999px;
+    opacity: 0.72;
+}
+
+.hortus-tool-tab-close:hover {
+    opacity: 1.0;
+    background-color: alpha(currentColor, 0.14);
+}
+
+.hortus-tool-action-btn,
+.hortus-tool-action-btn > button,
+.hortus-tool-action-btn button {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px;
+    margin: 0;
 }
 
 .hortus-tool-empty {

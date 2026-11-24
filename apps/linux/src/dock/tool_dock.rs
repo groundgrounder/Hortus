@@ -2,17 +2,18 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 统一单层工具标签容器：左/右/底三区共用一套 `adw::TabView` + `adw::TabBar`，
-//! 静态工具（文件/搜索/标签/大纲/反链/改动）与每个终端/Agent 实例完全平级同层、
-//! 支持 `+` 添加/新建、`×` 关闭及三区无损迁移（`transfer_page`）。
+//! 统一单层工具标签容器：左/右/底三区共用一套原生 GTK4 动态宽度标签条（`ToolTabStrip`）
+//! 与底层 `adw::TabView` 内容宿主；静态工具与终端/Agent 实例平级同层、支持 `+` 添加、
+//! `×` / 中键关闭、独立 PopoverMenu 右键迁移以及三区无损迁移（`transfer_page`）。
 
 use crate::core::{PanelRegion, StaticToolKind};
 use gtk4::gio;
 use gtk4::glib;
+use gtk4::pango;
 use gtk4::prelude::*;
 use hortus_config::{LayoutState, PanelGroup, RegionLayout};
 use libadwaita as adw;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
@@ -53,19 +54,97 @@ pub struct DockCallbacks {
     pub on_layout_changed: Rc<dyn Fn()>,
 }
 
+struct TabStripChipInner {
+    region: Cell<PanelRegion>,
+    root: gtk4::Box,
+    icon: gtk4::Image,
+    label: gtk4::Label,
+    close_btn: gtk4::Button,
+    selected: Cell<bool>,
+    hovered: Cell<bool>,
+}
+
+#[derive(Clone)]
+struct TabStripChip {
+    inner: Rc<TabStripChipInner>,
+}
+
+impl TabStripChip {
+    fn sync_visual(&self) {
+        let selected = self.inner.selected.get();
+        let hovered = self.inner.hovered.get();
+        if selected {
+            self.inner.root.add_css_class("selected");
+        } else {
+            self.inner.root.remove_css_class("selected");
+        }
+        self.inner.close_btn.set_visible(selected || hovered);
+    }
+
+    fn set_selected(&self, selected: bool) {
+        self.inner.selected.set(selected);
+        self.sync_visual();
+    }
+
+    fn set_hovered(&self, hovered: bool) {
+        self.inner.hovered.set(hovered);
+        self.sync_visual();
+    }
+
+    fn configure_for_region(&self, region: PanelRegion) {
+        self.inner.region.set(region);
+        let is_bottom = region == PanelRegion::Bottom;
+        if is_bottom {
+            self.inner.root.remove_css_class("hortus-tool-tab-sidebar");
+            self.inner.root.add_css_class("hortus-tool-tab-bottom");
+            self.inner.root.set_hexpand(false);
+            self.inner.label.set_hexpand(false);
+            self.inner.label.set_max_width_chars(24);
+        } else {
+            self.inner.root.remove_css_class("hortus-tool-tab-bottom");
+            self.inner.root.add_css_class("hortus-tool-tab-sidebar");
+            self.inner.root.set_hexpand(true);
+            self.inner.label.set_hexpand(true);
+            self.inner.label.set_max_width_chars(14);
+        }
+    }
+
+    fn update(&self, title: &str, icon_name: &str) {
+        self.inner.icon.set_icon_name(Some(icon_name));
+        self.inner.label.set_text(title);
+        self.inner.root.set_tooltip_text(Some(title));
+    }
+
+    fn widget(&self) -> &gtk4::Box {
+        &self.inner.root
+    }
+}
+
 struct DockTabEntry {
     region: PanelRegion,
     page: adw::TabPage,
+    title: String,
+    chip: TabStripChip,
 }
 
 struct RegionWidgets {
     root: gtk4::Box,
-    tab_bar: adw::TabBar,
+    #[cfg(feature = "automation")]
+    strip_bar: gtk4::Box,
+    strip_scroll: gtk4::ScrolledWindow,
+    tabs_box: gtk4::Box,
     tab_view: adw::TabView,
     content_stack: gtk4::Stack,
     add_btn: gtk4::MenuButton,
     add_menu: gio::Menu,
-    context_menu: gio::Menu,
+    collapse_btn: Option<gtk4::Button>,
+}
+
+struct ActiveContextMenu {
+    #[cfg(feature = "automation")]
+    tab_id: DockTabId,
+    popover: gtk4::PopoverMenu,
+    _menu: gio::Menu,
 }
 
 struct ToolDockState {
@@ -80,11 +159,34 @@ struct ToolDockState {
 struct ToolDockInner {
     regions: HashMap<PanelRegion, RegionWidgets>,
     state: RefCell<ToolDockState>,
+    active_context_menu: RefCell<Option<ActiveContextMenu>>,
 }
 
 #[derive(Clone)]
 pub struct ToolDock {
     inner: Rc<ToolDockInner>,
+}
+
+#[cfg(feature = "automation")]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct TabChipBounds {
+    pub id: String,
+    pub title: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub fits_in_strip: bool,
+    pub selected: bool,
+    pub close_visible: bool,
+}
+
+#[cfg(feature = "automation")]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct StripLayoutMetrics {
+    pub region: String,
+    pub strip_width: f32,
+    pub tabs: Vec<TabChipBounds>,
 }
 
 impl ToolDock {
@@ -104,6 +206,7 @@ impl ToolDock {
                 suppress_callbacks: false,
                 disposing: false,
             }),
+            active_context_menu: RefCell::new(None),
         });
 
         Self::bind_region_signals(&inner);
@@ -125,39 +228,57 @@ impl ToolDock {
         tab_view.set_hexpand(true);
         tab_view.remove_shortcuts(adw::TabViewShortcuts::ALL_SHORTCUTS);
 
-        let tab_bar = adw::TabBar::new();
-        tab_bar.set_view(Some(&tab_view));
-        tab_bar.set_autohide(false);
-        tab_bar.set_expand_tabs(false);
-        tab_bar.add_css_class("inline");
-        tab_bar.add_css_class("hortus-tool-tabbar");
+        // 原生 GTK4 动态宽度单层工具标签条：[ tabs_host (hexpand=true) | + | (Bottom) v ]
+        let strip_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
+        strip_bar.add_css_class("hortus-tool-strip");
+        strip_bar.set_widget_name(&format!("hortus-tool-strip-{}", region.id()));
+        strip_bar.set_hexpand(true);
+
+        let tabs_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
+        tabs_box.add_css_class("hortus-tool-tabs-box");
+        tabs_box.set_hexpand(true);
+        tabs_box.set_valign(gtk4::Align::Fill);
+
+        let strip_scroll = gtk4::ScrolledWindow::new();
+        strip_scroll.set_hexpand(true);
+        strip_scroll.set_vexpand(false);
+        strip_scroll.set_policy(gtk4::PolicyType::External, gtk4::PolicyType::Never);
+        strip_scroll.set_propagate_natural_width(false);
+        strip_scroll.set_propagate_natural_height(true);
+        strip_scroll.set_min_content_width(0);
+        strip_scroll.set_child(Some(&tabs_box));
 
         let add_menu = gio::Menu::new();
         let add_btn = gtk4::MenuButton::builder()
             .icon_name("list-add-symbolic")
             .tooltip_text("添加工具或新建终端")
             .menu_model(&add_menu)
+            .valign(gtk4::Align::Center)
             .build();
         add_btn.add_css_class("flat");
+        add_btn.add_css_class("hortus-tool-action-btn");
 
         let end_actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
-        end_actions.set_margin_end(4);
+        end_actions.set_valign(gtk4::Align::Center);
         end_actions.append(&add_btn);
 
-        if region == PanelRegion::Bottom {
-            let collapse_btn = gtk4::Button::builder()
+        let collapse_btn = if region == PanelRegion::Bottom {
+            let btn = gtk4::Button::builder()
                 .icon_name("pan-down-symbolic")
                 .tooltip_text("收起底部面板 (Ctrl+J)")
+                .valign(gtk4::Align::Center)
                 .build();
-            collapse_btn.add_css_class("flat");
-            collapse_btn.set_widget_name("hortus-bottom-collapse");
-            end_actions.append(&collapse_btn);
-        }
+            btn.add_css_class("flat");
+            btn.add_css_class("hortus-tool-action-btn");
+            btn.set_widget_name("hortus-bottom-collapse");
+            end_actions.append(&btn);
+            Some(btn)
+        } else {
+            None
+        };
 
-        tab_bar.set_end_action_widget(Some(&end_actions));
-
-        let context_menu = gio::Menu::new();
-        tab_view.set_menu_model(Some(&context_menu));
+        strip_bar.append(&strip_scroll);
+        strip_bar.append(&end_actions);
 
         let empty_box = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
         empty_box.set_valign(gtk4::Align::Center);
@@ -195,19 +316,161 @@ impl ToolDock {
         content_stack.add_named(&empty_box, Some("empty"));
         content_stack.set_visible_child_name("empty");
 
-        root.append(&tab_bar);
+        root.append(&strip_bar);
         root.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
         root.append(&content_stack);
 
         RegionWidgets {
             root,
-            tab_bar,
+            #[cfg(feature = "automation")]
+            strip_bar,
+            strip_scroll,
+            tabs_box,
             tab_view,
             content_stack,
             add_btn,
             add_menu,
-            context_menu,
+            collapse_btn,
         }
+    }
+
+    fn build_tab_chip(
+        inner: &Rc<ToolDockInner>,
+        tab_id: DockTabId,
+        region: PanelRegion,
+        title: &str,
+        icon_name: &str,
+    ) -> TabStripChip {
+        let root = gtk4::Box::new(gtk4::Orientation::Horizontal, 3);
+        root.add_css_class("hortus-tool-tab");
+        root.set_overflow(gtk4::Overflow::Hidden);
+        root.set_valign(gtk4::Align::Fill);
+        root.set_margin_top(2);
+        root.set_margin_bottom(2);
+        root.set_tooltip_text(Some(title));
+
+        let icon = gtk4::Image::from_icon_name(icon_name);
+        icon.set_pixel_size(14);
+        icon.set_valign(gtk4::Align::Center);
+
+        let label = gtk4::Label::new(Some(title));
+        label.set_single_line_mode(true);
+        label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_xalign(0.0);
+        label.set_valign(gtk4::Align::Center);
+        label.add_css_class("caption");
+
+        let close_icon = gtk4::Image::from_icon_name("window-close-symbolic");
+        close_icon.set_pixel_size(11);
+        let close_btn = gtk4::Button::builder()
+            .tooltip_text("关闭标签")
+            .has_frame(false)
+            .focus_on_click(false)
+            .valign(gtk4::Align::Center)
+            .child(&close_icon)
+            .build();
+        close_btn.add_css_class("flat");
+        close_btn.add_css_class("hortus-tool-tab-close");
+        close_btn.set_visible(false);
+
+        root.append(&icon);
+        root.append(&label);
+        root.append(&close_btn);
+
+        let chip = TabStripChip {
+            inner: Rc::new(TabStripChipInner {
+                region: Cell::new(region),
+                root: root.clone(),
+                icon,
+                label,
+                close_btn: close_btn.clone(),
+                selected: Cell::new(false),
+                hovered: Cell::new(false),
+            }),
+        };
+        chip.configure_for_region(region);
+
+        // 悬停显隐 × 关闭按钮（非选中态默认隐藏 × 以节省边栏横向空间）
+        let motion = gtk4::EventControllerMotion::new();
+        {
+            let chip_weak = Rc::downgrade(&chip.inner);
+            motion.connect_enter(move |_, _, _| {
+                if let Some(ci) = chip_weak.upgrade() {
+                    TabStripChip { inner: ci }.set_hovered(true);
+                }
+            });
+        }
+        {
+            let chip_weak = Rc::downgrade(&chip.inner);
+            motion.connect_leave(move |_| {
+                if let Some(ci) = chip_weak.upgrade() {
+                    TabStripChip { inner: ci }.set_hovered(false);
+                }
+            });
+        }
+        root.add_controller(motion);
+
+        // 左键点击切换标签页
+        let left_click = gtk4::GestureClick::new();
+        left_click.set_button(1);
+        {
+            let dock_weak = Rc::downgrade(inner);
+            let chip_weak = Rc::downgrade(&chip.inner);
+            left_click.connect_released(move |_, _, x, y| {
+                let Some(ci) = chip_weak.upgrade() else {
+                    return;
+                };
+                if ci.close_btn.is_visible()
+                    && let Some(cb_bounds) = ci.close_btn.compute_bounds(&ci.root)
+                    && cb_bounds.contains_point(&gtk4::graphene::Point::new(x as f32, y as f32))
+                {
+                    return;
+                }
+                if let Some(this) = dock_weak.upgrade() {
+                    Self::select_tab_impl(&this, tab_id);
+                }
+            });
+        }
+        root.add_controller(left_click);
+
+        // 中键点击关闭标签页
+        let mid_click = gtk4::GestureClick::new();
+        mid_click.set_button(2);
+        {
+            let dock_weak = Rc::downgrade(inner);
+            mid_click.connect_released(move |_, _, _, _| {
+                if let Some(this) = dock_weak.upgrade() {
+                    Self::close_tab_impl(&this, tab_id);
+                }
+            });
+        }
+        root.add_controller(mid_click);
+
+        // 右键点击弹出独立 PopoverMenu（关闭时不清空 GMenu，由 idle_add_local_once 延迟卸载）
+        let right_click = gtk4::GestureClick::new();
+        right_click.set_button(3);
+        {
+            let dock_weak = Rc::downgrade(inner);
+            right_click.connect_pressed(move |gesture, _, _, _| {
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+                if let Some(this) = dock_weak.upgrade() {
+                    Self::show_context_menu_for_tab(&this, tab_id);
+                }
+            });
+        }
+        root.add_controller(right_click);
+
+        // 点击 × 按钮关闭标签
+        {
+            let dock_weak = Rc::downgrade(inner);
+            close_btn.connect_clicked(move |_| {
+                if let Some(this) = dock_weak.upgrade() {
+                    Self::close_tab_impl(&this, tab_id);
+                }
+            });
+        }
+
+        chip
     }
 
     fn bind_region_signals(inner: &Rc<ToolDockInner>) {
@@ -229,11 +492,11 @@ impl ToolDock {
                 let weak = Rc::downgrade(inner);
                 rw.tab_view.connect_selected_page_notify(move |view| {
                     let Some(this) = weak.upgrade() else { return };
-                    let (suppress, disposing) = {
-                        let st = this.state.borrow();
-                        (st.suppress_callbacks, st.disposing)
-                    };
-                    if suppress || disposing {
+                    if this.state.borrow().disposing {
+                        return;
+                    }
+                    Self::sync_strip_selection(&this, region);
+                    if this.state.borrow().suppress_callbacks {
                         return;
                     }
                     let Some(page) = view.selected_page() else {
@@ -268,17 +531,7 @@ impl ToolDock {
                     }
                 });
             }
-            {
-                let weak = Rc::downgrade(inner);
-                rw.tab_view.connect_setup_menu(move |_, page_opt| {
-                    let Some(this) = weak.upgrade() else { return };
-                    Self::populate_context_menu(&this, region, page_opt);
-                });
-            }
-            if region == PanelRegion::Bottom
-                && let Some(end_box) = rw.tab_bar.end_action_widget().and_downcast::<gtk4::Box>()
-                && let Some(collapse_btn) = end_box.last_child().and_downcast::<gtk4::Button>()
-            {
+            if let Some(ref collapse_btn) = rw.collapse_btn {
                 let weak = Rc::downgrade(inner);
                 collapse_btn.connect_clicked(move |_| {
                     if let Some(this) = weak.upgrade()
@@ -299,29 +552,128 @@ impl ToolDock {
         }
     }
 
-    fn populate_context_menu(
-        inner: &Rc<ToolDockInner>,
-        region: PanelRegion,
-        page_opt: Option<&adw::TabPage>,
-    ) {
+    fn sync_strip_selection(inner: &Rc<ToolDockInner>, region: PanelRegion) {
         let Some(rw) = inner.regions.get(&region) else {
             return;
         };
-        rw.context_menu.remove_all();
-        let Some(page) = page_opt else {
+        let selected_page = rw.tab_view.selected_page();
+        let mut selected_chip: Option<gtk4::Box> = None;
+        {
+            let st = inner.state.borrow();
+            for entry in st.entries.values() {
+                if entry.region == region {
+                    let is_sel = selected_page.as_ref() == Some(&entry.page);
+                    entry.chip.set_selected(is_sel);
+                    if is_sel {
+                        selected_chip = Some(entry.chip.widget().clone());
+                    }
+                }
+            }
+        }
+        if let Some(chip_widget) = selected_chip {
+            Self::ensure_chip_visible(rw, &chip_widget);
+        }
+    }
+
+    fn ensure_chip_visible(rw: &RegionWidgets, chip_widget: &gtk4::Box) {
+        let Some(bounds) = chip_widget.compute_bounds(&rw.tabs_box) else {
             return;
         };
-        let tab_id = inner
+        let adj = rw.strip_scroll.hadjustment();
+        let page_size = adj.page_size();
+        if page_size <= 0.0 || adj.upper() <= page_size + 0.5 {
+            return;
+        }
+        let left = f64::from(bounds.x());
+        let right = left + f64::from(bounds.width());
+        let cur = adj.value();
+        if left < cur {
+            adj.set_value(left.max(adj.lower()));
+        } else if right > cur + page_size {
+            adj.set_value((right - page_size).min(adj.upper() - page_size));
+        }
+    }
+
+    fn select_tab_impl(inner: &Rc<ToolDockInner>, tab_id: DockTabId) {
+        let info = inner
             .state
             .borrow()
             .entries
-            .iter()
-            .find(|(_, entry)| &entry.page == page)
-            .map(|(id, _)| *id);
-        let Some(tab_id) = tab_id else {
+            .get(&tab_id)
+            .map(|e| (e.region, e.page.clone()));
+        let Some((region, page)) = info else {
             return;
         };
-        Self::fill_context_menu_for_tab(&rw.context_menu, region, tab_id);
+        if let Some(rw) = inner.regions.get(&region) {
+            rw.tab_view.set_selected_page(&page);
+        }
+    }
+
+    fn show_context_menu_for_tab(inner: &Rc<ToolDockInner>, tab_id: DockTabId) -> bool {
+        if let Some(prev) = inner.active_context_menu.borrow_mut().take() {
+            prev.popover.popdown();
+            if prev.popover.parent().is_some() {
+                prev.popover.unparent();
+            }
+        }
+        let info = inner
+            .state
+            .borrow()
+            .entries
+            .get(&tab_id)
+            .map(|e| (e.region, e.chip.widget().clone()));
+        let Some((region, chip_widget)) = info else {
+            return false;
+        };
+        let Some(rw) = inner.regions.get(&region) else {
+            return false;
+        };
+
+        let menu = gio::Menu::new();
+        Self::fill_context_menu_for_tab(&menu, region, tab_id);
+        let popover = gtk4::PopoverMenu::from_model(Some(&menu));
+        popover.set_has_arrow(true);
+        // 挂载到不随标签迁移销毁的区域 root 容器，防止 move_tab 移除旧芯片时触发子控件未解绑警告。
+        popover.set_parent(&rw.root);
+        if let Some(rect) = chip_widget.compute_bounds(&rw.root) {
+            let gdk_rect = gtk4::gdk::Rectangle::new(
+                rect.x().round() as i32,
+                rect.y().round() as i32,
+                rect.width().round().max(1.0) as i32,
+                rect.height().round().max(1.0) as i32,
+            );
+            popover.set_pointing_to(Some(&gdk_rect));
+        }
+
+        // 关键防坑：Popover 关闭时绝不在动作派发前清空 menu，仅在下一帧空闲安全 unparent 并释放。
+        let dock_weak = Rc::downgrade(inner);
+        let pop_weak = popover.downgrade();
+        popover.connect_closed(move |_| {
+            let dock_weak = dock_weak.clone();
+            let pop_weak = pop_weak.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(pop) = pop_weak.upgrade() {
+                    if pop.parent().is_some() {
+                        pop.unparent();
+                    }
+                    if let Some(this) = dock_weak.upgrade() {
+                        let mut slot = this.active_context_menu.borrow_mut();
+                        if slot.as_ref().is_some_and(|ctx| ctx.popover == pop) {
+                            *slot = None;
+                        }
+                    }
+                }
+            });
+        });
+
+        *inner.active_context_menu.borrow_mut() = Some(ActiveContextMenu {
+            #[cfg(feature = "automation")]
+            tab_id,
+            popover: popover.clone(),
+            _menu: menu,
+        });
+        popover.popup();
+        true
     }
 
     fn fill_context_menu_for_tab(menu: &gio::Menu, current_region: PanelRegion, tab_id: DockTabId) {
@@ -442,6 +794,9 @@ impl ToolDock {
                 .tab_view
                 .set_selected_page(&first);
         }
+        for region in PanelRegion::ALL {
+            Self::sync_strip_selection(&self.inner, region);
+        }
         self.inner.state.borrow_mut().preferred_terminal_region = PanelRegion::Bottom;
         self.inner.state.borrow_mut().suppress_callbacks = false;
         Self::rebuild_add_menus(&self.inner);
@@ -451,18 +806,19 @@ impl ToolDock {
     pub fn apply_layout_state(&self, layout: &LayoutState) -> (f64, f64, f64) {
         self.inner.state.borrow_mut().suppress_callbacks = true;
         // 先关闭全部静态工具页（保留 static_widgets），再按布局文件重新挂载。
-        let static_pages: Vec<(StaticToolKind, PanelRegion, adw::TabPage)> = {
+        let static_pages: Vec<(PanelRegion, adw::TabPage, TabStripChip)> = {
             let mut st = self.inner.state.borrow_mut();
             let mut out = Vec::new();
             for kind in StaticToolKind::ALL {
                 if let Some(entry) = st.entries.remove(&DockTabId::Static(kind)) {
-                    out.push((kind, entry.region, entry.page));
+                    out.push((entry.region, entry.page, entry.chip));
                 }
             }
             out
         };
-        for (_, region, page) in static_pages {
+        for (region, page, chip) in static_pages {
             if let Some(rw) = self.inner.regions.get(&region) {
+                rw.tabs_box.remove(chip.widget());
                 rw.tab_view.close_page(&page);
             }
         }
@@ -502,6 +858,7 @@ impl ToolDock {
         }
 
         for region in PanelRegion::ALL {
+            Self::sync_strip_selection(&self.inner, region);
             Self::sync_region_empty_stack(&self.inner, region);
         }
         self.inner.state.borrow_mut().preferred_terminal_region = preferred_term;
@@ -649,17 +1006,23 @@ impl ToolDock {
         page.set_title(kind.title());
         page.set_icon(Some(&gio::ThemedIcon::new(kind.icon_name())));
         page.set_tooltip(kind.title());
+        let chip =
+            Self::build_tab_chip(inner, tab_id, target_region, kind.title(), kind.icon_name());
+        rw.tabs_box.append(chip.widget());
         inner.state.borrow_mut().entries.insert(
             tab_id,
             DockTabEntry {
                 region: target_region,
                 page: page.clone(),
+                title: kind.title().to_string(),
+                chip,
             },
         );
         Self::sync_region_empty_stack(inner, target_region);
         if activate {
             rw.tab_view.set_selected_page(&page);
         }
+        Self::sync_strip_selection(inner, target_region);
         let suppress = inner.state.borrow().suppress_callbacks;
         if !suppress {
             Self::rebuild_add_menus(inner);
@@ -691,8 +1054,8 @@ impl ToolDock {
             .borrow()
             .entries
             .get(&tab_id)
-            .map(|e| (e.region, e.page.clone()));
-        let Some((src_region, page)) = info else {
+            .map(|e| (e.region, e.page.clone(), e.chip.clone()));
+        let Some((src_region, page, chip)) = info else {
             return;
         };
         let Some(target_rw) = inner.regions.get(&target_region) else {
@@ -700,6 +1063,7 @@ impl ToolDock {
         };
         if src_region == target_region {
             target_rw.tab_view.set_selected_page(&page);
+            Self::sync_strip_selection(inner, target_region);
             if reveal && let Some(ref cbs) = inner.state.borrow().callbacks {
                 (cbs.on_region_reveal)(target_region);
             }
@@ -710,10 +1074,13 @@ impl ToolDock {
         };
 
         inner.state.borrow_mut().suppress_callbacks = true;
+        src_rw.tabs_box.remove(chip.widget());
         let pos = target_rw.tab_view.n_pages();
         src_rw
             .tab_view
             .transfer_page(&page, &target_rw.tab_view, pos);
+        chip.configure_for_region(target_region);
+        target_rw.tabs_box.append(chip.widget());
         if let Some(entry) = inner.state.borrow_mut().entries.get_mut(&tab_id) {
             entry.region = target_region;
         }
@@ -721,6 +1088,8 @@ impl ToolDock {
             inner.state.borrow_mut().preferred_terminal_region = target_region;
         }
         target_rw.tab_view.set_selected_page(&page);
+        Self::sync_strip_selection(inner, src_region);
+        Self::sync_strip_selection(inner, target_region);
         Self::sync_region_empty_stack(inner, src_region);
         Self::sync_region_empty_stack(inner, target_region);
         inner.state.borrow_mut().suppress_callbacks = false;
@@ -750,8 +1119,11 @@ impl ToolDock {
     }
 
     pub fn close_tab(&self, tab_id: DockTabId) {
-        let info = self
-            .inner
+        Self::close_tab_impl(&self.inner, tab_id);
+    }
+
+    fn close_tab_impl(inner: &Rc<ToolDockInner>, tab_id: DockTabId) {
+        let info = inner
             .state
             .borrow()
             .entries
@@ -760,7 +1132,7 @@ impl ToolDock {
         let Some((region, page)) = info else {
             return;
         };
-        if let Some(rw) = self.inner.regions.get(&region) {
+        if let Some(rw) = inner.regions.get(&region) {
             rw.tab_view.close_page(&page);
         }
     }
@@ -771,19 +1143,23 @@ impl ToolDock {
         view: &adw::TabView,
         page: &adw::TabPage,
     ) {
-        let tab_id = {
+        let closed = {
             let mut st = inner.state.borrow_mut();
             let id = st
                 .entries
                 .iter()
                 .find(|(_, entry)| &entry.page == page)
                 .map(|(k, _)| *k);
-            if let Some(k) = id {
-                st.entries.remove(&k);
-            }
-            id
+            id.and_then(|k| st.entries.remove(&k).map(|e| (k, e.chip)))
         };
+        let tab_id = closed.as_ref().map(|(k, _)| *k);
+        if let Some((_, chip)) = closed
+            && let Some(rw) = inner.regions.get(&region)
+        {
+            rw.tabs_box.remove(chip.widget());
+        }
         view.close_page_finish(page, true);
+        Self::sync_strip_selection(inner, region);
         Self::sync_region_empty_stack(inner, region);
         if inner.state.borrow().suppress_callbacks {
             return;
@@ -818,17 +1194,22 @@ impl ToolDock {
         let Some(rw) = self.inner.regions.get(&region) else {
             return;
         };
+        let tab_id = DockTabId::Terminal(term_id);
         let page = rw.tab_view.append(widget);
         page.set_title(title);
         page.set_icon(Some(&gio::ThemedIcon::new(icon_name)));
         page.set_tooltip(title);
+        let chip = Self::build_tab_chip(&self.inner, tab_id, region, title, icon_name);
+        rw.tabs_box.append(chip.widget());
         {
             let mut st = self.inner.state.borrow_mut();
             st.entries.insert(
-                DockTabId::Terminal(term_id),
+                tab_id,
                 DockTabEntry {
                     region,
                     page: page.clone(),
+                    title: title.to_string(),
+                    chip,
                 },
             );
             if st.preferred_terminal_region != region {
@@ -837,6 +1218,7 @@ impl ToolDock {
         }
         Self::sync_region_empty_stack(&self.inner, region);
         rw.tab_view.set_selected_page(&page);
+        Self::sync_strip_selection(&self.inner, region);
         let cbs = self.inner.state.borrow().callbacks.clone();
         if let Some(ref cbs) = cbs {
             (cbs.on_region_reveal)(region);
@@ -845,17 +1227,13 @@ impl ToolDock {
     }
 
     pub fn update_terminal_tab(&self, term_id: u64, title: &str, icon_name: &str) {
-        let page = self
-            .inner
-            .state
-            .borrow()
-            .entries
-            .get(&DockTabId::Terminal(term_id))
-            .map(|e| e.page.clone());
-        if let Some(page) = page {
-            page.set_title(title);
-            page.set_icon(Some(&gio::ThemedIcon::new(icon_name)));
-            page.set_tooltip(title);
+        let mut st = self.inner.state.borrow_mut();
+        if let Some(entry) = st.entries.get_mut(&DockTabId::Terminal(term_id)) {
+            entry.title = title.to_string();
+            entry.page.set_title(title);
+            entry.page.set_icon(Some(&gio::ThemedIcon::new(icon_name)));
+            entry.page.set_tooltip(title);
+            entry.chip.update(title, icon_name);
         }
     }
 
@@ -872,6 +1250,7 @@ impl ToolDock {
         };
         if let Some(rw) = self.inner.regions.get(&region) {
             rw.tab_view.set_selected_page(&page);
+            Self::sync_strip_selection(&self.inner, region);
         }
         if let Some(ref cbs) = self.inner.state.borrow().callbacks {
             (cbs.on_region_reveal)(region);
@@ -910,7 +1289,7 @@ impl ToolDock {
             .map(|e| e.region)
     }
 
-    #[cfg(feature = "automation")]
+    #[cfg(any(test, feature = "automation"))]
     pub fn tab_region(&self, tab_id: DockTabId) -> Option<PanelRegion> {
         self.inner
             .state
@@ -937,16 +1316,25 @@ impl ToolDock {
     }
 
     pub fn teardown(&self) {
+        if let Some(ctx) = self.inner.active_context_menu.borrow_mut().take() {
+            ctx.popover.popdown();
+            if ctx.popover.parent().is_some() {
+                ctx.popover.unparent();
+            }
+        }
         {
             let mut st = self.inner.state.borrow_mut();
             st.disposing = true;
             st.callbacks = None;
-            st.entries.clear();
+            for (_, entry) in st.entries.drain() {
+                if let Some(rw) = self.inner.regions.get(&entry.region) {
+                    rw.tabs_box.remove(entry.chip.widget());
+                }
+            }
             st.static_widgets.clear();
         }
         for rw in self.inner.regions.values() {
             rw.add_menu.remove_all();
-            rw.context_menu.remove_all();
         }
     }
 
@@ -962,10 +1350,11 @@ impl ToolDock {
 
     #[cfg(feature = "automation")]
     pub fn region_has_add_button(&self, region: PanelRegion) -> bool {
-        self.inner
-            .regions
-            .get(&region)
-            .is_some_and(|rw| rw.tab_bar.end_action_widget().is_some())
+        self.inner.regions.get(&region).is_some_and(|rw| {
+            rw.add_btn.property::<bool>("visible")
+                && rw.strip_bar.property::<bool>("visible")
+                && rw.add_btn.parent().is_some()
+        })
     }
 
     #[cfg(feature = "automation")]
@@ -973,7 +1362,11 @@ impl ToolDock {
         let Some(rw) = self.inner.regions.get(&region) else {
             return 0;
         };
-        count_tab_bars_in_widget(rw.root.upcast_ref::<gtk4::Widget>())
+        let adw_bars = count_adw_tab_bars_in_widget(rw.root.upcast_ref::<gtk4::Widget>());
+        if adw_bars > 0 {
+            return adw_bars + 100;
+        }
+        count_strips_in_widget(rw.root.upcast_ref::<gtk4::Widget>())
     }
 
     #[cfg(feature = "automation")]
@@ -985,7 +1378,7 @@ impl ToolDock {
         collect_menu_labels(rw.add_menu.upcast_ref())
     }
 
-    #[cfg(feature = "automation")]
+    #[cfg(test)]
     pub fn context_menu_labels_for(&self, tab_id: DockTabId) -> Vec<String> {
         let Some(region) = self.tab_region(tab_id) else {
             return Vec::new();
@@ -993,6 +1386,105 @@ impl ToolDock {
         let menu = gio::Menu::new();
         Self::fill_context_menu_for_tab(&menu, region, tab_id);
         collect_menu_labels(menu.upcast_ref())
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn open_tab_context_menu(&self, tab_id: DockTabId) -> bool {
+        Self::show_context_menu_for_tab(&self.inner, tab_id)
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn active_context_menu_popover(&self) -> Option<(DockTabId, gtk4::PopoverMenu)> {
+        self.inner
+            .active_context_menu
+            .borrow()
+            .as_ref()
+            .map(|ctx| (ctx.tab_id, ctx.popover.clone()))
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn activate_context_menu_item(&self, label_text: &str) -> bool {
+        let Some(popover) = self
+            .inner
+            .active_context_menu
+            .borrow()
+            .as_ref()
+            .map(|ctx| ctx.popover.clone())
+        else {
+            return false;
+        };
+        if !popover.is_visible() {
+            return false;
+        }
+        let Some(model) = popover.menu_model() else {
+            return false;
+        };
+        let Some((action_name, target_opt)) = find_menu_action(&model, label_text) else {
+            return false;
+        };
+        if !action_name.starts_with("win.dock-") || target_opt.is_none() {
+            return false;
+        }
+        if let Some(btn) = find_popover_item_widget(popover.upcast_ref(), label_text) {
+            return btn.activate();
+        }
+        false
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn active_context_menu_labels(&self) -> Vec<String> {
+        let Some(popover) = self
+            .inner
+            .active_context_menu
+            .borrow()
+            .as_ref()
+            .map(|ctx| ctx.popover.clone())
+        else {
+            return Vec::new();
+        };
+        let Some(model) = popover.menu_model() else {
+            return Vec::new();
+        };
+        collect_menu_labels(&model)
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn measure_strip_tab_bounds(&self, region: PanelRegion) -> Option<StripLayoutMetrics> {
+        let rw = self.inner.regions.get(&region)?;
+        let strip_width = rw.strip_scroll.width() as f32;
+        let st = self.inner.state.borrow();
+        let n_pages = rw.tab_view.n_pages();
+        let mut tabs = Vec::with_capacity(n_pages as usize);
+        for idx in 0..n_pages {
+            let page = rw.tab_view.nth_page(idx);
+            let Some((&tab_id, entry)) = st.entries.iter().find(|(_, e)| e.page == page) else {
+                continue;
+            };
+            let chip_w = entry.chip.widget();
+            if let Some(bounds) = chip_w.compute_bounds(&rw.strip_scroll) {
+                let x = bounds.x();
+                let y = bounds.y();
+                let width = bounds.width();
+                let height = bounds.height();
+                let fits_in_strip = x >= -0.5 && x + width <= strip_width + 0.5;
+                tabs.push(TabChipBounds {
+                    id: tab_id.encode(),
+                    title: entry.title.clone(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    fits_in_strip,
+                    selected: entry.chip.inner.selected.get(),
+                    close_visible: entry.chip.inner.close_btn.is_visible(),
+                });
+            }
+        }
+        Some(StripLayoutMetrics {
+            region: region.id().to_string(),
+            strip_width,
+            tabs,
+        })
     }
 
     #[cfg(feature = "automation")]
@@ -1019,20 +1511,86 @@ impl ToolDock {
 }
 
 #[cfg(feature = "automation")]
-fn count_tab_bars_in_widget(root: &gtk4::Widget) -> usize {
+fn count_adw_tab_bars_in_widget(root: &gtk4::Widget) -> usize {
     let mut count = 0usize;
     if root.is::<adw::TabBar>() {
         count += 1;
     }
     let mut child = root.first_child();
     while let Some(c) = child {
-        count += count_tab_bars_in_widget(&c);
+        count += count_adw_tab_bars_in_widget(&c);
         child = c.next_sibling();
     }
     count
 }
 
 #[cfg(feature = "automation")]
+fn count_strips_in_widget(root: &gtk4::Widget) -> usize {
+    let mut count = 0usize;
+    if root.has_css_class("hortus-tool-strip") {
+        count += 1;
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        count += count_strips_in_widget(&c);
+        child = c.next_sibling();
+    }
+    count
+}
+
+#[cfg(feature = "automation")]
+fn find_menu_action(
+    menu: &gio::MenuModel,
+    target_label: &str,
+) -> Option<(String, Option<glib::Variant>)> {
+    for idx in 0..menu.n_items() {
+        if let Some(val) = menu.item_attribute_value(idx, "label", Some(glib::VariantTy::STRING))
+            && val.str() == Some(target_label)
+        {
+            let action = menu
+                .item_attribute_value(idx, "action", Some(glib::VariantTy::STRING))
+                .and_then(|v| v.str().map(str::to_string))?;
+            let target = menu.item_attribute_value(idx, "target", None);
+            return Some((action, target));
+        }
+        if let Some(sub) = menu.item_link(idx, gio::MENU_LINK_SECTION)
+            && let Some(found) = find_menu_action(&sub, target_label)
+        {
+            return Some(found);
+        }
+        if let Some(sub) = menu.item_link(idx, gio::MENU_LINK_SUBMENU)
+            && let Some(found) = find_menu_action(&sub, target_label)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "automation")]
+fn find_popover_item_widget(root: &gtk4::Widget, target_label: &str) -> Option<gtk4::Widget> {
+    if let Some(lbl) = root.downcast_ref::<gtk4::Label>()
+        && lbl.text() == target_label
+    {
+        let mut cur = lbl.parent();
+        while let Some(w) = cur {
+            if w.type_().name() == "GtkModelButton" || w.is::<gtk4::Button>() {
+                return Some(w);
+            }
+            cur = w.parent();
+        }
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        if let Some(found) = find_popover_item_widget(&c, target_label) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+#[cfg(any(test, feature = "automation"))]
 fn collect_menu_labels(menu: &gio::MenuModel) -> Vec<String> {
     let mut out = Vec::new();
     for idx in 0..menu.n_items() {
@@ -1074,6 +1632,10 @@ mod tests {
         }
         let dock = ToolDock::new(dummy_static_widgets());
         dock.apply_default_layout();
+        let _ = ToolDock::show_context_menu_for_tab(
+            &dock.inner,
+            DockTabId::Static(StaticToolKind::Changes),
+        );
         let weak = Rc::downgrade(&dock.inner);
         assert_eq!(weak.strong_count(), 1);
         dock.teardown();
@@ -1178,6 +1740,70 @@ mod tests {
         });
         dock.close_terminal_tab(99);
         assert_eq!(closed_count.get(), 1);
+        dock.teardown();
+    }
+
+    #[test]
+    fn tool_dock_strip_chips_and_context_menu_all_tools() {
+        if !crate::platform::style::ensure_gtk_test_thread() {
+            return;
+        }
+        let dock = ToolDock::new(dummy_static_widgets());
+        dock.apply_default_layout();
+
+        // 选中态显示 ×，非选中态默认隐藏 × 以节省边栏横向空间
+        let st = dock.inner.state.borrow();
+        let files_entry = &st.entries[&DockTabId::Static(StaticToolKind::Files)];
+        let search_entry = &st.entries[&DockTabId::Static(StaticToolKind::Search)];
+        assert!(files_entry.chip.inner.selected.get());
+        assert!(files_entry.chip.inner.close_btn.is_visible());
+        assert!(!search_entry.chip.inner.selected.get());
+        assert!(!search_entry.chip.inner.close_btn.is_visible());
+        assert!(
+            files_entry
+                .chip
+                .widget()
+                .has_css_class("hortus-tool-tab-sidebar")
+        );
+        drop(st);
+
+        // 全部 6 个静态工具右键菜单均包含其余两区移动项与「关闭标签」
+        for kind in StaticToolKind::ALL {
+            let id = DockTabId::Static(kind);
+            let region = dock.static_tool_region(kind).expect("tool in layout");
+            let labels = dock.context_menu_labels_for(id);
+            assert!(labels.iter().any(|l| l == "关闭标签"));
+            for target in PanelRegion::ALL {
+                let move_lbl = format!("移动到「{}」", target.title());
+                if target == region {
+                    assert!(!labels.iter().any(|l| l == &move_lbl));
+                } else {
+                    assert!(labels.iter().any(|l| l == &move_lbl));
+                }
+            }
+        }
+
+        // 移动到 Bottom 后芯片切换为底部紧凑模式（hexpand=false），移回 Right 恢复自适应（hexpand=true）
+        dock.move_tab(
+            DockTabId::Static(StaticToolKind::Changes),
+            PanelRegion::Bottom,
+        );
+        {
+            let st = dock.inner.state.borrow();
+            let chg = &st.entries[&DockTabId::Static(StaticToolKind::Changes)];
+            assert!(!chg.chip.widget().hexpands());
+            assert!(chg.chip.widget().has_css_class("hortus-tool-tab-bottom"));
+        }
+        dock.move_tab(
+            DockTabId::Static(StaticToolKind::Changes),
+            PanelRegion::Right,
+        );
+        {
+            let st = dock.inner.state.borrow();
+            let chg = &st.entries[&DockTabId::Static(StaticToolKind::Changes)];
+            assert!(chg.chip.widget().hexpands());
+            assert!(chg.chip.widget().has_css_class("hortus-tool-tab-sidebar"));
+        }
         dock.teardown();
     }
 }
