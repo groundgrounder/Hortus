@@ -1,21 +1,17 @@
-// Hortus - Linux GTK4 + libadwaita 原生界面原型
+// Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
+#[cfg(feature = "automation")]
+mod automation;
 mod core;
-mod diagram_render;
-mod embed_render;
+mod editor;
 mod files;
-mod findbar;
-mod focus;
-mod fonts;
 mod knowledge;
-mod math_render;
-mod media_render;
-mod pangocairo_ffi;
+mod platform;
 mod reading;
-mod style;
-mod tree;
+mod render;
+mod services;
 mod window;
 
 use crate::core::{APP_ID, CliOptions};
@@ -26,7 +22,7 @@ use libadwaita as adw;
 use std::cell::RefCell;
 
 fn main() -> std::process::ExitCode {
-    fonts::mark_main_thread();
+    platform::fonts::mark_main_thread();
     let options = match CliOptions::parse(std::env::args()) {
         Ok(opts) => opts,
         Err(err) => {
@@ -40,25 +36,7 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    // 传入命令行参数启动时使用 NON_UNIQUE，确保多窗口/自动化/指定库参数互不干扰。
-    let flags = if options.vault.is_some()
-        || !options.open_notes.is_empty()
-        || options.smoke_json.is_some()
-        || options.reading_json.is_some()
-        || options.screenshot.is_some()
-        || options.color_scheme.is_some()
-        || options.width.is_some()
-        || options.height.is_some()
-        || options.overview
-        || options.hide_top_bar
-        || options.edit_mode
-        || options.focus_diagram.is_some()
-        || options.scroll_fraction.is_some()
-        || options.edit_knowledge_json.is_some()
-        || options.edit_knowledge_scene.is_some()
-        || options.wikilink_json.is_some()
-        || options.layout_width_json.is_some()
-    {
+    let flags = if options.wants_non_unique() {
         gio::ApplicationFlags::NON_UNIQUE
     } else {
         gio::ApplicationFlags::FLAGS_NONE
@@ -90,7 +68,7 @@ fn main() -> std::process::ExitCode {
 
     let options_cell = RefCell::new(Some(options));
     app.connect_activate(move |app| {
-        style::install_css();
+        platform::style::install_css();
         let options = options_cell.borrow_mut().take();
         if let Some(opts) = options {
             let win = HortusWindow::new(app, opts);
@@ -100,11 +78,6 @@ fn main() -> std::process::ExitCode {
         }
     });
 
-    let empty_args: [&str; 0] = [];
-    let code = app.run_with_args(&empty_args);
-    if code == gtk4::glib::ExitCode::SUCCESS {
-        std::process::ExitCode::SUCCESS
-    } else {
-        std::process::ExitCode::FAILURE
-    }
+    app.run_with_args(&Vec::<String>::new());
+    std::process::ExitCode::SUCCESS
 }
