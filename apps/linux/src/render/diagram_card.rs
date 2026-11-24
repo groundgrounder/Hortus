@@ -1,0 +1,386 @@
+// Hortus - Linux GTK4 + libadwaita 原生界面
+// Copyright (C) 2026  groundgrounder
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! 内联 Mermaid 图表卡片控件（弱引用回调解环，支持折叠、双链、专注模式与导出）。
+
+use crate::render::diagram::{
+    DiagramExportKind, DiagramExportMeta, DiagramHighlight, RenderedDiagram, draw_scene, hit_test,
+    render_block_with_engine,
+};
+use gtk4::gio;
+use gtk4::glib;
+use gtk4::prelude::*;
+use hortus_ffi::{
+    DiagramEngine, DiagramIdentity, DiagramPrevious, SceneColor, SceneData, SceneHit,
+};
+use libadwaita as adw;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::Arc;
+
+/// 内联图表交互回调函数集。
+#[derive(Clone)]
+pub struct DiagramCallbacks {
+    pub on_collapse_changed: Rc<dyn Fn(u32, Vec<String>, SceneData)>,
+    pub on_open_link: Rc<dyn Fn(String, Option<String>)>,
+    pub on_open_source: Rc<dyn Fn(u64, u64)>,
+    pub on_focus: Rc<dyn Fn(u32)>,
+    pub on_export: Rc<dyn Fn(DiagramExportKind, DiagramExportMeta)>,
+}
+
+struct DiagramCardState {
+    note_path: String,
+    source: String,
+    mmd: bool,
+    ordinal: u32,
+    scene: RefCell<SceneData>,
+    collapsed: RefCell<Vec<String>>,
+    previous: RefCell<Option<DiagramPrevious>>,
+    hovered: RefCell<Option<SceneHit>>,
+    rerender_gen: Cell<u64>,
+    drawing: gtk4::DrawingArea,
+    engine: Arc<DiagramEngine>,
+    callbacks: DiagramCallbacks,
+}
+
+/// 构造内联 Mermaid 图表控件（支持节点折叠、双链跳转、专注模式、SVG/PNG/PDF 导出及降级源码卡片）。
+pub fn build_diagram_card(
+    note_path: String,
+    source: String,
+    mmd: bool,
+    initial: RenderedDiagram,
+    engine: Arc<DiagramEngine>,
+    callbacks: DiagramCallbacks,
+    content_width: f64,
+) -> gtk4::Widget {
+    if let Some(reason) = initial.failure {
+        return build_diagram_fallback_card(
+            &source,
+            initial.source_start,
+            initial.source_end,
+            &reason,
+            content_width,
+        );
+    }
+    let Some(scene) = initial.scene else {
+        return build_diagram_fallback_card(
+            &source,
+            initial.source_start,
+            initial.source_end,
+            "图表场景为空",
+            content_width,
+        );
+    };
+
+    let ordinal = initial.ordinal;
+    let drawing = gtk4::DrawingArea::new();
+    drawing.set_content_width(scene.width.ceil().max(120.0) as i32);
+    drawing.set_content_height(scene.height.ceil().max(48.0) as i32);
+    // 最小宽等于场景宽：若场景比目标栏宽略大，内层滚动容器可以真正横向滚动而不是裁切。
+    drawing.set_size_request(scene.width.ceil().max(120.0) as i32, -1);
+    drawing.set_hexpand(true);
+    drawing.set_halign(gtk4::Align::Fill);
+
+    let state = Rc::new(DiagramCardState {
+        note_path,
+        source,
+        mmd,
+        ordinal,
+        scene: RefCell::new(scene),
+        collapsed: RefCell::new(initial.collapsed),
+        previous: RefCell::new(initial.previous),
+        hovered: RefCell::new(None),
+        rerender_gen: Cell::new(0),
+        drawing: drawing.clone(),
+        engine,
+        callbacks,
+    });
+
+    {
+        let weak = Rc::downgrade(&state);
+        drawing.set_draw_func(move |_, cr, _, _| {
+            let Some(st) = weak.upgrade() else { return };
+            let current = st.scene.borrow();
+            let hl = st.hovered.borrow().as_ref().and_then(|hit| {
+                (hit.can_collapse || hit.link_target.is_some()).then(|| DiagramHighlight {
+                    rect: hit.rect.clone(),
+                    fill: SceneColor {
+                        r: 0.21,
+                        g: 0.52,
+                        b: 0.89,
+                        a: 0.10,
+                    },
+                    border: SceneColor {
+                        r: 0.21,
+                        g: 0.52,
+                        b: 0.89,
+                        a: 0.45,
+                    },
+                    border_width: 1.0,
+                })
+            });
+            draw_scene(cr, &current, None, hl.as_ref());
+        });
+    }
+
+    let motion = gtk4::EventControllerMotion::new();
+    {
+        let weak = Rc::downgrade(&state);
+        motion.connect_motion(move |_, x, y| {
+            let Some(st) = weak.upgrade() else { return };
+            let found = {
+                let s = st.scene.borrow();
+                hit_test(&s, x, y).cloned()
+            };
+            let pointer = found
+                .as_ref()
+                .is_some_and(|h| h.can_collapse || h.link_target.is_some());
+            st.drawing
+                .set_cursor_from_name(if pointer { Some("pointer") } else { None });
+            if let Some(ref hit) = found {
+                let tip = if let Some(ref target) = hit.link_target {
+                    Some(format!("打开笔记：{target}"))
+                } else if hit.can_collapse {
+                    Some(if hit.collapsed {
+                        "点击展开分支".to_string()
+                    } else {
+                        "点击折叠分支".to_string()
+                    })
+                } else {
+                    None
+                };
+                st.drawing.set_tooltip_text(tip.as_deref());
+            } else {
+                st.drawing.set_tooltip_text(None);
+            }
+            let changed = match (&*st.hovered.borrow(), &found) {
+                (None, None) => false,
+                (Some(a), Some(b)) => a.node_id != b.node_id,
+                _ => true,
+            };
+            if changed {
+                *st.hovered.borrow_mut() = found;
+                st.drawing.queue_draw();
+            }
+        });
+    }
+    {
+        let weak = Rc::downgrade(&state);
+        motion.connect_leave(move |_| {
+            let Some(st) = weak.upgrade() else { return };
+            st.drawing.set_cursor_from_name(None);
+            st.drawing.set_tooltip_text(None);
+            if st.hovered.borrow_mut().take().is_some() {
+                st.drawing.queue_draw();
+            }
+        });
+    }
+    drawing.add_controller(motion);
+
+    let click = gtk4::GestureClick::new();
+    click.set_button(1);
+    {
+        let weak = Rc::downgrade(&state);
+        click.connect_pressed(move |_, _, x, y| {
+            let Some(st) = weak.upgrade() else { return };
+            let hit = {
+                let s = st.scene.borrow();
+                hit_test(&s, x, y).cloned()
+            };
+            let Some(hit) = hit else { return };
+            if hit.can_collapse {
+                let next_collapsed = {
+                    let mut list = st.collapsed.borrow_mut();
+                    if let Some(pos) = list.iter().position(|id| id == &hit.node_id) {
+                        list.remove(pos);
+                    } else {
+                        list.push(hit.node_id.clone());
+                        list.sort();
+                    }
+                    list.clone()
+                };
+                let token = st.rerender_gen.get().wrapping_add(1);
+                st.rerender_gen.set(token);
+                let prev = st.previous.borrow().clone();
+                let cur_width = f64::from(st.drawing.width()).max(st.scene.borrow().width);
+                let dark = adw::StyleManager::default().is_dark();
+                let engine_bg = Arc::clone(&st.engine);
+                let src_bg = st.source.clone();
+                let note_bg = st.note_path.clone();
+                let mmd = st.mmd;
+                let ordinal = st.ordinal;
+                let collapsed_bg = next_collapsed.clone();
+                let weak_done = Rc::downgrade(&st);
+
+                glib::MainContext::default().spawn_local(async move {
+                    let rendered = gio::spawn_blocking(move || {
+                        render_block_with_engine(
+                            &engine_bg,
+                            &src_bg,
+                            mmd,
+                            cur_width,
+                            &collapsed_bg,
+                            DiagramIdentity {
+                                document: note_bg,
+                                block: ordinal,
+                                revision: 1,
+                                dark,
+                                font_generation: 0,
+                                request_generation: token,
+                            },
+                            prev,
+                        )
+                    })
+                    .await;
+                    let Some(st) = weak_done.upgrade() else {
+                        return;
+                    };
+                    if st.rerender_gen.get() != token {
+                        return;
+                    }
+                    if let Ok(Ok(new_scene)) = rendered {
+                        *st.previous.borrow_mut() = new_scene.previous.clone();
+                        st.drawing
+                            .set_content_width(new_scene.width.ceil().max(120.0) as i32);
+                        st.drawing
+                            .set_content_height(new_scene.height.ceil().max(48.0) as i32);
+                        *st.scene.borrow_mut() = new_scene.clone();
+                        st.drawing.queue_draw();
+                        (st.callbacks.on_collapse_changed)(ordinal, next_collapsed, new_scene);
+                    }
+                });
+            } else if let Some(target) = hit.link_target {
+                (st.callbacks.on_open_link)(target, hit.link_heading);
+            } else if hit.source_end > hit.source_start {
+                (st.callbacks.on_open_source)(hit.source_start, hit.source_end);
+            }
+        });
+    }
+    drawing.add_controller(click);
+
+    // 悬停/固定微型工具栏：专注查看（Ctrl+Shift+D）与导出 SVG/PNG/PDF
+    let tools = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+    tools.add_css_class("hortus-diagram-tools");
+    tools.set_halign(gtk4::Align::End);
+    tools.set_valign(gtk4::Align::Start);
+    tools.set_margin_top(6);
+    tools.set_margin_end(6);
+
+    let focus_btn = gtk4::Button::builder()
+        .icon_name("view-fullscreen-symbolic")
+        .tooltip_text("专注查看图表 (Ctrl+Shift+D)")
+        .build();
+    focus_btn.add_css_class("flat");
+    focus_btn.add_css_class("circular");
+    {
+        let weak = Rc::downgrade(&state);
+        focus_btn.connect_clicked(move |_| {
+            if let Some(st) = weak.upgrade() {
+                (st.callbacks.on_focus)(st.ordinal);
+            }
+        });
+    }
+
+    let export_popover = gtk4::Popover::new();
+    let export_list = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    export_list.set_margin_top(4);
+    export_list.set_margin_bottom(4);
+    export_list.set_margin_start(4);
+    export_list.set_margin_end(4);
+    for (label, kind) in [
+        ("导出为 SVG…", DiagramExportKind::Svg),
+        ("导出为 PNG (2x)…", DiagramExportKind::Png),
+        ("导出为 PDF…", DiagramExportKind::Pdf),
+    ] {
+        let btn = gtk4::Button::with_label(label);
+        btn.add_css_class("flat");
+        let weak = Rc::downgrade(&state);
+        let pop_weak = export_popover.downgrade();
+        btn.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let Some(st) = weak.upgrade() else { return };
+            let meta = DiagramExportMeta {
+                note_path: st.note_path.clone(),
+                ordinal: st.ordinal,
+                source: st.source.clone(),
+                mmd: st.mmd,
+                collapsed: st.collapsed.borrow().clone(),
+                scene: st.scene.borrow().clone(),
+            };
+            (st.callbacks.on_export)(kind, meta);
+        });
+        export_list.append(&btn);
+    }
+    export_popover.set_child(Some(&export_list));
+
+    let export_btn = gtk4::MenuButton::builder()
+        .icon_name("document-save-symbolic")
+        .tooltip_text("导出图表 (SVG / PNG / PDF)")
+        .popover(&export_popover)
+        .build();
+    export_btn.add_css_class("flat");
+    export_btn.add_css_class("circular");
+
+    tools.append(&focus_btn);
+    tools.append(&export_btn);
+
+    let canvas = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Automatic)
+        .vscrollbar_policy(gtk4::PolicyType::Never)
+        .propagate_natural_width(true)
+        .propagate_natural_height(true)
+        .child(&drawing)
+        .build();
+    canvas.add_css_class("hortus-diagram-canvas");
+    canvas.set_size_request(content_width.round().max(120.0) as i32, -1);
+    let overlay = gtk4::Overlay::new();
+    overlay.set_child(Some(&canvas));
+    overlay.add_overlay(&tools);
+    overlay.set_hexpand(true);
+    overlay.add_css_class("hortus-diagram-card");
+    // 让状态随 Overlay 控件一起释放，不建立反向强引用环。
+    overlay.connect_destroy(move |_| {
+        let _ = &state;
+    });
+
+    overlay.upcast()
+}
+
+fn build_diagram_fallback_card(
+    full_source: &str,
+    start_byte: u64,
+    end_byte: u64,
+    reason: &str,
+    content_width: f64,
+) -> gtk4::Widget {
+    let snippet = full_source
+        .get(start_byte as usize..end_byte as usize)
+        .unwrap_or(full_source)
+        .trim_end();
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    card.add_css_class("hortus-diagram-fallback");
+    card.set_halign(gtk4::Align::Fill);
+    card.set_hexpand(true);
+    card.set_size_request(content_width.round().max(240.0) as i32, -1);
+
+    let header = gtk4::Label::new(Some(reason));
+    header.set_halign(gtk4::Align::Start);
+    header.add_css_class("dim-label");
+    header.add_css_class("caption");
+    header.set_wrap(true);
+    card.append(&header);
+
+    let tv = gtk4::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .monospace(true)
+        .build();
+    tv.buffer().set_text(snippet);
+    tv.add_css_class("hortus-fallback-code");
+    card.append(&tv);
+    card.upcast()
+}
