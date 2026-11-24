@@ -321,9 +321,31 @@ async fn run_suite(
     win.switch_edit_mode(false);
     glib::timeout_future(Duration::from_millis(300)).await;
 
-    // 截图 1: 底部面板单层标签栏 + VTE4 终端 + `+` 按钮
-    let shot_bottom_single_bar = if let Some(dir) = media_dir {
-        let p = dir.join("l3-v2-bottom-single-bar-terminal.png");
+    // L3c D3-2: 标准 1280x800 窗口下量化断言左右边栏 3 个默认标签 100% 落在可视栏内、动态宽 < 120px，底栏标签不拉伸
+    let left_strip_3 = win.tool_dock.measure_strip_tab_bounds(PanelRegion::Left);
+    let right_strip_3 = win.tool_dock.measure_strip_tab_bounds(PanelRegion::Right);
+    let bottom_strip_1 = win.tool_dock.measure_strip_tab_bounds(PanelRegion::Bottom);
+    let left_3tabs_fit = left_strip_3.as_ref().is_some_and(|m| {
+        m.tabs.len() == 3
+            && m.strip_width > 120.0
+            && m.tabs
+                .iter()
+                .all(|t| t.fits_in_strip && t.width > 24.0 && t.width < 120.0)
+    });
+    let right_3tabs_fit = right_strip_3.as_ref().is_some_and(|m| {
+        m.tabs.len() == 3
+            && m.strip_width > 120.0
+            && m.tabs
+                .iter()
+                .all(|t| t.fits_in_strip && t.width > 24.0 && t.width < 120.0)
+    });
+    let bottom_tab_compact = bottom_strip_1
+        .as_ref()
+        .is_some_and(|m| m.tabs.len() == 1 && m.tabs[0].fits_in_strip && m.tabs[0].width < 220.0);
+
+    // 截图 1 (v3): 标准宽度下左右边栏 3 标签完整显示不溢出 + 底部单层紧凑终端栏
+    let shot_dynamic_sidebar = if let Some(dir) = media_dir {
+        let p = dir.join("l3-v3-dynamic-sidebar-tabs.png");
         capture_widget_png(&win.window, &p).is_ok() && p.exists()
     } else {
         false
@@ -331,21 +353,115 @@ async fn run_suite(
     let _ = win.terminal_host.feed_tab_command(shell_id, "\x03\x15\n");
     glib::timeout_future(Duration::from_millis(120)).await;
 
-    // 终端右键菜单检查与跨三区无损迁移（底 -> 右 -> 左 -> 底，全程 PID 与缓冲不变）
-    let ctx_labels_bottom = win
+    // L3c D3-1: 真实右键 PopoverMenu 迁移测试（改动 Right -> Bottom -> Left -> Right）
+    let changes_id = DockTabId::Static(StaticToolKind::Changes);
+    let changes_pop_opened_r = win.tool_dock.open_tab_context_menu(changes_id);
+    let changes_pop_visible_r = wait_for(1500, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_some_and(|(_, p)| p.is_visible())
+    })
+    .await;
+    let changes_menu_labels_r = win.tool_dock.active_context_menu_labels();
+    let changes_menu_ok_r = changes_pop_opened_r
+        && changes_pop_visible_r
+        && changes_menu_labels_r
+            .iter()
+            .any(|l| l == "移动到「底部面板」")
+        && changes_menu_labels_r
+            .iter()
+            .any(|l| l == "移动到「左侧栏」")
+        && changes_menu_labels_r.iter().any(|l| l == "关闭标签");
+    let changes_click_to_bottom = win
         .tool_dock
-        .context_menu_labels_for(DockTabId::Terminal(shell_id));
-    let ctx_menu_bottom_ok = ctx_labels_bottom.iter().any(|l| l.contains("左侧栏"))
+        .activate_context_menu_item("移动到「底部面板」");
+    let changes_moved_to_bottom = wait_for(2000, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_none_or(|(_, p)| !p.is_visible())
+            && win.tool_dock.tab_region(changes_id) == Some(PanelRegion::Bottom)
+    })
+    .await;
+
+    let changes_pop_opened_b = win.tool_dock.open_tab_context_menu(changes_id);
+    let changes_pop_visible_b = wait_for(1500, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_some_and(|(_, p)| p.is_visible())
+    })
+    .await;
+    let changes_menu_labels_b = win.tool_dock.active_context_menu_labels();
+    let changes_menu_ok_b = changes_pop_opened_b
+        && changes_pop_visible_b
+        && changes_menu_labels_b
+            .iter()
+            .any(|l| l == "移动到「左侧栏」")
+        && changes_menu_labels_b
+            .iter()
+            .any(|l| l == "移动到「右侧栏」")
+        && !changes_menu_labels_b
+            .iter()
+            .any(|l| l == "移动到「底部面板」");
+    let changes_click_to_left = win.tool_dock.activate_context_menu_item("移动到「左侧栏」");
+    let changes_moved_to_left = wait_for(2000, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_none_or(|(_, p)| !p.is_visible())
+            && win.tool_dock.tab_region(changes_id) == Some(PanelRegion::Left)
+    })
+    .await;
+
+    let changes_pop_opened_l = win.tool_dock.open_tab_context_menu(changes_id);
+    let _ = wait_for(1500, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_some_and(|(_, p)| p.is_visible())
+    })
+    .await;
+    let changes_click_to_right = win.tool_dock.activate_context_menu_item("移动到「右侧栏」");
+    let changes_moved_back_right = wait_for(2000, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_none_or(|(_, p)| !p.is_visible())
+            && win.tool_dock.tab_region(changes_id) == Some(PanelRegion::Right)
+    })
+    .await;
+    let changes_real_context_menu_ok = changes_menu_ok_r
+        && changes_click_to_bottom
+        && changes_moved_to_bottom
+        && changes_menu_ok_b
+        && changes_click_to_left
+        && changes_moved_to_left
+        && changes_pop_opened_l
+        && changes_click_to_right
+        && changes_moved_back_right;
+
+    // 终端真实右键菜单检查与跨三区无损迁移（底 -> 右 -> 左 -> 底，全程 PID 与缓冲不变）
+    let term_tab_id = DockTabId::Terminal(shell_id);
+    let term_pop_opened = win.tool_dock.open_tab_context_menu(term_tab_id);
+    let term_pop_visible = wait_for(1500, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_some_and(|(_, p)| p.is_visible())
+    })
+    .await;
+    let ctx_labels_bottom = win.tool_dock.active_context_menu_labels();
+    let ctx_menu_bottom_ok = term_pop_opened
+        && term_pop_visible
+        && ctx_labels_bottom.iter().any(|l| l.contains("左侧栏"))
         && ctx_labels_bottom.iter().any(|l| l.contains("右侧栏"))
         && !ctx_labels_bottom.iter().any(|l| l.contains("底部面板"))
         && ctx_labels_bottom.iter().any(|l| l == "关闭标签");
 
-    let _ = gtk4::prelude::WidgetExt::activate_action(
-        &win.window,
-        "win.dock-move-tab",
-        Some(&format!("right:term:{shell_id}").to_variant()),
-    );
-    glib::timeout_future(Duration::from_millis(250)).await;
+    let term_click_to_right = win.tool_dock.activate_context_menu_item("移动到「右侧栏」");
+    let term_moved_to_right = wait_for(2000, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_none_or(|(_, p)| !p.is_visible())
+            && win.tool_dock.tab_region(term_tab_id) == Some(PanelRegion::Right)
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(200)).await;
     let moved_right_pid = win
         .terminal_host
         .tab_snapshot(shell_id)
@@ -359,39 +475,68 @@ async fn run_suite(
         .contains("__L3B_MIGRATION_MARKER__");
     let bottom_auto_collapsed_on_move = !win.is_bottom_panel_revealed();
 
-    // 截图 2: 终端直接停靠在右侧栏并与大纲/反链/改动同层并列
+    // 验证终端移入右侧栏后与 大纲 | 反链 | 改动 共 4 标签动态缩窄且全部在栏内不溢出
+    let right_strip_4 = win.tool_dock.measure_strip_tab_bounds(PanelRegion::Right);
+    let right_4tabs_fit = right_strip_4.as_ref().is_some_and(|m| {
+        m.tabs.len() == 4
+            && m.tabs
+                .iter()
+                .all(|t| t.fits_in_strip && t.width > 24.0 && t.width < 120.0)
+    });
+
+    // 截图 2 (v3): 终端停靠在右侧栏并与大纲/反链/改动同层并列、动态缩窄不溢出
     let shot_right_sidebar_terminal = if let Some(dir) = media_dir {
-        let p = dir.join("l3-v2-terminal-in-right-sidebar.png");
+        let p = dir.join("l3-v3-terminal-in-right-sidebar.png");
         capture_widget_png(&win.window, &p).is_ok() && p.exists()
     } else {
         false
     };
 
-    let _ = gtk4::prelude::WidgetExt::activate_action(
-        &win.window,
-        "win.dock-move-tab",
-        Some(&format!("left:term:{shell_id}").to_variant()),
-    );
-    glib::timeout_future(Duration::from_millis(200)).await;
+    let _ = win.tool_dock.open_tab_context_menu(term_tab_id);
+    let _ = wait_for(1500, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_some_and(|(_, p)| p.is_visible())
+    })
+    .await;
+    let term_click_to_left = win.tool_dock.activate_context_menu_item("移动到「左侧栏」");
+    let _ = wait_for(2000, || {
+        win.tool_dock.tab_region(term_tab_id) == Some(PanelRegion::Left)
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(120)).await;
     let moved_left_pid = win
         .terminal_host
         .tab_snapshot(shell_id)
         .and_then(|s| s["pid"].as_i64())
         .unwrap_or(-1) as i32;
-    let moved_left_region = win.tool_dock.tab_region(DockTabId::Terminal(shell_id));
+    let moved_left_region = win.tool_dock.tab_region(term_tab_id);
 
-    let _ = gtk4::prelude::WidgetExt::activate_action(
-        &win.window,
-        "win.dock-move-tab",
-        Some(&format!("bottom:term:{shell_id}").to_variant()),
-    );
-    glib::timeout_future(Duration::from_millis(200)).await;
+    let _ = win.tool_dock.open_tab_context_menu(term_tab_id);
+    let _ = wait_for(1500, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_some_and(|(_, p)| p.is_visible())
+    })
+    .await;
+    let term_click_to_bottom = win
+        .tool_dock
+        .activate_context_menu_item("移动到「底部面板」");
+    let _ = wait_for(2000, || {
+        win.tool_dock.tab_region(term_tab_id) == Some(PanelRegion::Bottom)
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(120)).await;
     let moved_back_pid = win
         .terminal_host
         .tab_snapshot(shell_id)
         .and_then(|s| s["pid"].as_i64())
         .unwrap_or(-1) as i32;
     let lossless_3_region_migration = shell_pid > 0
+        && term_click_to_right
+        && term_moved_to_right
+        && term_click_to_left
+        && term_click_to_bottom
         && moved_right_pid == shell_pid
         && moved_left_pid == shell_pid
         && moved_back_pid == shell_pid
@@ -399,7 +544,7 @@ async fn run_suite(
         && moved_right_buf
         && moved_left_region == Some(PanelRegion::Left)
         && bottom_auto_collapsed_on_move
-        && win.tool_dock.tab_region(DockTabId::Terminal(shell_id)) == Some(PanelRegion::Bottom);
+        && win.tool_dock.tab_region(term_tab_id) == Some(PanelRegion::Bottom);
 
     // 测试工具栏 × 关闭与 + 菜单添加/跨区移入
     let left_count_before = win.tool_dock.tab_count(PanelRegion::Left);
@@ -423,7 +568,7 @@ async fn run_suite(
     win.tool_dock.popup_add_menu(PanelRegion::Right);
     glib::timeout_future(Duration::from_millis(250)).await;
     let shot_tool_add_menu = if let Some(dir) = media_dir {
-        let p = dir.join("l3-v2-tool-add-menu-and-close.png");
+        let p = dir.join("l3-v3-tool-add-menu-and-close.png");
         let btn = win.tool_dock.add_button_widget(PanelRegion::Right);
         let ok = if let Some(btn) = btn {
             capture_window_with_menu_button_popover(&win.window, &btn, &p).is_ok()
@@ -717,6 +862,53 @@ async fn run_suite(
     glib::timeout_future(Duration::from_millis(300)).await;
     let changes_title = win.changes_panel.title_text();
 
+    // 截图 3 (v3): 通过真实右键菜单将「改动」移入底部面板并验证 diff/回滚界面完好
+    let changes_live_ctx_open = win.tool_dock.open_tab_context_menu(changes_id);
+    let _ = wait_for(1500, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_some_and(|(_, p)| p.is_visible())
+    })
+    .await;
+    let changes_live_ctx_move_bottom = win
+        .tool_dock
+        .activate_context_menu_item("移动到「底部面板」");
+    let changes_live_moved_bottom = wait_for(2000, || {
+        win.tool_dock.tab_region(changes_id) == Some(PanelRegion::Bottom)
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(220)).await;
+    let changes_detail_after_ctx_move = win
+        .changes_panel
+        .detail_snapshot()
+        .is_some_and(|d| d.entry.id == "multi-hunk.md" && d.hunks.len() >= 2);
+    let shot_changes_context_moved = if let Some(dir) = media_dir {
+        let p = dir.join("l3-v3-changes-context-menu-moved.png");
+        capture_widget_png(&win.window, &p).is_ok() && p.exists()
+    } else {
+        false
+    };
+    let changes_live_ctx_open2 = win.tool_dock.open_tab_context_menu(changes_id);
+    let _ = wait_for(1500, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_some_and(|(_, p)| p.is_visible())
+    })
+    .await;
+    let changes_live_ctx_move_right = win.tool_dock.activate_context_menu_item("移动到「右侧栏」");
+    let changes_live_moved_back_right = wait_for(2000, || {
+        win.tool_dock.tab_region(changes_id) == Some(PanelRegion::Right)
+    })
+    .await;
+    let changes_ctx_with_diff_ok = changes_live_ctx_open
+        && changes_live_ctx_move_bottom
+        && changes_live_moved_bottom
+        && changes_detail_after_ctx_move
+        && changes_live_ctx_open2
+        && changes_live_ctx_move_right
+        && changes_live_moved_back_right;
+    glib::timeout_future(Duration::from_millis(150)).await;
+
     // -------------------------------------------------------------------------
     // Part 5: 多窗口同步（含 Agent 改动 + 双窗口同库同步合成截图）
     // -------------------------------------------------------------------------
@@ -799,7 +991,7 @@ async fn run_suite(
 
             // 截图 4: Agent 退出后「本次会话改动」红绿 diff + 双窗口同库同步
             if let Some(dir) = media_dir {
-                let p = dir.join("l3-v2-agent-changes-and-multi-window.png");
+                let p = dir.join("l3-v3-agent-changes-and-multi-window.png");
                 shot_agent_changes_multi =
                     capture_dual_window_png(&win.window, &win2.inner.window, &p).is_ok()
                         && p.exists();
@@ -937,6 +1129,18 @@ async fn run_suite(
             "right_agent_launched_ok": right_agent_launched_ok,
             "bottom_auto_collapsed_on_close": bottom_auto_collapsed_on_close,
         },
+        "dock_v3": {
+            "left_3tabs_fit": left_3tabs_fit,
+            "right_3tabs_fit": right_3tabs_fit,
+            "bottom_tab_compact": bottom_tab_compact,
+            "right_4tabs_fit": right_4tabs_fit,
+            "changes_real_context_menu_ok": changes_real_context_menu_ok,
+            "changes_ctx_with_diff_ok": changes_ctx_with_diff_ok,
+            "left_strip_3": left_strip_3,
+            "right_strip_3": right_strip_3,
+            "bottom_strip_1": bottom_strip_1,
+            "right_strip_4": right_strip_4,
+        },
         "terminal": {
             "alpha_loaded": alpha_loaded,
             "shell_ready": shell_ready,
@@ -989,7 +1193,8 @@ async fn run_suite(
             "win2_pty_reaped": win2_pty_reaped,
         },
         "screenshots": {
-            "bottom_single_bar": shot_bottom_single_bar,
+            "dynamic_sidebar": shot_dynamic_sidebar,
+            "changes_context_moved": shot_changes_context_moved,
             "right_sidebar_terminal": shot_right_sidebar_terminal,
             "tool_add_menu": shot_tool_add_menu,
             "agent_changes_multi": shot_agent_changes_multi,

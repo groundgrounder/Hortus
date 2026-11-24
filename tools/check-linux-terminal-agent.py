@@ -15,10 +15,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_PNGS = [
-    "l3-v2-bottom-single-bar-terminal.png",
-    "l3-v2-terminal-in-right-sidebar.png",
-    "l3-v2-tool-add-menu-and-close.png",
-    "l3-v2-agent-changes-and-multi-window.png",
+    "l3-v3-dynamic-sidebar-tabs.png",
+    "l3-v3-changes-context-menu-moved.png",
+    "l3-v3-terminal-in-right-sidebar.png",
+    "l3-v3-tool-add-menu-and-close.png",
+    "l3-v3-agent-changes-and-multi-window.png",
 ]
 
 
@@ -288,9 +289,9 @@ def main() -> int:
                     "--vault",
                     str(vault1),
                     "--width",
-                    "1320",
+                    "1280",
                     "--height",
-                    "840",
+                    "800",
                     "--terminal-agent-vault2",
                     str(vault2),
                     "--terminal-agent-media",
@@ -307,7 +308,7 @@ def main() -> int:
 
             data = json.loads(main_json.read_text(encoding="utf-8"))
             check(data.get("ok") is True, f"L3 主套校验失败: {data}")
-            for section in ("dock_v2", "terminal", "settings", "agent_changes", "multi_window", "screenshots"):
+            for section in ("dock_v2", "dock_v3", "terminal", "settings", "agent_changes", "multi_window", "screenshots"):
                 sec_val = data.get(section, {})
                 check(isinstance(sec_val, dict) and len(sec_val) > 0, f"缺少检查段 {section}: {data}")
                 for k, v in sec_val.items():
