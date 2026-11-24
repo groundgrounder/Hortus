@@ -3,32 +3,32 @@
 <resources>
     <string name="app_name">Hortus</string>
     <string name="permission_title">允许访问笔记</string>
-    <string name="permission_body">Hortus 直接打开共享存储中的 Markdown 文件夹。请授予所有文件访问权限，以读取和保存笔记。</string>
-    <string name="permission_grant_action">授予存储访问权限</string>
-    <string name="vault_path">笔记库文件夹路径</string>
-    <string name="open_vault">打开笔记库</string>
-    <string name="section_foundation_status">内核验证</string>
+    <string name="permission_body">请授予所有文件访问权限以打开和保存笔记。</string>
+    <string name="permission_grant_action">授予权限</string>
+    <string name="vault_path">文件夹路径</string>
+    <string name="open_vault">打开文件夹</string>
+    <string name="section_foundation_status">状态检查</string>
     <string name="section_notes_list">笔记</string>
-    <string name="status_running">正在验证内核…</string>
+    <string name="status_running">正在检查…</string>
     <string name="status_pass">通过</string>
     <string name="status_fail">失败</string>
     <string name="status_pending">待测试</string>
-    <string name="check_vault_scan">笔记库扫描</string>
+    <string name="check_vault_scan">扫描文件夹</string>
     <string name="note_count">%1$d 篇笔记</string>
     <string name="check_mermaid">Mermaid 排版</string>
     <string name="diagram_count">%1$d 类图</string>
-    <string name="check_math">RaTeX 排版</string>
+    <string name="check_math">公式排版</string>
     <string name="check_fonts">字体字宽偏差</string>
     <string name="font_difference">最大 %1$.2f px</string>
     <string name="check_atomic_save">原子保存</string>
     <string name="test_save_copy">用副本测试保存</string>
-    <string name="check_error">验证未能完成，请重新打开文件夹。</string>
-    <string name="empty_notes">笔记库中没有找到 Markdown 笔记。</string>
+    <string name="check_error">未能完成，请重新打开文件夹。</string>
+    <string name="empty_notes">文件夹里没有找到 Markdown 笔记。</string>
     <string name="note_preview_close">关闭</string>
     <string name="preview_error">无法打开这篇笔记。</string>
 
     <string name="reader_open_folder">打开文件夹</string>
-    <string name="reader_folder_path">笔记库文件夹路径</string>
+    <string name="reader_folder_path">文件夹路径</string>
     <string name="reader_use_folder">使用此文件夹</string>
     <string name="reader_folder_up">上一级</string>
     <string name="reader_cancel">取消</string>
@@ -50,12 +50,12 @@
     <string name="export_pdf">导出 PDF…</string>
     <string name="export_success">已导出 %1$s</string>
     <string name="export_failed">导出失败：%1$s</string>
-    <string name="export_choose_location">选择图表保存位置</string>
+    <string name="export_choose_location">选择保存位置</string>
     <string name="embed_loading">正在加载嵌入…</string>
     <string name="embed_cycle">循环嵌入：%1$s</string>
     <string name="embed_depth">嵌入层数过深：%1$s</string>
     <string name="embed_heading_missing">找不到标题：%1$s</string>
-    <string name="embed_ambiguous">笔记名有歧义：%1$s</string>
+    <string name="embed_ambiguous">有多个同名笔记：%1$s</string>
     <string name="embed_broken">找不到嵌入的笔记：%1$s</string>
     <string name="embed_attachment">嵌入的附件：%1$s</string>
     <string name="embed_error">无法显示嵌入：%1$s</string>
@@ -63,7 +63,6 @@
     <string name="focus_actual">100%</string>
     <string name="focus_zoom">%1$d%%</string>
     <string name="focus_title">图表</string>
-    <string name="focus_hint">双指缩放、拖动平移、双击在适应和 100% 之间切换。</string>
     <string name="focus_share">分享</string>
     <string name="focus_save">保存到…</string>
     <string name="share_png">分享 PNG</string>
@@ -79,7 +78,7 @@
     <string name="reader_save">保存</string>
     <string name="reader_more">更多选项</string>
     <string name="reader_read_only_label">只读</string>
-    <string name="reader_external_preview">只读预览：此文件来自其他应用，不能在此编辑。</string>
+    <string name="reader_external_preview">来自其他应用的只读预览，无法在此编辑。</string>
     <string name="reader_read_only_reason">只读文件：%1$s</string>
 
     <string name="search_hint">搜索笔记</string>
@@ -94,10 +93,10 @@
     <string name="knowledge_outline">大纲</string>
     <string name="knowledge_backlinks">反链</string>
     <string name="knowledge_tags">标签</string>
-    <string name="knowledge_empty_outline">这篇笔记没有标题。</string>
-    <string name="knowledge_empty_backlinks">还没有笔记链接到这里。</string>
-    <string name="knowledge_empty_tags">笔记库中还没有标签。</string>
-    <string name="knowledge_loading">正在加载知识导航…</string>
+    <string name="knowledge_empty_outline">没有标题。</string>
+    <string name="knowledge_empty_backlinks">还没有反链。</string>
+    <string name="knowledge_empty_tags">文件夹里还没有标签。</string>
+    <string name="knowledge_loading">正在加载…</string>
     <string name="knowledge_back_to_tags">全部标签</string>
     <string name="knowledge_line">第 %1$d 行</string>
     <string name="knowledge_in_diagram">图内</string>
@@ -105,14 +104,14 @@
     <string name="knowledge_tag_count">%1$d 篇笔记</string>
 
     <string name="shortcut_pin">固定到桌面</string>
-    <string name="shortcut_pinned">已请求创建快捷方式，启动器会询问确认。</string>
+    <string name="shortcut_pinned">已请求添加快捷方式。</string>
     <string name="shortcut_unsupported">当前启动器不支持固定快捷方式。</string>
 
     <string name="new_note">新建笔记</string>
     <string name="new_note_title">新建笔记</string>
     <string name="new_note_name">笔记名</string>
     <string name="new_note_parent">文件夹</string>
-    <string name="new_note_root">笔记库根目录</string>
+    <string name="new_note_root">根目录</string>
     <string name="new_note_create">创建</string>
     <string name="new_note_exists">同名文件已存在。</string>
     <string name="new_note_invalid">请输入有效的文件名。</string>
@@ -127,11 +126,32 @@
     <string name="editor_copy_saved">已另存为冲突副本：%1$s</string>
     <string name="editor_disk_loaded">已载入磁盘上的版本。</string>
     <string name="editor_conflict_title">磁盘上的文件已变化</string>
-    <string name="editor_conflict_body">编辑期间其他应用修改了这篇笔记。可以保留你的文字、载入磁盘版本或另存为冲突副本。</string>
+    <string name="editor_conflict_body">文件已被外部修改，请选择保留方式。</string>
     <string name="editor_missing_title">文件已被删除</string>
-    <string name="editor_missing_body">编辑期间这篇笔记在磁盘上被删除。可以用你的文字重建，或另存为冲突副本。</string>
+    <string name="editor_missing_body">磁盘上的文件已被删除，可重建或另存副本。</string>
     <string name="editor_keep_mine">保留我的修改</string>
     <string name="editor_use_disk">改用磁盘版本</string>
     <string name="editor_copy_action">另存为冲突副本</string>
-    <string name="editor_read_only_reason">这篇笔记不能编辑：%1$s</string>
+    <string name="editor_read_only_reason">无法编辑笔记：%1$s</string>
+
+    <string name="settings_title">设置</string>
+    <string name="settings_appearance">外观</string>
+    <string name="settings_theme_system">跟随系统</string>
+    <string name="settings_theme_light">浅色</string>
+    <string name="settings_theme_dark">深色</string>
+    <string name="settings_font_size">正文字号</string>
+    <string name="settings_font_size_value">%1$d sp</string>
+    <string name="settings_font_decrease">减小字号</string>
+    <string name="settings_font_increase">增大字号</string>
+    <string name="settings_cache">缓存</string>
+    <string name="settings_clear_cache">清理缓存</string>
+    <string name="settings_cache_cleared">已清理缓存</string>
+    <string name="settings_about">关于</string>
+    <string name="settings_version">版本</string>
+    <string name="settings_license">许可证</string>
+    <string name="settings_license_value">GPL-3.0-only</string>
+    <string name="settings_repository">代码仓库</string>
+    <string name="settings_repository_url">https://github.com/groundgrounder/Hortus</string>
+    <string name="settings_copy_link">复制</string>
+    <string name="settings_link_copied">已复制链接</string>
 </resources>

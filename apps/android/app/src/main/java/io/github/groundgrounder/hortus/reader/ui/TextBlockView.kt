@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package io.github.groundgrounder.hortus.reader.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Paint
@@ -47,6 +49,7 @@ import io.github.groundgrounder.hortus.reader.render.MathRenderResult
 import io.github.groundgrounder.hortus.reader.render.PreparedMath
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * 原生 TextView 承载阅读文本：系统负责选择手柄、复制工具栏和文本绘制。
@@ -248,6 +251,34 @@ internal class ReaderTextView(context: Context) : TextView(context) {
         return tags.firstOrNull { offset >= it.start && offset < it.end }
     }
 
+    override fun onTextContextMenuItem(id: Int): Boolean {
+        if (id == android.R.id.copy && mathLatex.isNotEmpty()) {
+            val start = min(selectionStart, selectionEnd).coerceAtLeast(0)
+            val end = max(selectionStart, selectionEnd).coerceAtMost(text.length)
+            if (end > start && (start until end).any { it in mathLatex }) {
+                val source = text
+                val resolved = buildString(end - start) {
+                    for (offset in start until end) {
+                        val latex = mathLatex[offset]
+                        if (latex != null && (source[offset] == '\uFFFC' || source[offset] == '\u200B')) {
+                            append(latex)
+                        } else {
+                            append(source[offset])
+                        }
+                    }
+                }
+                context.getSystemService(ClipboardManager::class.java)
+                    ?.setPrimaryClip(ClipData.newPlainText("Hortus", resolved))
+                if (source is Spannable) {
+                    Selection.setSelection(source, end)
+                }
+                clearFocus()
+                return true
+            }
+        }
+        return super.onTextContextMenuItem(id)
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -294,7 +325,7 @@ internal fun TextBlockView(
     val density = LocalDensity.current.density
     val blockScale = headingScale(item.headingLevel)
     val blockSize = bodySizePx * blockScale
-    val mathResults = remember(item.key) { mutableStateMapOf<String, MathRenderResult>() }
+    val mathResults = remember(item.key, blockSize) { mutableStateMapOf<String, MathRenderResult>() }
     val images = remember(item.key) { mutableStateMapOf<String, LoadedImage>() }
     val hasInlineMedia = item.inlineMath.isNotEmpty() || item.inlineImages.isNotEmpty()
     if (hasInlineMedia) {
@@ -340,7 +371,7 @@ internal fun TextBlockView(
                 for (formula in item.inlineMath) {
                     val local = (formula.displayStart.toLong() - item.displayStart).toInt()
                     if (local in 0 until item.text.length) {
-                        put(local, formula.latex)
+                        put(local, formula.displaySource.ifBlank { "\$${formula.latex}\$" })
                     }
                 }
             }
