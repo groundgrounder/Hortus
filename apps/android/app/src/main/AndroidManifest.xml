@@ -69,7 +69,7 @@
                 android:resource="@xml/file_paths" />
         </provider>
         <activity
-            android:name=".reader.DiagramFocusActivity"
+            android:name=".focus.DiagramFocusActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
             android:exported="false" />
     </application>
