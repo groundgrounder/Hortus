@@ -93,6 +93,13 @@ impl WindowInner {
             .tabs
             .get(note_path)
             .map(|tab| tab.reading_scrolled.clone());
+        let font_size = self
+            .state
+            .borrow()
+            .services
+            .as_ref()
+            .map(|s| s.config.snapshot().font_size)
+            .unwrap_or(15.0);
         ReadingEnv {
             note_path: note_path.to_string(),
             vault_root,
@@ -100,7 +107,7 @@ impl WindowInner {
             handle,
             diagram_engine,
             math_service,
-            font_size: 15.0,
+            font_size,
             content_width: self.reading_content_width(),
             ancestors: vec![note_path.to_string()],
             depth: 0,
@@ -168,6 +175,7 @@ impl WindowInner {
     }
 
     pub fn refresh_all_reading_tabs(self: &Rc<Self>) {
+        self.terminal_host.apply_theme();
         let paths: Vec<String> = self.state.borrow().tabs.keys().cloned().collect();
         for p in paths {
             self.refresh_reading_tab(&p, None);
@@ -197,6 +205,7 @@ impl WindowInner {
         };
 
         let content_width = self.reading_content_width();
+        let font_size = services.config.snapshot().font_size;
         let dark = adw::StyleManager::default().is_dark();
         let main_thread = std::thread::current().id();
         let weak = Rc::downgrade(self);
@@ -218,7 +227,7 @@ impl WindowInner {
                     diagram_engine: diag_bg,
                     math_service: math_bg,
                     content_width,
-                    font_size: 15.0,
+                    font_size,
                     dark,
                     main_thread,
                 })

@@ -460,6 +460,13 @@ impl WindowInner {
                         win.show_toast("已重命名");
                     }
                     win.refresh_knowledge_after_write();
+                    let mut changed_paths: Vec<String> = moved_tabs
+                        .iter()
+                        .flat_map(|(old, new)| [old.clone(), new.clone()])
+                        .collect();
+                    changed_paths.push(old_path);
+                    changed_paths.push(entry.path);
+                    win.notify_sibling_windows_written(&changed_paths);
                 }
                 Ok(Err(err)) => {
                     win.state.borrow_mut().last_file_op = Some(serde_json::json!({
@@ -597,6 +604,9 @@ impl WindowInner {
                     let _ = absolute;
                     win.show_toast("已移到回收站");
                     win.refresh_knowledge_after_write();
+                    let mut notify_paths = removed;
+                    notify_paths.push(path_bg);
+                    win.notify_sibling_windows_written(&notify_paths);
                 }
                 Ok(Err(err)) => {
                     win.state.borrow_mut().last_file_op = Some(serde_json::json!({

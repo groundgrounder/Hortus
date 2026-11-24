@@ -6,6 +6,8 @@
 
 use crate::platform::fonts::ensure_katex_fonts_registered_async;
 use crate::services::AppServices;
+use crate::terminal::process::resolve_login_path;
+use crate::window::session::WindowInnerBridge;
 use crate::window::shell::WindowInner;
 use gtk4::gio;
 use gtk4::glib;
@@ -19,35 +21,45 @@ use std::sync::Arc;
 
 impl WindowInner {
     pub fn initialize_services_async(self: &Rc<Self>) {
+        let preloaded = self.state.borrow().services.clone();
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
-            let init_res = gio::spawn_blocking(AppServices::init_blocking)
+            let init_res = if let Some(svcs) = preloaded {
+                gio::spawn_blocking(resolve_login_path)
+                    .await
+                    .map(|lp| (svcs, None, lp))
+                    .map_err(|_| "初始化线程异常".to_string())
+            } else {
+                gio::spawn_blocking(|| {
+                    let (svcs, warn) = AppServices::init_blocking()?;
+                    let lp = resolve_login_path();
+                    Ok::<_, String>((svcs, warn, lp))
+                })
                 .await
-                .unwrap_or_else(|_| Err("初始化线程异常".into()));
+                .unwrap_or_else(|_| Err("初始化线程异常".into()))
+            };
             let _ = ensure_katex_fonts_registered_async().await;
             let Some(win) = weak.upgrade() else { return };
             if win.state.borrow().disposing {
                 return;
             }
             match init_res {
-                Ok((services, font_warning)) => {
+                Ok((services, font_warning, login_path)) => {
                     services.ensure_dark_listener();
+                    services.config.ensure_monitor_and_css();
                     let reg_id = services.windows.allocate_id();
-                    let weak_dark = Rc::downgrade(&win);
-                    services.windows.register(reg_id, move || {
-                        if let Some(w) = weak_dark.upgrade() {
-                            w.refresh_all_reading_tabs();
-                            true
-                        } else {
-                            false
-                        }
-                    });
+                    services
+                        .windows
+                        .register(reg_id, WindowInnerBridge::new(Rc::downgrade(&win)));
+                    let term_font = services.config.snapshot().terminal_font;
                     {
                         let mut st = win.state.borrow_mut();
                         st.math_service = Arc::clone(&services.math_service);
                         st.services = Some(Arc::clone(&services));
                         st.window_reg_id = Some(reg_id);
+                        st.login_path = login_path;
                     }
+                    win.terminal_host.apply_font(term_font);
                     if let Some(warn) = font_warning {
                         win.show_toast(&format!("KaTeX 字体提示：{warn}"));
                     }
@@ -139,12 +151,19 @@ impl WindowInner {
                     win.empty_status
                         .set_description(Some("从左侧文件树选择一篇笔记。"));
                     let (sub_id, queue) = ctx.subscribe();
-                    {
+                    let temp_dir = {
                         let mut st = win.state.borrow_mut();
                         st.vault_ctx = Some(Arc::clone(&ctx));
                         st.vault_sub_id = Some(sub_id);
-                    }
+                        st.temp_dir.clone()
+                    };
                     win.attach_vault_to_panels(&ctx.handle);
+                    win.terminal_host.set_vault_root(Some(ctx.root.clone()));
+                    win.changes_panel.set_context(
+                        Arc::clone(&services.core),
+                        Some(ctx.root.clone()),
+                        temp_dir,
+                    );
 
                     let weak_ui = Rc::downgrade(&win);
                     glib::MainContext::default().spawn_local(async move {
@@ -161,23 +180,37 @@ impl WindowInner {
                             let (complete, micros) = win_ui.vault_tree.apply_batches(&batches);
                             win_ui.handle_vault_batches(&batches);
                             if complete {
-                                let pending: Vec<String> = {
+                                let (pending, override_state) = {
                                     let mut st = win_ui.state.borrow_mut();
                                     st.scan_complete = true;
                                     st.scan_micros = micros;
                                     if !initial_notes_opened {
                                         initial_notes_opened = true;
-                                        std::mem::take(&mut st.pending_open_notes)
+                                        (
+                                            std::mem::take(&mut st.pending_open_notes),
+                                            st.initial_tabs_override.take(),
+                                        )
                                     } else {
-                                        Vec::new()
+                                        (Vec::new(), None)
                                     }
                                 };
-                                for rel in &pending {
-                                    win_ui.open_note_at(rel, None);
+                                if let Some(restored) = override_state {
+                                    win_ui.state.borrow_mut().initial_tab_views = restored.views;
+                                    for rel in &restored.tabs {
+                                        win_ui.open_note_at(rel, None);
+                                    }
+                                    if let Some(sel) = restored.selected {
+                                        win_ui.open_note_at(&sel, None);
+                                    }
+                                } else {
+                                    for rel in &pending {
+                                        win_ui.open_note_at(rel, None);
+                                    }
+                                    if let Some(first) = pending.first() {
+                                        win_ui.open_note_at(first, None);
+                                    }
                                 }
-                                if let Some(first) = pending.first() {
-                                    win_ui.open_note_at(first, None);
-                                }
+                                win_ui.persist_window_session();
                                 #[cfg(feature = "automation")]
                                 crate::automation::maybe_schedule_automation(&win_ui);
                             }
@@ -278,6 +311,7 @@ impl WindowInner {
             st.close_requests += 1;
         }
         if self.state.borrow().close_approved {
+            self.persist_session_before_close();
             self.teardown();
             return glib::Propagation::Proceed;
         }
@@ -296,6 +330,7 @@ impl WindowInner {
             .collect();
         self.state.borrow_mut().close_unsaved = unsaved.len() as u32;
         if unsaved.is_empty() {
+            self.persist_session_before_close();
             self.teardown();
             return glib::Propagation::Proceed;
         }

@@ -1,0 +1,367 @@
+// Hortus - Linux GTK4 + libadwaita 原生界面
+// Copyright (C) 2026  groundgrounder
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! 窗口级终端、Agent 启动闸门、「本次会话改动」面板与设置对话框协调。
+
+use crate::agent::{AgentLaunchCallbacks, ChangesCallbacks, launch_agent_with_snapshot_gate};
+use crate::core::{ColorSchemeChoice, PanelRegion, PlaceholderKind};
+use crate::services::ConfigSnapshot;
+use crate::settings::{SettingsDialog, SettingsPage};
+use crate::window::actions::apply_color_scheme;
+use crate::window::commands::WindowCommand;
+use crate::window::shell::WindowInner;
+use gtk4::gio;
+use gtk4::glib;
+use gtk4::prelude::*;
+use libadwaita as adw;
+use libadwaita::prelude::*;
+use std::path::Path;
+use std::rc::Rc;
+use std::sync::Arc;
+
+impl WindowInner {
+    pub fn init_terminal_and_changes_panels(self: &Rc<Self>) {
+        let weak_launch = Rc::downgrade(self);
+        let weak_exit = Rc::downgrade(self);
+        let weak_toast = Rc::downgrade(self);
+        let weak_empty = Rc::downgrade(self);
+        self.terminal_host.set_callbacks(
+            Rc::new(move || {
+                if let Some(win) = weak_launch.upgrade() {
+                    win.send_command(WindowCommand::LaunchAgent);
+                }
+            }),
+            Rc::new(move |sid, code| {
+                if let Some(win) = weak_exit.upgrade() {
+                    win.handle_agent_process_exited(sid, code);
+                }
+            }),
+            Rc::new(move |msg| {
+                if let Some(win) = weak_toast.upgrade() {
+                    win.show_toast(&msg);
+                }
+            }),
+            Rc::new(move || {
+                if let Some(win) = weak_empty.upgrade()
+                    && win
+                        .state
+                        .borrow()
+                        .placement
+                        .region_of(PlaceholderKind::Terminal)
+                        == PanelRegion::Bottom
+                    && win.bottom_stack.visible_child_name().as_deref()
+                        == Some(PlaceholderKind::Terminal.id())
+                {
+                    win.set_bottom_panel_revealed(false);
+                }
+            }),
+        );
+
+        let weak_open = Rc::downgrade(self);
+        let weak_rb = Rc::downgrade(self);
+        let weak_c_toast = Rc::downgrade(self);
+        let weak_win = Rc::downgrade(self);
+        self.changes_panel.set_callbacks(ChangesCallbacks {
+            on_open_note: Rc::new(move |relpath| {
+                if let Some(win) = weak_open.upgrade() {
+                    win.send_command(WindowCommand::OpenNote {
+                        relpath,
+                        heading: None,
+                    });
+                }
+            }),
+            on_rolled_back: Rc::new(move |paths: Vec<String>| {
+                if let Some(win) = weak_rb.upgrade() {
+                    win.handle_changes_rolled_back(&paths);
+                }
+            }),
+            on_toast: Rc::new(move |msg: String| {
+                if let Some(win) = weak_c_toast.upgrade() {
+                    win.show_toast(&msg);
+                }
+            }),
+            parent_window: Rc::new(move || weak_win.upgrade().map(|w| w.window.clone())),
+        });
+    }
+
+    pub fn reveal_placeholder_panel(self: &Rc<Self>, kind: PlaceholderKind) {
+        let region = self.state.borrow().placement.region_of(kind);
+        match region {
+            PanelRegion::Right => {
+                self.right_split.set_show_sidebar(true);
+                self.right_stack.set_visible_child_name(kind.id());
+            }
+            PanelRegion::Bottom => {
+                self.set_bottom_panel_revealed(true);
+                self.bottom_stack.set_visible_child_name(kind.id());
+            }
+        }
+        if kind == PlaceholderKind::Terminal {
+            self.terminal_host.ensure_default_shell();
+        } else if kind == PlaceholderKind::Changes {
+            self.changes_panel.refresh();
+        }
+    }
+
+    pub fn send_path_to_terminal(self: &Rc<Self>) {
+        let Some(relpath) = self.active_tab_path() else {
+            self.show_toast("请先打开一篇笔记后再发送路径到终端");
+            return;
+        };
+        self.reveal_placeholder_panel(PlaceholderKind::Terminal);
+        let quoted = self.terminal_host.send_note_path(&relpath);
+        self.show_toast(&format!("已发送笔记路径到终端：{quoted}"));
+    }
+
+    pub fn active_note_selection(&self) -> Option<String> {
+        let active_path = self.active_tab_path()?;
+        let st = self.state.borrow();
+        let tab = st.tabs.get(&active_path)?;
+        if tab.editing {
+            let (start, end) = tab.edit_buffer.selection_bounds()?;
+            let txt = start.text(&end).to_string();
+            if txt.is_empty() { None } else { Some(txt) }
+        } else {
+            let reading = tab.reading.as_ref()?;
+            let mut parts = Vec::new();
+            for (_tv, buf) in reading.text_views() {
+                if let Some((start, end)) = buf.selection_bounds() {
+                    let s = start.text(&end).to_string();
+                    if !s.is_empty() {
+                        parts.push(s);
+                    }
+                }
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+    }
+
+    pub fn send_selection_to_terminal(self: &Rc<Self>) {
+        let Some(text) = self.active_note_selection() else {
+            self.show_toast("请先选中笔记文本后再发送到终端");
+            return;
+        };
+        self.reveal_placeholder_panel(PlaceholderKind::Terminal);
+        if self.terminal_host.send_selection(&text).is_some() {
+            self.show_toast("已安全发送选中文本到终端");
+        } else {
+            self.show_toast("当前选区仅含控制字符，已忽略发送");
+        }
+    }
+
+    pub fn launch_agent_action(self: &Rc<Self>) {
+        let (services, login_path) = {
+            let st = self.state.borrow();
+            (st.services.clone(), st.login_path.clone())
+        };
+        let Some(services) = services else {
+            self.show_toast("内核尚未就绪");
+            return;
+        };
+        let weak_toast = Rc::downgrade(self);
+        let weak_settings = Rc::downgrade(self);
+        let weak_changed = Rc::downgrade(self);
+        let weak_reveal = Rc::downgrade(self);
+        let weak_alert = Rc::downgrade(self);
+        let weak_vault = Rc::downgrade(self);
+        let weak_disp = Rc::downgrade(self);
+        launch_agent_with_snapshot_gate(
+            &self.window,
+            services,
+            self.terminal_host.clone(),
+            login_path,
+            AgentLaunchCallbacks {
+                on_toast: Rc::new(move |msg| {
+                    if let Some(win) = weak_toast.upgrade() {
+                        win.show_toast(&msg);
+                    }
+                }),
+                on_open_agent_settings: Rc::new(move || {
+                    if let Some(win) = weak_settings.upgrade() {
+                        win.send_command(WindowCommand::OpenSettings(Some(SettingsPage::Agent)));
+                    }
+                }),
+                on_session_changed: Rc::new(move || {
+                    if let Some(win) = weak_changed.upgrade() {
+                        win.changes_panel.refresh();
+                    }
+                }),
+                on_reveal_terminal: Rc::new(move || {
+                    if let Some(win) = weak_reveal.upgrade() {
+                        win.reveal_placeholder_panel(PlaceholderKind::Terminal);
+                    }
+                }),
+                on_alert: Rc::new(move |dlg: adw::AlertDialog| {
+                    if let Some(win) = weak_alert.upgrade() {
+                        let mut st = win.state.borrow_mut();
+                        st.last_alert = Some(dlg.heading().unwrap_or_default().to_string());
+                        st.last_alert_dialog.set(Some(&dlg));
+                    }
+                }),
+                current_vault_root: Rc::new(move || {
+                    weak_vault
+                        .upgrade()
+                        .and_then(|w| w.state.borrow().vault_root())
+                }),
+                is_disposing: Rc::new(move || {
+                    weak_disp
+                        .upgrade()
+                        .is_none_or(|w| w.state.borrow().disposing)
+                }),
+            },
+        );
+    }
+
+    pub fn build_settings_dialog(self: &Rc<Self>) -> Option<SettingsDialog> {
+        let (services, login_path) = {
+            let st = self.state.borrow();
+            (st.services.clone(), st.login_path.clone())
+        };
+        let Some(services) = services else {
+            self.show_toast("内核尚未就绪");
+            return None;
+        };
+        let scheme = match adw::StyleManager::default().color_scheme() {
+            adw::ColorScheme::ForceLight => ColorSchemeChoice::Light,
+            adw::ColorScheme::ForceDark => ColorSchemeChoice::Dark,
+            _ => ColorSchemeChoice::System,
+        };
+        let weak_toast = Rc::downgrade(self);
+        let weak_scheme = Rc::downgrade(self);
+        Some(SettingsDialog::new(
+            services,
+            login_path,
+            scheme,
+            Rc::new(move |msg| {
+                if let Some(win) = weak_toast.upgrade() {
+                    win.show_toast(&msg);
+                }
+            }),
+            Rc::new(move |choice| {
+                apply_color_scheme(choice);
+                if let Some(win) = weak_scheme.upgrade() {
+                    win.refresh_all_reading_tabs();
+                }
+            }),
+        ))
+    }
+
+    pub fn open_settings_dialog(self: &Rc<Self>, page: Option<SettingsPage>) {
+        if let Some(dlg) = self.build_settings_dialog() {
+            dlg.present(&self.window, page);
+        }
+    }
+
+    pub fn apply_config_update(self: &Rc<Self>, cfg: &ConfigSnapshot) {
+        self.terminal_host.apply_font(cfg.terminal_font.clone());
+        self.refresh_all_reading_tabs();
+    }
+
+    fn handle_agent_process_exited(self: &Rc<Self>, sid: String, code: i32) {
+        let core = self
+            .state
+            .borrow()
+            .services
+            .as_ref()
+            .map(|s| Arc::clone(&s.core));
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            if let Some(core_bg) = core {
+                let _ = gio::spawn_blocking(move || {
+                    core_bg.mark_agent_session(sid, "exited".into(), Some(code))
+                })
+                .await;
+            }
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            if win.state.borrow().disposing {
+                return;
+            }
+            win.changes_panel.refresh();
+            win.refresh_vault_tabs_and_broadcast();
+            win.show_toast(&format!(
+                "Agent 已退出（状态码 {code}）：可在「本次会话改动」查看 diff 或按需回滚"
+            ));
+        });
+    }
+
+    fn handle_changes_rolled_back(self: &Rc<Self>, paths: &[String]) {
+        self.sync_paths_with_disk(paths);
+        let (services, reg_id, vault_root) = {
+            let st = self.state.borrow();
+            (st.services.clone(), st.window_reg_id, st.vault_root())
+        };
+        if let (Some(svcs), Some(root)) = (services, vault_root) {
+            svcs.windows.notify_vault_written(reg_id, &root, paths);
+        }
+    }
+
+    pub(crate) fn refresh_vault_tabs_and_broadcast(self: &Rc<Self>) {
+        let open_paths: Vec<String> = self.state.borrow().tabs.keys().cloned().collect();
+        self.sync_paths_with_disk(&open_paths);
+        let (services, reg_id, vault_root) = {
+            let st = self.state.borrow();
+            (st.services.clone(), st.window_reg_id, st.vault_root())
+        };
+        if let (Some(svcs), Some(root)) = (services, vault_root) {
+            svcs.windows
+                .notify_vault_written(reg_id, &root, &open_paths);
+        }
+    }
+
+    pub(crate) fn sync_paths_with_disk(self: &Rc<Self>, paths: &[String]) {
+        let Some(vault_root) = self.state.borrow().vault_root() else {
+            return;
+        };
+        let targets: Vec<String> = if paths.is_empty() {
+            self.state.borrow().tabs.keys().cloned().collect()
+        } else {
+            paths.to_vec()
+        };
+        let mut to_close = Vec::new();
+        let mut to_refresh = Vec::new();
+        {
+            let st = self.state.borrow();
+            for rel in targets {
+                if !st.tabs.contains_key(&rel) {
+                    continue;
+                }
+                let abs = Path::new(&vault_root).join(&rel);
+                if abs.exists() {
+                    to_refresh.push(rel);
+                } else {
+                    to_close.push(rel);
+                }
+            }
+        }
+        if !to_close.is_empty() {
+            let mut st = self.state.borrow_mut();
+            for rel in &to_close {
+                st.force_close.insert(rel.clone());
+            }
+        }
+        for rel in &to_close {
+            self.close_tab_by_path(rel);
+        }
+        for rel in &to_refresh {
+            self.refresh_document_tab(rel);
+        }
+        self.refresh_knowledge_after_write();
+    }
+
+    pub fn notify_sibling_windows_written(&self, paths: &[String]) {
+        let (services, reg_id, vault_root) = {
+            let st = self.state.borrow();
+            (st.services.clone(), st.window_reg_id, st.vault_root())
+        };
+        if let (Some(svcs), Some(root)) = (services, vault_root) {
+            svcs.windows.notify_vault_written(reg_id, &root, paths);
+        }
+    }
+}

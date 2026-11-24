@@ -309,6 +309,7 @@ impl WindowInner {
         if saved_clean {
             self.update_disk_stamp(path);
             self.refresh_knowledge_after_write();
+            self.notify_sibling_windows_written(&[path.to_string()]);
         }
     }
 

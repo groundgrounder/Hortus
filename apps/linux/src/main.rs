@@ -2,6 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
+mod agent;
 #[cfg(feature = "automation")]
 mod automation;
 mod core;
@@ -12,10 +13,11 @@ mod platform;
 mod reading;
 mod render;
 mod services;
+mod settings;
+mod terminal;
 mod window;
 
 use crate::core::{APP_ID, CliOptions};
-use crate::window::HortusWindow;
 use gtk4::gio;
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -65,14 +67,17 @@ fn main() -> std::process::ExitCode {
     app.set_accels_for_action("win.toggle-tab-overview", &["<Control><Shift>o"]);
     app.set_accels_for_action("win.toggle-top-bar", &["<Control><Shift>h"]);
     app.set_accels_for_action("win.toggle-fullscreen", &["F11"]);
+    app.set_accels_for_action("win.new-window", &["<Control><Shift>n"]);
+    app.set_accels_for_action("win.open-settings", &["<Control>comma"]);
+    app.set_accels_for_action("win.send-path-to-terminal", &["<Control><Shift>l"]);
+    app.set_accels_for_action("win.send-selection-to-terminal", &["<Control><Shift>k"]);
 
     let options_cell = RefCell::new(Some(options));
     app.connect_activate(move |app| {
         platform::style::install_css();
         let options = options_cell.borrow_mut().take();
         if let Some(opts) = options {
-            let win = HortusWindow::new(app, opts);
-            win.present();
+            window::session::launch_initial_windows(app, opts);
         } else if let Some(win) = app.active_window() {
             win.present();
         }

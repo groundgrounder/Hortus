@@ -200,6 +200,7 @@ impl WindowInner {
         self.sync_active_tab_ui();
 
         let content_width = self.reading_content_width();
+        let font_size = services.config.snapshot().font_size;
         let dark = adw::StyleManager::default().is_dark();
         let main_thread = std::thread::current().id();
         let weak = Rc::downgrade(self);
@@ -236,7 +237,7 @@ impl WindowInner {
                     diagram_engine: diag_bg,
                     math_service: math_bg,
                     content_width,
-                    font_size: 15.0,
+                    font_size,
                     dark,
                     main_thread,
                 })?;
@@ -399,8 +400,15 @@ impl WindowInner {
         }
         clear_box(&reading_slot);
         reading_slot.append(&surface.root);
-        let (pending_heading, pending_scroll, viewport, old) = {
+        let default_edit = services.config.snapshot().default_view == "editing";
+        let (pending_heading, pending_scroll, viewport, old, content_stack_edit) = {
             let mut st = self.state.borrow_mut();
+            let view_override = st.initial_tab_views.remove(rel);
+            let want_edit = match view_override.as_deref() {
+                Some("editing") => true,
+                Some("reading") => false,
+                _ => default_edit,
+            };
             let Some(tab) = st.tabs.get_mut(rel) else {
                 return;
             };
@@ -414,13 +422,25 @@ impl WindowInner {
             tab.session = Some(session);
             tab.source_loaded = true;
             tab.reading_loaded = true;
+            if want_edit {
+                tab.editing = true;
+            }
             (
                 tab.pending_heading.take(),
                 tab.pending_scroll.take(),
                 tab.reading_viewport.clone(),
                 (old_reading, old_diagrams),
+                if want_edit {
+                    Some(tab.content_stack.clone())
+                } else {
+                    None
+                },
             )
         };
+        if let Some(stack) = content_stack_edit {
+            stack.set_visible_child_name("edit");
+            self.sync_active_tab_ui();
+        }
         drop(old);
 
         let alloc_w = viewport.last_allocated_width();
@@ -439,6 +459,7 @@ impl WindowInner {
         self.update_disk_stamp(rel);
         self.update_tab_notice(rel);
         self.update_tab_title(rel);
+        self.persist_window_session();
 
         if pending_heading.is_some() || pending_scroll.is_some() {
             let weak_h = Rc::downgrade(self);
@@ -480,6 +501,7 @@ impl WindowInner {
             } else {
                 self.sync_active_tab_ui();
             }
+            self.persist_window_session();
         }
     }
 

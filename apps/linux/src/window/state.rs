@@ -76,6 +76,12 @@ impl PlaceholderWidgets {
     }
 }
 
+pub struct RestoredTabsOverride {
+    pub tabs: Vec<String>,
+    pub selected: Option<String>,
+    pub views: HashMap<String, String>,
+}
+
 pub struct WindowState {
     #[cfg(feature = "automation")]
     pub started_at: Instant,
@@ -85,6 +91,11 @@ pub struct WindowState {
     pub vault_sub_id: Option<u64>,
     pub vault_open_gen: u64,
     pub window_reg_id: Option<u64>,
+    pub window_id: String,
+    pub login_path: Option<String>,
+    pub initial_tabs_override: Option<RestoredTabsOverride>,
+    pub initial_tab_views: HashMap<String, String>,
+    pub suppressing_session_save: bool,
     pub math_service: Arc<MathRenderService>,
     pub scan_complete: bool,
     pub scan_micros: u64,

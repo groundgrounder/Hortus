@@ -5,6 +5,8 @@
 //! 窗口级串行指令：将 GTK 回调与跨模块动作收敛到单一非重入队列。
 
 use crate::core::{ColorSchemeChoice, PlaceholderKind};
+use crate::services::ConfigSnapshot;
+use crate::settings::SettingsPage;
 use hortus_ffi::SaveChoice;
 use libadwaita as adw;
 
@@ -42,4 +44,11 @@ pub enum WindowCommand {
     TogglePlaceholderRegion(PlaceholderKind),
     CloseTabPage(adw::TabPage),
     ApplyColorScheme(ColorSchemeChoice),
+    NewWindow,
+    OpenSettings(Option<SettingsPage>),
+    LaunchAgent,
+    SendPathToTerminal,
+    SendSelectionToTerminal,
+    ConfigChanged(ConfigSnapshot),
+    ExternalVaultRefresh(Vec<String>),
 }

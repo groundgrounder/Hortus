@@ -233,6 +233,51 @@ impl WindowInner {
         self.window.add_action(&quick_open);
 
         let weak = Rc::downgrade(self);
+        let new_window = gio::SimpleAction::new("new-window", None);
+        new_window.connect_activate(move |_, _| {
+            if let Some(win) = weak.upgrade() {
+                win.send_command(WindowCommand::NewWindow);
+            }
+        });
+        self.window.add_action(&new_window);
+
+        let weak = Rc::downgrade(self);
+        let open_settings = gio::SimpleAction::new("open-settings", None);
+        open_settings.connect_activate(move |_, _| {
+            if let Some(win) = weak.upgrade() {
+                win.send_command(WindowCommand::OpenSettings(None));
+            }
+        });
+        self.window.add_action(&open_settings);
+
+        let weak = Rc::downgrade(self);
+        let launch_agent = gio::SimpleAction::new("launch-agent", None);
+        launch_agent.connect_activate(move |_, _| {
+            if let Some(win) = weak.upgrade() {
+                win.send_command(WindowCommand::LaunchAgent);
+            }
+        });
+        self.window.add_action(&launch_agent);
+
+        let weak = Rc::downgrade(self);
+        let send_path = gio::SimpleAction::new("send-path-to-terminal", None);
+        send_path.connect_activate(move |_, _| {
+            if let Some(win) = weak.upgrade() {
+                win.send_command(WindowCommand::SendPathToTerminal);
+            }
+        });
+        self.window.add_action(&send_path);
+
+        let weak = Rc::downgrade(self);
+        let send_sel = gio::SimpleAction::new("send-selection-to-terminal", None);
+        send_sel.connect_activate(move |_, _| {
+            if let Some(win) = weak.upgrade() {
+                win.send_command(WindowCommand::SendSelectionToTerminal);
+            }
+        });
+        self.window.add_action(&send_sel);
+
+        let weak = Rc::downgrade(self);
         let focus_search = gio::SimpleAction::new("focus-search", None);
         focus_search.connect_activate(move |_, _| {
             if let Some(win) = weak.upgrade() {
@@ -414,6 +459,11 @@ impl WindowInner {
         }
         if revealed {
             self.bottom_revealer.set_visible(true);
+            if self.bottom_stack.visible_child_name().as_deref()
+                == Some(PlaceholderKind::Terminal.id())
+            {
+                self.terminal_host.ensure_default_shell();
+            }
         }
         self.bottom_revealer.set_reveal_child(revealed);
     }
@@ -437,6 +487,11 @@ impl WindowInner {
             }
         }
         self.rebuild_panel_switchers();
+        if kind == PlaceholderKind::Terminal {
+            self.terminal_host.ensure_default_shell();
+        } else if kind == PlaceholderKind::Changes {
+            self.changes_panel.refresh();
+        }
         let region_name = match next {
             PanelRegion::Right => "右侧栏",
             PanelRegion::Bottom => "底部面板",
@@ -508,6 +563,7 @@ pub fn build_primary_menu() -> gio::Menu {
 
     let file_sec = gio::Menu::new();
     file_sec.append(Some("打开知识库…"), Some("win.open-vault"));
+    file_sec.append(Some("新建窗口 (Ctrl+Shift+N)"), Some("win.new-window"));
     file_sec.append(Some("快速打开笔记 (Ctrl+P)"), Some("win.quick-open"));
     file_sec.append(Some("新建笔记 (Ctrl+N)"), Some("win.new-note"));
     file_sec.append(Some("新建文件夹"), Some("win.new-folder"));
@@ -523,6 +579,19 @@ pub fn build_primary_menu() -> gio::Menu {
     );
     file_sec.append(Some("关闭当前标签 (Ctrl+W)"), Some("win.close-tab"));
     menu.append_section(None, &file_sec);
+
+    let agent_sec = gio::Menu::new();
+    agent_sec.append(Some("启动 Agent"), Some("win.launch-agent"));
+    agent_sec.append(
+        Some("发送笔记路径到终端 (Ctrl+Shift+L)"),
+        Some("win.send-path-to-terminal"),
+    );
+    agent_sec.append(
+        Some("发送选区到终端 (Ctrl+Shift+K)"),
+        Some("win.send-selection-to-terminal"),
+    );
+    agent_sec.append(Some("偏好设置… (Ctrl+,)"), Some("win.open-settings"));
+    menu.append_section(None, &agent_sec);
 
     let view_sec = gio::Menu::new();
     view_sec.append(
@@ -618,46 +687,4 @@ pub fn populate_stack_switcher(container: &gtk4::Box, stack: &gtk4::Stack, items
         });
         container.append(&btn);
     }
-}
-
-pub fn build_placeholder_panel(kind: PlaceholderKind) -> gtk4::Box {
-    match kind {
-        PlaceholderKind::Backlinks => build_placeholder_box(
-            "emblem-symbolic-link-symbolic",
-            "反链",
-            "显示引用当前笔记的其它页面与上下文摘要；可在“面板位置”中移到底部或右侧。",
-        ),
-        PlaceholderKind::Changes => build_placeholder_box(
-            "document-properties-symbolic",
-            "改动",
-            "待接入工作区文件改动与 Agent 建议评审队列。",
-        ),
-        PlaceholderKind::Terminal => build_placeholder_box(
-            "utilities-terminal-symbolic",
-            "终端",
-            "集成终端占位视图：Ctrl+J 可收起或恢复，也可从菜单移入右侧栏。",
-        ),
-    }
-}
-
-fn build_placeholder_box(icon: &str, title: &str, description: &str) -> gtk4::Box {
-    let box_v = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-    box_v.add_css_class("hortus-placeholder-body");
-    box_v.set_valign(gtk4::Align::Center);
-    box_v.set_halign(gtk4::Align::Center);
-    box_v.set_vexpand(true);
-    let img = gtk4::Image::from_icon_name(icon);
-    img.set_pixel_size(28);
-    img.add_css_class("dim-label");
-    let title_lbl = gtk4::Label::new(Some(title));
-    title_lbl.add_css_class("title-4");
-    let desc_lbl = gtk4::Label::new(Some(description));
-    desc_lbl.add_css_class("dim-label");
-    desc_lbl.add_css_class("caption");
-    desc_lbl.set_wrap(true);
-    desc_lbl.set_justify(gtk4::Justification::Center);
-    box_v.append(&img);
-    box_v.append(&title_lbl);
-    box_v.append(&desc_lbl);
-    box_v
 }

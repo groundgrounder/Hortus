@@ -4,14 +4,15 @@
 
 //! 主窗口外壳、生命周期解环（C-01/C-02/C-03）、库切换与关闭保护。
 
+use crate::agent::ChangesPanel;
 use crate::core::{CliOptions, CommandQueue, PanelPlacement, PlaceholderKind};
 use crate::files::{VaultTree, operations::prepare_edit_temp_dir};
 use crate::knowledge::{BacklinksPanel, QuickOpen, SearchPanel, TagsPanel};
 use crate::reading::FocusController;
 use crate::render::math::MathRenderService;
-use crate::window::actions::{
-    apply_color_scheme, build_left_switcher, build_placeholder_panel, build_primary_menu,
-};
+use crate::services::AppServices;
+use crate::terminal::TerminalHost;
+use crate::window::actions::{apply_color_scheme, build_left_switcher, build_primary_menu};
 use crate::window::commands::WindowCommand;
 use crate::window::state::{PlaceholderWidgets, WindowState};
 use gtk4::glib;
@@ -22,8 +23,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "automation")]
 use std::time::Instant;
+
+static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct WindowInner {
     pub window: adw::ApplicationWindow,
@@ -48,6 +52,8 @@ pub struct WindowInner {
     pub edit_badge: gtk4::Label,
     pub mode_toggle_btn: gtk4::Button,
     pub placeholders: Rc<PlaceholderWidgets>,
+    pub terminal_host: TerminalHost,
+    pub changes_panel: ChangesPanel,
     pub search_panel: SearchPanel,
     pub tags_panel: TagsPanel,
     pub backlinks_panel: BacklinksPanel,
@@ -65,6 +71,14 @@ pub struct HortusWindow {
 
 impl HortusWindow {
     pub fn new(app: &adw::Application, options: CliOptions) -> Self {
+        Self::new_with_services(app, options, None)
+    }
+
+    pub fn new_with_services(
+        app: &adw::Application,
+        options: CliOptions,
+        preloaded_services: Option<Arc<AppServices>>,
+    ) -> Self {
         let initial_width = options.width.unwrap_or(1320);
         let initial_height = options.height.unwrap_or(840);
         let lock_size = options.locks_window_size();
@@ -212,10 +226,12 @@ impl HortusWindow {
         outline_scroll.set_child(Some(&outline_box));
 
         let backlinks_panel = BacklinksPanel::new();
+        let changes_panel = ChangesPanel::new();
+        let terminal_host = TerminalHost::new();
         let placeholders = Rc::new(PlaceholderWidgets {
             backlinks: backlinks_panel.root().clone(),
-            changes: build_placeholder_panel(PlaceholderKind::Changes),
-            terminal: build_placeholder_panel(PlaceholderKind::Terminal),
+            changes: changes_panel.root().clone(),
+            terminal: terminal_host.root().clone(),
         });
 
         let right_stack = gtk4::Stack::new();
@@ -368,16 +384,26 @@ impl HortusWindow {
         window.set_content(Some(&toast_overlay));
 
         let pending_open_notes = options.open_notes.clone();
+        let math_service = preloaded_services
+            .as_ref()
+            .map(|s| Arc::clone(&s.math_service))
+            .unwrap_or_else(|| Arc::new(MathRenderService::new()));
+        let window_num = NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed);
         let state = Rc::new(RefCell::new(WindowState {
             #[cfg(feature = "automation")]
             started_at: Instant::now(),
             self_keepalive: None,
-            services: None,
+            services: preloaded_services,
             vault_ctx: None,
             vault_sub_id: None,
             vault_open_gen: 0,
             window_reg_id: None,
-            math_service: Arc::new(MathRenderService::new()),
+            window_id: format!("win-{window_num}"),
+            login_path: None,
+            initial_tabs_override: None,
+            initial_tab_views: HashMap::new(),
+            suppressing_session_save: false,
+            math_service,
             scan_complete: false,
             scan_micros: 0,
             pending_open_notes,
@@ -431,6 +457,8 @@ impl HortusWindow {
             edit_badge,
             mode_toggle_btn,
             placeholders,
+            terminal_host,
+            changes_panel,
             search_panel,
             tags_panel,
             backlinks_panel,
@@ -445,6 +473,7 @@ impl HortusWindow {
         inner.bind_signals(&bottom_close);
         inner.register_actions();
         inner.init_knowledge_panels();
+        inner.init_terminal_and_changes_panels();
         inner.install_tree_context_menu();
         inner.start_disk_poll_timer();
         inner.render_outline_empty("未打开笔记");
@@ -466,7 +495,7 @@ impl HortusWindow {
         self.inner.window.present();
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "automation"))]
     pub fn downgrade(&self) -> std::rc::Weak<WindowInner> {
         Rc::downgrade(&self.inner)
     }
@@ -510,6 +539,15 @@ impl WindowInner {
             WindowCommand::TogglePlaceholderRegion(kind) => self.toggle_placeholder_region(kind),
             WindowCommand::CloseTabPage(page) => self.request_close_tab(page),
             WindowCommand::ApplyColorScheme(scheme) => apply_color_scheme(scheme),
+            WindowCommand::NewWindow => self.open_new_window(),
+            WindowCommand::OpenSettings(page) => self.open_settings_dialog(page),
+            WindowCommand::LaunchAgent => self.launch_agent_action(),
+            WindowCommand::SendPathToTerminal => self.send_path_to_terminal(),
+            WindowCommand::SendSelectionToTerminal => self.send_selection_to_terminal(),
+            WindowCommand::ConfigChanged(cfg) => self.apply_config_update(&cfg),
+            WindowCommand::ExternalVaultRefresh(paths) => {
+                self.handle_external_vault_refresh(&paths)
+            }
         }
     }
 
@@ -529,6 +567,7 @@ impl WindowInner {
             if let Some(win) = weak.upgrade() {
                 win.sync_active_tab_ui();
                 win.check_active_tab_width_alignment();
+                win.persist_window_session();
             }
         });
 
@@ -619,6 +658,7 @@ impl WindowInner {
         }
         self.focus.teardown();
         self.quick_open.close_if_open();
+        self.terminal_host.teardown();
         self.vault_tree.clear();
         drop(keepalive);
     }
