@@ -362,7 +362,9 @@ impl WindowInner {
         }
         let tab_view_width = f64::from(self.tab_view.width());
         if tab_view_width > 160.0 {
-            let pad = if tab_view_width < 820.0 { 40.0 } else { 88.0 };
+            let pad = f64::from(crate::platform::viewport::responsive_horizontal_padding(
+                tab_view_width as i32,
+            ));
             return (tab_view_width - pad).max(260.0);
         }
         let window_w = f64::from(self.window.width()).max(720.0);
@@ -374,7 +376,9 @@ impl WindowInner {
         if self.right_split.shows_sidebar() && !self.right_split.is_collapsed() {
             content -= sidebar_width(window_w);
         }
-        let pad = if content < 820.0 { 40.0 } else { 88.0 };
+        let pad = f64::from(crate::platform::viewport::responsive_horizontal_padding(
+            content as i32,
+        ));
         (content - pad).max(260.0)
     }
 

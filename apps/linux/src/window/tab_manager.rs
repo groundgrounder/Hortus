@@ -104,8 +104,9 @@ impl WindowInner {
             .right_margin(44)
             .top_margin(28)
             .bottom_margin(48)
-            .pixels_above_lines(2)
-            .pixels_below_lines(4)
+            .pixels_above_lines(0)
+            .pixels_below_lines(2)
+            .pixels_inside_wrap(1)
             .vexpand(true)
             .hexpand(true)
             .build();

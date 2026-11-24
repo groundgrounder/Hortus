@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 const H_PADDING_BREAKPOINT: i32 = 820;
-const H_PADDING_NARROW: i32 = 20;
+const H_PADDING_NARROW: i32 = 24;
 const H_PADDING_WIDE: i32 = 44;
 const MIN_VIEWPORT_WIDTH: i32 = 240;
 const REFLOW_THRESHOLD_PX: i32 = 16;
@@ -119,9 +119,13 @@ mod imp {
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
             let total_pad = responsive_horizontal_padding(width);
             self.horizontal_padding.set(total_pad);
+            let side_pad = total_pad / 2;
+            let child_w = (width - total_pad).max(1);
             let child = self.child.borrow().clone();
             if let Some(child) = child {
-                child.allocate(width, height, baseline, None);
+                let transform = gtk4::gsk::Transform::new()
+                    .translate(&gtk4::graphene::Point::new(side_pad as f32, 0.0));
+                child.allocate(child_w, height, baseline, Some(transform));
             }
             let avail_w = (width - total_pad).max(MIN_VIEWPORT_WIDTH);
             if self.last_allocated_w.get() != avail_w {
@@ -284,15 +288,26 @@ mod tests {
 
         vp.allocate(1200, 800, -1, None);
         assert_eq!(vp.last_allocated_width(), 1200 - H_PADDING_WIDE * 2);
+        assert_eq!(wide_child.width(), 1200 - H_PADDING_WIDE * 2);
+        let offset_wide = wide_child
+            .compute_point(&vp, &gtk4::graphene::Point::new(0.0, 0.0))
+            .map(|pt| pt.x());
+        assert_eq!(offset_wide, Some(H_PADDING_WIDE as f32));
         assert_eq!(vp.resize_alloc_count(), 1);
 
         vp.set_settled_width(1200 - H_PADDING_WIDE * 2);
         vp.allocate(900, 800, -1, None);
         assert_eq!(vp.last_allocated_width(), 900 - H_PADDING_WIDE * 2);
+        assert_eq!(wide_child.width(), 900 - H_PADDING_WIDE * 2);
         assert_eq!(vp.resize_alloc_count(), 2);
 
         vp.allocate(700, 800, -1, None);
         assert_eq!(vp.last_allocated_width(), 700 - H_PADDING_NARROW * 2);
+        assert_eq!(wide_child.width(), 700 - H_PADDING_NARROW * 2);
+        let offset_narrow = wide_child
+            .compute_point(&vp, &gtk4::graphene::Point::new(0.0, 0.0))
+            .map(|pt| pt.x());
+        assert_eq!(offset_narrow, Some(H_PADDING_NARROW as f32));
         assert_eq!(vp.resize_alloc_count(), 3);
 
         vp.clear_timers();

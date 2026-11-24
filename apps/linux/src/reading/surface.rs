@@ -456,6 +456,20 @@ impl ReadingSurfaceHandle {
             })
             .collect()
     }
+
+    #[cfg(feature = "automation")]
+    pub fn text_segment_scrolled_offsets(&self) -> Vec<f64> {
+        self.segments
+            .iter()
+            .filter_map(|seg| match seg {
+                ReadingSegment::Text(t) => t
+                    .view
+                    .compute_point(&self.scrolled, &graphene::Point::new(0.0, 0.0))
+                    .map(|pt| f64::from(pt.x())),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 fn map_source_utf16_to_reading_char(anchors: &[(u64, i32)], target: u64) -> i32 {
@@ -532,8 +546,10 @@ pub fn build_reading_surface(
             .build()
     });
 
-    let content_box = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+    let content_box = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
     content_box.add_css_class("hortus-reading-box");
+    content_box.set_margin_top(24);
+    content_box.set_margin_bottom(48);
     content_box.set_hexpand(true);
     content_box.set_vexpand(true);
 
@@ -787,6 +803,23 @@ fn install_text_segment(
         }
     }
 
+    if let Some(blank_tag) = tag_table.lookup("blank_line") {
+        let codeblock_tag = tag_table.lookup("codeblock");
+        let mut cursor = buffer.start_iter();
+        for segment in data.text.split_inclusive('\n') {
+            let seg_chars = segment.chars().count() as i32;
+            let mut next = cursor;
+            next.forward_chars(seg_chars);
+            if segment.ends_with('\n') && segment.trim().is_empty() {
+                let in_codeblock = codeblock_tag.as_ref().is_some_and(|ct| cursor.has_tag(ct));
+                if !in_codeblock {
+                    buffer.apply_tag(&blank_tag, &cursor, &next);
+                }
+            }
+            cursor = next;
+        }
+    }
+
     let text_view = gtk4::TextView::builder()
         .buffer(&buffer)
         .editable(false)
@@ -796,8 +829,9 @@ fn install_text_segment(
         .right_margin(if embedded { 4 } else { 0 })
         .top_margin(if embedded { 2 } else { 0 })
         .bottom_margin(if embedded { 2 } else { 0 })
-        .pixels_above_lines(2)
-        .pixels_below_lines(4)
+        .pixels_above_lines(0)
+        .pixels_below_lines(2)
+        .pixels_inside_wrap(1)
         .vexpand(false)
         .hexpand(true)
         .build();

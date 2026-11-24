@@ -34,7 +34,7 @@ const BASE_CSS: &str = r#"
 }
 
 .hortus-note-view {
-    line-height: 1.58;
+    line-height: 1.28;
     background-color: @view_bg_color;
     color: @view_fg_color;
 }
@@ -73,14 +73,13 @@ const BASE_CSS: &str = r#"
 
 .hortus-reading-view,
 .hortus-embedded-reading-view {
-    line-height: 1.58;
+    line-height: 1.28;
     background-color: transparent;
     color: @view_fg_color;
 }
 
 .hortus-reading-box {
-    padding-top: 24px;
-    padding-bottom: 48px;
+    padding: 0px;
 }
 
 .hortus-diagram-card {
@@ -315,18 +314,20 @@ pub fn create_tag_table() -> gtk4::TextTagTable {
     let table = gtk4::TextTagTable::new();
 
     for level in 1u8..=6 {
-        let scale = match level {
-            1 => 1.65,
-            2 => 1.38,
-            3 => 1.20,
-            4 => 1.10,
-            5 => 1.04,
-            _ => 1.0,
+        let (scale, above, below) = match level {
+            1 => (1.65, 2, 0),
+            2 => (1.38, 4, 0),
+            3 => (1.20, 2, 0),
+            4 => (1.10, 2, 0),
+            5 => (1.04, 0, 0),
+            _ => (1.0, 0, 0),
         };
         let tag = gtk4::TextTag::builder()
             .name(format!("h{level}"))
             .scale(scale)
             .weight(700)
+            .pixels_above_lines(above)
+            .pixels_below_lines(below)
             .build();
         table.add(&tag);
     }
@@ -444,6 +445,14 @@ pub fn create_tag_table() -> gtk4::TextTagTable {
         &gtk4::TextTag::builder()
             .name("find_current")
             .background_rgba(&gdk::RGBA::new(0.98, 0.62, 0.16, 0.62))
+            .build(),
+    );
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("blank_line")
+            .scale(0.38)
+            .pixels_above_lines(0)
+            .pixels_below_lines(0)
             .build(),
     );
 
