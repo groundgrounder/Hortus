@@ -166,6 +166,39 @@ private fun QuickResults(
     }
 }
 
+internal data class SnippetDisplay(
+    val text: String,
+    val start: Int,
+    val end: Int,
+)
+
+/**
+ * 正文片段从匹配所在行开始显示，避免匹配行上方残留半截标题。
+ * 行内换行折叠为空格，高亮区间随截掉的同一前缀平移，仍指向真实匹配词。
+ */
+internal fun snippetDisplay(snippet: String, localStart: Int, localEnd: Int): SnippetDisplay {
+    val matchStart = localStart.coerceIn(0, snippet.length)
+    val matchEnd = localEnd.coerceIn(matchStart, snippet.length)
+    var from = 0
+    var index = matchStart - 1
+    while (index >= 0 && snippet[index] != '\n' && snippet[index] != '\r') index -= 1
+    if (index >= 0) {
+        from = index + 1
+        while (from < matchStart && (snippet[from] == '\n' || snippet[from] == '\r')) from += 1
+    }
+    val visible = snippet.substring(from)
+    val text = buildString(visible.length) {
+        for (character in visible) {
+            append(if (character == '\n' || character == '\r') ' ' else character)
+        }
+    }
+    return SnippetDisplay(
+        text = text,
+        start = (matchStart - from).coerceIn(0, text.length),
+        end = (matchEnd - from).coerceIn(0, text.length),
+    )
+}
+
 @Composable
 private fun FullResults(
     rows: List<SearchRow>,
@@ -208,6 +241,7 @@ private fun FullResults(
                 for (match in row.matches) {
                     val localStart = (match.start - match.snippetStart).coerceAtLeast(0)
                     val localEnd = (localStart + match.length).coerceAtMost(match.snippet.length)
+                    val display = snippetDisplay(match.snippet, localStart, localEnd)
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -227,9 +261,9 @@ private fun FullResults(
                             },
                     ) {
                         Highlighted(
-                            text = match.snippet,
-                            ranges = if (localEnd > localStart) {
-                                listOf(localStart until localEnd)
+                            text = display.text,
+                            ranges = if (display.end > display.start) {
+                                listOf(display.start until display.end)
                             } else {
                                 emptyList()
                             },

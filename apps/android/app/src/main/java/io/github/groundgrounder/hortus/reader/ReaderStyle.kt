@@ -6,6 +6,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 
+internal const val READER_BODY_SP = 17f
+
 internal data class ReaderPalette(
     val text: Color,
     val muted: Color,

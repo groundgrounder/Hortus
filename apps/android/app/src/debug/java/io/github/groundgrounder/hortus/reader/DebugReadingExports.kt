@@ -30,6 +30,11 @@ internal object DebugReadingExports {
         val content = activity.controller.state.content ?: return
         val dark = (activity.resources.configuration.uiMode and
             Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        val unitScale = diagramUnitScale(
+            activity.controller.bodySizePx,
+            activity.resources.displayMetrics.density,
+        )
+        val layoutWidth = (content.width / unitScale).toDouble()
         val repository = activity.controller.repository()
         val directory = checkNotNull(activity.getExternalFilesDir("exports")) { "external files unavailable" }
         directory.mkdirs()
@@ -44,7 +49,7 @@ internal object DebugReadingExports {
                     engineText = item.engineText,
                     mmd = item.mmd,
                     ordinal = item.ordinal,
-                    width = content.width.toDouble(),
+                    width = layoutWidth,
                     dark = dark,
                     collapsed = collapsed,
                     revision = content.revision,

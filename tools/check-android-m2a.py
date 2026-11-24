@@ -436,6 +436,25 @@ def assert_a2(device: Device, results: Results, media: Path) -> None:
     target = next((item for item in notes if item.get('path') == note), None)
     results.check('A2', 'full text finds mixed-language query', target is not None and target.get('count', 0) > 0, notes)
     results.check('A2', 'full text returns snippets', bool(target and target.get('snippets', 0) > 0), target)
+    snippets = (target or {}).get('matches', [])
+    results.check('A2', 'search snippet folds line breaks',
+                  bool(snippets) and all(
+                      '\n' not in match.get('display', '') and '\r' not in match.get('display', '')
+                      for match in snippets),
+                  snippets[:2])
+    results.check('A2', 'search snippet starts on the matching line',
+                  any(match.get('display', '').startswith('A quiet paragraph about 山水')
+                      for match in snippets),
+                  [match.get('display', '') for match in snippets[:2]])
+    results.check('A2', 'search snippet highlight covers the match',
+                  any(
+                      0 <= match.get('highlightStart', -1) <= match.get('highlightEnd', -1) <=
+                      len(match.get('display', '')) and
+                      match.get('display', '')[
+                          match.get('highlightStart', 0):match.get('highlightEnd', 0)
+                      ] == '山水'
+                      for match in snippets),
+                  snippets[:2])
     counts_ok, counts = main_thread_zero(full, ['search', 'quickOpen'])
     results.check('A2', 'full text search stays off the main thread', counts_ok, counts)
 
@@ -567,6 +586,51 @@ def assert_a3(device: Device, results: Results, media: Path) -> None:
 # A4 平板双栏
 # ---------------------------------------------------------------------------
 
+def inline_diagram(dump: dict, note: str) -> dict | None:
+    for preview in dump.get('inlinePreviews', []):
+        if note in (preview.get('pictureKey') or '') or note in (preview.get('key') or ''):
+            return preview
+    return None
+
+
+def check_inline_diagram(results: Results, item: str, label: str, dump: dict) -> dict | None:
+    note = 'Learning/Learning map.md'
+    preview = inline_diagram(dump, note)
+    body = dump.get('bodySizePx', 0) or 0
+    content = dump.get('contentWidth', 0) or 0
+    unit = (preview or {}).get('unitScale', 0) or 0
+    layout = (preview or {}).get('layoutWidth', 0) or 0
+    zoom = (preview or {}).get('drawZoom', 0) or 0
+    drawn = (preview or {}).get('drawnMainFontPx', 0) or 0
+    results.check(item, f'{label} inline diagram rendered',
+                  preview is not None and preview.get('hits', 0) > 0, preview)
+    results.check(item, f'{label} layout width is logical',
+                  preview is not None and unit > 0 and content > 0 and
+                  abs(layout - content / unit) <= 2.0,
+                  {'layoutWidth': layout, 'contentWidth': content, 'unitScale': unit})
+    results.check(item, f'{label} tree draws at unit scale',
+                  preview is not None and unit > 0 and abs(zoom - unit) <= 0.05,
+                  {'drawZoom': zoom, 'unitScale': unit})
+    ratio = drawn / body if body else 0
+    results.check(item, f'{label} main text matches body size',
+                  preview is not None and body > 0 and 0.90 <= ratio <= 1.10,
+                  {'drawnMainFontPx': drawn, 'bodySizePx': body, 'ratio': ratio})
+    return preview
+
+
+def assert_phone_diagram(device: Device, results: Results, media: Path) -> None:
+    note = 'Learning/Learning map.md'
+    dump = device.dump('a4-phone-diagram.json', note=note, cold=True, wait_ms=1800)
+    preview = check_inline_diagram(results, 'A4', 'phone', dump)
+    layout = (preview or {}).get('layoutWidth', 0) or 0
+    results.check('A4', 'phone diagram stays in the single-column band', 0 < layout < 380,
+                  {'layoutWidth': layout})
+    device.screenshot(media / 'm2a-phone-diagram-light.png')
+    results.check('A4', 'phone diagram screenshot taken',
+                  (media / 'm2a-phone-diagram-light.png').is_file(),
+                  str(media / 'm2a-phone-diagram-light.png'))
+
+
 def assert_a4(device: Device, results: Results, media: Path) -> None:
     note = 'Learning/Learning map.md'
     light = device.dump('a4-light.json', note=note, cold=True, wait_ms=1500)
@@ -579,6 +643,7 @@ def assert_a4(device: Device, results: Results, media: Path) -> None:
     device.screenshot(media / 'm2a-tablet-light.png')
     results.check('A4', 'tablet light screenshot taken', (media / 'm2a-tablet-light.png').is_file(),
                   str(media / 'm2a-tablet-light.png'))
+    check_inline_diagram(results, 'A4', 'tablet', light)
 
     files = device.dump('a4-files.json', note=note, action='side',
                         extra=['--es', 'debug_tab', 'files'], wait_ms=1500)
@@ -1015,6 +1080,8 @@ def main() -> int:
             assert_a2(phone, results, media)
         if 'A3' in wanted:
             assert_a3(phone, results, media)
+        if 'A4' in wanted:
+            assert_phone_diagram(phone, results, media)
         if 'A5' in wanted:
             assert_a5(phone, results, media)
         if 'A6' in wanted:

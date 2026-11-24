@@ -563,9 +563,10 @@ def inline_rect(value: dict, ordinal: int) -> dict | None:
 
 
 def focus_screen_point(hit: dict, state: dict) -> tuple[float, float]:
+    scale = state['scale'] * (state.get('unitScale') or 1.0)
     return (
-        hit['x'] * state['scale'] + state['offsetX'] + hit['width'] * state['scale'] / 2,
-        hit['y'] * state['scale'] + state['offsetY'] + hit['height'] * state['scale'] / 2,
+        hit['x'] * scale + state['offsetX'] + hit['width'] * scale / 2,
+        hit['y'] * scale + state['offsetY'] + hit['height'] * scale / 2,
     )
 
 
@@ -1125,9 +1126,10 @@ def assert_a7(device: Device, results: Results, media: Path) -> None:
         data = json.loads(instrument.read_text())
         results.check('A7', 'instrument scale is exactly 400%',
                       abs(data.get('scale', 0) - 4.0) <= 0.01, data)
-        results.check('A7', 'instrument drawn font size = scene × 4',
-                      data.get('sceneFontSize', 0) > 0 and
-                      abs(data.get('drawnFontSize', 0) - data.get('sceneFontSize', 0) * 4) <= 0.05,
+        results.check('A7', 'instrument drawn font size = scene × 4 × unit scale',
+                      data.get('sceneFontSize', 0) > 0 and data.get('unitScale', 0) > 0 and
+                      abs(data.get('drawnFontSize', 0) -
+                          data.get('sceneFontSize', 0) * 4 * data.get('unitScale', 0)) <= 0.05,
                       data)
     else:
         results.check('A7', 'instrument focus JSON present', False, str(instrument))

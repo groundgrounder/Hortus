@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.util.TypedValue
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -172,6 +173,12 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
     val dark = isSystemInDarkTheme()
     val palette = readerPalette()
     val density = LocalDensity.current
+    val bodySizePx = TypedValue.applyDimension(
+        TypedValue.COMPLEX_UNIT_SP,
+        READER_BODY_SP,
+        context.resources.displayMetrics,
+    )
+    val unitScale = diagramUnitScale(bodySizePx, density.density)
     val systemInsets = WindowInsets.statusBars.union(WindowInsets.displayCutout)
     val topInsetPx = systemInsets.getTop(density)
     var scene by remember { mutableStateOf<SceneData?>(null) }
@@ -212,14 +219,14 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
     fun fitScale(): Float {
         val value = scene ?: return 1f
         if (viewport.width == 0 || value.width <= 0.0) return 1f
-        return min(1f, viewport.width / value.width.toFloat())
+        return min(1f, viewport.width / (value.width.toFloat() * unitScale))
     }
 
     fun clampOffsets(newScale: Float, x: Float, y: Float): Pair<Float, Float> {
         val value = scene ?: return x to y
         if (viewport.width == 0 || viewport.height == 0) return x to y
-        val width = value.width.toFloat() * newScale
-        val height = value.height.toFloat() * newScale
+        val width = value.width.toFloat() * newScale * unitScale
+        val height = value.height.toFloat() * newScale * unitScale
         val top = topBarBottomPx
         val contentHeight = (viewport.height - top).coerceAtLeast(1f)
         val marginX = viewport.width * 0.5f
@@ -236,10 +243,12 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
         val fit = fitScale()
         val top = topBarBottomPx
         val contentHeight = (viewport.height - top).coerceAtLeast(1f)
+        val drawnWidth = value.width.toFloat() * fit * unitScale
+        val drawnHeight = value.height.toFloat() * fit * unitScale
         scale = fit
-        offsetX = (viewport.width - value.width.toFloat() * fit) / 2f
-        offsetY = if (value.height.toFloat() * fit <= contentHeight) {
-            top + (contentHeight - value.height.toFloat() * fit) / 2f
+        offsetX = (viewport.width - drawnWidth) / 2f
+        offsetY = if (drawnHeight <= contentHeight) {
+            top + (contentHeight - drawnHeight) / 2f
         } else {
             top
         }
@@ -252,9 +261,11 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
         val value = scene ?: return
         val top = topBarBottomPx
         val contentHeight = (viewport.height - top).coerceAtLeast(1f)
+        val drawnWidth = value.width.toFloat() * unitScale
+        val drawnHeight = value.height.toFloat() * unitScale
         scale = 1f
-        offsetX = (viewport.width - value.width.toFloat()) / 2f
-        offsetY = top + (contentHeight - value.height.toFloat()) / 2f
+        offsetX = (viewport.width - drawnWidth) / 2f
+        offsetY = top + (contentHeight - drawnHeight) / 2f
         val (x, y) = clampOffsets(scale, offsetX, offsetY)
         offsetX = x
         offsetY = y
@@ -271,7 +282,8 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             ?.filterIsInstance<io.github.groundgrounder.hortus.core.ScenePrimitive.Text>()
             ?.maxOfOrNull { it.span.fontSize.toFloat() } ?: 0f
         FocusStateRegistry.sceneFontSize = base
-        FocusStateRegistry.drawnFontSize = base * scale
+        FocusStateRegistry.unitScale = unitScale
+        FocusStateRegistry.drawnFontSize = base * scale * unitScale
         FocusStateRegistry.sceneKey = "${payload.documentKey}#${payload.ordinal}"
         FocusStateRegistry.notePath = payload.notePath
         FocusStateRegistry.ordinal = payload.ordinal
@@ -441,11 +453,11 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                                 val fit = fitScale()
                                 if (pressed.size >= 2 && previousDistance > 1f && distance > 1f) {
                                     val next = (scale * (distance / previousDistance)).coerceIn(fit, 4f)
-                                    val sceneX = (centroid.x - offsetX) / scale
-                                    val sceneY = (centroid.y - offsetY) / scale
+                                    val sceneX = (centroid.x - offsetX) / (scale * unitScale)
+                                    val sceneY = (centroid.y - offsetY) / (scale * unitScale)
                                     scale = next
-                                    offsetX = centroid.x - sceneX * next
-                                    offsetY = centroid.y - sceneY * next
+                                    offsetX = centroid.x - sceneX * next * unitScale
+                                    offsetY = centroid.y - sceneY * next * unitScale
                                 }
                                 val pan = centroid - previousCentroid
                                 if (pan.getDistance() > 0.01f) {
@@ -474,8 +486,8 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                                 } else {
                                     lastTapUp = now
                                     lastTapPosition = tapPosition
-                                    val sceneX = (tapPosition.x - offsetX) / scale
-                                    val sceneY = (tapPosition.y - offsetY) / scale
+                                    val sceneX = (tapPosition.x - offsetX) / (scale * unitScale)
+                                    val sceneY = (tapPosition.y - offsetY) / (scale * unitScale)
                                     FocusStateRegistry.lastTapSceneX = sceneX
                                     FocusStateRegistry.lastTapSceneY = sceneY
                                     val hit = SceneRenderer.hitAt(value, sceneX, sceneY)
@@ -499,7 +511,7 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                         canvas.nativeCanvas,
                         value,
                         palette.textArgb,
-                        zoom = scale,
+                        zoom = scale * unitScale,
                         translateX = offsetX,
                         translateY = offsetY,
                         diagramKey = "focus:${payload.documentKey}#${payload.ordinal}",

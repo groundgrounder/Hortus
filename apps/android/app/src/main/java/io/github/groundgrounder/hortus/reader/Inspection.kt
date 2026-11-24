@@ -249,6 +249,10 @@ internal object Inspection {
         collapsed: List<String>,
         pictureKey: String,
         heightPx: Float,
+        layoutWidth: Double,
+        unitScale: Float,
+        drawZoom: Float,
+        drawnMainFontPx: Float,
     ) {
         if (!recordingEnabled) return
         inlinePreviews[key] = JSONObject()
@@ -258,6 +262,10 @@ internal object Inspection {
             .put("collapsed", JSONArray(collapsed))
             .put("pictureKey", pictureKey)
             .put("heightPx", heightPx)
+            .put("layoutWidth", layoutWidth)
+            .put("unitScale", unitScale)
+            .put("drawZoom", drawZoom)
+            .put("drawnMainFontPx", drawnMainFontPx)
             .put("recordedAt", System.nanoTime())
     }
 

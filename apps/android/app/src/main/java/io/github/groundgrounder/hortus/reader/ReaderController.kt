@@ -139,7 +139,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
 
     val bodySizePx: Float = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_SP,
-        17f,
+        READER_BODY_SP,
         appContext.resources.displayMetrics,
     )
     var contentWidthPx: Int = 0

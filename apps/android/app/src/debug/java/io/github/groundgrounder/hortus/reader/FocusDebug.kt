@@ -33,6 +33,7 @@ internal object FocusDebug {
             .put("sceneWidth", FocusStateRegistry.sceneWidth)
             .put("sceneHeight", FocusStateRegistry.sceneHeight)
             .put("sceneFontSize", FocusStateRegistry.sceneFontSize)
+            .put("unitScale", FocusStateRegistry.unitScale)
             .put("drawnFontSize", FocusStateRegistry.drawnFontSize)
             .put("sceneKey", FocusStateRegistry.sceneKey)
             .put("notePath", FocusStateRegistry.notePath)

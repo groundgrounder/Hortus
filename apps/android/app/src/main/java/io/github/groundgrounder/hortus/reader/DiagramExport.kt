@@ -221,6 +221,7 @@ object FocusStateRegistry {
     @Volatile var pointerEvents: Int = 0
     @Volatile var gestureDistance: Float = 0f
     @Volatile var sceneFontSize: Float = 0f
+    @Volatile var unitScale: Float = 0f
     @Volatile var drawnFontSize: Float = 0f
     @Volatile var sceneKey: String = ""
     @Volatile var notePath: String = ""

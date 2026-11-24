@@ -44,6 +44,7 @@ class FocusGestureTest {
         FocusStateRegistry.sceneWidth = 0f
         FocusStateRegistry.sceneHeight = 0f
         FocusStateRegistry.sceneFontSize = 0f
+        FocusStateRegistry.unitScale = 0f
         FocusStateRegistry.drawnFontSize = 0f
         FocusStateRegistry.collapsed = emptyList()
     }
@@ -85,6 +86,7 @@ class FocusGestureTest {
             .put("offsetY", FocusStateRegistry.lastOffsetY)
             .put("fitScale", FocusStateRegistry.fitScale)
             .put("sceneFontSize", FocusStateRegistry.sceneFontSize)
+            .put("unitScale", FocusStateRegistry.unitScale)
             .put("drawnFontSize", FocusStateRegistry.drawnFontSize)
             .put("extra", extra)
         File(directory, name).writeText(report.toString(2) + "\n")
@@ -106,9 +108,11 @@ class FocusGestureTest {
         MotionPinch.pinch(instrumentation, cx, cy, 160f, 1000f)
         assertEquals("pinch reaches exactly 400%", 4f, FocusStateRegistry.lastScale, 0.01f)
         assertTrue("scene font size recorded", FocusStateRegistry.sceneFontSize > 0f)
+        assertTrue("unit scale recorded", FocusStateRegistry.unitScale > 0f)
+        val unitScale = FocusStateRegistry.unitScale
         assertEquals(
-            "drawn font size equals scene font size × 4",
-            FocusStateRegistry.sceneFontSize * 4f,
+            "drawn font size equals scene font size × 4 × unit scale",
+            FocusStateRegistry.sceneFontSize * 4f * unitScale,
             FocusStateRegistry.drawnFontSize,
             0.05f,
         )

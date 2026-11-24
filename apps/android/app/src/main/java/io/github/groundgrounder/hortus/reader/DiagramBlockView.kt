@@ -34,12 +34,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.ceil
 import kotlin.math.max
+import kotlin.math.min
 
 @Composable
 internal fun DiagramBlock(
     item: DiagramItem,
     engineText: String,
     contentWidth: Int,
+    bodySizePx: Float,
     dark: Boolean,
     palette: ReaderPalette,
     repository: ReaderRepository,
@@ -55,11 +57,15 @@ internal fun DiagramBlock(
                 repository.collapsedNodes(notePath, item.ordinal)
             }
     }
+    val density = LocalDensity.current.density
+    val unitScale = diagramUnitScale(bodySizePx, density)
+    val layoutWidth = (contentWidth / unitScale).toDouble()
     LaunchedEffect(
         item.documentKey,
         item.ordinal,
         engineText.hashCode(),
         contentWidth,
+        bodySizePx,
         dark,
         collapsed,
         item.source,
@@ -71,7 +77,7 @@ internal fun DiagramBlock(
                 engineText = engineText,
                 mmd = item.mmd,
                 ordinal = item.ordinal,
-                width = contentWidth.toDouble(),
+                width = layoutWidth,
                 dark = dark,
                 collapsed = current,
                 revision = engineText.hashCode().toLong(),
@@ -79,11 +85,10 @@ internal fun DiagramBlock(
         }
     }
     val scene = result?.scene
-    val density = LocalDensity.current.density
-    val scale = if (scene != null && scene.width > 0.0) {
-        contentWidth.toFloat() / scene.width.toFloat()
+    val drawZoom = if (scene != null && scene.width > 0.0) {
+        min(unitScale, contentWidth.toFloat() / scene.width.toFloat())
     } else {
-        1f
+        unitScale
     }
     LaunchedEffect(result) {
         result?.failure?.takeIf { it.isNotBlank() }?.let { reason ->
@@ -100,7 +105,7 @@ internal fun DiagramBlock(
         }
     }
     val canvasHeight = if (scene != null) {
-        max(1, ceil(scene.height.toFloat() * scale).toInt())
+        max(1, ceil(scene.height.toFloat() * drawZoom).toInt())
     } else {
         (120 * density).toInt()
     }
@@ -110,11 +115,19 @@ internal fun DiagramBlock(
                 append(item.documentKey).append('#').append(item.ordinal)
                 append('@').append(contentWidth).append('/').append(dark)
                 append('/').append(palette.textArgb)
+                append('/').append(unitScale).append('/').append(drawZoom)
                 append('/').append(collapsed.orEmpty().joinToString(","))
                 append('/').append(engineText.hashCode())
             }
             val renderNode = remember(scene, key) {
-                DiagramPreviewCache.renderNode(key, scene, contentWidth, palette.textArgb)
+                DiagramPreviewCache.renderNode(
+                    key,
+                    scene,
+                    contentWidth,
+                    canvasHeight,
+                    drawZoom,
+                    palette.textArgb,
+                )
             }
             LaunchedEffect(scene, key) {
                 if (!Inspection.recordingEnabled) return@LaunchedEffect
@@ -128,6 +141,10 @@ internal fun DiagramBlock(
                     collapsed.orEmpty(),
                     key,
                     canvasHeight.toFloat(),
+                    layoutWidth,
+                    unitScale,
+                    drawZoom,
+                    diagramMainFontSize(scene) * drawZoom,
                 )
             }
             Canvas(
