@@ -18,6 +18,13 @@ internal object MainThreadCounters {
         "mathRender",
         "resolveEmbed",
         "vaultScan",
+        "search",
+        "quickOpen",
+        "outline",
+        "backlinks",
+        "tags",
+        "save",
+        "createNote",
     )
     private val counts = ConcurrentHashMap<String, AtomicInteger>()
 

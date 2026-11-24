@@ -73,4 +73,65 @@
     <string name="save_svg">Save SVG…</string>
     <string name="save_pdf">Save PDF…</string>
     <string name="share_sheet_title">Share diagram</string>
+    <string name="reader_search">Search notes</string>
+    <string name="reader_edit">Edit note</string>
+    <string name="reader_done">Done</string>
+    <string name="reader_save">Save</string>
+    <string name="reader_more">More options</string>
+    <string name="reader_read_only_label">Read only</string>
+    <string name="reader_external_preview">Read-only preview: this file was opened from another app and cannot be edited here.</string>
+    <string name="reader_read_only_reason">Read-only file: %1$s</string>
+
+    <string name="search_hint">Search notes</string>
+    <string name="search_tab_quick">Quick open</string>
+    <string name="search_tab_full">Full text</string>
+    <string name="search_empty">No results</string>
+    <string name="search_clear">Clear search</string>
+    <string name="search_match_count">%1$d matches</string>
+    <string name="search_running">Searching…</string>
+
+    <string name="side_files">Files</string>
+    <string name="knowledge_outline">Outline</string>
+    <string name="knowledge_backlinks">Backlinks</string>
+    <string name="knowledge_tags">Tags</string>
+    <string name="knowledge_empty_outline">This note has no headings.</string>
+    <string name="knowledge_empty_backlinks">No notes link here yet.</string>
+    <string name="knowledge_empty_tags">No tags in this vault yet.</string>
+    <string name="knowledge_loading">Loading knowledge…</string>
+    <string name="knowledge_back_to_tags">All tags</string>
+    <string name="knowledge_line">Line %1$d</string>
+    <string name="knowledge_in_diagram">In diagram</string>
+    <string name="knowledge_embed">Embed</string>
+    <string name="knowledge_tag_count">%1$d notes</string>
+
+    <string name="shortcut_pin">Add to home screen</string>
+    <string name="shortcut_pinned">Shortcut requested. Your launcher will ask for confirmation.</string>
+    <string name="shortcut_unsupported">This launcher does not support pinned shortcuts.</string>
+
+    <string name="new_note">New note</string>
+    <string name="new_note_title">New note</string>
+    <string name="new_note_name">Note name</string>
+    <string name="new_note_parent">Folder</string>
+    <string name="new_note_root">Vault root</string>
+    <string name="new_note_create">Create</string>
+    <string name="new_note_exists">A file with this name already exists.</string>
+    <string name="new_note_invalid">Enter a valid file name.</string>
+    <string name="new_note_folder_missing">The selected folder no longer exists.</string>
+    <string name="new_note_failed">The note could not be created.</string>
+
+    <string name="editor_unsaved">Unsaved changes</string>
+    <string name="editor_saved">Saved</string>
+    <string name="editor_saving">Saving…</string>
+    <string name="editor_save">Save</string>
+    <string name="editor_done">Done</string>
+    <string name="editor_copy_saved">Saved conflict copy: %1$s</string>
+    <string name="editor_disk_loaded">Loaded the version on disk.</string>
+    <string name="editor_conflict_title">The file changed on disk</string>
+    <string name="editor_conflict_body">Another app modified this note while you were editing. Keep your text, load the disk version, or save a conflict copy.</string>
+    <string name="editor_missing_title">The file was deleted</string>
+    <string name="editor_missing_body">This note was removed on disk while you were editing. Recreate it with your text or save a conflict copy.</string>
+    <string name="editor_keep_mine">Keep my changes</string>
+    <string name="editor_use_disk">Use disk version</string>
+    <string name="editor_copy_action">Save conflict copy</string>
+    <string name="editor_read_only_reason">This note cannot be edited: %1$s</string>
 </resources>

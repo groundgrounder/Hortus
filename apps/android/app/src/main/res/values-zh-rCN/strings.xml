@@ -73,4 +73,65 @@
     <string name="save_svg">保存 SVG…</string>
     <string name="save_pdf">保存 PDF…</string>
     <string name="share_sheet_title">分享图表</string>
+    <string name="reader_search">搜索笔记</string>
+    <string name="reader_edit">编辑笔记</string>
+    <string name="reader_done">完成</string>
+    <string name="reader_save">保存</string>
+    <string name="reader_more">更多选项</string>
+    <string name="reader_read_only_label">只读</string>
+    <string name="reader_external_preview">只读预览：此文件来自其他应用，不能在此编辑。</string>
+    <string name="reader_read_only_reason">只读文件：%1$s</string>
+
+    <string name="search_hint">搜索笔记</string>
+    <string name="search_tab_quick">快速打开</string>
+    <string name="search_tab_full">全文搜索</string>
+    <string name="search_empty">没有结果</string>
+    <string name="search_clear">清除搜索</string>
+    <string name="search_match_count">%1$d 处匹配</string>
+    <string name="search_running">正在搜索…</string>
+
+    <string name="side_files">文件</string>
+    <string name="knowledge_outline">大纲</string>
+    <string name="knowledge_backlinks">反链</string>
+    <string name="knowledge_tags">标签</string>
+    <string name="knowledge_empty_outline">这篇笔记没有标题。</string>
+    <string name="knowledge_empty_backlinks">还没有笔记链接到这里。</string>
+    <string name="knowledge_empty_tags">笔记库中还没有标签。</string>
+    <string name="knowledge_loading">正在加载知识导航…</string>
+    <string name="knowledge_back_to_tags">全部标签</string>
+    <string name="knowledge_line">第 %1$d 行</string>
+    <string name="knowledge_in_diagram">图内</string>
+    <string name="knowledge_embed">嵌入</string>
+    <string name="knowledge_tag_count">%1$d 篇笔记</string>
+
+    <string name="shortcut_pin">固定到桌面</string>
+    <string name="shortcut_pinned">已请求创建快捷方式，启动器会询问确认。</string>
+    <string name="shortcut_unsupported">当前启动器不支持固定快捷方式。</string>
+
+    <string name="new_note">新建笔记</string>
+    <string name="new_note_title">新建笔记</string>
+    <string name="new_note_name">笔记名</string>
+    <string name="new_note_parent">文件夹</string>
+    <string name="new_note_root">笔记库根目录</string>
+    <string name="new_note_create">创建</string>
+    <string name="new_note_exists">同名文件已存在。</string>
+    <string name="new_note_invalid">请输入有效的文件名。</string>
+    <string name="new_note_folder_missing">所选文件夹已不存在。</string>
+    <string name="new_note_failed">无法创建笔记。</string>
+
+    <string name="editor_unsaved">未保存</string>
+    <string name="editor_saved">已保存</string>
+    <string name="editor_saving">正在保存…</string>
+    <string name="editor_save">保存</string>
+    <string name="editor_done">完成</string>
+    <string name="editor_copy_saved">已另存为冲突副本：%1$s</string>
+    <string name="editor_disk_loaded">已载入磁盘上的版本。</string>
+    <string name="editor_conflict_title">磁盘上的文件已变化</string>
+    <string name="editor_conflict_body">编辑期间其他应用修改了这篇笔记。可以保留你的文字、载入磁盘版本或另存为冲突副本。</string>
+    <string name="editor_missing_title">文件已被删除</string>
+    <string name="editor_missing_body">编辑期间这篇笔记在磁盘上被删除。可以用你的文字重建，或另存为冲突副本。</string>
+    <string name="editor_keep_mine">保留我的修改</string>
+    <string name="editor_use_disk">改用磁盘版本</string>
+    <string name="editor_copy_action">另存为冲突副本</string>
+    <string name="editor_read_only_reason">这篇笔记不能编辑：%1$s</string>
 </resources>

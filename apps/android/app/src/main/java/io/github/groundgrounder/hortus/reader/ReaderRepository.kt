@@ -14,7 +14,9 @@ import io.github.groundgrounder.hortus.core.MathBlock
 import io.github.groundgrounder.hortus.core.MathStyle
 import io.github.groundgrounder.hortus.core.MediaBlock
 import io.github.groundgrounder.hortus.core.ReadingModel
+import io.github.groundgrounder.hortus.core.SaveChoice
 import io.github.groundgrounder.hortus.core.SceneData
+import io.github.groundgrounder.hortus.core.SearchCancellation
 import io.github.groundgrounder.hortus.core.TreeBatch
 import io.github.groundgrounder.hortus.core.TreeEntry
 import io.github.groundgrounder.hortus.core.VaultHandle
@@ -37,6 +39,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -56,6 +59,7 @@ internal data class NoteContent(
     val width: Int,
     val bodySize: Float,
     val isMmd: Boolean,
+    val externalPreview: Boolean = false,
 ) {
     val title: String = run {
         val heading = outline.headings.firstOrNull { it.level.toInt() == 1 }?.title
@@ -698,6 +702,170 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
             null
         }
     }
+
+    suspend fun quickOpen(query: String, limit: Int = 50): List<QuickRow> = lock.withLock {
+        vault?.quickOpen(query, limit.toUInt())?.map { hit ->
+            QuickRow(
+                path = hit.path,
+                title = hit.title,
+                titleMatches = hit.titleMatches.mapNotNull { range ->
+                    range.length.toInt().takeIf { it > 0 }?.let {
+                        range.start.toInt() until range.start.toInt() + it
+                    }
+                },
+                pathMatches = hit.pathMatches.mapNotNull { range ->
+                    range.length.toInt().takeIf { it > 0 }?.let {
+                        range.start.toInt() until range.start.toInt() + it
+                    }
+                },
+            )
+        } ?: emptyList()
+    }
+
+    suspend fun search(query: String, cancellation: SearchCancellation): List<SearchRow> =
+        lock.withLock {
+            vault?.search(query, 8u, cancellation)?.map { result ->
+                SearchRow(
+                    path = result.path,
+                    title = result.title,
+                    count = result.count.toInt(),
+                    matches = result.matches.map { matched ->
+                        SearchSnippet(
+                            start = matched.start.toInt(),
+                            length = matched.length.toInt(),
+                            snippet = matched.snippet,
+                            snippetStart = matched.snippetStart.toInt(),
+                        )
+                    },
+                )
+            } ?: emptyList()
+        }
+
+    suspend fun outlineRows(): List<OutlineRow> = lock.withLock {
+        document?.outline()?.headings?.map {
+            OutlineRow(it.level.toInt(), it.title, it.start.toInt())
+        } ?: emptyList()
+    }
+
+    suspend fun backlinks(path: String): List<BacklinkRow> = lock.withLock {
+        vault?.backlinks(path)?.map { link ->
+            BacklinkRow(
+                source = link.source,
+                title = titleFor(link.source),
+                line = link.line.toInt(),
+                context = link.context,
+                inDiagram = link.inDiagram,
+                embed = link.embed,
+                startUtf16 = link.startUtf16.toInt(),
+                lengthUtf16 = link.lengthUtf16.toInt(),
+            )
+        } ?: emptyList()
+    }
+
+    suspend fun tags(): List<TagRow> = lock.withLock {
+        vault?.tags()?.map { summary ->
+            TagRow(
+                tag = summary.tag,
+                raw = summary.raw,
+                count = summary.count.toInt(),
+                notes = summary.notes,
+            )
+        } ?: emptyList()
+    }
+
+    suspend fun notesWithTag(tag: String): List<TagNoteRow> = lock.withLock {
+        vault?.notesWithTag(tag)?.map { path -> TagNoteRow(path, titleFor(path)) } ?: emptyList()
+    }
+
+    suspend fun sessionText(): String? = lock.withLock {
+        document?.snapshot()?.text
+    }
+
+    suspend fun replaceAndSave(
+        text: String,
+        temporary: String,
+        choice: SaveChoice,
+    ): io.github.groundgrounder.hortus.core.DocumentUpdate? = lock.withLock {
+        val session = document ?: return@withLock null
+        val current = session.snapshot().text
+        if (current != text) {
+            session.replace(0uL, current.length.toULong(), text)
+        }
+        val update = session.save(temporary, choice)
+        if (update.issue == io.github.groundgrounder.hortus.core.DocumentIssue.NONE &&
+            !update.dirty && update.copyPath == null
+        ) {
+            notePath?.let { vault?.upsertNoteContent(it, text) }
+        }
+        update
+    }
+
+    suspend fun refreshSession(): io.github.groundgrounder.hortus.core.DocumentUpdate? = lock.withLock {
+        document?.refresh()
+    }
+
+    suspend fun acceptExternal(revision: Long) = lock.withLock {
+        document?.acceptExternal(revision.toULong())
+        Unit
+    }
+
+    suspend fun useDiskVersion(): io.github.groundgrounder.hortus.core.DocumentUpdate? = lock.withLock {
+        val session = document ?: return@withLock null
+        val update = session.useDisk()
+        if (update.text != null) session.acceptExternal(update.revision)
+        update
+    }
+
+    suspend fun createNote(parent: String, name: String): TreeEntry? = lock.withLock {
+        try {
+            vault?.createNote(parent, name)?.also { entry ->
+                entries[entry.path] = entry
+                _tree.value = entries.values.sortedWith(
+                    compareBy<TreeEntry> { !it.directory }.thenBy { it.path.lowercase() },
+                )
+                vault?.upsertNoteContent(entry.path, "")
+            }
+        } catch (error: Exception) {
+            throw error
+        }
+    }
+
+    suspend fun openExternalPreview(
+        fileName: String,
+        text: String,
+        width: Int,
+        bodySize: Float,
+    ): NoteContent = lock.withLock {
+        closeDocument()
+        val core = requireWorkspace()
+        val directory = File(appContext.cacheDir, "external-preview").apply {
+            if (exists()) deleteRecursively()
+            mkdirs()
+        }
+        val base = fileName.substringAfterLast('/').ifBlank { "preview.md" }
+        val cleaned = base.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").take(100)
+            .ifBlank { "preview.md" }
+        val safe = if (cleaned.lowercase().endsWith(".md") ||
+            cleaned.lowercase().endsWith(".mmd")
+        ) {
+            cleaned
+        } else {
+            "$cleaned.md"
+        }
+        File(directory, safe).writeText(text)
+        val session = core.openDocument(directory.absolutePath, safe)
+        document = session
+        notePath = null
+        buildContent(session, directory.absolutePath, safe, width, bodySize).copy(
+            readOnlyReason = "preview.external",
+            externalPreview = true,
+            vaultPath = vaultPath ?: directory.absolutePath,
+        )
+    }
+
+    private fun titleFor(path: String): String =
+        entries[path]?.name?.substringBeforeLast('.')
+            ?: path.substringAfterLast('/').substringBeforeLast('.')
 
     override fun close() {
         stopScan()
