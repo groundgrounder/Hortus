@@ -29,6 +29,7 @@ import androidx.compose.ui.platform.LocalDensity
 
 internal data class ReaderCallbacks(
     val onLink: (TextLink) -> Unit,
+    val onTag: (String) -> Unit,
     val onOpenPath: (String, String?) -> Unit,
     val onFocus: (DiagramItem, SceneData, List<String>) -> Unit,
     val onNotice: (String) -> Unit,
@@ -57,6 +58,7 @@ internal fun ReaderItemView(
             repository = repository,
             notePath = notePath,
             onLink = callbacks.onLink,
+            onTag = callbacks.onTag,
             modifier = modifier,
         )
         is TableItem -> TableBlockView(

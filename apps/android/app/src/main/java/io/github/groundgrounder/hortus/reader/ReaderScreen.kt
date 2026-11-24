@@ -7,13 +7,16 @@ import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,21 +25,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -51,6 +57,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -59,13 +66,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,9 +83,8 @@ import io.github.groundgrounder.hortus.core.TreeEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
-import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -105,10 +112,17 @@ private fun ReaderScaffold(
     dark: Boolean,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val drawerState = androidx.compose.material3.rememberDrawerState(DrawerValue.Closed)
     val snackbarHost = remember { SnackbarHostState() }
-    fun focusDiagram(item: DiagramItem, scene: io.github.groundgrounder.hortus.core.SceneData, collapsed: List<String>) {
+    val configuration = LocalConfiguration.current
+    val tablet = configuration.screenWidthDp >= 600
+    LaunchedEffect(tablet) {
+        controller.updateLayoutMode(if (tablet) "tablet" else "phone")
+    }
+    fun focusDiagram(
+        item: DiagramItem,
+        scene: io.github.groundgrounder.hortus.core.SceneData,
+        collapsed: List<String>,
+    ) {
         val token = FocusPayloads.put(
             FocusPayload(
                 vaultPath = state.content?.vaultPath ?: "",
@@ -129,11 +143,11 @@ private fun ReaderScaffold(
 
     val callbacks = ReaderCallbacks(
         onLink = controller::followLink,
+        onTag = controller::openTagInText,
         onOpenPath = controller::openPath,
         onFocus = ::focusDiagram,
         onNotice = controller::notice,
     )
-
     if (controller.canGoBack()) {
         BackHandler { controller.back() }
     }
@@ -143,16 +157,52 @@ private fun ReaderScaffold(
             controller.clearNotice()
         }
     }
+    Box(Modifier.fillMaxSize()) {
+        when {
+            controller.searchState.open -> SearchOverlay(controller, controller.searchState, palette)
+            controller.editState.active -> EditorScreen(controller, state, controller.editState)
+            tablet -> TabletScaffold(controller, state, snackbarHost, callbacks, palette, dark)
+            else -> PhoneScaffold(controller, state, snackbarHost, callbacks, palette, dark)
+        }
+    }
+    if (controller.knowledgeState.open) {
+        KnowledgeSheet(controller, state, controller.knowledgeState)
+    }
+    if (controller.newNoteState.open) {
+        NewNoteDialog(controller, state, controller.newNoteState)
+    }
+    ConflictDialog(controller, controller.editState)
+}
+
+@Composable
+private fun PhoneScaffold(
+    controller: ReaderController,
+    state: ReaderUiState,
+    snackbarHost: SnackbarHostState,
+    callbacks: ReaderCallbacks,
+    palette: ReaderPalette,
+    dark: Boolean,
+) {
+    val scope = rememberCoroutineScope()
+    val drawerState = androidx.compose.material3.rememberDrawerState(DrawerValue.Closed)
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = true,
         drawerContent = {
             ModalDrawerSheet {
-                Text(
-                    stringResource(R.string.reader_notes),
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(16.dp),
-                )
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        stringResource(R.string.reader_notes),
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { controller.openNewNoteDialog() }) {
+                        Text(stringResource(R.string.new_note))
+                    }
+                }
                 HorizontalDivider()
                 FileTreeList(
                     entries = state.tree,
@@ -170,52 +220,257 @@ private fun ReaderScaffold(
     ) {
         Scaffold(
             topBar = {
-                TopAppBar(
-                    title = {
-                        Text(
-                            state.content?.title ?: stringResource(R.string.app_name),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    },
-                    navigationIcon = {
-                        if (controller.canGoBack()) {
-                            IconButton(onClick = { controller.back() }) {
-                                Icon(Icons.Default.ArrowBack, contentDescription = stringResource(R.string.reader_back))
-                            }
-                        } else {
-                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(Icons.Default.Menu, contentDescription = stringResource(R.string.reader_menu))
-                            }
-                        }
-                    },
-                    actions = {
-                        if (controller.canGoBack()) {
-                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(Icons.Default.Menu, contentDescription = stringResource(R.string.reader_menu))
-                            }
-                        }
-                    },
+                ReaderTopBar(
+                    controller = controller,
+                    state = state,
+                    tablet = false,
+                    onOpenDrawer = { scope.launch { drawerState.open() } },
                 )
             },
+            bottomBar = { PhoneKnowledgeBar(controller) },
             snackbarHost = { SnackbarHost(snackbarHost) },
         ) { insets ->
-            Box(Modifier.fillMaxSize().padding(insets)) {
-                if (state.loading && state.content == null) {
-                    CircularProgressIndicator(Modifier.align(Alignment.Center))
-                } else {
-                    ReaderContent(
-                        controller = controller,
-                        content = state.content,
-                        scrollTarget = state.scrollTarget,
-                        openSequence = state.openSequence,
-                        dark = dark,
-                        palette = palette,
-                        callbacks = callbacks,
+            ReaderDetail(
+                controller = controller,
+                state = state,
+                callbacks = callbacks,
+                palette = palette,
+                dark = dark,
+                modifier = Modifier.fillMaxSize().padding(insets),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TabletScaffold(
+    controller: ReaderController,
+    state: ReaderUiState,
+    snackbarHost: SnackbarHostState,
+    callbacks: ReaderCallbacks,
+    palette: ReaderPalette,
+    dark: Boolean,
+) {
+    Scaffold(
+        topBar = {
+            ReaderTopBar(
+                controller = controller,
+                state = state,
+                tablet = true,
+                onOpenDrawer = {},
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbarHost) },
+    ) { insets ->
+        Row(Modifier.fillMaxSize().padding(insets)) {
+            if (controller.sidePaneOpen) {
+                SidePane(
+                    controller = controller,
+                    state = state,
+                    knowledge = controller.knowledgeState,
+                    modifier = Modifier
+                        .width(320.dp)
+                        .fillMaxHeight()
+                        .onGloballyPositioned {
+                            controller.recordPaneWidths(
+                                it.size.width,
+                                controller.detailPaneWidthPx,
+                            )
+                        },
+                )
+                VerticalDivider()
+            }
+            ReaderDetail(
+                controller = controller,
+                state = state,
+                callbacks = callbacks,
+                palette = palette,
+                dark = dark,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .onGloballyPositioned {
+                        controller.recordPaneWidths(if (controller.sidePaneOpen) controller.sidePaneWidthPx else 0, it.size.width)
+                    },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReaderTopBar(
+    controller: ReaderController,
+    state: ReaderUiState,
+    tablet: Boolean,
+    onOpenDrawer: () -> Unit,
+) {
+    var menu by remember { mutableStateOf(false) }
+    TopAppBar(
+        title = {
+            Text(
+                state.content?.title ?: stringResource(R.string.app_name),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        navigationIcon = {
+            when {
+                controller.canGoBack() -> {
+                    IconButton(onClick = controller::back) {
+                        Icon(
+                            Icons.Default.ArrowBack,
+                            contentDescription = stringResource(R.string.reader_back),
+                        )
+                    }
+                }
+                tablet -> {
+                    IconButton(onClick = controller::toggleSidePane) {
+                        Icon(
+                            Icons.Default.Menu,
+                            contentDescription = stringResource(R.string.reader_menu),
+                        )
+                    }
+                }
+                else -> {
+                    IconButton(onClick = onOpenDrawer) {
+                        Icon(
+                            Icons.Default.Menu,
+                            contentDescription = stringResource(R.string.reader_menu),
+                        )
+                    }
+                }
+            }
+        },
+        actions = {
+            IconButton(onClick = controller::openSearch) {
+                Icon(
+                    Icons.Default.Search,
+                    contentDescription = stringResource(R.string.reader_search),
+                )
+            }
+            if (state.content?.readOnlyReason != null) {
+                Text(
+                    stringResource(R.string.reader_read_only_label),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+            } else {
+                IconButton(onClick = controller::startEditing, enabled = controller.canEdit) {
+                    Icon(
+                        Icons.Default.Edit,
+                        contentDescription = stringResource(R.string.reader_edit),
                     )
                 }
             }
+            Box {
+                IconButton(onClick = { menu = true }) {
+                    Icon(
+                        Icons.Default.MoreVert,
+                        contentDescription = stringResource(R.string.reader_more),
+                    )
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.shortcut_pin)) },
+                        onClick = {
+                            menu = false
+                            controller.pinCurrentNote()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.new_note)) },
+                        onClick = {
+                            menu = false
+                            controller.openNewNoteDialog()
+                        },
+                    )
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun PhoneKnowledgeBar(controller: ReaderController) {
+    BottomAppBar {
+        TextButton(
+            onClick = { controller.openKnowledge(KnowledgeTab.OUTLINE) },
+            modifier = Modifier.weight(1f),
+        ) {
+            Text(stringResource(R.string.knowledge_outline))
         }
+        TextButton(
+            onClick = { controller.openKnowledge(KnowledgeTab.BACKLINKS) },
+            modifier = Modifier.weight(1f),
+        ) {
+            Text(stringResource(R.string.knowledge_backlinks))
+        }
+        TextButton(
+            onClick = { controller.openKnowledge(KnowledgeTab.TAGS) },
+            modifier = Modifier.weight(1f),
+        ) {
+            Text(stringResource(R.string.knowledge_tags))
+        }
+    }
+}
+
+@Composable
+private fun ReaderDetail(
+    controller: ReaderController,
+    state: ReaderUiState,
+    callbacks: ReaderCallbacks,
+    palette: ReaderPalette,
+    dark: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier) {
+        val content = state.content
+        if (content?.readOnlyReason != null) {
+            ReadOnlyBanner(content)
+        }
+        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            val density = LocalDensity.current
+            val contentWidth = with(density) {
+                (maxWidth - 48.dp).roundToPx()
+            }.coerceAtLeast(1)
+            val bottomPadding = maxHeight + 72.dp
+            ReaderContent(
+                controller = controller,
+                content = content,
+                scrollTarget = state.scrollTarget,
+                openSequence = state.openSequence,
+                dark = dark,
+                palette = palette,
+                callbacks = callbacks,
+                contentWidthPx = contentWidth,
+                bottomPadding = bottomPadding,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReadOnlyBanner(content: NoteContent) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 20.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (content.externalPreview) {
+                stringResource(R.string.reader_external_preview)
+            } else {
+                stringResource(
+                    R.string.reader_read_only_reason,
+                    content.readOnlyReason ?: "",
+                )
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -228,17 +483,12 @@ private fun ReaderContent(
     dark: Boolean,
     palette: ReaderPalette,
     callbacks: ReaderCallbacks,
+    contentWidthPx: Int,
+    bottomPadding: androidx.compose.ui.unit.Dp,
 ) {
     if (content == null) return
-    val density = LocalDensity.current.density
-    val configuration = LocalConfiguration.current
-    val contentWidth = if (content.width > 0) {
-        content.width
-    } else {
-        ((configuration.screenWidthDp * density) - 48 * density).toInt().coerceAtLeast(1)
-    }
-    LaunchedEffect(contentWidth) { controller.setContentWidth(contentWidth) }
-    val initialTarget = remember(content.path) { scrollTarget }
+    LaunchedEffect(contentWidthPx) { controller.setContentWidth(contentWidthPx) }
+    val initialTarget = remember(content.path) { scrollTarget ?: controller.restoreTarget(content) }
     val listState = remember(content.path) {
         LazyListState(
             firstVisibleItemIndex = initialTarget?.itemIndex?.coerceAtLeast(0) ?: 0,
@@ -303,7 +553,7 @@ private fun ReaderContent(
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = (configuration.screenHeightDp + 72).dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = bottomPadding),
         ) {
             itemsIndexed(
                 content.items,
@@ -312,7 +562,7 @@ private fun ReaderContent(
                 ReaderItemView(
                     item = item,
                     engineText = content.sourceText,
-                    contentWidth = contentWidth,
+                    contentWidth = contentWidthPx,
                     bodySizePx = controller.bodySizePx,
                     dark = dark,
                     palette = palette,
@@ -340,7 +590,7 @@ private fun ReaderContent(
 }
 
 @Composable
-private fun FileTreeList(
+internal fun FileTreeList(
     entries: List<TreeEntry>,
     currentPath: String?,
     onOpen: (String) -> Unit,
@@ -379,7 +629,19 @@ private fun FileTreeList(
                             onOpen(entry.path)
                         }
                     }
-                    .padding(start = (12 + depth * 16).dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
+                    .padding(start = (12 + depth * 16).dp, end = 12.dp, top = 9.dp, bottom = 9.dp)
+                    .trackPanel("files", "file:${entry.path}") {
+                        PanelHit(
+                            kind = "file",
+                            label = entry.name,
+                            x = 0f,
+                            y = 0f,
+                            width = 0f,
+                            height = 0f,
+                            target = entry.path,
+                            tab = "files",
+                        )
+                    },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (entry.directory) {

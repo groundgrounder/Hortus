@@ -206,6 +206,7 @@ internal class ReaderTextView(context: Context) : TextView(context) {
     var blockId: Long = 0
     var notePath: String = ""
     var onLink: ((TextLink) -> Unit)? = null
+    var onTag: ((String) -> Unit)? = null
     var onLayoutReady: (() -> Unit)? = null
 
     private var item: TextItem? = null
@@ -213,6 +214,7 @@ internal class ReaderTextView(context: Context) : TextView(context) {
     private var mathByOffset: Map<Int, PreparedMath?> = emptyMap()
     private var mathLatex: Map<Int, String> = emptyMap()
     private var links: List<TextLink> = emptyList()
+    private var tags: List<TextTag> = emptyList()
     private var appliedSpannable: SpannableString? = null
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private var downX = 0f
@@ -244,6 +246,7 @@ internal class ReaderTextView(context: Context) : TextView(context) {
         math: Map<Int, PreparedMath?>,
         latex: Map<Int, String>,
         onLink: (TextLink) -> Unit,
+        onTag: (String) -> Unit,
     ) {
         this.item = item
         this.itemKey = item.key
@@ -253,8 +256,10 @@ internal class ReaderTextView(context: Context) : TextView(context) {
         this.mathByOffset = math
         this.mathLatex = latex
         this.links = item.links
-        if (item.links.isEmpty()) HitRegistry.replace("text:${item.key}", emptyList())
+        this.tags = item.tags
+        if (item.links.isEmpty() && item.tags.isEmpty()) HitRegistry.replace("text:${item.key}", emptyList())
         this.onLink = onLink
+        this.onTag = onTag
         val (left, right, _) = textBlockWidths(item, contentWidth.coerceAtLeast(1), density)
         val (top, bottom) = textBlockVerticalPadding(item, density)
         setPadding(left.toInt(), top.toInt(), right, bottom.toInt())
@@ -358,6 +363,21 @@ internal class ReaderTextView(context: Context) : TextView(context) {
         return links.firstOrNull { offset >= it.start && offset < it.end }
     }
 
+    private fun tagAt(x: Float, y: Float): TextTag? {
+        val layout = layout ?: return null
+        val vertical = (y - totalPaddingTop).toInt()
+        if (vertical < 0 || vertical > layout.height) return null
+        val line = layout.getLineForVertical(vertical)
+        val horizontal = x - totalPaddingLeft
+        if (horizontal < layout.getLineLeft(line) - 2f ||
+            horizontal > layout.getLineRight(line) + 2f
+        ) {
+            return null
+        }
+        val offset = layout.getOffsetForHorizontal(line, horizontal)
+        return tags.firstOrNull { offset >= it.start && offset < it.end }
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -379,17 +399,21 @@ internal class ReaderTextView(context: Context) : TextView(context) {
                     onLink?.invoke(link)
                     return true
                 }
+                tagAt(event.x, event.y)?.let { tag ->
+                    onTag?.invoke(tag.tag)
+                    return true
+                }
             }
         }
         return handled
     }
 
     fun refreshHits() {
-        if (links.isEmpty()) return
+        if (links.isEmpty() && tags.isEmpty()) return
         val layout = layout ?: return
         val location = IntArray(2)
         getLocationOnScreen(location)
-        val hits = ArrayList<ScreenHit>(links.size)
+        val hits = ArrayList<ScreenHit>(links.size + tags.size)
         for (link in links) {
             for (rect in layoutRects(layout, link.start, link.end)) {
                 hits += ScreenHit(
@@ -401,6 +425,22 @@ internal class ReaderTextView(context: Context) : TextView(context) {
                     height = rect.height(),
                     target = link.resolvedPath ?: link.target,
                     heading = link.heading,
+                    canCollapse = false,
+                    nodeId = null,
+                )
+            }
+        }
+        for (tag in tags) {
+            for (rect in layoutRects(layout, tag.start, tag.end)) {
+                hits += ScreenHit(
+                    kind = "tag",
+                    label = tag.tag,
+                    x = location[0] + totalPaddingLeft + rect.left,
+                    y = location[1] + totalPaddingTop + rect.top,
+                    width = rect.width(),
+                    height = rect.height(),
+                    target = tag.tag,
+                    heading = null,
                     canCollapse = false,
                     nodeId = null,
                 )
@@ -463,6 +503,7 @@ internal fun TextBlockView(
     repository: ReaderRepository,
     notePath: String,
     onLink: (TextLink) -> Unit,
+    onTag: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current.density
@@ -544,12 +585,13 @@ internal fun TextBlockView(
                     math = mathByLocal,
                     latex = mathLatex,
                     onLink = onLink,
+                    onTag = onTag,
                 )
                 view.refreshLayoutData()
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .onGloballyPositioned { if (item.links.isNotEmpty()) textView?.refreshHits() },
+                .onGloballyPositioned { if (item.links.isNotEmpty() || item.tags.isNotEmpty()) textView?.refreshHits() },
         )
         for ((formula, reason) in failures) {
             Text(
