@@ -1,24 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.focus
 
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
-import android.util.TypedValue
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.foundation.Canvas as ComposeCanvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
@@ -37,16 +36,17 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -57,31 +57,31 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.DebugProbes.debugFocusBackTop
 import io.github.groundgrounder.hortus.MainActivity
 import io.github.groundgrounder.hortus.R
-import io.github.groundgrounder.hortus.app.HortusServices
-import io.github.groundgrounder.hortus.core.SceneData
+import io.github.groundgrounder.hortus.core.settings.LaunchExtras
+import io.github.groundgrounder.hortus.reader.model.readerPalette
+import io.github.groundgrounder.hortus.reader.render.DiagramExportFormat
+import io.github.groundgrounder.hortus.reader.render.DiagramExporter
+import io.github.groundgrounder.hortus.reader.render.SceneRenderer
 import io.github.groundgrounder.hortus.ui.HortusTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 private const val DOWNLOAD_DOCUMENT_URI =
     "content://com.android.externalstorage.documents/document/primary%3ADownload"
-
-private class FocusViewportState {
-    @Volatile var scale: Float = 0f
-    @Volatile var offsetX: Float = 0f
-    @Volatile var offsetY: Float = 0f
-}
 
 internal class DiagramFocusActivity : ComponentActivity() {
     companion object {
@@ -97,7 +97,7 @@ internal class DiagramFocusActivity : ComponentActivity() {
 
     private var payloadToken: Int = -1
     private var payload: FocusPayload? = null
-    private val viewportState = FocusViewportState()
+    private val viewModel: FocusViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -107,25 +107,16 @@ internal class DiagramFocusActivity : ComponentActivity() {
         payload = FocusPayloads.get(payloadToken)
         setContent {
             HortusTheme {
-                FocusScreen(payload, viewportState, ::finish)
+                FocusScreen(payload, viewModel, ::finish)
             }
         }
     }
 
     override fun onPause() {
         super.onPause()
-        val value = payload ?: return
+        if (payload == null) return
         DebugProbes.writeFocusDebug(applicationContext)
-        val scale = viewportState.scale
-        if (scale <= 0f) return
-        HortusServices.get(applicationContext).persistDiagramFocusAsync(
-            vaultPath = value.vaultPath,
-            note = value.notePath,
-            block = value.ordinal,
-            scale = scale.toDouble(),
-            offsetX = viewportState.offsetX.toDouble(),
-            offsetY = viewportState.offsetY.toDouble(),
-        )
+        viewModel.persistViewport()
     }
 
     override fun onDestroy() {
@@ -145,7 +136,7 @@ private data class SaveRequest(
 @Composable
 private fun FocusScreen(
     payload: FocusPayload?,
-    viewportState: FocusViewportState,
+    viewModel: FocusViewModel,
     onClose: () -> Unit,
 ) {
     if (payload == null) return
@@ -154,25 +145,27 @@ private fun FocusScreen(
     val dark = isSystemInDarkTheme()
     val palette = readerPalette()
     val density = LocalDensity.current
-    val bodySizePx = TypedValue.applyDimension(
-        TypedValue.COMPLEX_UNIT_SP,
-        READER_BODY_SP,
-        context.resources.displayMetrics,
-    )
-    val unitScale = diagramUnitScale(bodySizePx, density.density)
+    val unitScale = viewModel.unitScale
     val systemInsets = WindowInsets.statusBars.union(WindowInsets.displayCutout)
     val topInsetPx = systemInsets.getTop(density)
-    var scene by remember { mutableStateOf<SceneData?>(null) }
-    var failure by remember { mutableStateOf<String?>(null) }
-    var collapsed by remember { mutableStateOf(payload.collapsed) }
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val scene = uiState.scene
+    val failure = uiState.failure
+    val collapsed = uiState.collapsed
     var viewport by remember { mutableStateOf(IntSize.Zero) }
-    var topBarBottomPx by remember { mutableStateOf(0f) }
-    var scale by remember { mutableStateOf(0f) }
-    var offsetX by remember { mutableStateOf(0f) }
-    var offsetY by remember { mutableStateOf(0f) }
+    var topBarBottomPx by remember { mutableFloatStateOf(0f) }
+    var scale by remember { mutableFloatStateOf(0f) }
+    var offsetX by remember { mutableFloatStateOf(0f) }
+    var offsetY by remember { mutableFloatStateOf(0f) }
     var menuOpen by remember { mutableStateOf(false) }
     var pendingSave by remember { mutableStateOf<SaveRequest?>(null) }
-    val services = remember { HortusServices.get(context.applicationContext) }
+
+    LaunchedEffect(payload) {
+        viewModel.initialize(payload, dark)
+    }
+    LaunchedEffect(dark) {
+        viewModel.onDarkModeChanged(dark)
+    }
 
     val documentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -253,9 +246,7 @@ private fun FocusScreen(
     }
 
     fun rememberNow() {
-        viewportState.scale = scale
-        viewportState.offsetX = offsetX
-        viewportState.offsetY = offsetY
+        viewModel.updateViewport(scale, offsetX, offsetY)
         DebugProbes.recordFocusState(
             scale = scale,
             offsetX = offsetX,
@@ -271,50 +262,26 @@ private fun FocusScreen(
     }
 
     fun toggleNode(nodeId: String) {
-        val next = if (nodeId in collapsed) collapsed - nodeId else collapsed + nodeId
-        collapsed = next
-        DiagramStateBus.publish(payload.vaultPath, payload.notePath, payload.ordinal, next)
-        DebugProbes.recordFocusCollapsed(next)
-        DebugProbes.writeFocusDebug(context)
-        scope.launch {
-            services.rememberCollapsed(payload.vaultPath, payload.notePath, payload.ordinal, next)
-        }
+        viewModel.toggleNode(nodeId, dark)
     }
 
     fun openNote(target: String, heading: String?) {
         scope.launch {
-            val resolved = services.resolveVaultLink(payload.vaultPath, payload.notePath, target)
-                ?: target
+            val resolved = viewModel.resolveVaultLink(target) ?: target
             context.startActivity(
                 Intent(context, MainActivity::class.java).apply {
-                    putExtra(MainActivity.EXTRA_OPEN_NOTE, resolved)
-                    putExtra(MainActivity.EXTRA_OPEN_HEADING, heading)
-                    putExtra(MainActivity.EXTRA_OPEN_VAULT, payload.vaultPath)
+                    putExtra(LaunchExtras.EXTRA_OPEN_NOTE, resolved)
+                    putExtra(LaunchExtras.EXTRA_OPEN_HEADING, heading)
+                    putExtra(LaunchExtras.EXTRA_OPEN_VAULT, payload.vaultPath)
                 },
             )
-        }
-    }
-
-    suspend fun encode(format: DiagramExportFormat): ByteArray {
-        val value = scene ?: throw IllegalStateException("diagram unavailable")
-        return when (format) {
-            DiagramExportFormat.Svg -> services.renderSvg(
-                engineText = payload.engineText,
-                mmd = payload.mmd,
-                ordinal = payload.ordinal,
-                width = payload.renderWidth,
-                dark = dark,
-                collapsed = collapsed,
-            ).toByteArray(Charsets.UTF_8)
-            DiagramExportFormat.Png -> DiagramExporter.encodePng(value, dark)
-            DiagramExportFormat.Pdf -> DiagramExporter.encodePdf(value, dark)
         }
     }
 
     fun share(format: DiagramExportFormat) {
         scope.launch {
             try {
-                val bytes = withContext(Dispatchers.IO) { encode(format) }
+                val bytes = withContext(Dispatchers.IO) { viewModel.encode(format, dark) }
                 val name = DiagramExporter.defaultName(payload.notePath, payload.ordinal, format)
                 val file = withContext(Dispatchers.IO) {
                     DiagramExporter.shareFile(context, name, bytes)
@@ -343,7 +310,7 @@ private fun FocusScreen(
     fun save(format: DiagramExportFormat) {
         scope.launch {
             try {
-                val bytes = withContext(Dispatchers.IO) { encode(format) }
+                val bytes = withContext(Dispatchers.IO) { viewModel.encode(format, dark) }
                 val name = DiagramExporter.defaultName(payload.notePath, payload.ordinal, format)
                 pendingSave = SaveRequest(bytes, name, format)
                 val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
@@ -359,36 +326,12 @@ private fun FocusScreen(
         }
     }
 
-    LaunchedEffect(payload.documentKey, payload.ordinal, dark, collapsed) {
-        try {
-            val rendered = services.renderDiagram(
-                documentKey = payload.documentKey,
-                engineText = payload.engineText,
-                mmd = payload.mmd,
-                ordinal = payload.ordinal,
-                width = payload.renderWidth,
-                dark = dark,
-                collapsed = collapsed,
-                revision = payload.revision,
-            )
-            scene = rendered
-            failure = null
-            if (DebugProbes.enabled) {
-                withContext(Dispatchers.IO) {
-                    DebugProbes.recordFocusScene(rendered, payload.documentKey, payload.ordinal)
-                }
-            }
-        } catch (error: Exception) {
-            failure = error.message ?: error.javaClass.simpleName
-            scene = null
-        }
-    }
     LaunchedEffect(scene, viewport, topBarBottomPx) {
-        val value = scene ?: return@LaunchedEffect
+        if (scene == null) return@LaunchedEffect
         if (viewport.width == 0 || viewport.height == 0 || topBarBottomPx <= 0f) return@LaunchedEffect
         if (scale == 0f) {
             val fit = fitScale()
-            val stored = services.diagramFocus(payload.vaultPath, payload.notePath, payload.ordinal)
+            val stored = viewModel.loadStoredFocus()
             if (stored != null && stored.scale >= fit - 0.01 && stored.scale <= 4.0) {
                 scale = stored.scale.toFloat().coerceIn(fit, 4f)
                 val (x, y) = clampOffsets(scale, stored.offsetX.toFloat(), stored.offsetY.toFloat())
@@ -420,7 +363,7 @@ private fun FocusScreen(
                     .fillMaxSize()
                     .pointerInput(value) {
                         var lastTapUp = 0L
-                        var lastTapPosition = androidx.compose.ui.geometry.Offset.Zero
+                        var lastTapPosition = Offset.Zero
                         awaitEachGesture {
                             val first = awaitFirstDown(requireUnconsumed = false)
                             var previousCentroid = first.position
@@ -517,7 +460,7 @@ private fun FocusScreen(
                 .onGloballyPositioned { coordinates ->
                     val bottom = coordinates.positionInRoot().y + coordinates.size.height
                     DebugProbes.recordFocusChrome(topInsetPx, bottom.roundToInt())
-                    if (kotlin.math.abs(bottom - topBarBottomPx) > 0.5f) {
+                    if (abs(bottom - topBarBottomPx) > 0.5f) {
                         topBarBottomPx = bottom
                     }
                 }
@@ -533,7 +476,7 @@ private fun FocusScreen(
             Text(
                 payload.title.ifBlank { stringResource(R.string.focus_title) },
                 maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
             Text(stringResource(R.string.focus_zoom, (scale * 100).roundToInt()))

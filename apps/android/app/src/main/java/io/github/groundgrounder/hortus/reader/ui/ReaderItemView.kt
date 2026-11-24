@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,23 +18,24 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.R
-import io.github.groundgrounder.hortus.core.SceneData
-import androidx.compose.ui.res.stringResource
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import androidx.compose.ui.platform.LocalDensity
-
-internal data class ReaderCallbacks(
-    val onLink: (TextLink) -> Unit,
-    val onTag: (String) -> Unit,
-    val onOpenPath: (String, String?) -> Unit,
-    val onFocus: (DiagramItem, SceneData, List<String>) -> Unit,
-    val onNotice: (String) -> Unit,
-)
+import io.github.groundgrounder.hortus.core.model.DiagramItem
+import io.github.groundgrounder.hortus.core.model.EmbedItem
+import io.github.groundgrounder.hortus.core.model.EmbeddedContent
+import io.github.groundgrounder.hortus.core.model.ImageItem
+import io.github.groundgrounder.hortus.core.model.MathItem
+import io.github.groundgrounder.hortus.core.model.ReaderItem
+import io.github.groundgrounder.hortus.core.model.TableItem
+import io.github.groundgrounder.hortus.core.model.TextItem
+import io.github.groundgrounder.hortus.core.model.embedDiagramType
+import io.github.groundgrounder.hortus.reader.model.ItemRenderBridge
+import io.github.groundgrounder.hortus.reader.model.ReaderCallbacks
+import io.github.groundgrounder.hortus.reader.model.ReaderPalette
 
 @Composable
 internal fun ReaderItemView(
@@ -44,7 +45,7 @@ internal fun ReaderItemView(
     bodySizePx: Float,
     dark: Boolean,
     palette: ReaderPalette,
-    repository: ReaderRepository,
+    renderBridge: ItemRenderBridge,
     vaultPath: String,
     notePath: String,
     revision: Long,
@@ -58,7 +59,7 @@ internal fun ReaderItemView(
             contentWidth = contentWidth,
             bodySizePx = bodySizePx,
             palette = palette,
-            repository = repository,
+            renderBridge = renderBridge,
             notePath = notePath,
             onLink = callbacks.onLink,
             onTag = callbacks.onTag,
@@ -69,7 +70,7 @@ internal fun ReaderItemView(
             contentWidth = contentWidth,
             bodySizePx = bodySizePx,
             palette = palette,
-            repository = repository,
+            renderBridge = renderBridge,
             notePath = notePath,
             modifier = modifier,
         )
@@ -77,6 +78,7 @@ internal fun ReaderItemView(
             item.media,
             contentWidth = contentWidth,
             palette = palette,
+            renderBridge = renderBridge,
             modifier = modifier,
         )
         is MathItem -> MathBlockView(
@@ -84,10 +86,9 @@ internal fun ReaderItemView(
             itemKey = item.key,
             blockId = item.blockId,
             notePath = notePath,
-            contentWidth = contentWidth,
             bodySizePx = bodySizePx,
             palette = palette,
-            repository = repository,
+            renderBridge = renderBridge,
             modifier = modifier,
         )
         is DiagramItem -> DiagramBlock(
@@ -97,7 +98,7 @@ internal fun ReaderItemView(
             bodySizePx = bodySizePx,
             dark = dark,
             palette = palette,
-            repository = repository,
+            renderBridge = renderBridge,
             vaultPath = vaultPath,
             notePath = notePath,
             revision = revision,
@@ -114,7 +115,7 @@ internal fun ReaderItemView(
             bodySizePx = bodySizePx,
             dark = dark,
             palette = palette,
-            repository = repository,
+            renderBridge = renderBridge,
             callbacks = callbacks,
             modifier = modifier,
         )
@@ -132,7 +133,7 @@ internal fun EmbedBlockView(
     bodySizePx: Float,
     dark: Boolean,
     palette: ReaderPalette,
-    repository: ReaderRepository,
+    renderBridge: ItemRenderBridge,
     callbacks: ReaderCallbacks,
     modifier: Modifier = Modifier,
 ) {
@@ -140,17 +141,15 @@ internal fun EmbedBlockView(
         mutableStateOf<EmbeddedContent?>(null)
     }
     LaunchedEffect(vaultPath, item.key, notePath, ancestors, contentWidth, bodySizePx, revision) {
-        embedded = withContext(Dispatchers.IO) {
-            repository.resolveEmbed(
-                sourcePath = notePath,
-                target = item.target,
-                heading = item.heading,
-                alias = item.alias,
-                ancestors = ancestors,
-                width = contentWidth.toDouble(),
-                size = bodySizePx.toDouble(),
-            )
-        }
+        embedded = renderBridge.resolveEmbed(
+            sourcePath = notePath,
+            target = item.target,
+            heading = item.heading,
+            alias = item.alias,
+            ancestors = ancestors,
+            width = contentWidth.toDouble(),
+            size = bodySizePx.toDouble(),
+        )
     }
     val content = embedded
     val info = content?.info
@@ -215,7 +214,7 @@ internal fun EmbedBlockView(
                             bodySizePx = bodySizePx * 0.94f,
                             dark = dark,
                             palette = palette,
-                            repository = repository,
+                            renderBridge = renderBridge,
                             vaultPath = vaultPath,
                             notePath = info.resolvedPath ?: notePath,
                             revision = revision,
@@ -249,7 +248,7 @@ internal fun EmbedBlockView(
                     bodySizePx = bodySizePx * 0.94f,
                     dark = dark,
                     palette = palette,
-                    repository = repository,
+                    renderBridge = renderBridge,
                     vaultPath = vaultPath,
                     notePath = info.resolvedPath ?: notePath,
                     revision = revision,

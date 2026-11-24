@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.ui
 
 import android.graphics.Paint
 import android.graphics.Typeface
@@ -17,8 +17,8 @@ import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -34,9 +34,9 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
@@ -48,10 +48,23 @@ import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.core.MathBlock
 import io.github.groundgrounder.hortus.core.MediaBlock
 import io.github.groundgrounder.hortus.core.MediaRun
+import io.github.groundgrounder.hortus.core.model.LoadedImage
+import io.github.groundgrounder.hortus.core.model.MASK_EMPHASIS
+import io.github.groundgrounder.hortus.core.model.MASK_HIGHLIGHT
+import io.github.groundgrounder.hortus.core.model.MASK_INLINE_CODE
+import io.github.groundgrounder.hortus.core.model.MASK_LINK
+import io.github.groundgrounder.hortus.core.model.MASK_QUOTE
+import io.github.groundgrounder.hortus.core.model.MASK_STRIKE
+import io.github.groundgrounder.hortus.core.model.MASK_STRONG
+import io.github.groundgrounder.hortus.reader.model.ItemRenderBridge
+import io.github.groundgrounder.hortus.reader.model.ReaderPalette
+import io.github.groundgrounder.hortus.reader.model.toArgbCompat
+import io.github.groundgrounder.hortus.reader.render.MathRenderResult
+import io.github.groundgrounder.hortus.reader.render.PreparedMath
+import io.github.groundgrounder.hortus.reader.render.mathInlinePadding
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 private class CellMathSpan(
     private val prepared: PreparedMath?,
@@ -59,18 +72,19 @@ private class CellMathSpan(
     private val errorColor: Int,
 ) : ReplacementSpan() {
     private val padding = prepared?.let { mathInlinePadding(it.em) } ?: 0f
+    private var fallbackPaint: Paint? = null
 
     override fun getSize(paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int {
         val content = prepared?.width ?: paint.measureText(fallback)
         if (prepared != null && fm != null) {
-            val ascent = kotlin.math.ceil(prepared.ascent).toInt()
-            val descent = kotlin.math.ceil(prepared.descent).toInt()
+            val ascent = ceil(prepared.ascent).toInt()
+            val descent = ceil(prepared.descent).toInt()
             if (fm.ascent > -ascent) fm.ascent = -ascent
             if (fm.top > -ascent) fm.top = -ascent
             if (fm.descent < descent) fm.descent = descent
             if (fm.bottom < descent) fm.bottom = descent
         }
-        return kotlin.math.ceil(content + padding * 2f).toInt()
+        return ceil(content + padding * 2f).toInt()
     }
 
     override fun draw(
@@ -87,7 +101,10 @@ private class CellMathSpan(
         if (prepared != null) {
             prepared.draw(canvas, x + padding, baseline - prepared.ascent, paint.color)
         } else {
-            canvas.drawText(fallback, x, baseline.toFloat(), Paint(paint).apply { color = errorColor })
+            val drawPaint = fallbackPaint ?: Paint(paint).also { fallbackPaint = it }
+            drawPaint.set(paint)
+            drawPaint.color = errorColor
+            canvas.drawText(fallback, x, baseline.toFloat(), drawPaint)
         }
     }
 }
@@ -104,7 +121,7 @@ internal fun TableBlockView(
     contentWidth: Int,
     bodySizePx: Float,
     palette: ReaderPalette,
-    repository: ReaderRepository,
+    renderBridge: ItemRenderBridge,
     notePath: String,
     modifier: Modifier = Modifier,
 ) {
@@ -117,14 +134,14 @@ internal fun TableBlockView(
         val formulas = media.cells.flatMap { it.math }
         val pending = formulas.filter { cellMathKey(it) !in mathResults }
         if (pending.isNotEmpty()) {
-            val values = withContext(Dispatchers.IO) { repository.prepareMath(pending, tableFontSize) }
+            val values = renderBridge.prepareMath(pending, tableFontSize)
             pending.forEachIndexed { index, formula ->
                 values.getOrNull(index)?.let { mathResults[cellMathKey(formula)] = it }
             }
         }
     }
     val prepared = remember(media, contentWidth, palette, tableFontSize, mathResults.size, density) {
-        buildTable(media, contentWidth, tableFontSize, palette, density, mathResults)
+        buildTable(media, tableFontSize, palette, density, mathResults)
     }
     val failures = media.cells.flatMap { cell ->
         cell.math.mapNotNull { formula ->
@@ -145,51 +162,51 @@ internal fun TableBlockView(
         }
     }
     Column(modifier.fillMaxWidth()) {
-    Canvas(
-        Modifier
-            .fillMaxWidth()
-            .height(with(LocalDensity.current) { prepared.totalHeight.toDp() }),
-    ) {
-        var y = 0f
-        val columns = media.columns.map { it.toFloat() }
-        val headerRows = 1
-        var row = 0
-        for (heightPx in prepared.rowHeights) {
-            if (row < headerRows) {
-                drawRect(
-                    color = palette.codeBackground.copy(alpha = 0.55f),
-                    topLeft = Offset(0f, y),
-                    size = androidx.compose.ui.geometry.Size(this.size.width, heightPx),
-                )
-            }
-            var x = 0f
-            for (column in columns.indices) {
-                val index = row * columns.size + column
-                val layout = prepared.layouts.getOrNull(index) ?: continue
-                drawIntoCanvas { canvas ->
-                    canvas.nativeCanvas.save()
-                    val alignment = media.alignments.getOrNull(column)?.toInt() ?: 0
-                    val available = max(0f, columns[column] - 20f * density)
-                    val offset = when (alignment) {
-                        1 -> (available - layout.width) / 2f
-                        2 -> available - layout.width
-                        else -> 0f
-                    }
-                    canvas.nativeCanvas.translate(x + 10f * density + offset, y + 8f * density)
-                    layout.draw(canvas.nativeCanvas)
-                    canvas.nativeCanvas.restore()
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .height(with(LocalDensity.current) { prepared.totalHeight.toDp() }),
+        ) {
+            var y = 0f
+            val columns = media.columns.map { it.toFloat() }
+            val headerRows = 1
+            var row = 0
+            for (heightPx in prepared.rowHeights) {
+                if (row < headerRows) {
+                    drawRect(
+                        color = palette.codeBackground.copy(alpha = 0.55f),
+                        topLeft = Offset(0f, y),
+                        size = Size(this.size.width, heightPx),
+                    )
                 }
-                x += columns[column]
+                var x = 0f
+                for (column in columns.indices) {
+                    val index = row * columns.size + column
+                    val layout = prepared.layouts.getOrNull(index) ?: continue
+                    drawIntoCanvas { canvas ->
+                        canvas.nativeCanvas.save()
+                        val alignment = media.alignments.getOrNull(column)?.toInt() ?: 0
+                        val available = max(0f, columns[column] - 20f * density)
+                        val offset = when (alignment) {
+                            1 -> (available - layout.width) / 2f
+                            2 -> available - layout.width
+                            else -> 0f
+                        }
+                        canvas.nativeCanvas.translate(x + 10f * density + offset, y + 8f * density)
+                        layout.draw(canvas.nativeCanvas)
+                        canvas.nativeCanvas.restore()
+                    }
+                    x += columns[column]
+                }
+                y += heightPx
+                drawRect(
+                    color = palette.rule,
+                    topLeft = Offset(0f, y - max(0.5f, density / 2)),
+                    size = Size(this.size.width, max(0.5f, density / 2)),
+                )
+                row += 1
             }
-            y += heightPx
-            drawRect(
-                color = palette.rule,
-                topLeft = Offset(0f, y - max(0.5f, density / 2)),
-                size = androidx.compose.ui.geometry.Size(this.size.width, max(0.5f, density / 2)),
-            )
-            row += 1
         }
-    }
         for ((formula, reason) in failures) {
             Text(
                 "${formula.displaySource}: $reason",
@@ -204,7 +221,6 @@ private fun cellMathKey(formula: MathBlock): String = "${formula.displayStart}:$
 
 private fun buildTable(
     media: MediaBlock,
-    contentWidth: Int,
     size: Float,
     palette: ReaderPalette,
     density: Float,
@@ -281,7 +297,7 @@ private fun applyCellRun(
         spannable.setSpan(TypefaceSpan("monospace"), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         spannable.setSpan(RelativeSizeSpan(0.92f), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         spannable.setSpan(
-            BackgroundColorSpan(palette.codeBackground.toArgbCompat2()),
+            BackgroundColorSpan(palette.codeBackground.toArgbCompat()),
             start,
             end,
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
@@ -297,7 +313,7 @@ private fun applyCellRun(
     }
     if (mask and MASK_HIGHLIGHT != 0) {
         spannable.setSpan(
-            BackgroundColorSpan(palette.highlight.toArgbCompat2()),
+            BackgroundColorSpan(palette.highlight.toArgbCompat()),
             start,
             end,
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
@@ -318,13 +334,14 @@ internal fun ImageBlockView(
     media: MediaBlock,
     contentWidth: Int,
     palette: ReaderPalette,
+    renderBridge: ItemRenderBridge,
     modifier: Modifier = Modifier,
 ) {
     var image by remember(media.blockId, media.imagePath, contentWidth) {
         mutableStateOf<LoadedImage?>(null)
     }
     LaunchedEffect(media.blockId, media.imagePath, contentWidth, media.imageWidth) {
-        image = ImageLoader.load(
+        image = renderBridge.loadImage(
             media.imagePath,
             contentWidth,
             media.imageWidth?.toInt(),
@@ -335,7 +352,7 @@ internal fun ImageBlockView(
     if (loaded?.bitmap != null) {
         val width = min(maximum, loaded.widthPx.toFloat()).toInt().coerceAtLeast(1)
         val height = (loaded.heightPx.toFloat() * width / loaded.widthPx).toInt().coerceAtLeast(1)
-        androidx.compose.foundation.Image(
+        Image(
             bitmap = loaded.bitmap.asImageBitmap(),
             contentDescription = media.imageAlt.ifBlank { null },
             contentScale = ContentScale.FillWidth,
@@ -376,19 +393,16 @@ internal fun MathBlockView(
     itemKey: String,
     blockId: Long,
     notePath: String,
-    contentWidth: Int,
     bodySizePx: Float,
     palette: ReaderPalette,
-    repository: ReaderRepository,
+    renderBridge: ItemRenderBridge,
     modifier: Modifier = Modifier,
 ) {
-    val density = LocalDensity.current.density
-    // 块级公式上下各留 0.5 em，避免与相邻块贴住。
     val verticalPadding = bodySizePx * 0.5f
     val results = remember(formulas) { mutableStateMapOf<MathBlock, MathRenderResult>() }
     LaunchedEffect(formulas, bodySizePx, results.size, notePath, itemKey) {
         if (results.size < formulas.size) {
-            val values = withContext(Dispatchers.IO) { repository.prepareMath(formulas, bodySizePx) }
+            val values = renderBridge.prepareMath(formulas, bodySizePx)
             formulas.forEachIndexed { index, formula ->
                 values.getOrNull(index)?.let { results[formula] = it }
             }
@@ -454,10 +468,3 @@ internal fun MathBlockView(
         }
     }
 }
-
-private fun androidx.compose.ui.graphics.Color.toArgbCompat2(): Int = android.graphics.Color.argb(
-    (alpha * 255).toInt().coerceIn(0, 255),
-    (red * 255).toInt().coerceIn(0, 255),
-    (green * 255).toInt().coerceIn(0, 255),
-    (blue * 255).toInt().coerceIn(0, 255),
-)

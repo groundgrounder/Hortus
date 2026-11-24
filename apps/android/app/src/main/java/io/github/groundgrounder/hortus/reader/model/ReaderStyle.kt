@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.model
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import io.github.groundgrounder.hortus.core.settings.DEFAULT_READER_BODY_SP
 
-internal const val READER_BODY_SP = 17f
+internal const val READER_BODY_SP = DEFAULT_READER_BODY_SP
 
+@Immutable
 internal data class ReaderPalette(
     val text: Color,
     val muted: Color,
@@ -59,3 +62,10 @@ internal fun calloutAccent(kind: String, palette: ReaderPalette): Color = when (
 
 internal fun calloutBackground(kind: String, palette: ReaderPalette): Color =
     calloutAccent(kind, palette).copy(alpha = 0.10f)
+
+internal fun Color.toArgbCompat(): Int = android.graphics.Color.argb(
+    (alpha * 255).toInt().coerceIn(0, 255),
+    (red * 255).toInt().coerceIn(0, 255),
+    (green * 255).toInt().coerceIn(0, 255),
+    (blue * 255).toInt().coerceIn(0, 255),
+)

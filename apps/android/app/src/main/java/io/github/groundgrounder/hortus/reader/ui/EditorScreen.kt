@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -36,14 +36,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.groundgrounder.hortus.R
+import io.github.groundgrounder.hortus.reader.model.EditState
+import io.github.groundgrounder.hortus.reader.model.ReaderUiState
+import io.github.groundgrounder.hortus.reader.state.ReaderViewModel
 
 @Composable
 internal fun EditorScreen(
-    controller: ReaderController,
+    viewModel: ReaderViewModel,
     state: ReaderUiState,
     edit: EditState,
 ) {
-    BackHandler { controller.finishEditing() }
+    BackHandler { viewModel.finishEditing() }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -55,7 +58,7 @@ internal fun EditorScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = controller::finishEditing) {
+                    IconButton(onClick = viewModel::finishEditing) {
                         Icon(
                             Icons.Default.Check,
                             contentDescription = stringResource(R.string.editor_done),
@@ -64,7 +67,7 @@ internal fun EditorScreen(
                 },
                 actions = {
                     TextButton(
-                        onClick = controller::saveEditedNote,
+                        onClick = viewModel::saveEditedNote,
                         enabled = !edit.saving && edit.dirty,
                     ) {
                         Text(stringResource(R.string.editor_save))
@@ -112,7 +115,7 @@ internal fun EditorScreen(
             }
             BasicTextField(
                 value = edit.field,
-                onValueChange = controller::updateEditText,
+                onValueChange = viewModel::updateEditText,
                 textStyle = TextStyle(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 16.sp,
@@ -130,7 +133,7 @@ internal fun EditorScreen(
 
 @Composable
 internal fun ConflictDialog(
-    controller: ReaderController,
+    viewModel: ReaderViewModel,
     edit: EditState,
 ) {
     if (!edit.active) return
@@ -155,7 +158,7 @@ internal fun ConflictDialog(
                 )
                 if (!missing) {
                     TextButton(
-                        onClick = controller::useDiskVersion,
+                        onClick = viewModel::useDiskVersion,
                         enabled = !edit.saving,
                     ) {
                         Text(stringResource(R.string.editor_use_disk))
@@ -164,12 +167,12 @@ internal fun ConflictDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = controller::keepMine, enabled = !edit.saving) {
+            TextButton(onClick = viewModel::keepMine, enabled = !edit.saving) {
                 Text(stringResource(R.string.editor_keep_mine))
             }
         },
         dismissButton = {
-            TextButton(onClick = controller::saveConflictCopy, enabled = !edit.saving) {
+            TextButton(onClick = viewModel::saveConflictCopy, enabled = !edit.saving) {
                 Text(stringResource(R.string.editor_copy_action))
             }
         },

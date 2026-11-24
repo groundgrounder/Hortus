@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -30,11 +30,16 @@ import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.DebugProbes.debugDiagramRect
 import io.github.groundgrounder.hortus.R
 import io.github.groundgrounder.hortus.core.SceneData
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import io.github.groundgrounder.hortus.core.model.DiagramItem
+import io.github.groundgrounder.hortus.core.model.DiagramRenderResult
+import io.github.groundgrounder.hortus.reader.model.ItemRenderBridge
+import io.github.groundgrounder.hortus.reader.model.ReaderPalette
+import io.github.groundgrounder.hortus.reader.render.DiagramPreviewCache
+import io.github.groundgrounder.hortus.reader.render.DiagramStateBus
+import io.github.groundgrounder.hortus.reader.render.diagramUnitScale
+import io.github.groundgrounder.hortus.reader.render.previewDrawZoom
 import kotlin.math.ceil
 import kotlin.math.max
-import kotlin.math.min
 
 @Composable
 internal fun DiagramBlock(
@@ -44,7 +49,7 @@ internal fun DiagramBlock(
     bodySizePx: Float,
     dark: Boolean,
     palette: ReaderPalette,
-    repository: ReaderRepository,
+    renderBridge: ItemRenderBridge,
     vaultPath: String,
     notePath: String,
     revision: Long,
@@ -59,9 +64,7 @@ internal fun DiagramBlock(
     }
     LaunchedEffect(vaultPath, item.documentKey, item.ordinal, DiagramStateBus.version) {
         collapsed = DiagramStateBus.nodes(vaultPath, notePath, item.ordinal)
-            ?: withContext(Dispatchers.IO) {
-                repository.collapsedNodes(notePath, item.ordinal)
-            }
+            ?: renderBridge.collapsedNodes(vaultPath, notePath, item.ordinal)
     }
     val density = LocalDensity.current.density
     val unitScale = diagramUnitScale(bodySizePx, density)
@@ -79,22 +82,23 @@ internal fun DiagramBlock(
         item.source,
     ) {
         val current = collapsed ?: return@LaunchedEffect
-        result = withContext(Dispatchers.IO) {
-            repository.renderDiagram(
-                documentKey = item.documentKey,
-                engineText = engineText,
-                mmd = item.mmd,
-                ordinal = item.ordinal,
-                width = layoutWidth,
-                dark = dark,
-                collapsed = current,
-                revision = revision,
-            )
-        }
+        result = renderBridge.renderDiagram(
+            vaultPath = vaultPath,
+            documentKey = item.documentKey,
+            engineText = engineText,
+            mmd = item.mmd,
+            ordinal = item.ordinal,
+            width = layoutWidth,
+            dark = dark,
+            collapsed = current,
+            revision = revision,
+            previewContentWidthPx = contentWidth,
+            previewUnitScale = unitScale,
+        )
     }
     val scene = result?.scene
-    val drawZoom = if (scene != null && scene.width > 0.0) {
-        min(unitScale, contentWidth.toFloat() / scene.width.toFloat())
+    val drawZoom = if (scene != null) {
+        previewDrawZoom(scene.width, contentWidth, unitScale)
     } else {
         unitScale
     }

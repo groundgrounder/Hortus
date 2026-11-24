@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-package io.github.groundgrounder.hortus.reader
+package io.github.groundgrounder.hortus.reader.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -34,24 +34,32 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.groundgrounder.hortus.DebugProbes.debugPanel
 import io.github.groundgrounder.hortus.R
+import io.github.groundgrounder.hortus.core.model.QuickRow
+import io.github.groundgrounder.hortus.core.model.SearchRow
+import io.github.groundgrounder.hortus.core.model.SearchSnippet
+import io.github.groundgrounder.hortus.reader.model.ReaderPalette
+import io.github.groundgrounder.hortus.reader.model.SearchState
+import io.github.groundgrounder.hortus.reader.model.SearchTab
+import io.github.groundgrounder.hortus.reader.state.ReaderViewModel
 
 @Composable
 internal fun SearchOverlay(
-    controller: ReaderController,
+    viewModel: ReaderViewModel,
     search: SearchState,
     palette: ReaderPalette,
 ) {
-    BackHandler { controller.closeSearch() }
+    BackHandler { viewModel.closeSearch() }
     val keyboard = LocalSoftwareKeyboardController.current
     fun closeAnd(action: () -> Unit) {
         keyboard?.hide()
-        controller.closeSearch()
+        viewModel.closeSearch()
         action()
     }
     Column(
@@ -61,10 +69,10 @@ internal fun SearchOverlay(
     ) {
         SearchBar(
             query = search.query,
-            onQueryChange = controller::setSearchQuery,
+            onQueryChange = viewModel::setSearchQuery,
             onSearch = {
-                controller.setSearchQuery(it)
-                controller.setSearchTab(SearchTab.FULL)
+                viewModel.setSearchQuery(it)
+                viewModel.setSearchTab(SearchTab.FULL)
             },
             active = false,
             onActiveChange = {},
@@ -72,7 +80,7 @@ internal fun SearchOverlay(
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
             trailingIcon = {
                 if (search.query.isNotEmpty()) {
-                    IconButton(onClick = { controller.setSearchQuery("") }) {
+                    IconButton(onClick = { viewModel.setSearchQuery("") }) {
                         Icon(
                             Icons.Default.Clear,
                             contentDescription = stringResource(R.string.search_clear),
@@ -85,12 +93,12 @@ internal fun SearchOverlay(
         TabRow(selectedTabIndex = search.tab.ordinal) {
             Tab(
                 selected = search.tab == SearchTab.QUICK,
-                onClick = { controller.setSearchTab(SearchTab.QUICK) },
+                onClick = { viewModel.setSearchTab(SearchTab.QUICK) },
                 text = { Text(stringResource(R.string.search_tab_quick)) },
             )
             Tab(
                 selected = search.tab == SearchTab.FULL,
-                onClick = { controller.setSearchTab(SearchTab.FULL) },
+                onClick = { viewModel.setSearchTab(SearchTab.FULL) },
                 text = { Text(stringResource(R.string.search_tab_full)) },
             )
         }
@@ -103,14 +111,14 @@ internal fun SearchOverlay(
                     rows = search.quick,
                     palette = palette,
                     onOpen = { row ->
-                        closeAnd { controller.openNote(row.path) }
+                        closeAnd { viewModel.openNote(row.path) }
                     },
                 )
                 SearchTab.FULL -> FullResults(
                     rows = search.full,
                     palette = palette,
                     onOpen = { row, snippet ->
-                        closeAnd { controller.openNoteAt(row.path, snippet.start) }
+                        closeAnd { viewModel.openNoteAt(row.path, snippet.start) }
                     },
                 )
             }
@@ -291,7 +299,7 @@ private fun Highlighted(
     text: String,
     ranges: List<IntRange>,
     palette: ReaderPalette,
-    style: androidx.compose.ui.text.TextStyle,
+    style: TextStyle,
     color: Color = Color.Unspecified,
 ) {
     Text(
