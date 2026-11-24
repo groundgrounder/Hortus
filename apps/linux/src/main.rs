@@ -6,6 +6,7 @@ mod agent;
 #[cfg(feature = "automation")]
 mod automation;
 mod core;
+mod dock;
 mod editor;
 mod files;
 mod knowledge;

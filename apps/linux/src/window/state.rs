@@ -2,8 +2,6 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::core::PanelPlacement;
-use crate::core::PlaceholderKind;
 use crate::core::model::HeadingItem;
 use crate::editor::{EditState, FindBar, LinkCompletion};
 use crate::platform::HortusReadingViewport;
@@ -60,22 +58,6 @@ pub struct OpenNoteTab {
     pub edit_state: Rc<RefCell<EditState>>,
 }
 
-pub struct PlaceholderWidgets {
-    pub backlinks: gtk4::Box,
-    pub changes: gtk4::Box,
-    pub terminal: gtk4::Box,
-}
-
-impl PlaceholderWidgets {
-    pub fn widget(&self, kind: PlaceholderKind) -> &gtk4::Box {
-        match kind {
-            PlaceholderKind::Backlinks => &self.backlinks,
-            PlaceholderKind::Changes => &self.changes,
-            PlaceholderKind::Terminal => &self.terminal,
-        }
-    }
-}
-
 pub struct RestoredTabsOverride {
     pub tabs: Vec<String>,
     pub selected: Option<String>,
@@ -101,8 +83,12 @@ pub struct WindowState {
     pub scan_micros: u64,
     pub pending_open_notes: Vec<String>,
     pub tabs: HashMap<String, OpenNoteTab>,
-    pub placement: PanelPlacement,
     pub bottom_revealed: bool,
+    pub bottom_height: f64,
+    pub pending_bottom_position: bool,
+    pub suppressing_bottom_pos: bool,
+    pub suppressing_layout_save: bool,
+    pub layout_save_source: Option<glib::SourceId>,
     #[cfg(feature = "automation")]
     pub automation_triggered: bool,
     /// 原子保存与冲突副本的临时目录，始终位于笔记库之外。
@@ -145,6 +131,9 @@ impl WindowState {
             id.remove();
         }
         if let Some(id) = self.file_change_source.take() {
+            id.remove();
+        }
+        if let Some(id) = self.layout_save_source.take() {
             id.remove();
         }
         #[cfg(feature = "automation")]

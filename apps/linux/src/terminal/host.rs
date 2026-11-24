@@ -2,9 +2,11 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! VTE4 原生多标签终端宿主：普通 Shell 与独立 Agent 标签、主题/字体自适应、
+//! VTE4 原生终端管理器：直接托管于 `ToolDock` 单层工具标签栏（无内嵌双层 TabBar），
+//! 支持普通 Shell 与独立 Agent 实例、最近聚焦终端追踪、主题/字体自适应、
 //! 子进程退出非自动重启状态栏及进程组安全清理。
 
+use crate::core::PanelRegion;
 use crate::terminal::process::{
     build_terminal_env, is_pid_alive, signal_process_group, terminate_pids_sync, user_shell_program,
 };
@@ -39,11 +41,21 @@ pub enum TerminalPhase {
     Failed(String),
 }
 
+#[derive(Clone)]
+pub struct TerminalHostCallbacks {
+    pub on_tab_created: Rc<dyn Fn(u64, PanelRegion, gtk4::Widget, String, &'static str)>,
+    pub on_tab_updated: Rc<dyn Fn(u64, String, &'static str)>,
+    pub on_request_select_tab: Rc<dyn Fn(u64)>,
+    pub on_request_close_tab: Rc<dyn Fn(u64)>,
+    pub on_agent_exited: Rc<dyn Fn(String, i32)>,
+}
+
 struct TerminalTab {
     id: u64,
     kind: TerminalKind,
     phase: TerminalPhase,
-    page: adw::TabPage,
+    region: PanelRegion,
+    title: String,
     stack: gtk4::Stack,
     vte: vte4::Terminal,
     status_bar: gtk4::Box,
@@ -69,17 +81,12 @@ struct HostState {
     vault_root: Option<String>,
     terminal_font: Option<String>,
     tabs: HashMap<u64, TerminalTab>,
-    on_launch_agent: Option<Rc<dyn Fn()>>,
-    on_agent_exited: Option<Rc<dyn Fn(String, i32)>>,
-    on_toast: Option<Rc<dyn Fn(String)>>,
-    on_tab_empty: Option<Rc<dyn Fn()>>,
+    last_active_id: Option<u64>,
+    callbacks: Option<TerminalHostCallbacks>,
     disposing: bool,
 }
 
 struct TerminalHostInner {
-    root: gtk4::Box,
-    _tab_bar: adw::TabBar,
-    tab_view: adw::TabView,
     state: RefCell<HostState>,
 }
 
@@ -96,116 +103,18 @@ impl Default for TerminalHost {
 
 impl TerminalHost {
     pub fn new() -> Self {
-        let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        root.set_vexpand(true);
-        root.set_hexpand(true);
-
-        let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-        toolbar.add_css_class("hortus-terminal-toolbar");
-
-        let tab_view = adw::TabView::new();
-        tab_view.set_vexpand(true);
-        tab_view.set_hexpand(true);
-
-        let tab_bar = adw::TabBar::new();
-        tab_bar.set_view(Some(&tab_view));
-        tab_bar.set_autohide(false);
-        tab_bar.set_expand_tabs(false);
-        tab_bar.set_hexpand(true);
-
-        let new_shell_btn = gtk4::Button::builder()
-            .icon_name("list-add-symbolic")
-            .label("新建终端")
-            .tooltip_text("新建普通终端标签")
-            .build();
-        new_shell_btn.add_css_class("flat");
-        new_shell_btn.add_css_class("caption");
-
-        let launch_agent_btn = gtk4::Button::builder()
-            .icon_name("system-run-symbolic")
-            .label("启动 Agent")
-            .tooltip_text("先建全库快照再在独立终端启动 Agent")
-            .build();
-        launch_agent_btn.add_css_class("flat");
-        launch_agent_btn.add_css_class("caption");
-
-        toolbar.append(&tab_bar);
-        toolbar.append(&new_shell_btn);
-        toolbar.append(&launch_agent_btn);
-
-        root.append(&toolbar);
-        root.append(&tab_view);
-
-        let inner = Rc::new(TerminalHostInner {
-            root,
-            _tab_bar: tab_bar,
-            tab_view,
-            state: RefCell::new(HostState::default()),
-        });
-
-        Self::bind_host_signals(&inner, &new_shell_btn, &launch_agent_btn);
-        Self { inner }
-    }
-
-    fn bind_host_signals(
-        inner: &Rc<TerminalHostInner>,
-        new_shell_btn: &gtk4::Button,
-        launch_agent_btn: &gtk4::Button,
-    ) {
-        {
-            let weak = Rc::downgrade(inner);
-            new_shell_btn.connect_clicked(move |_| {
-                if let Some(this) = weak.upgrade() {
-                    Self::open_shell_tab_impl(&this);
-                }
-            });
-        }
-        {
-            let weak = Rc::downgrade(inner);
-            launch_agent_btn.connect_clicked(move |_| {
-                if let Some(this) = weak.upgrade() {
-                    let cb = this.state.borrow().on_launch_agent.clone();
-                    if let Some(cb) = cb {
-                        cb();
-                    }
-                }
-            });
-        }
-        {
-            let weak = Rc::downgrade(inner);
-            inner.tab_view.connect_close_page(move |view, page| {
-                let Some(this) = weak.upgrade() else {
-                    return glib::Propagation::Proceed;
-                };
-                if this.state.borrow().disposing {
-                    return glib::Propagation::Proceed;
-                }
-                Self::close_tab_page(&this, view, page);
-                glib::Propagation::Stop
-            });
+        Self {
+            inner: Rc::new(TerminalHostInner {
+                state: RefCell::new(HostState::default()),
+            }),
         }
     }
 
-    pub fn root(&self) -> &gtk4::Box {
-        &self.inner.root
-    }
-
-    pub fn set_callbacks(
-        &self,
-        on_launch_agent: Rc<dyn Fn()>,
-        on_agent_exited: Rc<dyn Fn(String, i32)>,
-        on_toast: Rc<dyn Fn(String)>,
-        on_tab_empty: Rc<dyn Fn()>,
-    ) {
-        let mut st = self.inner.state.borrow_mut();
-        st.on_launch_agent = Some(on_launch_agent);
-        st.on_agent_exited = Some(on_agent_exited);
-        st.on_toast = Some(on_toast);
-        st.on_tab_empty = Some(on_tab_empty);
+    pub fn set_callbacks(&self, callbacks: TerminalHostCallbacks) {
+        self.inner.state.borrow_mut().callbacks = Some(callbacks);
     }
 
     pub fn set_vault_root(&self, vault_root: Option<String>) {
-        // 切换知识库时终止旧库终端子进程并清空标签，防止跨库残留或工作目录错位。
         let prev = self.inner.state.borrow().vault_root.clone();
         if prev == vault_root {
             return;
@@ -245,24 +154,29 @@ impl TerminalHost {
         }
     }
 
-    pub fn ensure_default_shell(&self) -> u64 {
-        if let Some(id) = self.active_tab_id() {
-            return id;
+    pub fn open_shell_in_region(&self, region: PanelRegion) -> u64 {
+        Self::open_shell_tab_impl(&self.inner, region)
+    }
+
+    pub fn ensure_terminal_in_region(&self, region: PanelRegion) -> (u64, PanelRegion) {
+        if let Some(id) = self.last_active_tab_id()
+            && let Some(cur_region) = self.tab_region(id)
+        {
+            return (id, cur_region);
         }
-        Self::open_shell_tab_impl(&self.inner)
+        let id = Self::open_shell_tab_impl(&self.inner, region);
+        (id, region)
     }
 
-    #[cfg(feature = "automation")]
-    pub fn open_shell_tab(&self) -> u64 {
-        Self::open_shell_tab_impl(&self.inner)
-    }
-
-    /// 创建处于“正在建立安全快照…”状态的 Agent 占位标签；返回 `(tab_id, cancel_flag)`。
-    pub fn create_preparing_agent_tab(&self) -> (u64, Arc<AtomicBool>) {
+    pub fn create_preparing_agent_tab_in_region(
+        &self,
+        region: PanelRegion,
+    ) -> (u64, Arc<AtomicBool>) {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let working_dir = self.default_working_dir();
         let id = Self::insert_tab(
             &self.inner,
+            region,
             TerminalKind::Agent { session_id: None },
             TerminalPhase::Preparing,
             working_dir,
@@ -273,7 +187,6 @@ impl TerminalHost {
         (id, cancel_flag)
     }
 
-    /// 快照完成后将 Agent 标签切换到运行中 VTE4 终端并启动进程（直接按 `argv` 启动）。
     pub fn start_agent_in_tab(
         &self,
         tab_id: u64,
@@ -282,8 +195,9 @@ impl TerminalHost {
         argv: Vec<String>,
         envv: Vec<String>,
     ) -> Result<(), String> {
-        let (vte, stack, page, pending_cancel) = {
+        let (vte, stack, pending_cancel, callbacks) = {
             let mut st = self.inner.state.borrow_mut();
+            let cbs = st.callbacks.clone();
             let Some(tab) = st.tabs.get_mut(&tab_id) else {
                 return Err("Agent 终端标签已关闭".into());
             };
@@ -294,24 +208,28 @@ impl TerminalHost {
                 session_id: Some(session_id.clone()),
             };
             tab.phase = TerminalPhase::Running;
+            tab.title = "Agent".to_string();
             tab.working_dir = working_dir.clone();
             tab.argv = argv.clone();
             tab.envv = envv.clone();
-            (
+            let out = (
                 tab.vte.clone(),
                 tab.stack.clone(),
-                tab.page.clone(),
                 tab.cancel_flag.clone(),
-            )
+                cbs,
+            );
+            st.last_active_id = Some(tab_id);
+            out
         };
         if pending_cancel.load(Ordering::Acquire) {
             return Err("Agent 启动已取消".into());
         }
-        page.set_title("Agent");
-        page.set_icon(Some(&gio::ThemedIcon::new("system-run-symbolic")));
+        if let Some(ref cbs) = callbacks {
+            (cbs.on_tab_updated)(tab_id, "Agent".to_string(), "system-run-symbolic");
+            (cbs.on_request_select_tab)(tab_id);
+        }
         stack.set_visible_child_name("terminal");
         Self::spawn_in_vte(&self.inner, tab_id, &vte, &working_dir, &argv, &envv);
-        self.inner.tab_view.set_selected_page(&page);
         vte.grab_focus();
         Ok(())
     }
@@ -328,26 +246,72 @@ impl TerminalHost {
         }
     }
 
-    pub fn send_note_path(&self, relpath: &str) -> String {
-        let quoted = shell_quote_relative_path(relpath);
-        let id = self.ensure_default_shell();
-        self.deliver_to_tab(id, PendingFeed::Raw(quoted.clone()));
-        quoted
+    pub fn set_tab_region(&self, tab_id: u64, region: PanelRegion) {
+        let mut st = self.inner.state.borrow_mut();
+        if let Some(tab) = st.tabs.get_mut(&tab_id) {
+            tab.region = region;
+        }
     }
 
-    pub fn send_selection(&self, text: &str) -> Option<String> {
+    pub fn tab_region(&self, tab_id: u64) -> Option<PanelRegion> {
+        self.inner
+            .state
+            .borrow()
+            .tabs
+            .get(&tab_id)
+            .map(|t| t.region)
+    }
+
+    pub fn mark_active_tab(&self, tab_id: u64) {
+        let mut st = self.inner.state.borrow_mut();
+        if st.tabs.contains_key(&tab_id) {
+            st.last_active_id = Some(tab_id);
+        }
+    }
+
+    pub fn last_active_tab_id(&self) -> Option<u64> {
+        let st = self.inner.state.borrow();
+        if let Some(id) = st.last_active_id
+            && st.tabs.contains_key(&id)
+        {
+            return Some(id);
+        }
+        st.tabs
+            .values()
+            .find(|t| t.phase == TerminalPhase::Running)
+            .or_else(|| st.tabs.values().next())
+            .map(|t| t.id)
+    }
+
+    pub fn send_note_path(
+        &self,
+        relpath: &str,
+        fallback_region: PanelRegion,
+    ) -> (u64, PanelRegion, String) {
+        let quoted = shell_quote_relative_path(relpath);
+        let (id, region) = self.ensure_terminal_in_region(fallback_region);
+        self.deliver_to_tab(id, PendingFeed::Raw(quoted.clone()));
+        (id, region, quoted)
+    }
+
+    pub fn send_selection(
+        &self,
+        text: &str,
+        fallback_region: PanelRegion,
+    ) -> Option<(u64, PanelRegion, String)> {
         let cleaned = sanitize_selection_for_terminal(text);
         if cleaned.is_empty() {
             return None;
         }
-        let id = self.ensure_default_shell();
+        let (id, region) = self.ensure_terminal_in_region(fallback_region);
         self.deliver_to_tab(id, PendingFeed::Paste(cleaned.clone()));
-        Some(cleaned)
+        Some((id, region, cleaned))
     }
 
     fn deliver_to_tab(&self, tab_id: u64, payload: PendingFeed) {
-        let (vte, ready, page) = {
+        let (vte, ready, callbacks) = {
             let mut st = self.inner.state.borrow_mut();
+            let cbs = st.callbacks.clone();
             let Some(tab) = st.tabs.get_mut(&tab_id) else {
                 return;
             };
@@ -355,9 +319,13 @@ impl TerminalHost {
             if !ready {
                 tab.pending_feeds.push(payload.clone());
             }
-            (tab.vte.clone(), ready, tab.page.clone())
+            let out = (tab.vte.clone(), ready, cbs);
+            st.last_active_id = Some(tab_id);
+            out
         };
-        self.inner.tab_view.set_selected_page(&page);
+        if let Some(ref cbs) = callbacks {
+            (cbs.on_request_select_tab)(tab_id);
+        }
         vte.grab_focus();
         if ready {
             Self::write_payload(&vte, &payload);
@@ -371,22 +339,6 @@ impl TerminalHost {
         }
     }
 
-    pub fn active_tab_id(&self) -> Option<u64> {
-        let page = self.inner.tab_view.selected_page()?;
-        self.inner
-            .state
-            .borrow()
-            .tabs
-            .values()
-            .find(|t| t.page == page)
-            .map(|t| t.id)
-    }
-
-    #[cfg(feature = "automation")]
-    pub fn tab_count(&self) -> usize {
-        self.inner.state.borrow().tabs.len()
-    }
-
     pub fn all_child_pids(&self) -> Vec<i32> {
         self.inner
             .state
@@ -398,33 +350,53 @@ impl TerminalHost {
     }
 
     #[cfg(feature = "automation")]
+    pub fn tab_count(&self) -> usize {
+        self.inner.state.borrow().tabs.len()
+    }
+
+    pub fn close_tab_from_dock(&self, tab_id: u64) {
+        let removed = {
+            let mut st = self.inner.state.borrow_mut();
+            if st.last_active_id == Some(tab_id) {
+                st.last_active_id = None;
+            }
+            st.tabs.remove(&tab_id)
+        };
+        if let Some(tab) = removed {
+            tab.cancel_flag.store(true, Ordering::Release);
+            if let Some(pid) = tab.child_pid {
+                terminate_async_with_kill_fallback(pid);
+            }
+        }
+    }
+
+    #[cfg(feature = "automation")]
     pub fn close_tab_by_id(&self, tab_id: u64) {
-        let page = self
-            .inner
-            .state
-            .borrow()
-            .tabs
-            .get(&tab_id)
-            .map(|t| t.page.clone());
-        if let Some(page) = page {
-            self.inner.tab_view.close_page(&page);
+        let callbacks = self.inner.state.borrow().callbacks.clone();
+        if let Some(ref cbs) = callbacks {
+            (cbs.on_request_close_tab)(tab_id);
+        } else {
+            self.close_tab_from_dock(tab_id);
         }
     }
 
     pub fn close_all_tabs(&self) {
         let pids = self.all_child_pids();
-        let pages: Vec<adw::TabPage> = {
+        let (ids, callbacks, disposing) = {
             let mut st = self.inner.state.borrow_mut();
             let mut collected = Vec::new();
             for tab in st.tabs.values_mut() {
                 tab.cancel_flag.store(true, Ordering::Release);
-                collected.push(tab.page.clone());
+                collected.push(tab.id);
             }
             st.tabs.clear();
-            collected
+            st.last_active_id = None;
+            (collected, st.callbacks.clone(), st.disposing)
         };
-        for page in pages {
-            self.inner.tab_view.close_page(&page);
+        if !disposing && let Some(ref cbs) = callbacks {
+            for id in ids {
+                (cbs.on_request_close_tab)(id);
+            }
         }
         terminate_pids_sync(&pids);
     }
@@ -432,11 +404,7 @@ impl TerminalHost {
     pub fn teardown(&self) {
         self.inner.state.borrow_mut().disposing = true;
         self.close_all_tabs();
-        let mut st = self.inner.state.borrow_mut();
-        st.on_launch_agent = None;
-        st.on_agent_exited = None;
-        st.on_toast = None;
-        st.on_tab_empty = None;
+        self.inner.state.borrow_mut().callbacks = None;
     }
 
     fn default_working_dir(&self) -> String {
@@ -449,12 +417,16 @@ impl TerminalHost {
             .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
     }
 
-    fn open_shell_tab_impl(inner: &Rc<TerminalHostInner>) -> u64 {
+    fn open_shell_tab_impl(inner: &Rc<TerminalHostInner>, region: PanelRegion) -> u64 {
         let shell = user_shell_program();
-        Self::open_shell_tab_with_argv(inner, vec![shell])
+        Self::open_shell_tab_with_argv(inner, region, vec![shell])
     }
 
-    fn open_shell_tab_with_argv(inner: &Rc<TerminalHostInner>, argv: Vec<String>) -> u64 {
+    fn open_shell_tab_with_argv(
+        inner: &Rc<TerminalHostInner>,
+        region: PanelRegion,
+        argv: Vec<String>,
+    ) -> u64 {
         let working_dir = inner
             .state
             .borrow()
@@ -466,6 +438,7 @@ impl TerminalHost {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let id = Self::insert_tab(
             inner,
+            region,
             TerminalKind::Shell,
             TerminalPhase::Running,
             working_dir.clone(),
@@ -481,8 +454,10 @@ impl TerminalHost {
         id
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_tab(
         inner: &Rc<TerminalHostInner>,
+        region: PanelRegion,
         kind: TerminalKind,
         phase: TerminalPhase,
         working_dir: String,
@@ -502,6 +477,17 @@ impl TerminalHost {
         apply_vte_colors(&vte, dark);
         let font_opt = inner.state.borrow().terminal_font.clone();
         vte.set_font(Some(&font_description_for(font_opt.as_deref())));
+
+        let focus_ctrl = gtk4::EventControllerFocus::new();
+        {
+            let weak = Rc::downgrade(inner);
+            focus_ctrl.connect_enter(move |_| {
+                if let Some(this) = weak.upgrade() {
+                    this.state.borrow_mut().last_active_id = Some(id);
+                }
+            });
+        }
+        vte.add_controller(focus_ctrl);
 
         let status_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         status_bar.add_css_class("hortus-terminal-status");
@@ -549,18 +535,10 @@ impl TerminalHost {
             "terminal"
         });
 
-        let page = inner.tab_view.append(&stack);
-        match &kind {
-            TerminalKind::Shell => {
-                page.set_title(&format!("终端 {id}"));
-                page.set_icon(Some(&gio::ThemedIcon::new("utilities-terminal-symbolic")));
-            }
-            TerminalKind::Agent { .. } => {
-                page.set_title("Agent（快照中）");
-                page.set_icon(Some(&gio::ThemedIcon::new("system-run-symbolic")));
-            }
-        }
-        inner.tab_view.set_selected_page(&page);
+        let (title, icon_name) = match &kind {
+            TerminalKind::Shell => (format!("终端 {id}"), "utilities-terminal-symbolic"),
+            TerminalKind::Agent { .. } => ("Agent（快照中）".to_string(), "system-run-symbolic"),
+        };
 
         {
             let weak = Rc::downgrade(inner);
@@ -582,9 +560,9 @@ impl TerminalHost {
             let weak = Rc::downgrade(inner);
             close_btn.connect_clicked(move |_| {
                 if let Some(this) = weak.upgrade() {
-                    let page = this.state.borrow().tabs.get(&id).map(|t| t.page.clone());
-                    if let Some(page) = page {
-                        this.tab_view.close_page(&page);
+                    let cbs = this.state.borrow().callbacks.clone();
+                    if let Some(ref cbs) = cbs {
+                        (cbs.on_request_close_tab)(id);
                     }
                 }
             });
@@ -595,35 +573,45 @@ impl TerminalHost {
             cancel_prep_btn.connect_clicked(move |_| {
                 flag.store(true, Ordering::Release);
                 if let Some(this) = weak.upgrade() {
-                    let page = this.state.borrow().tabs.get(&id).map(|t| t.page.clone());
-                    if let Some(page) = page {
-                        this.tab_view.close_page(&page);
+                    let cbs = this.state.borrow().callbacks.clone();
+                    if let Some(ref cbs) = cbs {
+                        (cbs.on_request_close_tab)(id);
                     }
                 }
             });
         }
 
-        inner.state.borrow_mut().tabs.insert(
-            id,
-            TerminalTab {
+        let widget = stack.clone().upcast::<gtk4::Widget>();
+        let callbacks = {
+            let mut st = inner.state.borrow_mut();
+            st.tabs.insert(
                 id,
-                kind,
-                phase,
-                page,
-                stack,
-                vte,
-                status_bar,
-                status_label,
-                restart_btn,
-                preparing_label,
-                working_dir,
-                child_pid: None,
-                argv,
-                envv,
-                cancel_flag,
-                pending_feeds: Vec::new(),
-            },
-        );
+                TerminalTab {
+                    id,
+                    kind,
+                    phase,
+                    region,
+                    title: title.clone(),
+                    stack,
+                    vte,
+                    status_bar,
+                    status_label,
+                    restart_btn,
+                    preparing_label,
+                    working_dir,
+                    child_pid: None,
+                    argv,
+                    envv,
+                    cancel_flag,
+                    pending_feeds: Vec::new(),
+                },
+            );
+            st.last_active_id = Some(id);
+            st.callbacks.clone()
+        };
+        if let Some(ref cbs) = callbacks {
+            (cbs.on_tab_created)(id, region, widget, title, icon_name);
+        }
         id
     }
 
@@ -699,6 +687,7 @@ impl TerminalHost {
         let code = decode_wait_status(raw_status);
         let agent_cb = {
             let mut st = inner.state.borrow_mut();
+            let callbacks = st.callbacks.clone();
             let Some(tab) = st.tabs.get_mut(&tab_id) else {
                 return;
             };
@@ -713,7 +702,7 @@ impl TerminalHost {
             match &tab.kind {
                 TerminalKind::Agent {
                     session_id: Some(sid),
-                } => Some((sid.clone(), st.on_agent_exited.clone())),
+                } => Some((sid.clone(), callbacks.map(|c| c.on_agent_exited))),
                 _ => None,
             }
         };
@@ -746,32 +735,6 @@ impl TerminalHost {
         };
         Self::spawn_in_vte(inner, tab_id, &info.0, &info.1, &info.2, &info.3);
         info.0.grab_focus();
-    }
-
-    fn close_tab_page(inner: &Rc<TerminalHostInner>, view: &adw::TabView, page: &adw::TabPage) {
-        let removed = {
-            let mut st = inner.state.borrow_mut();
-            let key = st
-                .tabs
-                .iter()
-                .find(|(_, tab)| &tab.page == page)
-                .map(|(id, _)| *id);
-            key.and_then(|id| st.tabs.remove(&id))
-        };
-        if let Some(tab) = removed {
-            tab.cancel_flag.store(true, Ordering::Release);
-            if let Some(pid) = tab.child_pid {
-                terminate_async_with_kill_fallback(pid);
-            }
-        }
-        view.close_page_finish(page, true);
-        let empty = inner.state.borrow().tabs.is_empty();
-        if empty {
-            let cb = inner.state.borrow().on_tab_empty.clone();
-            if let Some(cb) = cb {
-                cb();
-            }
-        }
     }
 }
 
@@ -814,6 +777,7 @@ impl TerminalHost {
         Some(serde_json::json!({
             "id": tab.id,
             "kind": kind_str,
+            "region": tab.region.id(),
             "session_id": session_id,
             "phase": phase_str,
             "exit_code": exit_code,
@@ -823,7 +787,7 @@ impl TerminalHost {
             "pid": tab.child_pid,
             "font_family": font_family,
             "screen_text": screen_text,
-            "title": tab.page.title().to_string(),
+            "title": tab.title,
             "has_focus": tab.vte.has_focus(),
         }))
     }

@@ -2,10 +2,10 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 窗口动作、知识面板联动、可移动侧栏/底部面板及样式切换器。
+//! 窗口动作、知识面板联动、三区统一工具面板显隐及布局持久化。
 
-use crate::core::{APP_ID, APP_VERSION, ColorSchemeChoice, PanelRegion, PlaceholderKind};
-use crate::knowledge::clear_box;
+use crate::core::{APP_ID, APP_VERSION, ColorSchemeChoice, PanelRegion, StaticToolKind};
+use crate::dock::DockTabId;
 use crate::window::commands::WindowCommand;
 use crate::window::shell::WindowInner;
 use gtk4::gio;
@@ -16,6 +16,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 impl WindowInner {
     pub fn register_actions(self: &Rc<Self>) {
@@ -159,18 +160,76 @@ impl WindowInner {
         self.window.add_action(&color_action);
 
         let weak = Rc::downgrade(self);
-        let move_panel = gio::SimpleAction::new("move-panel", Some(glib::VariantTy::STRING));
-        move_panel.connect_activate(move |_, param| {
-            let Some(id) = param.and_then(|v| v.str()) else {
-                return;
-            };
-            if let Some(kind) = PlaceholderKind::parse(id)
+        let dock_new_shell =
+            gio::SimpleAction::new("dock-new-shell", Some(glib::VariantTy::STRING));
+        dock_new_shell.connect_activate(move |_, param| {
+            if let Some(reg) = param.and_then(|v| v.str()).and_then(PanelRegion::parse)
                 && let Some(win) = weak.upgrade()
             {
-                win.send_command(WindowCommand::TogglePlaceholderRegion(kind));
+                win.send_command(WindowCommand::DockNewShell(reg));
             }
         });
-        self.window.add_action(&move_panel);
+        self.window.add_action(&dock_new_shell);
+
+        let weak = Rc::downgrade(self);
+        let dock_launch_agent =
+            gio::SimpleAction::new("dock-launch-agent", Some(glib::VariantTy::STRING));
+        dock_launch_agent.connect_activate(move |_, param| {
+            if let Some(reg) = param.and_then(|v| v.str()).and_then(PanelRegion::parse)
+                && let Some(win) = weak.upgrade()
+            {
+                win.send_command(WindowCommand::DockLaunchAgent(reg));
+            }
+        });
+        self.window.add_action(&dock_launch_agent);
+
+        let weak = Rc::downgrade(self);
+        let dock_add_tool = gio::SimpleAction::new("dock-add-tool", Some(glib::VariantTy::STRING));
+        dock_add_tool.connect_activate(move |_, param| {
+            let Some(raw) = param.and_then(|v| v.str()) else {
+                return;
+            };
+            let Some((reg_str, tool_str)) = raw.split_once(':') else {
+                return;
+            };
+            if let (Some(region), Some(tool)) =
+                (PanelRegion::parse(reg_str), StaticToolKind::parse(tool_str))
+                && let Some(win) = weak.upgrade()
+            {
+                win.send_command(WindowCommand::DockAddTool { region, tool });
+            }
+        });
+        self.window.add_action(&dock_add_tool);
+
+        let weak = Rc::downgrade(self);
+        let dock_move_tab = gio::SimpleAction::new("dock-move-tab", Some(glib::VariantTy::STRING));
+        dock_move_tab.connect_activate(move |_, param| {
+            let Some(raw) = param.and_then(|v| v.str()) else {
+                return;
+            };
+            let Some((reg_str, tab_str)) = raw.split_once(':') else {
+                return;
+            };
+            if let (Some(region), Some(tab_id)) =
+                (PanelRegion::parse(reg_str), DockTabId::decode(tab_str))
+                && let Some(win) = weak.upgrade()
+            {
+                win.send_command(WindowCommand::DockMoveTab { tab_id, region });
+            }
+        });
+        self.window.add_action(&dock_move_tab);
+
+        let weak = Rc::downgrade(self);
+        let dock_close_tab =
+            gio::SimpleAction::new("dock-close-tab", Some(glib::VariantTy::STRING));
+        dock_close_tab.connect_activate(move |_, param| {
+            if let Some(tab_id) = param.and_then(|v| v.str()).and_then(DockTabId::decode)
+                && let Some(win) = weak.upgrade()
+            {
+                win.send_command(WindowCommand::DockCloseTab(tab_id));
+            }
+        });
+        self.window.add_action(&dock_close_tab);
 
         let weak = Rc::downgrade(self);
         let save_note = gio::SimpleAction::new("save-note", None);
@@ -404,35 +463,17 @@ impl WindowInner {
         }
     }
 
-    pub fn switch_left_panel(&self, name: &str) {
-        self.left_stack.set_visible_child_name(name);
-        self.rebuild_left_switcher();
-    }
-
-    fn rebuild_left_switcher(&self) {
-        let Some(switcher) = self.left_stack.parent().and_downcast::<gtk4::Box>() else {
-            return;
-        };
-        let Some(switcher) = switcher.first_child().and_downcast::<gtk4::Box>() else {
-            return;
-        };
-        clear_box(&switcher);
-        populate_stack_switcher(
-            &switcher,
-            &self.left_stack,
-            &[("files", "文件"), ("search", "搜索"), ("tags", "标签")],
-        );
+    pub fn activate_static_tool(&self, kind: StaticToolKind) {
+        self.tool_dock.activate_static_tool(kind);
     }
 
     pub fn open_tag_from_reading(&self, tag: &str) {
-        self.left_split.set_show_sidebar(true);
-        self.switch_left_panel("tags");
+        self.activate_static_tool(StaticToolKind::Tags);
         self.tags_panel.select_tag(tag);
     }
 
     pub fn focus_search_panel(&self) {
-        self.left_split.set_show_sidebar(true);
-        self.switch_left_panel("search");
+        self.activate_static_tool(StaticToolKind::Search);
         self.search_panel.focus_entry();
     }
 
@@ -452,83 +493,139 @@ impl WindowInner {
         self.refresh_backlinks(true);
     }
 
-    pub fn set_bottom_panel_revealed(&self, revealed: bool) {
-        self.state.borrow_mut().bottom_revealed = revealed;
+    #[cfg(feature = "automation")]
+    pub fn is_bottom_panel_revealed(&self) -> bool {
+        self.state.borrow().bottom_revealed
+            && self
+                .tool_dock
+                .region_widget(PanelRegion::Bottom)
+                .is_visible()
+    }
+
+    pub fn set_region_revealed(self: &Rc<Self>, region: PanelRegion, revealed: bool) {
+        match region {
+            PanelRegion::Left => self.left_split.set_show_sidebar(revealed),
+            PanelRegion::Right => self.right_split.set_show_sidebar(revealed),
+            PanelRegion::Bottom => self.set_bottom_panel_revealed(revealed),
+        }
+    }
+
+    pub fn set_bottom_panel_revealed(self: &Rc<Self>, revealed: bool) {
+        let bottom_height = {
+            let mut st = self.state.borrow_mut();
+            st.bottom_revealed = revealed;
+            st.bottom_height
+        };
         if self.bottom_toggle.is_active() != revealed {
             self.bottom_toggle.set_active(revealed);
         }
+        let bottom_box = self.tool_dock.region_widget(PanelRegion::Bottom);
         if revealed {
-            self.bottom_revealer.set_visible(true);
-            if self.bottom_stack.visible_child_name().as_deref()
-                == Some(PlaceholderKind::Terminal.id())
-            {
-                self.terminal_host.ensure_default_shell();
+            bottom_box.set_visible(true);
+            self.apply_bottom_paned_position(bottom_height);
+            if self.tool_dock.tab_count(PanelRegion::Bottom) == 0 {
+                self.terminal_host.open_shell_in_region(PanelRegion::Bottom);
             }
+        } else {
+            bottom_box.set_visible(false);
+            self.state.borrow_mut().pending_bottom_position = false;
         }
-        self.bottom_revealer.set_reveal_child(revealed);
     }
 
-    pub fn toggle_placeholder_region(&self, kind: PlaceholderKind) {
-        let next = self.state.borrow_mut().placement.toggle_region(kind);
-        let widget = self.placeholders.widget(kind);
-        if let Some(parent) = widget.parent().and_downcast::<gtk4::Stack>() {
-            parent.remove(widget);
+    fn apply_bottom_paned_position(self: &Rc<Self>, bottom_height: f64) {
+        let total_h = self.center_paned.height();
+        if total_h > 200 {
+            self.state.borrow_mut().suppressing_bottom_pos = true;
+            let pos = (total_h - bottom_height.round() as i32).max(120);
+            self.center_paned.set_position(pos);
+            self.state.borrow_mut().suppressing_bottom_pos = false;
+            self.state.borrow_mut().pending_bottom_position = false;
+            return;
         }
-        match next {
-            PanelRegion::Right => {
-                self.right_stack.add_named(widget, Some(kind.id()));
-                self.right_stack.set_visible_child_name(kind.id());
-                self.right_split.set_show_sidebar(true);
-            }
-            PanelRegion::Bottom => {
-                self.bottom_stack.add_named(widget, Some(kind.id()));
-                self.bottom_stack.set_visible_child_name(kind.id());
-                self.set_bottom_panel_revealed(true);
-            }
-        }
-        self.rebuild_panel_switchers();
-        if kind == PlaceholderKind::Terminal {
-            self.terminal_host.ensure_default_shell();
-        } else if kind == PlaceholderKind::Changes {
-            self.changes_panel.refresh();
-        }
-        let region_name = match next {
-            PanelRegion::Right => "右侧栏",
-            PanelRegion::Bottom => "底部面板",
-        };
-        self.show_toast(&format!("已将「{}」移至{}", kind.title(), region_name));
-    }
-
-    pub fn rebuild_panel_switchers(&self) {
-        clear_box(&self.right_switcher);
-        clear_box(&self.bottom_switcher);
-
-        let placement = self.state.borrow().placement.clone();
-        let mut right_items: Vec<(&'static str, &'static str)> = vec![("outline", "大纲")];
-        for kind in placement.views_in(PanelRegion::Right) {
-            right_items.push((kind.id(), kind.title()));
-        }
-        populate_stack_switcher(&self.right_switcher, &self.right_stack, &right_items);
-        if self.right_stack.visible_child_name().is_none() {
-            self.right_stack.set_visible_child_name("outline");
-        }
-
-        let bottom_views = placement.views_in(PanelRegion::Bottom);
-        let bottom_items: Vec<(&'static str, &'static str)> =
-            bottom_views.iter().map(|k| (k.id(), k.title())).collect();
-        populate_stack_switcher(&self.bottom_switcher, &self.bottom_stack, &bottom_items);
-        if let Some((first_id, _)) = bottom_items.first()
-            && self
-                .bottom_stack
-                .child_by_name(
-                    self.bottom_stack
-                        .visible_child_name()
-                        .as_deref()
-                        .unwrap_or(""),
+        self.state.borrow_mut().pending_bottom_position = true;
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            let Some(win) = weak.upgrade() else { return };
+            let (revealed, pending, bh) = {
+                let st = win.state.borrow();
+                (
+                    st.bottom_revealed,
+                    st.pending_bottom_position,
+                    st.bottom_height,
                 )
-                .is_none()
+            };
+            if revealed && pending && win.center_paned.height() > 200 {
+                win.apply_bottom_paned_position(bh);
+            }
+        });
+    }
+
+    pub fn load_saved_layout(&self) {
+        let core = self
+            .state
+            .borrow()
+            .services
+            .as_ref()
+            .map(|s| Arc::clone(&s.core));
+        let Some(core) = core else { return };
+        let Ok(Some(json)) = core.layout_json() else {
+            return;
+        };
+        let Ok(layout) = serde_json::from_str::<hortus_config::LayoutState>(&json) else {
+            return;
+        };
+        self.state.borrow_mut().suppressing_layout_save = true;
+        let (_left_w, _right_w, bottom_h) = self.tool_dock.apply_layout_state(&layout);
+        self.state.borrow_mut().bottom_height = bottom_h.clamp(120.0, 520.0);
+        self.left_split
+            .set_show_sidebar(self.tool_dock.tab_count(PanelRegion::Left) > 0);
+        self.right_split
+            .set_show_sidebar(self.tool_dock.tab_count(PanelRegion::Right) > 0);
+        self.state.borrow_mut().suppressing_layout_save = false;
+    }
+
+    pub fn schedule_layout_save(self: &Rc<Self>) {
         {
-            self.bottom_stack.set_visible_child_name(first_id);
+            let mut st = self.state.borrow_mut();
+            if st.disposing || st.suppressing_layout_save {
+                return;
+            }
+            if let Some(old) = st.layout_save_source.take() {
+                old.remove();
+            }
+        }
+        let weak = Rc::downgrade(self);
+        let src = glib::timeout_add_local_once(Duration::from_millis(120), move || {
+            if let Some(win) = weak.upgrade() {
+                win.state.borrow_mut().layout_save_source = None;
+                win.persist_layout_now();
+            }
+        });
+        self.state.borrow_mut().layout_save_source = Some(src);
+    }
+
+    pub fn persist_layout_now(&self) {
+        let (core, bottom_height, suppressing) = {
+            let st = self.state.borrow();
+            (
+                st.services.as_ref().map(|s| Arc::clone(&s.core)),
+                st.bottom_height,
+                st.disposing || st.suppressing_layout_save,
+            )
+        };
+        if suppressing {
+            return;
+        }
+        let Some(core) = core else { return };
+        let win_w = f64::from(self.window.width()).max(1000.0);
+        let side_w = (win_w * 0.24).clamp(220.0, 480.0);
+        let layout = self
+            .tool_dock
+            .export_layout_state(side_w, side_w, bottom_height);
+        if let Ok(json) = serde_json::to_string(&layout) {
+            gio::spawn_blocking(move || {
+                let _ = core.save_layout(json);
+            });
         }
     }
 
@@ -581,6 +678,10 @@ pub fn build_primary_menu() -> gio::Menu {
     menu.append_section(None, &file_sec);
 
     let agent_sec = gio::Menu::new();
+    agent_sec.append(
+        Some("新建终端（底部）"),
+        Some("win.dock-new-shell('bottom')"),
+    );
     agent_sec.append(Some("启动 Agent"), Some("win.launch-agent"));
     agent_sec.append(
         Some("发送笔记路径到终端 (Ctrl+Shift+L)"),
@@ -622,18 +723,18 @@ pub fn build_primary_menu() -> gio::Menu {
     menu.append_section(None, &view_sec);
 
     let panel_sub = gio::Menu::new();
-    panel_sub.append(
-        Some("移动「反链」区域（右/底）"),
-        Some("win.move-panel('backlinks')"),
-    );
-    panel_sub.append(
-        Some("移动「改动」区域（右/底）"),
-        Some("win.move-panel('changes')"),
-    );
-    panel_sub.append(
-        Some("移动「终端」区域（右/底）"),
-        Some("win.move-panel('terminal')"),
-    );
+    for tool in StaticToolKind::ALL {
+        let tool_sub = gio::Menu::new();
+        for region in PanelRegion::ALL {
+            let item = gio::MenuItem::new(Some(&format!("移至{}", region.title())), None);
+            item.set_action_and_target_value(
+                Some("win.dock-add-tool"),
+                Some(&format!("{}:{}", region.id(), tool.id()).to_variant()),
+            );
+            tool_sub.append_item(&item);
+        }
+        panel_sub.append_submenu(Some(tool.title()), &tool_sub);
+    }
     menu.append_submenu(Some("面板位置"), &panel_sub);
 
     let theme_sub = gio::Menu::new();
@@ -646,45 +747,4 @@ pub fn build_primary_menu() -> gio::Menu {
     about_sec.append(Some("关于 Hortus"), Some("win.about"));
     menu.append_section(None, &about_sec);
     menu
-}
-
-pub fn build_left_switcher(stack: &gtk4::Stack) -> gtk4::Box {
-    let switcher = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-    switcher.add_css_class("hortus-sidebar-switcher");
-    populate_stack_switcher(
-        &switcher,
-        stack,
-        &[("files", "文件"), ("search", "搜索"), ("tags", "标签")],
-    );
-    switcher
-}
-
-pub fn populate_stack_switcher(container: &gtk4::Box, stack: &gtk4::Stack, items: &[(&str, &str)]) {
-    let current = stack
-        .visible_child_name()
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-    let mut group_leader: Option<gtk4::ToggleButton> = None;
-    for &(name, label) in items {
-        let btn = gtk4::ToggleButton::with_label(label);
-        btn.add_css_class("flat");
-        btn.add_css_class("caption");
-        btn.set_hexpand(true);
-        btn.set_active(name == current);
-        if let Some(ref leader) = group_leader {
-            btn.set_group(Some(leader));
-        } else {
-            group_leader = Some(btn.clone());
-        }
-        let stack_weak = stack.downgrade();
-        let name_owned = name.to_string();
-        btn.connect_toggled(move |b| {
-            if b.is_active()
-                && let Some(stack_ref) = stack_weak.upgrade()
-            {
-                stack_ref.set_visible_child_name(&name_owned);
-            }
-        });
-        container.append(&btn);
-    }
 }

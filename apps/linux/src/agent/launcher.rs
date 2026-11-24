@@ -4,6 +4,7 @@
 
 //! Agent 安全启动闭环：校验 `[agent]` 配置 → 后台全库快照（可取消，失败硬阻断）→ 直接按 argv 启动 VTE4 标签。
 
+use crate::core::PanelRegion;
 use crate::services::AppServices;
 use crate::terminal::TerminalHost;
 use crate::terminal::process::build_terminal_env;
@@ -21,7 +22,6 @@ pub struct AgentLaunchCallbacks {
     pub on_toast: Rc<dyn Fn(String)>,
     pub on_open_agent_settings: Rc<dyn Fn()>,
     pub on_session_changed: Rc<dyn Fn()>,
-    pub on_reveal_terminal: Rc<dyn Fn()>,
     pub on_alert: Rc<dyn Fn(adw::AlertDialog)>,
     pub current_vault_root: Rc<dyn Fn() -> Option<String>>,
     pub is_disposing: Rc<dyn Fn() -> bool>,
@@ -50,6 +50,7 @@ pub fn launch_agent_with_snapshot_gate(
     parent_window: &adw::ApplicationWindow,
     services: Arc<AppServices>,
     terminal: TerminalHost,
+    target_region: PanelRegion,
     login_path: Option<String>,
     callbacks: AgentLaunchCallbacks,
 ) {
@@ -105,8 +106,7 @@ pub fn launch_agent_with_snapshot_gate(
             }
         };
 
-        (callbacks.on_reveal_terminal)();
-        let (tab_id, cancel_flag) = terminal.create_preparing_agent_tab();
+        let (tab_id, cancel_flag) = terminal.create_preparing_agent_tab_in_region(target_region);
         let core_snap = Arc::clone(&core);
         let vault_snap = vault_root.clone();
         let snap_res = gio::spawn_blocking(move || {

@@ -4,7 +4,8 @@
 
 //! 窗口级串行指令：将 GTK 回调与跨模块动作收敛到单一非重入队列。
 
-use crate::core::{ColorSchemeChoice, PlaceholderKind};
+use crate::core::{ColorSchemeChoice, PanelRegion, StaticToolKind};
+use crate::dock::DockTabId;
 use crate::services::ConfigSnapshot;
 use crate::settings::SettingsPage;
 use hortus_ffi::SaveChoice;
@@ -41,7 +42,17 @@ pub enum WindowCommand {
         announce: bool,
     },
     ToggleBottomPanel(bool),
-    TogglePlaceholderRegion(PlaceholderKind),
+    DockNewShell(PanelRegion),
+    DockLaunchAgent(PanelRegion),
+    DockAddTool {
+        region: PanelRegion,
+        tool: StaticToolKind,
+    },
+    DockMoveTab {
+        tab_id: DockTabId,
+        region: PanelRegion,
+    },
+    DockCloseTab(DockTabId),
     CloseTabPage(adw::TabPage),
     ApplyColorScheme(ColorSchemeChoice),
     NewWindow,

@@ -5,16 +5,17 @@
 //! 主窗口外壳、生命周期解环（C-01/C-02/C-03）、库切换与关闭保护。
 
 use crate::agent::ChangesPanel;
-use crate::core::{CliOptions, CommandQueue, PanelPlacement, PlaceholderKind};
+use crate::core::{CliOptions, CommandQueue, PanelRegion, StaticToolKind};
+use crate::dock::{DockTabId, ToolDock};
 use crate::files::{VaultTree, operations::prepare_edit_temp_dir};
 use crate::knowledge::{BacklinksPanel, QuickOpen, SearchPanel, TagsPanel};
 use crate::reading::FocusController;
 use crate::render::math::MathRenderService;
 use crate::services::AppServices;
 use crate::terminal::TerminalHost;
-use crate::window::actions::{apply_color_scheme, build_left_switcher, build_primary_menu};
+use crate::window::actions::{apply_color_scheme, build_primary_menu};
 use crate::window::commands::WindowCommand;
-use crate::window::state::{PlaceholderWidgets, WindowState};
+use crate::window::state::WindowState;
 use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -38,27 +39,22 @@ pub struct WindowInner {
     pub window_title: adw::WindowTitle,
     pub left_split: adw::OverlaySplitView,
     pub right_split: adw::OverlaySplitView,
+    pub center_paned: gtk4::Paned,
     pub center_stack: gtk4::Stack,
     pub empty_status: adw::StatusPage,
     pub tab_view: adw::TabView,
     pub vault_tree: VaultTree,
     pub outline_box: gtk4::Box,
-    pub right_stack: gtk4::Stack,
-    pub right_switcher: gtk4::Box,
-    pub bottom_stack: gtk4::Stack,
-    pub bottom_switcher: gtk4::Box,
-    pub bottom_revealer: gtk4::Revealer,
     pub bottom_toggle: gtk4::ToggleButton,
     pub edit_badge: gtk4::Label,
     pub mode_toggle_btn: gtk4::Button,
-    pub placeholders: Rc<PlaceholderWidgets>,
+    pub tool_dock: ToolDock,
     pub terminal_host: TerminalHost,
     pub changes_panel: ChangesPanel,
     pub search_panel: SearchPanel,
     pub tags_panel: TagsPanel,
     pub backlinks_panel: BacklinksPanel,
     pub quick_open: QuickOpen,
-    pub left_stack: gtk4::Stack,
     pub state: Rc<RefCell<WindowState>>,
     pub commands: CommandQueue<WindowCommand>,
     pub options: CliOptions,
@@ -167,7 +163,7 @@ impl HortusWindow {
             toolbar_view.set_reveal_top_bars(false);
         }
 
-        // 左侧栏：文件 / 全文搜索 / 层级标签
+        // 静态工具视图：文件 / 搜索 / 标签 / 大纲 / 反链 / 改动
         let vault_tree = VaultTree::new();
         let search_panel = SearchPanel::new();
         let tags_panel = TagsPanel::new();
@@ -199,20 +195,6 @@ impl HortusWindow {
         files_page.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
         files_page.append(vault_tree.widget());
 
-        let left_stack = gtk4::Stack::new();
-        left_stack.set_vexpand(true);
-        left_stack.add_named(&files_page, Some("files"));
-        left_stack.add_named(search_panel.root(), Some("search"));
-        left_stack.add_named(tags_panel.root(), Some("tags"));
-        left_stack.set_visible_child_name("files");
-
-        let left_switcher = build_left_switcher(&left_stack);
-        let left_sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        left_sidebar_box.append(&left_switcher);
-        left_sidebar_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
-        left_sidebar_box.append(&left_stack);
-
-        // 右侧栏：大纲 / 反链 / 改动
         let outline_scroll = gtk4::ScrolledWindow::builder()
             .hscrollbar_policy(gtk4::PolicyType::Never)
             .vscrollbar_policy(gtk4::PolicyType::Automatic)
@@ -228,30 +210,25 @@ impl HortusWindow {
         let backlinks_panel = BacklinksPanel::new();
         let changes_panel = ChangesPanel::new();
         let terminal_host = TerminalHost::new();
-        let placeholders = Rc::new(PlaceholderWidgets {
-            backlinks: backlinks_panel.root().clone(),
-            changes: changes_panel.root().clone(),
-            terminal: terminal_host.root().clone(),
-        });
 
-        let right_stack = gtk4::Stack::new();
-        right_stack.set_vexpand(true);
-        right_stack.add_named(&outline_scroll, Some("outline"));
-        right_stack.add_named(
-            &placeholders.backlinks,
-            Some(PlaceholderKind::Backlinks.id()),
+        let mut static_widgets: HashMap<StaticToolKind, gtk4::Widget> = HashMap::new();
+        static_widgets.insert(StaticToolKind::Files, files_page.upcast());
+        static_widgets.insert(StaticToolKind::Search, search_panel.root().clone().upcast());
+        static_widgets.insert(StaticToolKind::Tags, tags_panel.root().clone().upcast());
+        static_widgets.insert(StaticToolKind::Outline, outline_scroll.upcast());
+        static_widgets.insert(
+            StaticToolKind::Backlinks,
+            backlinks_panel.root().clone().upcast(),
         );
-        right_stack.add_named(&placeholders.changes, Some(PlaceholderKind::Changes.id()));
-        right_stack.set_visible_child_name("outline");
+        static_widgets.insert(
+            StaticToolKind::Changes,
+            changes_panel.root().clone().upcast(),
+        );
 
-        let right_switcher = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-        right_switcher.add_css_class("hortus-sidebar-switcher");
-        let right_sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        right_sidebar_box.append(&right_switcher);
-        right_sidebar_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
-        right_sidebar_box.append(&right_stack);
+        let tool_dock = ToolDock::new(static_widgets);
+        tool_dock.apply_default_layout();
 
-        // G-04 修复：AdwTabBar 本身自带水平滚动箭头与溢出管理，直接置入容器而不再套 ScrolledWindow。
+        // 中央阅读/编辑标签区
         let tab_view = adw::TabView::new();
         tab_view.set_vexpand(true);
         tab_view.set_hexpand(true);
@@ -290,67 +267,39 @@ impl HortusWindow {
         center_stack.add_named(&tabs_container, Some("tabs"));
         center_stack.set_visible_child_name("empty");
 
-        let bottom_stack = gtk4::Stack::new();
-        bottom_stack.set_vexpand(false);
-        bottom_stack.set_size_request(-1, 180);
-        bottom_stack.add_named(&placeholders.terminal, Some(PlaceholderKind::Terminal.id()));
+        let bottom_panel_box = tool_dock.region_widget(PanelRegion::Bottom);
+        bottom_panel_box.set_visible(false);
+        bottom_panel_box.set_size_request(-1, 120);
 
-        let bottom_switcher = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-        bottom_switcher.add_css_class("hortus-panel-header");
-
-        let bottom_header = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        bottom_header.append(&bottom_switcher);
-        let bottom_spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        bottom_spacer.set_hexpand(true);
-        bottom_header.append(&bottom_spacer);
-        let bottom_close = gtk4::Button::builder()
-            .icon_name("pan-down-symbolic")
-            .tooltip_text("收起底部面板 (Ctrl+J)")
+        let center_paned = gtk4::Paned::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .vexpand(true)
+            .hexpand(true)
+            .resize_start_child(true)
+            .shrink_start_child(false)
+            .resize_end_child(false)
+            .shrink_end_child(false)
+            .start_child(&center_stack)
+            .end_child(bottom_panel_box)
             .build();
-        bottom_close.add_css_class("flat");
-        bottom_header.append(&bottom_close);
-
-        let bottom_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        bottom_box.add_css_class("hortus-bottom-panel");
-        bottom_box.append(&bottom_header);
-        bottom_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
-        bottom_box.append(&bottom_stack);
-
-        let bottom_revealer = gtk4::Revealer::builder()
-            .transition_type(gtk4::RevealerTransitionType::SlideUp)
-            .reveal_child(false)
-            .visible(false)
-            .child(&bottom_box)
-            .build();
-        bottom_revealer.connect_child_revealed_notify(|rev| {
-            if !rev.reveals_child() && !rev.is_child_revealed() {
-                rev.set_visible(false);
-            }
-        });
-
-        let center_and_bottom = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        center_and_bottom.set_vexpand(true);
-        center_and_bottom.set_hexpand(true);
-        center_and_bottom.append(&center_stack);
-        center_and_bottom.append(&bottom_revealer);
 
         let right_split = adw::OverlaySplitView::builder()
-            .sidebar(&right_sidebar_box)
-            .content(&center_and_bottom)
+            .sidebar(tool_dock.region_widget(PanelRegion::Right))
+            .content(&center_paned)
             .sidebar_position(gtk4::PackType::End)
             .min_sidebar_width(220.0)
-            .max_sidebar_width(320.0)
-            .sidebar_width_fraction(0.22)
+            .max_sidebar_width(480.0)
+            .sidebar_width_fraction(0.24)
             .show_sidebar(true)
             .build();
 
         let left_split = adw::OverlaySplitView::builder()
-            .sidebar(&left_sidebar_box)
+            .sidebar(tool_dock.region_widget(PanelRegion::Left))
             .content(&right_split)
             .sidebar_position(gtk4::PackType::Start)
             .min_sidebar_width(220.0)
-            .max_sidebar_width(320.0)
-            .sidebar_width_fraction(0.22)
+            .max_sidebar_width(480.0)
+            .sidebar_width_fraction(0.24)
             .show_sidebar(true)
             .build();
 
@@ -408,8 +357,12 @@ impl HortusWindow {
             scan_micros: 0,
             pending_open_notes,
             tabs: HashMap::new(),
-            placement: PanelPlacement::default(),
             bottom_revealed: false,
+            bottom_height: 260.0,
+            pending_bottom_position: false,
+            suppressing_bottom_pos: false,
+            suppressing_layout_save: false,
+            layout_save_source: None,
             #[cfg(feature = "automation")]
             automation_triggered: false,
             temp_dir: prepare_edit_temp_dir(),
@@ -443,34 +396,28 @@ impl HortusWindow {
             window_title,
             left_split,
             right_split,
+            center_paned,
             center_stack,
             empty_status,
             tab_view,
             vault_tree,
             outline_box,
-            right_stack,
-            right_switcher,
-            bottom_stack,
-            bottom_switcher,
-            bottom_revealer,
             bottom_toggle,
             edit_badge,
             mode_toggle_btn,
-            placeholders,
+            tool_dock,
             terminal_host,
             changes_panel,
             search_panel,
             tags_panel,
             backlinks_panel,
             quick_open: QuickOpen::new(),
-            left_stack,
             state,
             commands: CommandQueue::new(),
             options,
         });
 
-        inner.rebuild_panel_switchers();
-        inner.bind_signals(&bottom_close);
+        inner.bind_signals();
         inner.register_actions();
         inner.init_knowledge_panels();
         inner.init_terminal_and_changes_panels();
@@ -536,7 +483,20 @@ impl WindowInner {
                 announce,
             } => self.request_save(&path, choice, announce),
             WindowCommand::ToggleBottomPanel(revealed) => self.set_bottom_panel_revealed(revealed),
-            WindowCommand::TogglePlaceholderRegion(kind) => self.toggle_placeholder_region(kind),
+            WindowCommand::DockNewShell(region) => {
+                self.terminal_host.open_shell_in_region(region);
+            }
+            WindowCommand::DockLaunchAgent(region) => self.launch_agent_in_region(region),
+            WindowCommand::DockAddTool { region, tool } => {
+                self.tool_dock.open_or_move_static_tool(tool, region, true);
+            }
+            WindowCommand::DockMoveTab { tab_id, region } => {
+                self.tool_dock.move_tab(tab_id, region);
+                if let DockTabId::Static(tool) = tab_id {
+                    self.show_toast(&format!("已将「{}」移至{}", tool.title(), region.title()));
+                }
+            }
+            WindowCommand::DockCloseTab(tab_id) => self.tool_dock.close_tab(tab_id),
             WindowCommand::CloseTabPage(page) => self.request_close_tab(page),
             WindowCommand::ApplyColorScheme(scheme) => apply_color_scheme(scheme),
             WindowCommand::NewWindow => self.open_new_window(),
@@ -551,7 +511,7 @@ impl WindowInner {
         }
     }
 
-    fn bind_signals(self: &Rc<Self>, bottom_close: &gtk4::Button) {
+    fn bind_signals(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
         self.vault_tree.set_on_open_note(move |path| {
             if let Some(win) = weak.upgrade() {
@@ -600,9 +560,25 @@ impl WindowInner {
         });
 
         let weak = Rc::downgrade(self);
-        bottom_close.connect_clicked(move |_| {
-            if let Some(win) = weak.upgrade() {
-                win.send_command(WindowCommand::ToggleBottomPanel(false));
+        self.center_paned.connect_position_notify(move |paned| {
+            let Some(win) = weak.upgrade() else { return };
+            let total_h = paned.height();
+            let changed = {
+                let mut st = win.state.borrow_mut();
+                if !st.bottom_revealed || st.suppressing_bottom_pos || total_h <= 200 {
+                    false
+                } else {
+                    let new_bh = f64::from(total_h - paned.position()).clamp(120.0, 520.0);
+                    if (new_bh - st.bottom_height).abs() >= 2.0 {
+                        st.bottom_height = new_bh;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if changed {
+                win.schedule_layout_save();
             }
         });
 
@@ -658,6 +634,7 @@ impl WindowInner {
         }
         self.focus.teardown();
         self.quick_open.close_if_open();
+        self.tool_dock.teardown();
         self.terminal_host.teardown();
         self.vault_tree.clear();
         drop(keepalive);

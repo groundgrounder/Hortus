@@ -60,6 +60,7 @@ impl WindowInner {
                         st.login_path = login_path;
                     }
                     win.terminal_host.apply_font(term_font);
+                    win.load_saved_layout();
                     if let Some(warn) = font_warning {
                         win.show_toast(&format!("KaTeX 字体提示：{warn}"));
                     }

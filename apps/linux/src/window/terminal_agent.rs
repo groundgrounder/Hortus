@@ -2,12 +2,14 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 窗口级终端、Agent 启动闸门、「本次会话改动」面板与设置对话框协调。
+//! 窗口级终端、Agent 启动闸门、「本次会话改动」面板、统一工具区回调与设置对话框协调。
 
 use crate::agent::{AgentLaunchCallbacks, ChangesCallbacks, launch_agent_with_snapshot_gate};
-use crate::core::{ColorSchemeChoice, PanelRegion, PlaceholderKind};
+use crate::core::{ColorSchemeChoice, PanelRegion};
+use crate::dock::DockCallbacks;
 use crate::services::ConfigSnapshot;
 use crate::settings::{SettingsDialog, SettingsPage};
+use crate::terminal::TerminalHostCallbacks;
 use crate::window::actions::apply_color_scheme;
 use crate::window::commands::WindowCommand;
 use crate::window::shell::WindowInner;
@@ -22,41 +24,90 @@ use std::sync::Arc;
 
 impl WindowInner {
     pub fn init_terminal_and_changes_panels(self: &Rc<Self>) {
-        let weak_launch = Rc::downgrade(self);
+        let weak_create = Rc::downgrade(self);
+        let weak_update = Rc::downgrade(self);
+        let weak_select = Rc::downgrade(self);
+        let weak_close = Rc::downgrade(self);
         let weak_exit = Rc::downgrade(self);
-        let weak_toast = Rc::downgrade(self);
-        let weak_empty = Rc::downgrade(self);
-        self.terminal_host.set_callbacks(
-            Rc::new(move || {
-                if let Some(win) = weak_launch.upgrade() {
-                    win.send_command(WindowCommand::LaunchAgent);
+        self.terminal_host.set_callbacks(TerminalHostCallbacks {
+            on_tab_created: Rc::new(move |id, region, widget, title, icon| {
+                if let Some(win) = weak_create.upgrade() {
+                    win.tool_dock
+                        .insert_terminal_tab(id, region, &widget, &title, icon);
                 }
             }),
-            Rc::new(move |sid, code| {
+            on_tab_updated: Rc::new(move |id, title, icon| {
+                if let Some(win) = weak_update.upgrade() {
+                    win.tool_dock.update_terminal_tab(id, &title, icon);
+                }
+            }),
+            on_request_select_tab: Rc::new(move |id| {
+                if let Some(win) = weak_select.upgrade() {
+                    win.tool_dock.select_terminal_tab(id);
+                }
+            }),
+            on_request_close_tab: Rc::new(move |id| {
+                if let Some(win) = weak_close.upgrade() {
+                    win.tool_dock.close_terminal_tab(id);
+                }
+            }),
+            on_agent_exited: Rc::new(move |sid, code| {
                 if let Some(win) = weak_exit.upgrade() {
                     win.handle_agent_process_exited(sid, code);
                 }
             }),
-            Rc::new(move |msg| {
-                if let Some(win) = weak_toast.upgrade() {
-                    win.show_toast(&msg);
+        });
+
+        let weak_close_t = Rc::downgrade(self);
+        let weak_emptied = Rc::downgrade(self);
+        let weak_reveal = Rc::downgrade(self);
+        let weak_collapse = Rc::downgrade(self);
+        let weak_term_sel = Rc::downgrade(self);
+        let weak_term_mov = Rc::downgrade(self);
+        let weak_chg = Rc::downgrade(self);
+        let weak_layout = Rc::downgrade(self);
+        self.tool_dock.set_callbacks(DockCallbacks {
+            on_request_close_terminal: Rc::new(move |tid| {
+                if let Some(win) = weak_close_t.upgrade() {
+                    win.terminal_host.close_tab_from_dock(tid);
                 }
             }),
-            Rc::new(move || {
-                if let Some(win) = weak_empty.upgrade()
-                    && win
-                        .state
-                        .borrow()
-                        .placement
-                        .region_of(PlaceholderKind::Terminal)
-                        == PanelRegion::Bottom
-                    && win.bottom_stack.visible_child_name().as_deref()
-                        == Some(PlaceholderKind::Terminal.id())
-                {
-                    win.set_bottom_panel_revealed(false);
+            on_region_emptied: Rc::new(move |region| {
+                if let Some(win) = weak_emptied.upgrade() {
+                    win.set_region_revealed(region, false);
                 }
             }),
-        );
+            on_region_reveal: Rc::new(move |region| {
+                if let Some(win) = weak_reveal.upgrade() {
+                    win.set_region_revealed(region, true);
+                }
+            }),
+            on_region_collapse: Rc::new(move |region| {
+                if let Some(win) = weak_collapse.upgrade() {
+                    win.set_region_revealed(region, false);
+                }
+            }),
+            on_terminal_selected: Rc::new(move |tid| {
+                if let Some(win) = weak_term_sel.upgrade() {
+                    win.terminal_host.mark_active_tab(tid);
+                }
+            }),
+            on_terminal_moved: Rc::new(move |tid, region| {
+                if let Some(win) = weak_term_mov.upgrade() {
+                    win.terminal_host.set_tab_region(tid, region);
+                }
+            }),
+            on_changes_shown: Rc::new(move || {
+                if let Some(win) = weak_chg.upgrade() {
+                    win.changes_panel.refresh();
+                }
+            }),
+            on_layout_changed: Rc::new(move || {
+                if let Some(win) = weak_layout.upgrade() {
+                    win.schedule_layout_save();
+                }
+            }),
+        });
 
         let weak_open = Rc::downgrade(self);
         let weak_rb = Rc::downgrade(self);
@@ -85,32 +136,14 @@ impl WindowInner {
         });
     }
 
-    pub fn reveal_placeholder_panel(self: &Rc<Self>, kind: PlaceholderKind) {
-        let region = self.state.borrow().placement.region_of(kind);
-        match region {
-            PanelRegion::Right => {
-                self.right_split.set_show_sidebar(true);
-                self.right_stack.set_visible_child_name(kind.id());
-            }
-            PanelRegion::Bottom => {
-                self.set_bottom_panel_revealed(true);
-                self.bottom_stack.set_visible_child_name(kind.id());
-            }
-        }
-        if kind == PlaceholderKind::Terminal {
-            self.terminal_host.ensure_default_shell();
-        } else if kind == PlaceholderKind::Changes {
-            self.changes_panel.refresh();
-        }
-    }
-
     pub fn send_path_to_terminal(self: &Rc<Self>) {
         let Some(relpath) = self.active_tab_path() else {
             self.show_toast("请先打开一篇笔记后再发送路径到终端");
             return;
         };
-        self.reveal_placeholder_panel(PlaceholderKind::Terminal);
-        let quoted = self.terminal_host.send_note_path(&relpath);
+        let fallback = self.tool_dock.preferred_terminal_region();
+        let (_id, region, quoted) = self.terminal_host.send_note_path(&relpath, fallback);
+        self.set_region_revealed(region, true);
         self.show_toast(&format!("已发送笔记路径到终端：{quoted}"));
     }
 
@@ -146,8 +179,9 @@ impl WindowInner {
             self.show_toast("请先选中笔记文本后再发送到终端");
             return;
         };
-        self.reveal_placeholder_panel(PlaceholderKind::Terminal);
-        if self.terminal_host.send_selection(&text).is_some() {
+        let fallback = self.tool_dock.preferred_terminal_region();
+        if let Some((_id, region, _)) = self.terminal_host.send_selection(&text, fallback) {
+            self.set_region_revealed(region, true);
             self.show_toast("已安全发送选中文本到终端");
         } else {
             self.show_toast("当前选区仅含控制字符，已忽略发送");
@@ -155,6 +189,11 @@ impl WindowInner {
     }
 
     pub fn launch_agent_action(self: &Rc<Self>) {
+        let region = self.tool_dock.preferred_terminal_region();
+        self.launch_agent_in_region(region);
+    }
+
+    pub fn launch_agent_in_region(self: &Rc<Self>, target_region: PanelRegion) {
         let (services, login_path) = {
             let st = self.state.borrow();
             (st.services.clone(), st.login_path.clone())
@@ -166,7 +205,6 @@ impl WindowInner {
         let weak_toast = Rc::downgrade(self);
         let weak_settings = Rc::downgrade(self);
         let weak_changed = Rc::downgrade(self);
-        let weak_reveal = Rc::downgrade(self);
         let weak_alert = Rc::downgrade(self);
         let weak_vault = Rc::downgrade(self);
         let weak_disp = Rc::downgrade(self);
@@ -174,6 +212,7 @@ impl WindowInner {
             &self.window,
             services,
             self.terminal_host.clone(),
+            target_region,
             login_path,
             AgentLaunchCallbacks {
                 on_toast: Rc::new(move |msg| {
@@ -189,11 +228,6 @@ impl WindowInner {
                 on_session_changed: Rc::new(move || {
                     if let Some(win) = weak_changed.upgrade() {
                         win.changes_panel.refresh();
-                    }
-                }),
-                on_reveal_terminal: Rc::new(move || {
-                    if let Some(win) = weak_reveal.upgrade() {
-                        win.reveal_placeholder_panel(PlaceholderKind::Terminal);
                     }
                 }),
                 on_alert: Rc::new(move |dlg: adw::AlertDialog| {

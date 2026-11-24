@@ -259,14 +259,17 @@ const BASE_CSS: &str = r#"
     border-radius: 6px;
 }
 
+.hortus-tool-tabbar {
+    min-height: 34px;
+}
+
+.hortus-tool-empty {
+    padding: 16px;
+}
+
 .hortus-terminal-status {
     padding: 4px 10px;
     background-color: alpha(@warning_bg_color, 0.16);
-    border-bottom: 1px solid alpha(currentColor, 0.10);
-}
-
-.hortus-terminal-toolbar {
-    padding: 2px 6px;
     border-bottom: 1px solid alpha(currentColor, 0.10);
 }
 

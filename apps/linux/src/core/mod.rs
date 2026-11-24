@@ -10,8 +10,8 @@ pub mod text;
 pub use async_bus::{CommandQueue, NotifyQueue};
 pub use cli::CliOptions;
 pub use model::{
-    APP_ID, APP_VERSION, ColorSchemeChoice, PanelPlacement, PanelRegion, PlaceholderKind,
-    TreeEntryItem, is_note_file_name, sort_tree_entries,
+    APP_ID, APP_VERSION, ColorSchemeChoice, PanelRegion, StaticToolKind, TreeEntryItem,
+    is_note_file_name, sort_tree_entries,
 };
 pub use text::{
     Utf16Mapper, decode_source_styles, find_char_ranges, line_list_continuation, task_toggle_at,

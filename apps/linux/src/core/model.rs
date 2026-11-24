@@ -2,8 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-use serde::Serialize;
-use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
 
 pub const APP_ID: &str = "io.github.groundgrounder.Hortus";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -36,86 +35,114 @@ impl ColorSchemeChoice {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelRegion {
+    Left,
     Right,
     Bottom,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlaceholderKind {
-    Backlinks,
-    Changes,
-    Terminal,
-}
+impl PanelRegion {
+    pub const ALL: [Self; 3] = [Self::Left, Self::Right, Self::Bottom];
 
-impl PlaceholderKind {
     pub fn id(self) -> &'static str {
         match self {
-            Self::Backlinks => "backlinks",
-            Self::Changes => "changes",
-            Self::Terminal => "terminal",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Bottom => "bottom",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
-            "backlinks" => Some(Self::Backlinks),
-            "changes" => Some(Self::Changes),
-            "terminal" => Some(Self::Terminal),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "bottom" => Some(Self::Bottom),
             _ => None,
         }
     }
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Backlinks => "反链",
-            Self::Changes => "改动",
-            Self::Terminal => "终端",
+            Self::Left => "左侧栏",
+            Self::Right => "右侧栏",
+            Self::Bottom => "底部面板",
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PanelPlacement {
-    locations: BTreeMap<PlaceholderKind, PanelRegion>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaticToolKind {
+    Files,
+    Search,
+    Tags,
+    Outline,
+    Backlinks,
+    Changes,
 }
 
-impl Default for PanelPlacement {
-    fn default() -> Self {
-        let mut locations = BTreeMap::new();
-        locations.insert(PlaceholderKind::Backlinks, PanelRegion::Right);
-        locations.insert(PlaceholderKind::Changes, PanelRegion::Right);
-        locations.insert(PlaceholderKind::Terminal, PanelRegion::Bottom);
-        Self { locations }
-    }
-}
+impl StaticToolKind {
+    pub const ALL: [Self; 6] = [
+        Self::Files,
+        Self::Search,
+        Self::Tags,
+        Self::Outline,
+        Self::Backlinks,
+        Self::Changes,
+    ];
 
-impl PanelPlacement {
-    pub fn region_of(&self, kind: PlaceholderKind) -> PanelRegion {
-        *self.locations.get(&kind).unwrap_or(&PanelRegion::Right)
-    }
-
-    pub fn toggle_region(&mut self, kind: PlaceholderKind) -> PanelRegion {
-        let next = match self.region_of(kind) {
-            PanelRegion::Right => PanelRegion::Bottom,
-            PanelRegion::Bottom => PanelRegion::Right,
-        };
-        self.locations.insert(kind, next);
-        next
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Files => "files",
+            Self::Search => "search",
+            Self::Tags => "tags",
+            Self::Outline => "outline",
+            Self::Backlinks => "backlinks",
+            Self::Changes => "changes",
+        }
     }
 
-    pub fn views_in(&self, region: PanelRegion) -> Vec<PlaceholderKind> {
-        [
-            PlaceholderKind::Backlinks,
-            PlaceholderKind::Changes,
-            PlaceholderKind::Terminal,
-        ]
-        .into_iter()
-        .filter(|kind| self.region_of(*kind) == region)
-        .collect()
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "files" => Some(Self::Files),
+            "search" => Some(Self::Search),
+            "tags" => Some(Self::Tags),
+            "outline" => Some(Self::Outline),
+            "backlinks" => Some(Self::Backlinks),
+            "changes" => Some(Self::Changes),
+            _ => None,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Files => "文件",
+            Self::Search => "搜索",
+            Self::Tags => "标签",
+            Self::Outline => "大纲",
+            Self::Backlinks => "反链",
+            Self::Changes => "改动",
+        }
+    }
+
+    pub fn icon_name(self) -> &'static str {
+        match self {
+            Self::Files => "folder-symbolic",
+            Self::Search => "system-search-symbolic",
+            Self::Tags => "starred-symbolic",
+            Self::Outline => "view-list-symbolic",
+            Self::Backlinks => "insert-link-symbolic",
+            Self::Changes => "document-edit-symbolic",
+        }
+    }
+
+    pub fn default_region(self) -> PanelRegion {
+        match self {
+            Self::Files | Self::Search | Self::Tags => PanelRegion::Left,
+            Self::Outline | Self::Backlinks | Self::Changes => PanelRegion::Right,
+        }
     }
 }
 
@@ -209,28 +236,14 @@ mod tests {
     }
 
     #[test]
-    fn panel_placement_moves_placeholders_between_right_and_bottom() {
-        let mut placement = PanelPlacement::default();
-        assert_eq!(
-            placement.views_in(PanelRegion::Right),
-            vec![PlaceholderKind::Backlinks, PlaceholderKind::Changes]
-        );
-        assert_eq!(
-            placement.views_in(PanelRegion::Bottom),
-            vec![PlaceholderKind::Terminal]
-        );
-
-        assert_eq!(
-            placement.toggle_region(PlaceholderKind::Backlinks),
-            PanelRegion::Bottom
-        );
-        assert_eq!(
-            placement.views_in(PanelRegion::Right),
-            vec![PlaceholderKind::Changes]
-        );
-        assert_eq!(
-            placement.views_in(PanelRegion::Bottom),
-            vec![PlaceholderKind::Backlinks, PlaceholderKind::Terminal]
-        );
+    fn static_tool_and_region_roundtrip() {
+        for region in PanelRegion::ALL {
+            assert_eq!(PanelRegion::parse(region.id()), Some(region));
+        }
+        for tool in StaticToolKind::ALL {
+            assert_eq!(StaticToolKind::parse(tool.id()), Some(tool));
+        }
+        assert_eq!(StaticToolKind::Files.default_region(), PanelRegion::Left);
+        assert_eq!(StaticToolKind::Outline.default_region(), PanelRegion::Right);
     }
 }

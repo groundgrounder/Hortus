@@ -6,4 +6,4 @@ pub mod host;
 pub mod process;
 pub mod sanitize;
 
-pub use host::TerminalHost;
+pub use host::{TerminalHost, TerminalHostCallbacks};

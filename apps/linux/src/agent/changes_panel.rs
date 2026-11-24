@@ -131,7 +131,7 @@ impl ChangesPanel {
         entries_box.set_margin_top(4);
         entries_box.set_margin_bottom(4);
         let entries_scroll = panel_scroll(&entries_box);
-        entries_scroll.set_min_content_height(130);
+        entries_scroll.set_min_content_height(64);
 
         let detail_title = gtk4::Label::new(Some("选择一个改动条目查看逐行 diff"));
         detail_title.add_css_class("caption");
@@ -147,7 +147,7 @@ impl ChangesPanel {
         detail_box.set_margin_end(6);
         detail_box.set_margin_bottom(8);
         let detail_scroll = panel_scroll(&detail_box);
-        detail_scroll.set_min_content_height(140);
+        detail_scroll.set_min_content_height(64);
 
         let paned = gtk4::Paned::builder()
             .orientation(gtk4::Orientation::Vertical)
