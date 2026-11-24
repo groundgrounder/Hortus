@@ -3,7 +3,7 @@ package io.github.groundgrounder.hortus
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import io.github.groundgrounder.hortus.reader.DiagramExporter
+import io.github.groundgrounder.hortus.reader.render.DiagramExporter
 import org.json.JSONObject
 import org.junit.Assert.assertTrue
 import org.junit.Test

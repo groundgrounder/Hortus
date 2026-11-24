@@ -6,6 +6,10 @@ import android.graphics.BitmapFactory
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import io.github.groundgrounder.hortus.MainActivity
+import io.github.groundgrounder.hortus.app.HortusServices
+import io.github.groundgrounder.hortus.reader.render.DiagramExportFormat
+import io.github.groundgrounder.hortus.reader.render.DiagramExporter
+import io.github.groundgrounder.hortus.reader.render.diagramUnitScale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -26,7 +30,7 @@ internal object DebugReadingExports {
         openJob?.join()
         var waited = 0L
         while (waited < 12_000) {
-            val state = activity.controller.state
+            val state = activity.viewModel.readerState.value
             val current = state.content
             if (current != null &&
                 !state.loading &&
@@ -39,24 +43,26 @@ internal object DebugReadingExports {
             delay(100)
             waited += 100
         }
-        val content = activity.controller.state.content ?: return
+        val viewModel = activity.viewModel
+        val content = viewModel.readerState.value.content ?: return
         val dark = (activity.resources.configuration.uiMode and
             Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
         val unitScale = diagramUnitScale(
-            activity.controller.bodySizePx,
+            viewModel.bodySizePx.value,
             activity.resources.displayMetrics.density,
         )
         val layoutWidth = (content.width / unitScale).toDouble()
-        val repository = activity.controller.repository()
+        val diagramService = HortusServices.get(activity).diagramService
         val directory = checkNotNull(activity.getExternalFilesDir("exports")) { "external files unavailable" }
         directory.mkdirs()
         val results = JSONArray()
         for (item in content.diagramItems) {
             val collapsed = withContext(Dispatchers.IO) {
-                repository.collapsedNodes(item.documentKey, item.ordinal)
+                diagramService.collapsedNodes(content.vaultPath, item.documentKey, item.ordinal)
             }
             val render = withContext(Dispatchers.IO) {
-                repository.renderDiagram(
+                diagramService.renderDiagram(
+                    vaultPath = content.vaultPath,
                     documentKey = item.documentKey,
                     engineText = item.engineText,
                     mmd = item.mmd,
@@ -65,6 +71,8 @@ internal object DebugReadingExports {
                     dark = dark,
                     collapsed = collapsed,
                     revision = content.revision,
+                    previewContentWidthPx = content.width,
+                    previewUnitScale = unitScale,
                 )
             }
             val scene = render.scene
@@ -79,7 +87,7 @@ internal object DebugReadingExports {
                 val fileName = DiagramExporter.defaultName(item.documentKey, item.ordinal, format)
                 val bytes = withContext(Dispatchers.IO) {
                     when (format) {
-                        DiagramExportFormat.Svg -> repository.exportSvg(
+                        DiagramExportFormat.Svg -> diagramService.renderSvg(
                             item.engineText,
                             item.mmd,
                             item.ordinal,

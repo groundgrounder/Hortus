@@ -9,8 +9,9 @@ import android.provider.DocumentsContract
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
+import io.github.groundgrounder.hortus.core.AndroidFonts
 import io.github.groundgrounder.hortus.core.DiagramEngine
-import io.github.groundgrounder.hortus.reader.DiagramExporter
+import io.github.groundgrounder.hortus.reader.render.DiagramExporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

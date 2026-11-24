@@ -5,9 +5,9 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.groundgrounder.hortus.app.HortusServices
-import io.github.groundgrounder.hortus.reader.DiagramFocusActivity
-import io.github.groundgrounder.hortus.reader.FocusPayload
-import io.github.groundgrounder.hortus.reader.FocusPayloads
+import io.github.groundgrounder.hortus.focus.DiagramFocusActivity
+import io.github.groundgrounder.hortus.focus.FocusPayload
+import io.github.groundgrounder.hortus.focus.FocusPayloads
 import io.github.groundgrounder.hortus.reader.FocusStateRegistry
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject

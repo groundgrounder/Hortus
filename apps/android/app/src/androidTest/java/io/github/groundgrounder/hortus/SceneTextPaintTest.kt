@@ -6,7 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.groundgrounder.hortus.core.SceneColor
 import io.github.groundgrounder.hortus.core.ScenePoint
 import io.github.groundgrounder.hortus.core.SceneText
-import io.github.groundgrounder.hortus.reader.SceneTextMetrics
+import io.github.groundgrounder.hortus.reader.render.SceneTextMetrics
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

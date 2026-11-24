@@ -8,6 +8,11 @@ import io.github.groundgrounder.hortus.core.MathBlock
 import io.github.groundgrounder.hortus.core.MathStyle
 import io.github.groundgrounder.hortus.core.SceneData
 import io.github.groundgrounder.hortus.core.ScenePrimitive
+import io.github.groundgrounder.hortus.core.model.LoadedImage
+import io.github.groundgrounder.hortus.reader.model.ScrollTarget
+import io.github.groundgrounder.hortus.reader.render.DiagramPreviewCache
+import io.github.groundgrounder.hortus.reader.render.MathRenderResult
+import io.github.groundgrounder.hortus.reader.render.SceneTextMetrics
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File

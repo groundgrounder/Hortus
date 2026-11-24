@@ -4,6 +4,7 @@ package io.github.groundgrounder.hortus.reader
 import android.content.Context
 import io.github.groundgrounder.hortus.core.SceneData
 import io.github.groundgrounder.hortus.core.SceneHit
+import io.github.groundgrounder.hortus.reader.render.SceneRenderer
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File

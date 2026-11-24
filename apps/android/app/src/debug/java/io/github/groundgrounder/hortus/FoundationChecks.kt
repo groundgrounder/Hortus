@@ -2,6 +2,8 @@
 package io.github.groundgrounder.hortus
 
 import android.content.Context
+import io.github.groundgrounder.hortus.core.AndroidFonts
+import io.github.groundgrounder.hortus.core.CoreEnvironment
 import io.github.groundgrounder.hortus.core.DiagramEngine
 import io.github.groundgrounder.hortus.core.MathEngine
 import io.github.groundgrounder.hortus.core.MathStyle

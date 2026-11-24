@@ -11,10 +11,10 @@ import io.github.groundgrounder.hortus.core.MathBlock
 import io.github.groundgrounder.hortus.core.MediaBlock
 import io.github.groundgrounder.hortus.core.SceneData
 import io.github.groundgrounder.hortus.core.SceneHit
-import io.github.groundgrounder.hortus.reader.LoadedImage
-import io.github.groundgrounder.hortus.reader.MathRenderResult
-import io.github.groundgrounder.hortus.reader.ReaderTextView
-import io.github.groundgrounder.hortus.reader.ScrollTarget
+import io.github.groundgrounder.hortus.core.model.LoadedImage
+import io.github.groundgrounder.hortus.reader.model.ScrollTarget
+import io.github.groundgrounder.hortus.reader.render.MathRenderResult
+import io.github.groundgrounder.hortus.reader.ui.ReaderTextView
 
 /** Release 与 benchmark 构建的零开销空探针。 */
 internal object DebugProbes {

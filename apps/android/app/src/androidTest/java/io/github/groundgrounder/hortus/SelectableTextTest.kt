@@ -34,7 +34,7 @@ class SelectableTextTest {
         val deadline = System.currentTimeMillis() + timeout
         while (System.currentTimeMillis() < deadline) {
             var current: String? = null
-            scenario.onActivity { current = it.controller.state.content?.path }
+            scenario.onActivity { current = it.viewModel.readerState.value.content?.path }
             if (current == path) return
             Thread.sleep(100)
         }
@@ -107,7 +107,7 @@ class SelectableTextTest {
         val targetPath = link!!.target ?: ""
         waitForNote(scenario, targetPath)
         var linkOpened = false
-        scenario.onActivity { linkOpened = it.controller.state.content?.path == targetPath }
+        scenario.onActivity { linkOpened = it.viewModel.readerState.value.content?.path == targetPath }
         assertTrue("link did not open target", linkOpened)
         scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
         waitForNote(scenario, sourcePath)
@@ -118,7 +118,7 @@ class SelectableTextTest {
         device.waitForIdle()
         Thread.sleep(500)
         var survived = false
-        scenario.onActivity { survived = it.controller.state.content != null }
+        scenario.onActivity { survived = it.viewModel.readerState.value.content != null }
         assertTrue("reader lost content after scrolling with selection", survived)
 
         val report = JSONObject()

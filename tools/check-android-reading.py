@@ -477,7 +477,7 @@ def first_interactive(dump: dict, kind: str, predicate) -> dict | None:
 def center(hit: dict) -> tuple[float, float]:
     return hit['x'] + hit['width'] / 2, hit['y'] + hit['height'] / 2
 
-FOCUS_ACTIVITY = f'{PACKAGE}/.reader.DiagramFocusActivity'
+FOCUS_ACTIVITY = f'{PACKAGE}/.focus.DiagramFocusActivity'
 FOCUS_STATE = f'/sdcard/Android/data/{PACKAGE}/files/focus/focus-state.json'
 
 

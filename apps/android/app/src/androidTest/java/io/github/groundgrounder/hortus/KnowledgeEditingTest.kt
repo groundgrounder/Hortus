@@ -3,6 +3,7 @@ package io.github.groundgrounder.hortus
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.groundgrounder.hortus.core.CoreEnvironment
 import io.github.groundgrounder.hortus.core.DocumentIssue
 import io.github.groundgrounder.hortus.core.SaveChoice
 import io.github.groundgrounder.hortus.core.SearchCancellation

@@ -2,13 +2,14 @@
 package io.github.groundgrounder.hortus
 
 import android.content.Intent
+import androidx.lifecycle.lifecycleScope
+import io.github.groundgrounder.hortus.app.StoragePermissions
 import io.github.groundgrounder.hortus.reader.DebugInspection
 import io.github.groundgrounder.hortus.reader.DebugReadingExports
 import io.github.groundgrounder.hortus.reader.DebugSessionMetrics
-import io.github.groundgrounder.hortus.reader.KnowledgeTab
-import io.github.groundgrounder.hortus.reader.SearchTab
-import io.github.groundgrounder.hortus.reader.SideMode
-import androidx.lifecycle.lifecycleScope
+import io.github.groundgrounder.hortus.reader.model.KnowledgeTab
+import io.github.groundgrounder.hortus.reader.model.SearchTab
+import io.github.groundgrounder.hortus.reader.model.SideMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -30,7 +31,8 @@ internal object DebugHooks {
         val vault = decode(intent.getStringExtra("debug_vault"))
         val note = decode(intent.getStringExtra("debug_note"))
         val heading = decode(intent.getStringExtra("debug_heading"))
-        val initialSequence = activity.controller.state.openSequence
+        val viewModel = activity.viewModel
+        val initialSequence = viewModel.readerState.value.openSequence
         var openJob: Job? = null
         var expectedVault: String? = null
         var expectedNote: String? = null
@@ -39,29 +41,29 @@ internal object DebugHooks {
             if (vault != null) {
                 expectedVault = vault
                 expectedNote = note
-                val current = activity.controller.state
+                val current = viewModel.readerState.value
                 if (current.vaultPath == vault && !current.loading && note != null) {
-                    openJob = activity.controller.openNote(note, heading)
+                    openJob = viewModel.openNote(note, heading)
                     if (current.content?.path != note) {
                         minSequence = initialSequence + 1L
                     }
                 } else {
-                    openJob = activity.controller.start(vault, note)
+                    openJob = viewModel.start(vault, note)
                     minSequence = initialSequence + 1L
                 }
             } else if (note != null) {
                 expectedNote = note
-                val current = activity.controller.state
+                val current = viewModel.readerState.value
                 if (current.vaultPath == null) {
-                    val savedVault = activity.controller.preferencesState.vaultPath
+                    val savedVault = viewModel.preferencesState.vaultPath
                     if (savedVault != null) {
                         expectedVault = savedVault
-                        openJob = activity.controller.start(savedVault, note)
+                        openJob = viewModel.start(savedVault, note)
                         minSequence = initialSequence + 1L
                     }
                 } else {
                     expectedVault = current.vaultPath
-                    openJob = activity.controller.openPath(note, heading)
+                    openJob = viewModel.openPath(note, heading)
                     if (current.content?.path != note) {
                         minSequence = initialSequence + 1L
                     }
@@ -78,7 +80,7 @@ internal object DebugHooks {
             val wait = intent.getLongExtra("debug_wait_ms", 900L).coerceIn(0L, 20_000L)
             val isCreate = action == "create"
             val inspectNote = if (isCreate) null else expectedNote
-            val inspectVault = if (isCreate) expectedVault else expectedVault
+            val inspectVault = expectedVault
             val inspectMinSeq = if (isCreate) 0L else minSequence
             activity.lifecycleScope.launch {
                 if (action != null) {
@@ -131,20 +133,20 @@ internal object DebugHooks {
         minSequence: Long,
         openJob: Job?,
     ) {
-        val controller = activity.controller
+        val viewModel = activity.viewModel
         when (action) {
             "search" -> {
                 awaitContent(activity, expectedVault, expectedNote, minSequence, openJob)
-                controller.openSearch()
+                viewModel.openSearch()
                 intent.getStringExtra("debug_tab")?.let { tab ->
-                    controller.setSearchTab(if (tab == "full") SearchTab.FULL else SearchTab.QUICK)
+                    viewModel.setSearchTab(if (tab == "full") SearchTab.FULL else SearchTab.QUICK)
                 }
                 intent.getStringExtra("debug_query")?.let { query ->
-                    controller.setSearchQuery(android.net.Uri.decode(query))
+                    viewModel.setSearchQuery(android.net.Uri.decode(query))
                 }
-                controller.awaitSearchIdle()
+                viewModel.awaitSearchIdle()
             }
-            "close_search" -> controller.closeSearch()
+            "close_search" -> viewModel.closeSearch()
             "knowledge" -> {
                 awaitContent(activity, expectedVault, expectedNote, minSequence, openJob)
                 val tab = when (intent.getStringExtra("debug_tab")) {
@@ -152,15 +154,15 @@ internal object DebugHooks {
                     "tags" -> KnowledgeTab.TAGS
                     else -> KnowledgeTab.OUTLINE
                 }
-                controller.openKnowledge(tab, intent.getStringExtra("debug_tag")?.let(android.net.Uri::decode))
-                controller.awaitKnowledgeIdle()
+                viewModel.openKnowledge(tab, intent.getStringExtra("debug_tag")?.let(android.net.Uri::decode))
+                viewModel.awaitKnowledgeIdle()
             }
-            "close_knowledge" -> controller.closeKnowledge()
-            "pane" -> controller.toggleSidePane()
+            "close_knowledge" -> viewModel.closeKnowledge()
+            "pane" -> viewModel.toggleSidePane()
             "finish_edit" -> {
                 awaitEdit(activity)
-                controller.finishEditing()?.join()
-                controller.awaitSaveIdle()
+                viewModel.finishEditing()?.join()
+                viewModel.awaitSaveIdle()
             }
             "side" -> {
                 awaitContent(activity, expectedVault, expectedNote, minSequence, openJob)
@@ -170,17 +172,17 @@ internal object DebugHooks {
                     "tags" -> SideMode.TAGS
                     else -> SideMode.FILES
                 }
-                controller.selectSideMode(mode)
-                controller.awaitKnowledgeIdle()
+                viewModel.selectSideMode(mode)
+                viewModel.awaitKnowledgeIdle()
             }
             "tag" -> {
                 awaitContent(activity, expectedVault, expectedNote, minSequence, openJob)
-                controller.openTagInText(intent.getStringExtra("debug_tag") ?: "")
-                controller.awaitKnowledgeIdle()
+                viewModel.openTagInText(intent.getStringExtra("debug_tag") ?: "")
+                viewModel.awaitKnowledgeIdle()
             }
             "edit" -> {
                 awaitContent(activity, expectedVault, expectedNote, minSequence, openJob)
-                controller.startEditing()
+                viewModel.startEditing()
                 awaitEdit(activity)
                 applyEditFile(activity, intent)
                 if (intent.getStringExtra("debug_save") != null) {
@@ -193,17 +195,17 @@ internal object DebugHooks {
             }
             "create" -> {
                 awaitContent(activity, expectedVault, expectedNote, minSequence, openJob)
-                controller.openNewNoteDialog(
+                viewModel.openNewNoteDialog(
                     intent.getStringExtra("debug_parent")?.let(android.net.Uri::decode),
                 )
-                controller.updateNewNoteName(
+                viewModel.updateNewNoteName(
                     intent.getStringExtra("debug_name")?.let(android.net.Uri::decode) ?: "Note",
                 )
                 val previousCreated = DebugSessionMetrics.lastCreatedNote
-                controller.createNewNote()?.join()
+                viewModel.createNewNote()?.join()
                 val created = DebugSessionMetrics.lastCreatedNote
                 if (created != null && created != previousCreated &&
-                    controller.newNoteState.error == null
+                    viewModel.newNoteState.value.error == null
                 ) {
                     awaitContent(activity, expectedVault = expectedVault, expectedNote = created)
                 }
@@ -219,23 +221,22 @@ internal object DebugHooks {
             }
             "pin" -> {
                 awaitContent(activity, expectedVault, expectedNote, minSequence, openJob)
-                controller.pinCurrentNote()?.join()
+                viewModel.pinCurrentNote()?.join()
             }
             "shortcut" -> {
                 val previousPending = activity.pendingIntentJob
                 val index = intent.getIntExtra("debug_index", 0)
-                if (controller.launchShortcut(index)) {
-                    var waited = 0
-                    while (waited < 5_000 && activity.pendingIntentJob === previousPending) {
-                        delay(50)
-                        waited += 50
-                    }
-                    activity.pendingIntentJob?.join()
-                    awaitContent(
-                        activity,
-                        expectedNote = DebugSessionMetrics.lastShortcutLaunchNote,
-                    )
+                viewModel.launchShortcutAsync(index).join()
+                var waited = 0
+                while (waited < 5_000 && activity.pendingIntentJob === previousPending) {
+                    delay(50)
+                    waited += 50
                 }
+                activity.pendingIntentJob?.join()
+                awaitContent(
+                    activity,
+                    expectedNote = DebugSessionMetrics.lastShortcutLaunchNote,
+                )
             }
         }
     }
@@ -247,7 +248,7 @@ internal object DebugHooks {
         val text = withContext(Dispatchers.IO) {
             File(directory, name).takeIf { it.isFile }?.readText()
         } ?: return
-        activity.controller.updateEditText(
+        activity.viewModel.updateEditText(
             androidx.compose.ui.text.input.TextFieldValue(
                 text,
                 androidx.compose.ui.text.TextRange(text.length),
@@ -256,17 +257,17 @@ internal object DebugHooks {
     }
 
     private suspend fun save(activity: MainActivity, choice: String) {
-        val controller = activity.controller
+        val viewModel = activity.viewModel
         val job = when (choice) {
-            "disk" -> controller.useDiskVersion()
-            "copy" -> controller.saveConflictCopy()
-            "keep" -> controller.keepMine()
-            else -> controller.saveEditedNote()
+            "disk" -> viewModel.useDiskVersion()
+            "copy" -> viewModel.saveConflictCopy()
+            "keep" -> viewModel.keepMine()
+            else -> viewModel.saveEditedNote()
         }
         job?.join()
-        controller.awaitSaveIdle()
+        viewModel.awaitSaveIdle()
         var waited = 0
-        while (waited < 15_000 && controller.editState.saving) {
+        while (waited < 15_000 && viewModel.editState.value.saving) {
             delay(50)
             waited += 50
         }
@@ -282,7 +283,7 @@ internal object DebugHooks {
         openJob?.join()
         var waited = 0
         while (waited < 15_000) {
-            val state = activity.controller.state
+            val state = activity.viewModel.readerState.value
             val content = state.content
             if (content != null &&
                 !state.loading &&
@@ -300,8 +301,8 @@ internal object DebugHooks {
     private suspend fun awaitEdit(activity: MainActivity, expectedNote: String? = null) {
         var waited = 0
         while (waited < 15_000) {
-            val editState = activity.controller.editState
-            val content = activity.controller.state.content
+            val editState = activity.viewModel.editState.value
+            val content = activity.viewModel.readerState.value.content
             if (editState.active && (expectedNote == null || content?.path == expectedNote)) {
                 return
             }

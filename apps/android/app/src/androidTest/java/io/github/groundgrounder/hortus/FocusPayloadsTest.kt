@@ -2,8 +2,8 @@
 package io.github.groundgrounder.hortus
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import io.github.groundgrounder.hortus.reader.FocusPayload
-import io.github.groundgrounder.hortus.reader.FocusPayloads
+import io.github.groundgrounder.hortus.focus.FocusPayload
+import io.github.groundgrounder.hortus.focus.FocusPayloads
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull

@@ -2,6 +2,25 @@
 package io.github.groundgrounder.hortus.reader
 
 import io.github.groundgrounder.hortus.MainActivity
+import io.github.groundgrounder.hortus.core.mathTypographyScale
+import io.github.groundgrounder.hortus.core.model.DiagramItem
+import io.github.groundgrounder.hortus.core.model.EmbedItem
+import io.github.groundgrounder.hortus.core.model.ImageItem
+import io.github.groundgrounder.hortus.core.model.MASK_EMPHASIS
+import io.github.groundgrounder.hortus.core.model.MASK_FOOTNOTE
+import io.github.groundgrounder.hortus.core.model.MASK_FRONTMATTER
+import io.github.groundgrounder.hortus.core.model.MASK_HIGHLIGHT
+import io.github.groundgrounder.hortus.core.model.MASK_INLINE_CODE
+import io.github.groundgrounder.hortus.core.model.MASK_STRIKE
+import io.github.groundgrounder.hortus.core.model.MASK_STRONG
+import io.github.groundgrounder.hortus.core.model.MASK_TAG
+import io.github.groundgrounder.hortus.core.model.MathItem
+import io.github.groundgrounder.hortus.core.model.TableItem
+import io.github.groundgrounder.hortus.core.model.TextItem
+import io.github.groundgrounder.hortus.data.ImageLoader
+import io.github.groundgrounder.hortus.reader.render.DiagramPreviewCache
+import io.github.groundgrounder.hortus.reader.render.diagramUnitScale
+import io.github.groundgrounder.hortus.reader.ui.snippetDisplay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -43,7 +62,7 @@ internal object DebugInspection {
         openJob?.join()
         var waited = 0L
         while (waited < 12_000) {
-            val state = activity.controller.state
+            val state = activity.viewModel.readerState.value
             val current = state.content
             if (current != null &&
                 !state.loading &&
@@ -74,8 +93,9 @@ internal object DebugInspection {
     }
 
     private suspend fun prepareAll(activity: MainActivity) {
-        val content = activity.controller.state.content ?: return
-        val repository = activity.controller.repository()
+        val viewModel = activity.viewModel
+        val content = viewModel.readerState.value.content ?: return
+        val renderBridge = viewModel.renderBridge
         val dark = (activity.resources.configuration.uiMode and
             android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
@@ -88,8 +108,8 @@ internal object DebugInspection {
         val innerLayoutWidth = (innerWidth / innerUnitScale).toDouble()
         withContext(Dispatchers.IO) {
             kotlinx.coroutines.withTimeoutOrNull(30_000) {
-                repository.prepareMath(content.math, content.bodySize)
-                repository.prepareMath(
+                renderBridge.prepareMath(content.math, content.bodySize)
+                renderBridge.prepareMath(
                     content.media.flatMap { media -> media.cells.flatMap { it.math } },
                     content.bodySize,
                 )
@@ -97,8 +117,9 @@ internal object DebugInspection {
                     ImageLoader.load(media.imagePath, content.width, media.imageWidth?.toInt())
                 }
                 for (item in content.diagramItems) {
-                    val collapsed = repository.collapsedNodes(item.documentKey, item.ordinal)
-                    repository.renderDiagram(
+                    val collapsed = renderBridge.collapsedNodes(content.vaultPath, item.documentKey, item.ordinal)
+                    renderBridge.renderDiagram(
+                        vaultPath = content.vaultPath,
                         documentKey = item.documentKey,
                         engineText = item.engineText,
                         mmd = item.mmd,
@@ -107,11 +128,13 @@ internal object DebugInspection {
                         dark = dark,
                         collapsed = collapsed,
                         revision = content.revision,
+                        previewContentWidthPx = content.width,
+                        previewUnitScale = unitScale,
                     )
                 }
                 val ancestors = listOf(content.path)
                 for (embed in content.items.filterIsInstance<EmbedItem>()) {
-                    val resolved = repository.resolveEmbed(
+                    val resolved = renderBridge.resolveEmbed(
                         sourcePath = content.path,
                         target = embed.target,
                         heading = embed.heading,
@@ -120,9 +143,10 @@ internal object DebugInspection {
                         width = innerWidth.toDouble(),
                         size = innerBodySize.toDouble(),
                     )
-                    repository.prepareMath(resolved.math, innerBodySize)
+                    renderBridge.prepareMath(resolved.math, innerBodySize)
                     if (resolved.info.kind == "diagram") {
-                        repository.renderDiagram(
+                        renderBridge.renderDiagram(
+                            vaultPath = content.vaultPath,
                             documentKey = resolved.info.resolvedPath ?: embed.target,
                             engineText = resolved.info.content,
                             mmd = resolved.info.isMmd,
@@ -131,11 +155,14 @@ internal object DebugInspection {
                             dark = dark,
                             collapsed = emptyList(),
                             revision = content.revision,
+                            previewContentWidthPx = innerWidth,
+                            previewUnitScale = innerUnitScale,
                         )
                     }
                     if (resolved.info.kind == "note") {
                         for (diagram in resolved.items.filterIsInstance<DiagramItem>()) {
-                            repository.renderDiagram(
+                            renderBridge.renderDiagram(
+                                vaultPath = content.vaultPath,
                                 documentKey = diagram.documentKey,
                                 engineText = diagram.engineText,
                                 mmd = diagram.mmd,
@@ -144,6 +171,8 @@ internal object DebugInspection {
                                 dark = dark,
                                 collapsed = emptyList(),
                                 revision = content.revision,
+                                previewContentWidthPx = innerWidth,
+                                previewUnitScale = innerUnitScale,
                             )
                         }
                     }
@@ -153,8 +182,12 @@ internal object DebugInspection {
     }
 
     fun build(activity: MainActivity): JSONObject {
-        val controller = activity.controller
-        val state = controller.state
+        val viewModel = activity.viewModel
+        val state = viewModel.readerState.value
+        val searchState = viewModel.searchState.value
+        val knowledgeState = viewModel.knowledgeState.value
+        val editState = viewModel.editState.value
+        val newNoteState = viewModel.newNoteState.value
         val content = state.content
         val report = JSONObject()
             .put("capturedAt", java.time.Instant.now().toString())
@@ -167,24 +200,24 @@ internal object DebugInspection {
             .put("lastOpenTarget", DebugSessionMetrics.lastOpenTarget?.let {
                 JSONObject().put("itemIndex", it.itemIndex).put("offsetPx", it.offsetPx)
             })
-            .put("contentWidth", controller.contentWidthPx)
-            .put("bodySizePx", controller.bodySizePx)
+            .put("contentWidth", viewModel.contentWidthPx)
+            .put("bodySizePx", viewModel.bodySizePx.value)
             .put("layoutMode", DebugSessionMetrics.layoutMode)
             .put("sidePaneWidthPx", DebugSessionMetrics.sidePaneWidthPx)
             .put("detailPaneWidthPx", DebugSessionMetrics.detailPaneWidthPx)
-            .put("sidePaneOpen", controller.sidePaneOpen)
-            .put("sideMode", controller.sideMode.name.lowercase())
+            .put("sidePaneOpen", viewModel.sidePaneOpen.value)
+            .put("sideMode", viewModel.sideMode.value.name.lowercase())
             .put("externalOpenMode", DebugSessionMetrics.externalMode)
-            .put("canEdit", controller.canEdit)
+            .put("canEdit", viewModel.canEdit)
             .put("search", JSONObject()
-                .put("open", controller.searchState.open)
-                .put("tab", controller.searchState.tab.name.lowercase())
-                .put("query", controller.searchState.query)
-                .put("running", controller.searchState.running)
-                .put("quickCount", controller.searchState.quick.size)
-                .put("fullCount", controller.searchState.full.size)
-                .put("quickPaths", JSONArray(controller.searchState.quick.map { it.path }))
-                .put("fullNotes", JSONArray(controller.searchState.full.map {
+                .put("open", searchState.open)
+                .put("tab", searchState.tab.name.lowercase())
+                .put("query", searchState.query)
+                .put("running", searchState.running)
+                .put("quickCount", searchState.quick.size)
+                .put("fullCount", searchState.full.size)
+                .put("quickPaths", JSONArray(searchState.quick.map { it.path }))
+                .put("fullNotes", JSONArray(searchState.full.map {
                     JSONObject()
                         .put("path", it.path)
                         .put("count", it.count)
@@ -203,27 +236,27 @@ internal object DebugInspection {
                                 .put("highlightEnd", display.end)
                         }))
                 }))
-                .put("generation", controller.searchState.generation)
-                .put("cancelled", controller.searchState.cancelled)
-                .put("staleDiscarded", controller.searchState.staleDiscarded)
+                .put("generation", searchState.generation)
+                .put("cancelled", searchState.cancelled)
+                .put("staleDiscarded", searchState.staleDiscarded)
                 .put("summary", DebugSessionMetrics.querySummary)
                 .put("lastMicros", DebugSessionMetrics.lastSearchMicros))
             .put("knowledge", JSONObject()
-                .put("open", controller.knowledgeState.open)
-                .put("tab", controller.knowledgeState.tab.name.lowercase())
-                .put("loading", controller.knowledgeState.loading)
-                .put("outlineCount", controller.knowledgeState.outline.size)
-                .put("backlinkCount", controller.knowledgeState.backlinks.size)
-                .put("tagCount", controller.knowledgeState.tags.size)
-                .put("selectedTag", controller.knowledgeState.selectedTag)
-                .put("tagNoteCount", controller.knowledgeState.tagNotes.size)
-                .put("outline", JSONArray(controller.knowledgeState.outline.map {
+                .put("open", knowledgeState.open)
+                .put("tab", knowledgeState.tab.name.lowercase())
+                .put("loading", knowledgeState.loading)
+                .put("outlineCount", knowledgeState.outline.size)
+                .put("backlinkCount", knowledgeState.backlinks.size)
+                .put("tagCount", knowledgeState.tags.size)
+                .put("selectedTag", knowledgeState.selectedTag)
+                .put("tagNoteCount", knowledgeState.tagNotes.size)
+                .put("outline", JSONArray(knowledgeState.outline.map {
                     JSONObject()
                         .put("level", it.level)
                         .put("title", it.title)
                         .put("start", it.start)
                 }))
-                .put("backlinks", JSONArray(controller.knowledgeState.backlinks.map {
+                .put("backlinks", JSONArray(knowledgeState.backlinks.map {
                     JSONObject()
                         .put("source", it.source)
                         .put("line", it.line)
@@ -231,12 +264,12 @@ internal object DebugInspection {
                         .put("embed", it.embed)
                         .put("startUtf16", it.startUtf16)
                 }))
-                .put("tags", JSONArray(controller.knowledgeState.tags.map {
+                .put("tags", JSONArray(knowledgeState.tags.map {
                     JSONObject()
                         .put("tag", it.tag)
                         .put("count", it.count)
                 }))
-                .put("tagNotes", JSONArray(controller.knowledgeState.tagNotes.map { it.path })))
+                .put("tagNotes", JSONArray(knowledgeState.tagNotes.map { it.path })))
             .put("panelHits", JSONArray().also { array ->
                 PanelRegistry.snapshot().forEach { hit ->
                     array.put(JSONObject()
@@ -251,37 +284,37 @@ internal object DebugInspection {
                 }
             })
             .put("edit", JSONObject()
-                .put("active", controller.editState.active)
-                .put("dirty", controller.editState.dirty)
-                .put("saving", controller.editState.saving)
-                .put("issue", controller.editState.issue)
-                .put("copyPath", controller.editState.copyPath)
-                .put("lastSaveOk", controller.editState.lastSaveOk)
-                .put("lastSaveMicros", controller.editState.lastSaveMicros)
+                .put("active", editState.active)
+                .put("dirty", editState.dirty)
+                .put("saving", editState.saving)
+                .put("issue", editState.issue)
+                .put("copyPath", editState.copyPath)
+                .put("lastSaveOk", editState.lastSaveOk)
+                .put("lastSaveMicros", editState.lastSaveMicros)
                 .put("lastSaveIssue", DebugSessionMetrics.lastSaveIssue)
-                .put("choice", controller.editState.choice)
-                .put("textLength", controller.editState.field.text.length)
-                .put("savedTextLength", controller.editState.savedText.length)
-                .put("readOnlyReason", controller.editState.readOnlyReason))
+                .put("choice", editState.choice)
+                .put("textLength", editState.field.text.length)
+                .put("savedTextLength", editState.savedText.length)
+                .put("readOnlyReason", editState.readOnlyReason))
             .put("newNote", JSONObject()
-                .put("open", controller.newNoteState.open)
-                .put("name", controller.newNoteState.name)
-                .put("parent", controller.newNoteState.parent)
-                .put("error", controller.newNoteState.error)
-                .put("creating", controller.newNoteState.creating)
+                .put("open", newNoteState.open)
+                .put("name", newNoteState.name)
+                .put("parent", newNoteState.parent)
+                .put("error", newNoteState.error)
+                .put("creating", newNoteState.creating)
                 .put("lastCreated", DebugSessionMetrics.lastCreatedNote))
             .put("shortcuts", JSONObject()
                 .put("published", JSONArray(DebugSessionMetrics.shortcutsPublished))
                 .put("lastLaunchNote", DebugSessionMetrics.lastShortcutLaunchNote)
                 .put("lastLaunchVault", DebugSessionMetrics.lastShortcutLaunchVault)
-                .put("stored", JSONArray(controller.shortcutNotes().map {
+                .put("stored", JSONArray(viewModel.shortcutNotesSync().map {
                     JSONObject()
                         .put("vault", it.vault)
                         .put("path", it.path)
                         .put("title", it.title)
                 })))
-            .put("firstVisibleBlockId", controller.lastVisibleBlockId)
-            .put("firstVisibleOffsetPx", controller.lastVisibleOffsetPx)
+            .put("firstVisibleBlockId", viewModel.lastVisibleBlockId)
+            .put("firstVisibleOffsetPx", viewModel.lastVisibleOffsetPx)
             .put("openMs", if (ReaderTiming.contentInstalledAt > 0) ReaderTiming.contentInstalledAt - ReaderTiming.openStartedAt else -1)
             .put("firstFrameMs", if (ReaderTiming.firstFrameAt > 0) ReaderTiming.firstFrameAt - ReaderTiming.openStartedAt else -1)
             .put("appOpenMs", if (ReaderTiming.contentInstalledAt > 0 && ReaderTiming.activityCreatedAt > 0) ReaderTiming.contentInstalledAt - ReaderTiming.activityCreatedAt else -1)
@@ -564,7 +597,7 @@ internal object DebugInspection {
             .put("rendered", rendered)
             .put("failed", failed)
             .put("empty", empty)
-            .put("typographyScale", io.github.groundgrounder.hortus.core.mathTypographyScale()))
+            .put("typographyScale", mathTypographyScale()))
         val failedDiagrams = Inspection.failuresJson().length()
         val failedImages = content.media.count {
             it.columns.isEmpty() && it.imagePath.isNotEmpty() && it.imageReason.isNotEmpty()
