@@ -11,5 +11,10 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
             android:exported="true"
             android:permission="android.permission.DUMP" />
+        <provider
+            android:name=".DebugPreviewProvider"
+            android:authorities="${applicationId}.debugpreview"
+            android:exported="true"
+            android:grantUriPermissions="false" />
     </application>
 </manifest>

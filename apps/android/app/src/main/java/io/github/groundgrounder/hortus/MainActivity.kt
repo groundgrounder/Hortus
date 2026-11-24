@@ -3,8 +3,11 @@ package io.github.groundgrounder.hortus
 
 import android.Manifest
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -23,6 +26,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 open class MainActivity : ComponentActivity() {
     companion object {
@@ -73,6 +77,8 @@ open class MainActivity : ComponentActivity() {
         }
         if (intent.getBooleanExtra("run_smoke", false)) {
             // DebugSmokeActivity 子类自行处理；MainActivity 不启动任何检查。
+        } else if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
+            handleExternalIntent(intent)
         } else if (intent.getStringExtra("debug_vault") == null) {
             if (intent.getStringExtra(EXTRA_OPEN_NOTE) != null) {
                 handleOpenIntent(intent)
@@ -85,7 +91,11 @@ open class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleOpenIntent(intent)
+        if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
+            handleExternalIntent(intent)
+        } else {
+            handleOpenIntent(intent)
+        }
         DebugHooks.onNewIntent(this, intent)
     }
 
@@ -103,10 +113,123 @@ open class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onStop() {
+        controller.onActivityStop()
+        super.onStop()
+    }
+
     override fun onDestroy() {
         if (isFinishing) controller.close()
         super.onDestroy()
     }
+
+    private fun handleExternalIntent(intent: Intent) {
+        val uri = intent.data ?: return
+        val physical = resolvePhysicalPath(uri)
+        if (physical != null && File(physical).isFile) {
+            if (!hasAccess) {
+                controller.notice(getString(R.string.reader_open_failed, "io.permission_denied"))
+                return
+            }
+            val file = File(physical)
+            val canonical = runCatching { file.canonicalPath }.getOrNull() ?: return
+            val known = controller.state.vaultPath ?: controller.preferencesState.vaultPath
+            val knownRoot = known?.let { runCatching { File(it).canonicalPath }.getOrNull() }
+            val vault: String
+            val note: String
+            val mode: String
+            if (knownRoot != null && canonical.startsWith(knownRoot + File.separator)) {
+                vault = knownRoot
+                note = canonical.removePrefix(knownRoot + File.separator)
+                mode = "vault"
+            } else {
+                vault = file.parentFile?.absolutePath ?: return
+                note = file.name
+                mode = "parent_vault"
+            }
+            if (controller.state.vaultPath == vault) {
+                controller.recordExternalMode(mode)
+                controller.openNote(note.replace(File.separatorChar, '/'))
+            } else {
+                path = vault
+                controller.start(vault, note.replace(File.separatorChar, '/'))
+                controller.recordExternalMode(mode)
+            }
+            return
+        }
+        lifecycleScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching {
+                    val name = displayName(uri) ?: "Preview.md"
+                    val stream = contentResolver.openInputStream(uri)
+                        ?: throw IllegalStateException("preview.unreadable")
+                    stream.use { input ->
+                        val output = java.io.ByteArrayOutputStream()
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            if (output.size() > 8 * 1024 * 1024) {
+                                throw IllegalStateException("preview.too_large")
+                            }
+                        }
+                        name to output.toByteArray().toString(Charsets.UTF_8)
+                    }
+                }.getOrNull()
+            }
+            if (loaded == null) {
+                controller.notice(getString(R.string.preview_error))
+            } else {
+                controller.openExternalPreview(loaded.first, loaded.second)
+            }
+        }
+    }
+
+    private fun resolvePhysicalPath(uri: Uri): String? {
+        return try {
+            when (uri.scheme) {
+                "file" -> uri.path
+                "content" -> when (uri.authority) {
+                    "com.android.externalstorage.documents" -> {
+                        val id = DocumentsContract.getDocumentId(uri)
+                        val parts = id.split(':', limit = 2)
+                        if (parts.size == 2) {
+                            val volume = if (parts[0].equals("primary", ignoreCase = true)) {
+                                "/storage/emulated/0"
+                            } else {
+                                "/storage/${parts[0]}"
+                            }
+                            "$volume/${parts[1]}"
+                        } else {
+                            null
+                        }
+                    }
+                    "com.android.providers.downloads.documents" -> {
+                        val id = DocumentsContract.getDocumentId(uri)
+                        id.removePrefix("raw:").takeIf { it != id }
+                    }
+                    else -> contentResolver.query(
+                        uri,
+                        arrayOf("_data"),
+                        null,
+                        null,
+                        null,
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    }
+                }
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun displayName(uri: Uri): String? = runCatching {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    }.getOrNull()
 
     private fun handleOpenIntent(intent: Intent) {
         val note = intent.getStringExtra(EXTRA_OPEN_NOTE) ?: return
