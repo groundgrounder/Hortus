@@ -2,8 +2,11 @@
 package io.github.groundgrounder.hortus.reader
 
 import android.content.Context
+import android.content.res.Configuration
+import io.github.groundgrounder.hortus.app.HortusServices
 import io.github.groundgrounder.hortus.core.SceneData
 import io.github.groundgrounder.hortus.core.SceneHit
+import io.github.groundgrounder.hortus.core.settings.ThemeMode
 import io.github.groundgrounder.hortus.reader.render.SceneRenderer
 import org.json.JSONArray
 import org.json.JSONObject
@@ -52,11 +55,23 @@ internal object FocusStateRegistry {
 internal object FocusDebug {
     fun write(context: Context, state: JSONObject) {
         runCatching {
+            val appSettings = HortusServices.get(context.applicationContext).settingsRepository.settings.value
+            val systemDark = (context.resources.configuration.uiMode and
+                Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+            val resolvedDark = when (appSettings.themeMode) {
+                ThemeMode.SYSTEM -> systemDark
+                ThemeMode.LIGHT -> false
+                ThemeMode.DARK -> true
+            }
+            val enriched = JSONObject(state.toString())
+                .put("themeMode", appSettings.themeMode.serialized)
+                .put("fontSizeSp", appSettings.fontSizeSp.toDouble())
+                .put("resolvedDark", resolvedDark)
             val directory = context.getExternalFilesDir("focus") ?: return
             directory.mkdirs()
             val file = File(directory, "focus-state.json")
             val temporary = File(directory, ".focus-state.json.tmp")
-            temporary.writeText(state.toString(2) + "\n")
+            temporary.writeText(enriched.toString(2) + "\n")
             temporary.setReadable(true, false)
             java.nio.file.Files.move(
                 temporary.toPath(),

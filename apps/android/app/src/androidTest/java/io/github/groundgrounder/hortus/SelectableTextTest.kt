@@ -134,6 +134,63 @@ class SelectableTextTest {
         scenario.close()
     }
 
+    @Test
+    fun copySelectionWithInlineMathIncludesLatexSource() {
+        shell("appops set $PACKAGE_NAME MANAGE_EXTERNAL_STORAGE allow")
+        val vault = File(context.getExternalFilesDir(null), "math-copy-vault-${System.nanoTime()}").apply {
+            mkdirs()
+        }
+        try {
+            File(vault, "MathCopy.md").writeText(
+                "# MathCopy\n\n中文计算 alpha \$a^2 + b^2 = c^2\$ beta 结束。\n",
+            )
+            val intent = Intent(context, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(MainActivity.EXTRA_OPEN_NOTE, "MathCopy.md")
+                putExtra(MainActivity.EXTRA_OPEN_VAULT, vault.absolutePath)
+            }
+            val scenario = ActivityScenario.launch<MainActivity>(intent)
+            try {
+                waitForNote(scenario, "MathCopy.md")
+                instrumentation.waitForIdleSync()
+                val device = UiDevice.getInstance(instrumentation)
+                val paragraph = device.wait(Until.findObject(By.textContains("中文计算")), 8_000)
+                assertNotNull("paragraph with inline math not found", paragraph)
+                val bounds = paragraph!!.visibleBounds
+                device.swipe(
+                    bounds.left + 80,
+                    bounds.top + bounds.height() / 2,
+                    bounds.left + 80,
+                    bounds.top + bounds.height() / 2,
+                    900,
+                )
+                val selectAll = device.wait(Until.findObject(By.textContains("全选")), 3_000)
+                    ?: device.wait(Until.findObject(By.textContains("Select all")), 3_000)
+                assertNotNull("select all action did not appear", selectAll)
+                selectAll!!.click()
+                device.waitForIdle()
+                val copy = device.wait(Until.findObject(By.textContains("复制")), 4_000)
+                    ?: device.wait(Until.findObject(By.textContains("Copy")), 3_000)
+                assertNotNull("copy action did not appear", copy)
+                copy!!.click()
+                device.waitForIdle()
+                Thread.sleep(400)
+                val clipboard = context.getSystemService(ClipboardManager::class.java)
+                    .primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+                assertTrue("clipboard missing Chinese prefix: $clipboard", clipboard.contains("中文计算"))
+                assertTrue("clipboard missing LaTeX source: $clipboard", clipboard.contains("\$a^2 + b^2 = c^2\$"))
+                assertTrue(
+                    "clipboard still contains placeholder: $clipboard",
+                    !clipboard.contains('\uFFFC') && !clipboard.contains('\u200B'),
+                )
+            } finally {
+                scenario.close()
+            }
+        } finally {
+            vault.deleteRecursively()
+        }
+    }
+
     private companion object {
         const val PACKAGE_NAME = "io.github.groundgrounder.hortus"
     }

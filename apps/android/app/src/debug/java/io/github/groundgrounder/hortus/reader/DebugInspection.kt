@@ -96,9 +96,14 @@ internal object DebugInspection {
         val viewModel = activity.viewModel
         val content = viewModel.readerState.value.content ?: return
         val renderBridge = viewModel.renderBridge
-        val dark = (activity.resources.configuration.uiMode and
+        val systemDark = (activity.resources.configuration.uiMode and
             android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
+        val dark = when (viewModel.appSettings.value.themeMode) {
+            io.github.groundgrounder.hortus.core.settings.ThemeMode.SYSTEM -> systemDark
+            io.github.groundgrounder.hortus.core.settings.ThemeMode.LIGHT -> false
+            io.github.groundgrounder.hortus.core.settings.ThemeMode.DARK -> true
+        }
         val density = activity.resources.displayMetrics.density
         val unitScale = diagramUnitScale(content.bodySize, density)
         val mainLayoutWidth = (content.width / unitScale).toDouble()
@@ -188,6 +193,18 @@ internal object DebugInspection {
         val knowledgeState = viewModel.knowledgeState.value
         val editState = viewModel.editState.value
         val newNoteState = viewModel.newNoteState.value
+        val appSettings = viewModel.appSettings.value
+        val systemDark = (activity.resources.configuration.uiMode and
+            android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+        val resolvedDark = when (appSettings.themeMode) {
+            io.github.groundgrounder.hortus.core.settings.ThemeMode.SYSTEM -> systemDark
+            io.github.groundgrounder.hortus.core.settings.ThemeMode.LIGHT -> false
+            io.github.groundgrounder.hortus.core.settings.ThemeMode.DARK -> true
+        }
+        val settingsFile = File(File(activity.filesDir, "config"), "android-settings.json")
+        val diagramExportsDir = File(activity.cacheDir, "diagram-exports")
+        val externalPreviewDir = File(activity.cacheDir, "external-preview")
         val content = state.content
         val report = JSONObject()
             .put("capturedAt", java.time.Instant.now().toString())
@@ -197,6 +214,18 @@ internal object DebugInspection {
             .put("loading", state.loading)
             .put("error", state.error)
             .put("lastAction", DebugSessionMetrics.lastAction)
+            .put("settings", JSONObject()
+                .put("themeMode", appSettings.themeMode.serialized)
+                .put("fontSizeSp", appSettings.fontSizeSp.toDouble())
+                .put("bodySizePx", viewModel.bodySizePx.value.toDouble())
+                .put("systemDark", systemDark)
+                .put("resolvedDark", resolvedDark)
+                .put("settingsOpen", viewModel.settingsOpen.value)
+                .put("settingsFileExists", settingsFile.isFile)
+                .put("settingsFileText", settingsFile.takeIf { it.isFile }?.readText())
+                .put("cacheDiagramExportsCount", diagramExportsDir.listFiles()?.size ?: 0)
+                .put("cacheExternalPreviewCount", externalPreviewDir.listFiles()?.size ?: 0)
+                .put("diagramPreviewCacheSize", DiagramPreviewCache.size()))
             .put("lastOpenTarget", DebugSessionMetrics.lastOpenTarget?.let {
                 JSONObject().put("itemIndex", it.itemIndex).put("offsetPx", it.offsetPx)
             })

@@ -238,6 +238,19 @@ internal object DebugHooks {
                     expectedNote = DebugSessionMetrics.lastShortcutLaunchNote,
                 )
             }
+            "settings" -> viewModel.openSettings()
+            "close_settings" -> viewModel.closeSettings()
+            "set_theme" -> {
+                val mode = io.github.groundgrounder.hortus.core.settings.ThemeMode.fromSerialized(
+                    intent.getStringExtra("debug_theme"),
+                )
+                viewModel.setThemeMode(mode).join()
+            }
+            "set_font_size" -> {
+                val size = intent.getFloatExtra("debug_font_size", 17f)
+                viewModel.setFontSizeSp(size).join()
+            }
+            "clear_caches" -> viewModel.clearCaches().join()
         }
     }
 
