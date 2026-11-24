@@ -37,6 +37,7 @@ pub fn utf16_offset_to_char_offset(text: &str, target_utf16: usize) -> usize {
 }
 
 /// 将源码 UTF-16 区间 `(start, length)` 转换为 `(char_start, char_end)`。
+#[cfg(test)]
 pub fn utf16_range_to_char_range(
     text: &str,
     start_utf16: usize,
@@ -57,14 +58,6 @@ pub fn utf16_range_to_char_range(
         chars += 1;
     }
     (char_start.unwrap_or(chars), chars)
-}
-
-/// 从源码中提取给定 UTF-16 起点与长度的切片。
-pub fn utf16_slice(text: &str, start_utf16: usize, length_utf16: usize) -> Option<String> {
-    let mapper = Utf16Mapper::new(text);
-    let b0 = mapper.utf16_to_byte(start_utf16);
-    let b1 = mapper.utf16_to_byte(start_utf16.saturating_add(length_utf16));
-    text.get(b0..b1).map(str::to_string)
 }
 
 /// 线性预扫描一次字符串，提供 O(log N) 精确 UTF-16 ↔ Unicode char ↔ UTF-8 byte 索引转换。
@@ -133,6 +126,12 @@ impl Utf16Mapper {
             .partition_point(|&b| b < target_byte)
             .min(self.utf16_offsets.len().saturating_sub(1));
         self.utf16_offsets[idx]
+    }
+
+    pub fn byte_to_char(&self, target_byte: usize) -> usize {
+        self.byte_offsets
+            .partition_point(|&b| b < target_byte)
+            .min(self.utf16_offsets.len().saturating_sub(1))
     }
 }
 

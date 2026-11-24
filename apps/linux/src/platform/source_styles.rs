@@ -5,6 +5,7 @@
 use crate::core::{Utf16Mapper, decode_source_styles};
 use gtk4::prelude::*;
 
+#[allow(dead_code)]
 pub fn apply_mask_tags(
     buffer: &gtk4::TextBuffer,
     s: &gtk4::TextIter,

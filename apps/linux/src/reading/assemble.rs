@@ -2,7 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 阅读缓冲数据组装：锚点映射、链接区间、内嵌结构与统计指标计算。
+//! 阅读分段模型组装：合并连续文本段与行内公式，遇到块级非文本元素切分原生子控件。
 
 use crate::core::Utf16Mapper;
 #[cfg(feature = "automation")]
@@ -12,29 +12,25 @@ use crate::reading::prepare::PreparedReadingNote;
 use crate::reading::prepare::{DecodedBlock, DecodedReadingModel, DecodedRun};
 use crate::reading::surface::ReadingEnv;
 use crate::render::diagram::{DiagramExportKind, DiagramExportMeta, RenderedDiagram};
-use crate::render::diagram_card::{DiagramCallbacks, build_diagram_card};
-use crate::render::embed::{EmbedBodyBuilder, EmbedRequest, PreparedEmbed, build_embed_card};
+use crate::render::diagram_card::{DiagramCallbacks, DiagramCard, build_diagram_card};
+use crate::render::embed::{
+    EmbedBodyBuilder, EmbedCard, EmbedRequest, PreparedEmbed, build_embed_card,
+};
 use crate::render::math::PreparedMathBlock;
-use crate::render::math_widgets::{build_display_math_widget, build_inline_math_widget};
+use crate::render::math_widgets::{
+    DisplayMathBlock, build_display_math_widget, build_inline_math_widget,
+};
 #[cfg(feature = "automation")]
 use crate::render::media::summarize_media_stats;
-use crate::render::media::{PreparedMedia, build_image_widget, build_table_widget};
+use crate::render::media::{
+    ImageBlock, PreparedMedia, TableBlock, build_image_widget, build_table_widget,
+};
 use gtk4::pango;
-use gtk4::prelude::*;
 use hortus_ffi::{EmbedContentInfo, KnowledgeMarkupInfo, ResolvedLinkInfo};
 use libadwaita as adw;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-
-#[derive(Clone)]
-pub enum AnchorKind {
-    Widget(gtk4::Widget),
-    InlineWidget {
-        widget: gtk4::Widget,
-        rise_pango: i32,
-    },
-}
 
 #[derive(Clone)]
 pub enum LinkAction {
@@ -55,30 +51,80 @@ pub struct LinkSpan {
 }
 
 #[derive(Clone)]
-pub struct AdjustedRun {
-    pub disp_start_u16: usize,
-    pub disp_len_u16: usize,
-    pub mask: u32,
+pub struct InlineAnchor {
+    pub local_char_pos: usize,
+    pub widget: gtk4::Widget,
+    pub rise_pango: i32,
 }
 
-pub struct AssembledReadingBuffer {
+pub struct TextSegmentData {
     pub text: String,
-    pub runs: Vec<AdjustedRun>,
-    pub anchors: Vec<(usize, AnchorKind)>,
-    pub source_char_anchors: Vec<(u64, i32)>,
+    pub runs: Vec<(i32, i32, u32)>,
+    pub inline_anchors: Vec<InlineAnchor>,
     pub link_spans: Vec<LinkSpan>,
-    #[cfg(feature = "automation")]
-    pub diagram_widgets: Vec<gtk4::Widget>,
-    #[cfg(feature = "automation")]
-    pub table_widgets: Vec<gtk4::Widget>,
-    #[cfg(feature = "automation")]
-    pub image_widgets: Vec<gtk4::Widget>,
-    #[cfg(feature = "automation")]
-    pub embed_widgets: Vec<gtk4::Widget>,
+    pub source_anchors: Vec<(u64, i32)>,
+    pub source_start: u64,
+    pub source_end: u64,
+}
+
+pub enum AssembledSegment {
+    Text(TextSegmentData),
+    Diagram {
+        card: DiagramCard,
+        source_start: u64,
+        source_end: u64,
+    },
+    Table {
+        table: TableBlock,
+        source_start: u64,
+        source_end: u64,
+    },
+    Image {
+        image: ImageBlock,
+        source_start: u64,
+        source_end: u64,
+    },
+    DisplayMath {
+        math: DisplayMathBlock,
+        source_start: u64,
+        source_end: u64,
+    },
+    Embed {
+        embed: EmbedCard,
+        source_start: u64,
+        source_end: u64,
+    },
+    Hr {
+        source_start: u64,
+        source_end: u64,
+    },
+}
+
+enum BlockBreakKind {
+    Diagram(DiagramCard),
+    Table(TableBlock),
+    Image(ImageBlock),
+    DisplayMath(DisplayMathBlock),
+    Embed(EmbedCard),
+    Hr,
+}
+
+struct BlockBreak {
+    char_pos: usize,
+    source_start: u64,
+    source_end: u64,
+    kind: BlockBreakKind,
+}
+
+#[derive(Clone)]
+struct CharRun {
+    char_start: usize,
+    char_end: usize,
+    mask: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_reading_buffer_data(
+pub fn assemble_reading_segments(
     model: &DecodedReadingModel,
     source_text: &str,
     knowledge: Option<&KnowledgeMarkupInfo>,
@@ -88,8 +134,9 @@ pub fn assemble_reading_buffer_data(
     precomputed_embeds: &HashMap<usize, PreparedEmbed>,
     env: &ReadingEnv,
     on_diagram_collapse: Rc<dyn Fn(u32, Vec<String>, hortus_ffi::SceneData)>,
+    on_diagram_scene_updated: Rc<dyn Fn(u32, hortus_ffi::SceneData)>,
     embed_body_builder: &EmbedBodyBuilder,
-) -> AssembledReadingBuffer {
+) -> Vec<AssembledSegment> {
     let mut text = model.text.clone();
     let has_props = text.starts_with('\u{e000}');
     let prop_label = "属性";
@@ -104,7 +151,7 @@ pub fn assemble_reading_buffer_data(
     let disp_mapper = Utf16Mapper::new(&text);
     let src_mapper = Utf16Mapper::new(source_text);
 
-    let mut block_index_by_id = HashMap::new();
+    let mut block_index_by_id = HashMap::with_capacity(model.blocks.len());
     let mut block_disp_starts_u16 = Vec::with_capacity(model.blocks.len());
     for (idx, blk) in model.blocks.iter().enumerate() {
         block_index_by_id.insert(blk.id, idx);
@@ -133,24 +180,17 @@ pub fn assemble_reading_buffer_data(
         })
         .unwrap_or_default();
 
-    let mut adjusted_runs = Vec::new();
-    let mut anchors: Vec<(usize, AnchorKind)> = Vec::new();
+    let mut char_runs: Vec<CharRun> = Vec::with_capacity(model.runs.len());
+    let mut block_breaks: Vec<BlockBreak> = Vec::new();
+    let mut inline_anchors: Vec<(usize, gtk4::Widget, i32)> = Vec::new();
     let mut link_spans: Vec<LinkSpan> = Vec::new();
-    let mut source_char_anchors: Vec<(u64, i32)> = Vec::new();
+    let mut source_char_anchors: Vec<(u64, usize)> = Vec::new();
     let mut seen_hr_chars = HashSet::new();
-    #[cfg(feature = "automation")]
-    let mut diagram_widgets: Vec<gtk4::Widget> = Vec::new();
-    #[cfg(feature = "automation")]
-    let mut table_widgets: Vec<gtk4::Widget> = Vec::new();
-    #[cfg(feature = "automation")]
-    let mut image_widgets: Vec<gtk4::Widget> = Vec::new();
-    #[cfg(feature = "automation")]
-    let mut embed_widgets: Vec<gtk4::Widget> = Vec::new();
 
     for (idx, blk) in model.blocks.iter().enumerate() {
         let blk_disp_u16 = block_disp_starts_u16[idx];
         let blk_src_u16 = blk.source_start;
-        let blk_char = disp_mapper.utf16_to_char(blk_disp_u16) as i32;
+        let blk_char = disp_mapper.utf16_to_char(blk_disp_u16);
         source_char_anchors.push((blk_src_u16, blk_char));
 
         let slice = &model.runs[blk.run_start..blk.run_start + blk.run_len];
@@ -164,8 +204,8 @@ pub fn assemble_reading_buffer_data(
                     r_start = (r_start as isize + prop_delta_u16).max(0) as usize;
                 }
             }
-            let r_char_start = disp_mapper.utf16_to_char(r_start) as i32;
-            let r_char_end = disp_mapper.utf16_to_char(r_start + r_len) as i32;
+            let r_char_start = disp_mapper.utf16_to_char(r_start);
+            let r_char_end = disp_mapper.utf16_to_char(r_start + r_len);
 
             let mut final_mask = run.mask;
             let abs_src_u16 = blk_src_u16 + run.source_start;
@@ -174,12 +214,14 @@ pub fn assemble_reading_buffer_data(
                 && let Some(zw_byte) =
                     find_char_near_utf16(&text, &disp_mapper, r_start, r_len, '\u{200b}')
             {
-                let zw_char = text[..zw_byte].chars().count();
+                let zw_char = disp_mapper.byte_to_char(zw_byte);
                 if seen_hr_chars.insert(zw_char) {
-                    let sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
-                    sep.add_css_class("hortus-reading-hr");
-                    sep.set_hexpand(true);
-                    anchors.push((zw_char, AnchorKind::Widget(sep.upcast())));
+                    block_breaks.push(BlockBreak {
+                        char_pos: zw_char,
+                        source_start: blk_src_u16,
+                        source_end: blk_src_u16 + blk.source_length,
+                        kind: BlockBreakKind::Hr,
+                    });
                 }
             }
 
@@ -192,8 +234,8 @@ pub fn assemble_reading_buffer_data(
                     }
                     if r_char_end > r_char_start {
                         link_spans.push(LinkSpan {
-                            char_start: r_char_start,
-                            char_end: r_char_end,
+                            char_start: r_char_start as i32,
+                            char_end: r_char_end as i32,
                             action: LinkAction::Wiki {
                                 target: link.target.clone(),
                                 heading: link.heading.clone(),
@@ -212,31 +254,33 @@ pub fn assemble_reading_buffer_data(
                 && r_char_end > r_char_start
             {
                 link_spans.push(LinkSpan {
-                    char_start: r_char_start,
-                    char_end: r_char_end,
+                    char_start: r_char_start as i32,
+                    char_end: r_char_end as i32,
                     action: LinkAction::ExternalUrl(url),
                 });
             }
 
             if final_mask & (512 | 8192) != 0 && r_char_end > r_char_start {
-                let b0 = disp_mapper.char_to_byte(r_char_start as usize);
-                let b1 = disp_mapper.char_to_byte(r_char_end as usize);
+                let b0 = disp_mapper.char_to_byte(r_char_start);
+                let b1 = disp_mapper.char_to_byte(r_char_end);
                 let tag_text = text.get(b0..b1).unwrap_or("");
                 let tag = tag_text.trim_start_matches('#').trim().to_string();
                 if !tag.is_empty() {
                     link_spans.push(LinkSpan {
-                        char_start: r_char_start,
-                        char_end: r_char_end,
+                        char_start: r_char_start as i32,
+                        char_end: r_char_end as i32,
                         action: LinkAction::Tag(tag),
                     });
                 }
             }
 
-            adjusted_runs.push(AdjustedRun {
-                disp_start_u16: r_start,
-                disp_len_u16: r_len,
-                mask: final_mask,
-            });
+            if r_char_end > r_char_start && final_mask != 0 {
+                char_runs.push(CharRun {
+                    char_start: r_char_start,
+                    char_end: r_char_end,
+                    mask: final_mask,
+                });
+            }
         }
     }
 
@@ -251,7 +295,7 @@ pub fn assemble_reading_buffer_data(
         if let Some(byte_pos) =
             find_char_near_utf16(&text, &disp_mapper, blk_disp_u16, blk_len_u16, '\u{fffc}')
         {
-            let char_pos = text[..byte_pos].chars().count();
+            let char_pos = disp_mapper.byte_to_char(byte_pos);
             let diag = diagrams
                 .iter()
                 .find(|d| d.ordinal == diag_ord)
@@ -265,18 +309,26 @@ pub fn assemble_reading_buffer_data(
                     collapsed: Vec::new(),
                     previous: None,
                 });
-            let w = build_diagram_card(
+            let card = build_diagram_card(
                 env.note_path.clone(),
                 source_text.to_string(),
                 false,
                 diag,
                 Arc::clone(&env.diagram_engine),
-                make_diagram_callbacks(env, env.note_path.clone(), on_diagram_collapse.clone()),
+                make_diagram_callbacks(
+                    env,
+                    env.note_path.clone(),
+                    on_diagram_collapse.clone(),
+                    on_diagram_scene_updated.clone(),
+                ),
                 env.content_width,
             );
-            #[cfg(feature = "automation")]
-            diagram_widgets.push(w.clone());
-            anchors.push((char_pos, AnchorKind::Widget(w)));
+            block_breaks.push(BlockBreak {
+                char_pos,
+                source_start: blk.source_start,
+                source_end: blk.source_start + blk.source_length,
+                kind: BlockBreakKind::Diagram(card),
+            });
         }
     }
 
@@ -284,10 +336,8 @@ pub fn assemble_reading_buffer_data(
         let Some(&blk_idx) = block_index_by_id.get(&m.block.block_id) else {
             continue;
         };
-        let local_u16 = m
-            .block
-            .display_start
-            .saturating_sub(model.blocks[blk_idx].display_start) as usize;
+        let blk = &model.blocks[blk_idx];
+        let local_u16 = m.block.display_start.saturating_sub(blk.display_start) as usize;
         let disp_u16 = block_disp_starts_u16[blk_idx] + local_u16;
         if let Some(byte_pos) = find_char_near_utf16(
             &text,
@@ -296,10 +346,16 @@ pub fn assemble_reading_buffer_data(
             m.block.display_length.max(1) as usize,
             '\u{fffc}',
         ) {
-            let char_pos = text[..byte_pos].chars().count();
+            let char_pos = disp_mapper.byte_to_char(byte_pos);
             if m.block.block {
-                let widget = build_display_math_widget(m, env.content_width);
-                anchors.push((char_pos, AnchorKind::Widget(widget)));
+                let math_block = build_display_math_widget(m, env.content_width);
+                let src_start = blk.source_start + m.block.source_start;
+                block_breaks.push(BlockBreak {
+                    char_pos,
+                    source_start: src_start,
+                    source_end: src_start + m.block.source_length,
+                    kind: BlockBreakKind::DisplayMath(math_block),
+                });
             } else {
                 let widget = build_inline_math_widget(m);
                 let rise_pango = m
@@ -310,7 +366,7 @@ pub fn assemble_reading_buffer_data(
                         -((px * 0.75 * f64::from(pango::SCALE)).round() as i32)
                     })
                     .unwrap_or(0);
-                anchors.push((char_pos, AnchorKind::InlineWidget { widget, rise_pango }));
+                inline_anchors.push((char_pos, widget, rise_pango));
             }
         }
     }
@@ -319,10 +375,8 @@ pub fn assemble_reading_buffer_data(
         let Some(&blk_idx) = block_index_by_id.get(&item.block.block_id) else {
             continue;
         };
-        let local_u16 = item
-            .block
-            .display_start
-            .saturating_sub(model.blocks[blk_idx].display_start) as usize;
+        let blk = &model.blocks[blk_idx];
+        let local_u16 = item.block.display_start.saturating_sub(blk.display_start) as usize;
         let disp_u16 = block_disp_starts_u16[blk_idx] + local_u16;
         let Some(byte_pos) = find_char_near_utf16(
             &text,
@@ -333,7 +387,7 @@ pub fn assemble_reading_buffer_data(
         ) else {
             continue;
         };
-        let char_pos = text[..byte_pos].chars().count();
+        let char_pos = disp_mapper.byte_to_char(byte_pos);
 
         if item.block.image_wiki && item.reason.starts_with("embed.") {
             let src_u16 = item.block.source_start;
@@ -369,9 +423,12 @@ pub fn assemble_reading_buffer_data(
                     env.callbacks.clone(),
                     embed_body_builder.clone(),
                 );
-                #[cfg(feature = "automation")]
-                embed_widgets.push(card.clone());
-                anchors.push((char_pos, AnchorKind::Widget(card)));
+                block_breaks.push(BlockBreak {
+                    char_pos,
+                    source_start: src_u16,
+                    source_end: src_u16 + link.length_utf16,
+                    kind: BlockBreakKind::Embed(card),
+                });
                 continue;
             }
         }
@@ -383,42 +440,251 @@ pub fn assemble_reading_buffer_data(
                 Some(env.callbacks.on_open_note.clone()),
                 Some(env.callbacks.on_open_external.clone()),
             );
-            #[cfg(feature = "automation")]
-            table_widgets.push(tbl.clone());
-            anchors.push((char_pos, AnchorKind::Widget(tbl)));
+            block_breaks.push(BlockBreak {
+                char_pos,
+                source_start: item.block.source_start,
+                source_end: item
+                    .block
+                    .source_start
+                    .max(blk.source_start + blk.source_length),
+                kind: BlockBreakKind::Table(tbl),
+            });
         } else {
             let img = build_image_widget(item, env.content_width, env.parent_window.as_ref());
-            #[cfg(feature = "automation")]
-            image_widgets.push(img.clone());
-            anchors.push((char_pos, AnchorKind::Widget(img)));
+            block_breaks.push(BlockBreak {
+                char_pos,
+                source_start: item.block.source_start,
+                source_end: item.block.source_start + 1,
+                kind: BlockBreakKind::Image(img),
+            });
         }
     }
 
-    anchors.sort_by_key(|a| a.0);
-    anchors.dedup_by(|a, b| a.0 == b.0);
+    block_breaks.sort_by_key(|b| b.char_pos);
+    block_breaks.dedup_by_key(|b| b.char_pos);
+    inline_anchors.sort_by_key(|a| a.0);
+    inline_anchors.dedup_by_key(|a| a.0);
     source_char_anchors.sort_by_key(|a| a.0);
 
-    AssembledReadingBuffer {
-        text,
-        runs: adjusted_runs,
-        anchors,
-        source_char_anchors,
-        link_spans,
-        #[cfg(feature = "automation")]
-        diagram_widgets,
-        #[cfg(feature = "automation")]
-        table_widgets,
-        #[cfg(feature = "automation")]
-        image_widgets,
-        #[cfg(feature = "automation")]
-        embed_widgets,
+    split_into_segments(
+        &text,
+        &disp_mapper,
+        &char_runs,
+        &inline_anchors,
+        &link_spans,
+        &source_char_anchors,
+        block_breaks,
+    )
+}
+
+fn split_into_segments(
+    text: &str,
+    disp_mapper: &Utf16Mapper,
+    char_runs: &[CharRun],
+    inline_anchors: &[(usize, gtk4::Widget, i32)],
+    link_spans: &[LinkSpan],
+    source_char_anchors: &[(u64, usize)],
+    block_breaks: Vec<BlockBreak>,
+) -> Vec<AssembledSegment> {
+    let total_chars = disp_mapper.char_len();
+    let mut segments = Vec::with_capacity(block_breaks.len() * 2 + 1);
+    let mut raw_start = 0usize;
+    let mut last_src_u16 = source_char_anchors.first().map(|a| a.0).unwrap_or(0);
+
+    for brk in block_breaks {
+        let raw_end = brk.char_pos.min(total_chars);
+        if raw_end > raw_start
+            && let Some(seg) = build_text_segment_slice(
+                text,
+                disp_mapper,
+                char_runs,
+                inline_anchors,
+                link_spans,
+                source_char_anchors,
+                raw_start,
+                raw_end,
+                last_src_u16,
+                brk.source_start,
+            )
+        {
+            last_src_u16 = seg.source_end;
+            segments.push(AssembledSegment::Text(seg));
+        }
+
+        let brk_seg = match brk.kind {
+            BlockBreakKind::Diagram(card) => AssembledSegment::Diagram {
+                card,
+                source_start: brk.source_start,
+                source_end: brk.source_end,
+            },
+            BlockBreakKind::Table(table) => AssembledSegment::Table {
+                table,
+                source_start: brk.source_start,
+                source_end: brk.source_end,
+            },
+            BlockBreakKind::Image(image) => AssembledSegment::Image {
+                image,
+                source_start: brk.source_start,
+                source_end: brk.source_end,
+            },
+            BlockBreakKind::DisplayMath(math) => AssembledSegment::DisplayMath {
+                math,
+                source_start: brk.source_start,
+                source_end: brk.source_end,
+            },
+            BlockBreakKind::Embed(embed) => AssembledSegment::Embed {
+                embed,
+                source_start: brk.source_start,
+                source_end: brk.source_end,
+            },
+            BlockBreakKind::Hr => AssembledSegment::Hr {
+                source_start: brk.source_start,
+                source_end: brk.source_end,
+            },
+        };
+        last_src_u16 = brk.source_end.max(last_src_u16);
+        segments.push(brk_seg);
+        raw_start = (brk.char_pos + 1).min(total_chars);
     }
+
+    if raw_start < total_chars {
+        let end_src_u16 = source_char_anchors
+            .last()
+            .map(|a| a.0)
+            .unwrap_or(last_src_u16)
+            .max(last_src_u16);
+        if let Some(seg) = build_text_segment_slice(
+            text,
+            disp_mapper,
+            char_runs,
+            inline_anchors,
+            link_spans,
+            source_char_anchors,
+            raw_start,
+            total_chars,
+            last_src_u16,
+            end_src_u16,
+        ) {
+            segments.push(AssembledSegment::Text(seg));
+        }
+    }
+
+    segments
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_text_segment_slice(
+    text: &str,
+    disp_mapper: &Utf16Mapper,
+    char_runs: &[CharRun],
+    inline_anchors: &[(usize, gtk4::Widget, i32)],
+    link_spans: &[LinkSpan],
+    source_char_anchors: &[(u64, usize)],
+    raw_start: usize,
+    raw_end: usize,
+    fallback_src_start: u64,
+    fallback_src_end: u64,
+) -> Option<TextSegmentData> {
+    let raw_b0 = disp_mapper.char_to_byte(raw_start);
+    let raw_b1 = disp_mapper.char_to_byte(raw_end);
+    let raw_slice = text.get(raw_b0..raw_b1)?;
+
+    let lead_trim_bytes = raw_slice
+        .bytes()
+        .take_while(|&b| b == b'\n' || b == b'\r')
+        .count();
+    let tail_trim_bytes = raw_slice[lead_trim_bytes..]
+        .bytes()
+        .rev()
+        .take_while(|&b| b == b'\n' || b == b'\r')
+        .count();
+
+    let seg_b0 = raw_b0 + lead_trim_bytes;
+    let seg_b1 = raw_b1 - tail_trim_bytes;
+    if seg_b0 >= seg_b1 {
+        return None;
+    }
+    let seg_text = text.get(seg_b0..seg_b1)?;
+    if seg_text.trim().is_empty() {
+        return None;
+    }
+
+    let seg_start = disp_mapper.byte_to_char(seg_b0);
+    let seg_end = disp_mapper.byte_to_char(seg_b1);
+    if seg_start >= seg_end {
+        return None;
+    }
+
+    let seg_runs: Vec<(i32, i32, u32)> = char_runs
+        .iter()
+        .filter(|r| r.char_end > seg_start && r.char_start < seg_end)
+        .filter_map(|r| {
+            let cs = r.char_start.max(seg_start) - seg_start;
+            let ce = r.char_end.min(seg_end) - seg_start;
+            (cs < ce).then_some((cs as i32, ce as i32, r.mask))
+        })
+        .collect();
+
+    let seg_inline: Vec<InlineAnchor> = inline_anchors
+        .iter()
+        .filter(|(pos, _, _)| *pos >= seg_start && *pos < seg_end)
+        .map(|(pos, w, rise)| InlineAnchor {
+            local_char_pos: *pos - seg_start,
+            widget: w.clone(),
+            rise_pango: *rise,
+        })
+        .collect();
+
+    let seg_links: Vec<LinkSpan> = link_spans
+        .iter()
+        .filter(|l| (l.char_end as usize) > seg_start && (l.char_start as usize) < seg_end)
+        .filter_map(|l| {
+            let cs = (l.char_start as usize).max(seg_start) - seg_start;
+            let ce = (l.char_end as usize).min(seg_end) - seg_start;
+            (cs < ce).then(|| LinkSpan {
+                char_start: cs as i32,
+                char_end: ce as i32,
+                action: l.action.clone(),
+            })
+        })
+        .collect();
+
+    let mut seg_anchors: Vec<(u64, i32)> = source_char_anchors
+        .iter()
+        .filter(|(_, ch)| *ch >= raw_start && *ch <= raw_end)
+        .map(|&(src, ch)| (src, (ch.clamp(seg_start, seg_end) - seg_start) as i32))
+        .collect();
+    if seg_anchors.is_empty() {
+        seg_anchors.push((fallback_src_start, 0));
+    }
+
+    let src_start = seg_anchors
+        .first()
+        .map(|a| a.0)
+        .unwrap_or(fallback_src_start);
+    let src_end = seg_anchors
+        .last()
+        .map(|a| a.0)
+        .unwrap_or(fallback_src_end)
+        .max(fallback_src_end)
+        .max(src_start);
+
+    Some(TextSegmentData {
+        text: seg_text.to_string(),
+        runs: seg_runs,
+        inline_anchors: seg_inline,
+        link_spans: seg_links,
+        source_anchors: seg_anchors,
+        source_start: src_start,
+        source_end: src_end,
+    })
 }
 
 pub fn make_diagram_callbacks(
     env: &ReadingEnv,
     note_path: String,
     on_collapse_changed: Rc<dyn Fn(u32, Vec<String>, hortus_ffi::SceneData)>,
+    on_scene_updated: Rc<dyn Fn(u32, hortus_ffi::SceneData)>,
 ) -> DiagramCallbacks {
     let handle = Arc::clone(&env.handle);
     let open_note = env.callbacks.on_open_note.clone();
@@ -430,6 +696,7 @@ pub fn make_diagram_callbacks(
 
     DiagramCallbacks {
         on_collapse_changed,
+        on_scene_updated,
         on_open_link: Rc::new(move |target, heading| {
             let res = handle.resolve_link(src_note.clone(), target);
             if let Some(resolved) = res.resolved_path {
@@ -581,4 +848,45 @@ fn extract_markdown_url_around_utf16(
         return Some(slice.to_string());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_text_segment_slice_trims_and_rebases_runs_and_links() {
+        let text = "\n\nHello world!\n";
+        let mapper = Utf16Mapper::new(text);
+        let char_runs = vec![CharRun {
+            char_start: 2,
+            char_end: 7,
+            mask: 4,
+        }];
+        let links = vec![LinkSpan {
+            char_start: 8,
+            char_end: 13,
+            action: LinkAction::Tag("demo".into()),
+        }];
+        let anchors = vec![(0, 2), (10, 8)];
+        let seg = build_text_segment_slice(
+            text,
+            &mapper,
+            &char_runs,
+            &[],
+            &links,
+            &anchors,
+            0,
+            text.chars().count(),
+            0,
+            20,
+        )
+        .expect("segment should exist");
+        assert_eq!(seg.text, "Hello world!");
+        assert_eq!(seg.runs, vec![(0, 5, 4)]);
+        assert_eq!(seg.link_spans.len(), 1);
+        assert_eq!(seg.link_spans[0].char_start, 6);
+        assert_eq!(seg.link_spans[0].char_end, 11);
+        assert_eq!(seg.source_anchors, vec![(0, 0), (10, 6)]);
+    }
 }

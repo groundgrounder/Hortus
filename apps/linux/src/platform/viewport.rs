@@ -11,10 +11,20 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-const DEFAULT_H_PADDING: i32 = 96;
+const H_PADDING_BREAKPOINT: i32 = 820;
+const H_PADDING_NARROW: i32 = 20;
+const H_PADDING_WIDE: i32 = 44;
 const MIN_VIEWPORT_WIDTH: i32 = 240;
 const REFLOW_THRESHOLD_PX: i32 = 16;
 const DEBOUNCE_MS: u64 = 90;
+
+pub fn responsive_horizontal_padding(width: i32) -> i32 {
+    if width < H_PADDING_BREAKPOINT {
+        H_PADDING_NARROW * 2
+    } else {
+        H_PADDING_WIDE * 2
+    }
+}
 
 type WidthCallback = Rc<dyn Fn(i32)>;
 
@@ -37,7 +47,7 @@ mod imp {
         fn default() -> Self {
             Self {
                 child: RefCell::new(None),
-                horizontal_padding: Cell::new(DEFAULT_H_PADDING),
+                horizontal_padding: Cell::new(H_PADDING_WIDE * 2),
                 last_allocated_w: Cell::new(0),
                 settled_w: Cell::new(0),
                 resize_alloc_count: Cell::new(0),
@@ -65,7 +75,8 @@ mod imp {
                 src.remove();
             }
             *self.on_relayout.borrow_mut() = None;
-            if let Some(child) = self.child.borrow_mut().take() {
+            let old = self.child.borrow_mut().take();
+            if let Some(child) = old {
                 child.unparent();
             }
         }
@@ -85,24 +96,34 @@ mod imp {
             let Some(child) = child else {
                 return (0, 0, -1, -1);
             };
-            let (min, nat, min_base, nat_base) = child.measure(orientation, for_size);
             match orientation {
                 gtk4::Orientation::Horizontal => {
+                    let (min, nat, min_base, nat_base) = child.measure(orientation, for_size);
                     // 安全最小宽封顶 240px：绝不把内部宽块级控件顶破 AdwToastOverlay。
-                    let safe_min = min.clamp(0, MIN_VIEWPORT_WIDTH);
-                    let safe_nat = nat.max(safe_min);
+                    let safe_min = (min + H_PADDING_NARROW * 2).clamp(0, MIN_VIEWPORT_WIDTH);
+                    let safe_nat = (nat + H_PADDING_WIDE * 2).max(safe_min);
                     (safe_min, safe_nat, min_base, nat_base)
                 }
-                _ => (min, nat, min_base, nat_base),
+                _ => {
+                    let inner_for = if for_size >= 0 {
+                        let pad = responsive_horizontal_padding(for_size);
+                        (for_size - pad).max(1)
+                    } else {
+                        for_size
+                    };
+                    child.measure(orientation, inner_for)
+                }
             }
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            let total_pad = responsive_horizontal_padding(width);
+            self.horizontal_padding.set(total_pad);
             let child = self.child.borrow().clone();
             if let Some(child) = child {
                 child.allocate(width, height, baseline, None);
             }
-            let avail_w = (width - self.horizontal_padding.get()).max(MIN_VIEWPORT_WIDTH);
+            let avail_w = (width - total_pad).max(MIN_VIEWPORT_WIDTH);
             if self.last_allocated_w.get() != avail_w {
                 self.last_allocated_w.set(avail_w);
                 self.resize_alloc_count
@@ -188,8 +209,9 @@ impl HortusReadingViewport {
 
     pub fn set_child(&self, child: Option<&impl IsA<gtk4::Widget>>) {
         let imp = self.imp();
-        if let Some(old) = imp.child.borrow_mut().take() {
-            old.unparent();
+        let old = imp.child.borrow_mut().take();
+        if let Some(old_child) = old {
+            old_child.unparent();
         }
         if let Some(child) = child {
             let widget: gtk4::Widget = child.clone().upcast();
@@ -261,13 +283,17 @@ mod tests {
         assert!(nat_w >= min_w);
 
         vp.allocate(1200, 800, -1, None);
-        assert_eq!(vp.last_allocated_width(), 1200 - DEFAULT_H_PADDING);
+        assert_eq!(vp.last_allocated_width(), 1200 - H_PADDING_WIDE * 2);
         assert_eq!(vp.resize_alloc_count(), 1);
 
-        vp.set_settled_width(1200 - DEFAULT_H_PADDING);
+        vp.set_settled_width(1200 - H_PADDING_WIDE * 2);
         vp.allocate(900, 800, -1, None);
-        assert_eq!(vp.last_allocated_width(), 900 - DEFAULT_H_PADDING);
+        assert_eq!(vp.last_allocated_width(), 900 - H_PADDING_WIDE * 2);
         assert_eq!(vp.resize_alloc_count(), 2);
+
+        vp.allocate(700, 800, -1, None);
+        assert_eq!(vp.last_allocated_width(), 700 - H_PADDING_NARROW * 2);
+        assert_eq!(vp.resize_alloc_count(), 3);
 
         vp.clear_timers();
         vp.set_child(None::<&gtk4::Widget>);

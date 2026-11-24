@@ -15,5 +15,5 @@ pub use model::{
 };
 pub use text::{
     Utf16Mapper, decode_source_styles, find_char_ranges, line_list_continuation, task_toggle_at,
-    utf16_offset_to_char_offset, utf16_range_to_char_range, utf16_slice,
+    utf16_offset_to_char_offset,
 };

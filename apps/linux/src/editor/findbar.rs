@@ -2,10 +2,12 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 文内查找与替换：弱引用解环（C-04 修复），零整篇 `Vec<char>` 分配。
+//! 文内查找与替换：支持单编辑器缓冲区与阅读视图跨分段扫描（弱引用解环，零整篇 `Vec<char>` 分配）。
 
 use crate::core::find_char_ranges;
+use crate::reading::ReadingSurfaceHandle;
 use gtk4::glib;
+use gtk4::graphene;
 use gtk4::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,12 +15,26 @@ use std::time::Duration;
 
 const MAX_HIGHLIGHTS: usize = 4000;
 
-#[derive(Default)]
-struct FindState {
+#[derive(Clone)]
+struct FindTarget {
     view: glib::WeakRef<gtk4::TextView>,
     buffer: glib::WeakRef<gtk4::TextBuffer>,
+}
+
+#[derive(Clone, Copy)]
+struct FindMatch {
+    target_idx: usize,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Default)]
+struct FindState {
+    targets: Vec<FindTarget>,
+    scrolled: glib::WeakRef<gtk4::ScrolledWindow>,
+    content_box: glib::WeakRef<gtk4::Box>,
     editable: bool,
-    matches: Vec<(usize, usize)>,
+    matches: Vec<FindMatch>,
     current: usize,
     query: String,
     replaced: u32,
@@ -32,6 +48,8 @@ pub struct FindStats {
     pub open: bool,
     pub matches: usize,
     pub current: usize,
+    pub current_segment: Option<usize>,
+    pub segments: usize,
     pub editable: bool,
     pub replaced: u32,
     pub searches: u32,
@@ -139,9 +157,14 @@ impl FindBar {
             let weak = Rc::downgrade(inner);
             inner.bar.connect_search_mode_enabled_notify(move |bar| {
                 if !bar.is_search_mode() {
-                    let view = weak
-                        .upgrade()
-                        .and_then(|inner| inner.state.borrow().view.upgrade());
+                    let view = weak.upgrade().and_then(|inner| {
+                        inner
+                            .state
+                            .borrow()
+                            .targets
+                            .first()
+                            .and_then(|t| t.view.upgrade())
+                    });
                     if let Some(view) = view {
                         view.grab_focus();
                     }
@@ -244,18 +267,54 @@ impl FindBar {
         &self.inner.bar
     }
 
-    /// 绑定当前可见的原生正文控件；阅读视图为只读，编辑视图展开替换行。
+    /// 绑定单一原生正文控件（编辑视图）。
     pub fn bind(&self, view: &gtk4::TextView, buffer: &gtk4::TextBuffer, editable: bool) {
         {
             let mut st = self.inner.state.borrow_mut();
-            st.view.set(Some(view));
-            st.buffer.set(Some(buffer));
+            let v_ref = glib::WeakRef::new();
+            v_ref.set(Some(view));
+            let b_ref = glib::WeakRef::new();
+            b_ref.set(Some(buffer));
+            st.targets = vec![FindTarget {
+                view: v_ref,
+                buffer: b_ref,
+            }];
+            st.scrolled.set(None);
+            st.content_box.set(None);
             st.editable = editable;
             st.matches.clear();
             st.current = 0;
             st.query = self.inner.entry.text().to_string();
         }
         self.inner.replace_box.set_visible(editable);
+    }
+
+    /// 绑定分段块级阅读表面，顺序扫描全部 `TextSegment`。
+    pub fn bind_reading(&self, surface: &ReadingSurfaceHandle) {
+        {
+            let mut st = self.inner.state.borrow_mut();
+            st.targets = surface
+                .text_views()
+                .into_iter()
+                .map(|(view, buffer)| {
+                    let v_ref = glib::WeakRef::new();
+                    v_ref.set(Some(&view));
+                    let b_ref = glib::WeakRef::new();
+                    b_ref.set(Some(&buffer));
+                    FindTarget {
+                        view: v_ref,
+                        buffer: b_ref,
+                    }
+                })
+                .collect();
+            st.scrolled.set(Some(&surface.scrolled));
+            st.content_box.set(Some(&surface.content_box));
+            st.editable = false;
+            st.matches.clear();
+            st.current = 0;
+            st.query = self.inner.entry.text().to_string();
+        }
+        self.inner.replace_box.set_visible(false);
     }
 
     pub fn open(&self, editable: bool) {
@@ -271,7 +330,6 @@ impl FindBar {
         Self::close_impl(&self.inner);
     }
 
-    #[cfg(feature = "automation")]
     pub fn is_open(&self) -> bool {
         self.inner.bar.is_search_mode()
     }
@@ -295,6 +353,13 @@ impl FindBar {
         }
     }
 
+    /// 表面重建后若查找条仍处于打开状态，重新在各分段中计算高亮。
+    pub fn recompute_if_open(&self) {
+        if self.inner.bar.is_search_mode() {
+            Self::recompute(&self.inner, true);
+        }
+    }
+
     #[cfg(feature = "automation")]
     pub fn stats(&self) -> FindStats {
         let st = self.inner.state.borrow();
@@ -302,6 +367,8 @@ impl FindBar {
             open: self.inner.bar.is_search_mode(),
             matches: st.matches.len(),
             current: st.current,
+            current_segment: st.matches.get(st.current).map(|m| m.target_idx),
+            segments: st.targets.len(),
             editable: st.editable,
             replaced: st.replaced,
             searches: st.searches,
@@ -323,14 +390,20 @@ impl FindBar {
         if let Some(src) = st.debounce_source.take() {
             src.remove();
         }
-        st.view.set(None);
-        st.buffer.set(None);
+        st.targets.clear();
+        st.scrolled.set(None);
+        st.content_box.set(None);
         st.matches.clear();
     }
 
     fn close_impl(inner: &Rc<FindBarInner>) {
         inner.bar.set_search_mode(false);
-        let view = inner.state.borrow().view.upgrade();
+        let view = inner
+            .state
+            .borrow()
+            .targets
+            .first()
+            .and_then(|t| t.view.upgrade());
         if let Some(view) = view {
             view.grab_focus();
         }
@@ -360,26 +433,30 @@ impl FindBar {
     }
 
     fn replace_current_impl(inner: &Rc<FindBarInner>) {
-        let (buffer, range) = {
+        let (buffer, m) = {
             let st = inner.state.borrow();
             if !st.editable {
                 return;
             }
-            let Some(buffer) = st.buffer.upgrade() else {
+            let Some(&m) = st.matches.get(st.current) else {
                 return;
             };
-            let Some(&range) = st.matches.get(st.current) else {
+            let Some(buffer) = st
+                .targets
+                .get(m.target_idx)
+                .and_then(|t| t.buffer.upgrade())
+            else {
                 return;
             };
-            (buffer, range)
+            (buffer, m)
         };
         let replacement = inner.replace_entry.text().to_string();
         buffer.begin_user_action();
         {
-            let mut s = buffer.iter_at_offset(range.0 as i32);
-            let mut e = buffer.iter_at_offset(range.1 as i32);
+            let mut s = buffer.iter_at_offset(m.start as i32);
+            let mut e = buffer.iter_at_offset(m.end as i32);
             buffer.delete(&mut s, &mut e);
-            buffer.insert(&mut buffer.iter_at_offset(range.0 as i32), &replacement);
+            buffer.insert(&mut buffer.iter_at_offset(m.start as i32), &replacement);
         }
         buffer.end_user_action();
         inner.state.borrow_mut().replaced += 1;
@@ -393,14 +470,16 @@ impl FindBar {
             if !st.editable {
                 return;
             }
-            let Some(buffer) = st.buffer.upgrade() else {
+            let Some(buffer) = st.targets.first().and_then(|t| t.buffer.upgrade()) else {
                 return;
             };
-            (
-                buffer,
-                st.matches.clone(),
-                inner.replace_entry.text().to_string(),
-            )
+            let ranges: Vec<(usize, usize)> = st
+                .matches
+                .iter()
+                .filter(|m| m.target_idx == 0)
+                .map(|m| (m.start, m.end))
+                .collect();
+            (buffer, ranges, inner.replace_entry.text().to_string())
         };
         if ranges.is_empty() {
             return;
@@ -418,25 +497,42 @@ impl FindBar {
     }
 
     fn recompute(inner: &Rc<FindBarInner>, keep_current: bool) {
-        let (buffer, query, keep) = {
+        let (buffers, query, keep) = {
             let st = inner.state.borrow();
+            let buffers: Vec<(usize, gtk4::TextBuffer)> = st
+                .targets
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, t)| t.buffer.upgrade().map(|buf| (idx, buf)))
+                .collect();
             (
-                st.buffer.upgrade(),
+                buffers,
                 inner.entry.text().to_string(),
                 if keep_current { st.current } else { 0 },
             )
         };
-        let Some(buffer) = buffer else {
+        if buffers.is_empty() {
             return;
-        };
-        let matches = if query.is_empty() {
-            Vec::new()
-        } else {
-            let text = buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                .to_string();
-            find_char_ranges(&text, &query, MAX_HIGHLIGHTS)
-        };
+        }
+        let mut matches = Vec::new();
+        if !query.is_empty() {
+            for (target_idx, buffer) in buffers {
+                let remaining = MAX_HIGHLIGHTS.saturating_sub(matches.len());
+                if remaining == 0 {
+                    break;
+                }
+                let text = buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string();
+                for (start, end) in find_char_ranges(&text, &query, remaining) {
+                    matches.push(FindMatch {
+                        target_idx,
+                        start,
+                        end,
+                    });
+                }
+            }
+        }
         let (matches_len, current_idx, is_empty_query) = {
             let mut st = inner.state.borrow_mut();
             st.matches = matches;
@@ -462,48 +558,73 @@ impl FindBar {
     }
 
     fn highlight_and_scroll(inner: &Rc<FindBarInner>) {
-        let (view, buffer, matches, current) = {
+        let (targets, matches, current, scrolled, content_box) = {
             let st = inner.state.borrow();
             (
-                st.view.upgrade(),
-                st.buffer.upgrade(),
+                st.targets.clone(),
                 st.matches.clone(),
                 st.current,
+                st.scrolled.upgrade(),
+                st.content_box.upgrade(),
             )
         };
-        let (Some(view), Some(buffer)) = (view, buffer) else {
+        Self::apply_highlights(inner, &targets, &matches, current);
+        let Some(m) = matches.get(current) else {
             return;
         };
-        Self::apply_highlights(inner, &buffer, &matches, current);
-        if let Some(&(start, _)) = matches.get(current) {
-            let mut iter = buffer.iter_at_offset(start as i32);
+        let Some(target) = targets.get(m.target_idx) else {
+            return;
+        };
+        let (Some(view), Some(buffer)) = (target.view.upgrade(), target.buffer.upgrade()) else {
+            return;
+        };
+        let mut iter = buffer.iter_at_offset(m.start as i32);
+        if let (Some(scrolled), Some(content_box)) = (scrolled, content_box) {
+            let rect = view.iter_location(&iter);
+            let (wx, wy) =
+                view.buffer_to_window_coords(gtk4::TextWindowType::Widget, rect.x(), rect.y());
+            if let Some(pt) =
+                view.compute_point(&content_box, &graphene::Point::new(wx as f32, wy as f32))
+            {
+                let adj = scrolled.vadjustment();
+                let target_y = (f64::from(pt.y()) - adj.page_size() * 0.3).max(0.0);
+                let max_y = (adj.upper() - adj.page_size()).max(0.0);
+                adj.set_value(target_y.min(max_y));
+            }
+        } else {
             view.scroll_to_iter(&mut iter, 0.2, false, 0.0, 0.3);
         }
     }
 
     fn apply_highlights(
         inner: &Rc<FindBarInner>,
-        buffer: &gtk4::TextBuffer,
-        matches: &[(usize, usize)],
+        targets: &[FindTarget],
+        matches: &[FindMatch],
         current: usize,
     ) {
-        buffer.begin_irreversible_action();
-        {
+        for (target_idx, target) in targets.iter().enumerate() {
+            let Some(buffer) = target.buffer.upgrade() else {
+                continue;
+            };
+            buffer.begin_irreversible_action();
             let start = buffer.start_iter();
             let end = buffer.end_iter();
             buffer.remove_tag_by_name("find_match", &start, &end);
             buffer.remove_tag_by_name("find_current", &start, &end);
-        }
-        for (index, (start, end)) in matches.iter().enumerate().take(MAX_HIGHLIGHTS) {
-            let s = buffer.iter_at_offset(*start as i32);
-            let e = buffer.iter_at_offset(*end as i32);
-            if index == current {
-                buffer.apply_tag_by_name("find_current", &s, &e);
-            } else {
-                buffer.apply_tag_by_name("find_match", &s, &e);
+            for (global_idx, m) in matches.iter().enumerate().take(MAX_HIGHLIGHTS) {
+                if m.target_idx != target_idx {
+                    continue;
+                }
+                let s = buffer.iter_at_offset(m.start as i32);
+                let e = buffer.iter_at_offset(m.end as i32);
+                if global_idx == current {
+                    buffer.apply_tag_by_name("find_current", &s, &e);
+                } else {
+                    buffer.apply_tag_by_name("find_match", &s, &e);
+                }
             }
+            buffer.end_irreversible_action();
         }
-        buffer.end_irreversible_action();
         if !matches.is_empty() {
             inner
                 .status

@@ -10,7 +10,7 @@ use std::sync::Once;
 #[cfg(any(test, feature = "automation"))]
 pub use crate::platform::source_styles::apply_source_styles_timed;
 pub use crate::platform::source_styles::{
-    apply_mask_tags, apply_source_styles, apply_source_styles_with,
+    MaskTagSet, apply_mask_tags_cached, apply_source_styles, apply_source_styles_with,
 };
 
 const BASE_CSS: &str = r#"
@@ -78,6 +78,11 @@ const BASE_CSS: &str = r#"
     color: @view_fg_color;
 }
 
+.hortus-reading-box {
+    padding-top: 24px;
+    padding-bottom: 48px;
+}
+
 .hortus-diagram-card {
     border-radius: 10px;
     border: 1px solid alpha(currentColor, 0.10);
@@ -137,6 +142,10 @@ const BASE_CSS: &str = r#"
 
 .hortus-table-cell-text {
     background-color: transparent;
+}
+
+.hortus-table-header {
+    font-weight: 700;
 }
 
 .hortus-focus-overlay {
