@@ -20,70 +20,6 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.min
 
-internal class SceneCounts {
-    var roundedRect = 0
-    var line = 0
-    var graphPath = 0
-    var graphShape = 0
-    var labelBackground = 0
-    var text = 0
-    var arrow = 0
-    var circle = 0
-    var cross = 0
-    var solid = 0
-    var dotted = 0
-    var thick = 0
-    var otherMarker = 0
-    var otherLine = 0
-    var textSamples = 0
-    var maxTextWidthError = 0.0
-    var worstTextDiagram = ""
-    var worstText = ""
-
-    fun merge(other: SceneCounts) {
-        roundedRect += other.roundedRect
-        line += other.line
-        graphPath += other.graphPath
-        graphShape += other.graphShape
-        labelBackground += other.labelBackground
-        text += other.text
-        arrow += other.arrow
-        circle += other.circle
-        cross += other.cross
-        solid += other.solid
-        dotted += other.dotted
-        thick += other.thick
-        otherMarker += other.otherMarker
-        otherLine += other.otherLine
-        textSamples += other.textSamples
-        if (other.maxTextWidthError > maxTextWidthError) {
-            maxTextWidthError = other.maxTextWidthError
-            worstTextDiagram = other.worstTextDiagram
-            worstText = other.worstText
-        }
-    }
-
-    fun toJson(): org.json.JSONObject = org.json.JSONObject()
-        .put("RoundedRect", roundedRect)
-        .put("Line", line)
-        .put("GraphPath", graphPath)
-        .put("GraphShape", graphShape)
-        .put("LabelBackground", labelBackground)
-        .put("Text", text)
-        .put("Arrow", arrow)
-        .put("Circle", circle)
-        .put("Cross", cross)
-        .put("Solid", solid)
-        .put("Dotted", dotted)
-        .put("Thick", thick)
-        .put("otherMarker", otherMarker)
-        .put("otherLine", otherLine)
-        .put("textSamples", textSamples)
-        .put("maxTextWidthErrorPx", maxTextWidthError)
-        .put("worstTextDiagram", worstTextDiagram)
-        .put("worstText", worstText)
-}
-
 internal object DiagramFonts {
     private val cache = java.util.concurrent.ConcurrentHashMap<String, Typeface>()
 
@@ -191,8 +127,6 @@ internal object SceneRenderer {
         translateX: Float = 0f,
         translateY: Float = 0f,
         includeText: Boolean = true,
-        counts: SceneCounts? = null,
-        diagramKey: String = "",
     ) {
         val clip = canvas.clipBounds
         canvas.save()
@@ -200,7 +134,6 @@ internal object SceneRenderer {
         for (primitive in scene.primitives) {
             when (primitive) {
                 is ScenePrimitive.RoundedRect -> {
-                    counts?.let { it.roundedRect += 1 }
                     val rect = primitive.rect.toRectF(zoom)
                     if (rect.intersects(clip.left.toFloat(), clip.top.toFloat(), clip.right.toFloat(), clip.bottom.toFloat())) {
                         canvas.drawRoundRect(rect, primitive.radius.toFloat() * zoom,
@@ -209,7 +142,6 @@ internal object SceneRenderer {
                     }
                 }
                 is ScenePrimitive.Line -> {
-                    counts?.let { it.line += 1 }
                     val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                         color = colorInt(primitive.color, foreground)
                         strokeWidth = primitive.width.toFloat() * zoom
@@ -224,13 +156,6 @@ internal object SceneRenderer {
                     )
                 }
                 is ScenePrimitive.GraphPath -> {
-                    counts?.let { it.graphPath += 1 }
-                    when (primitive.line) {
-                        "Dotted" -> counts?.let { it.dotted += 1 }
-                        "Thick" -> counts?.let { it.thick += 1 }
-                        "Solid" -> counts?.let { it.solid += 1 }
-                        else -> counts?.let { it.otherLine += 1 }
-                    }
                     val points = primitive.points
                     if (points.isNotEmpty()) {
                         val path = roundedPath(points, primitive.cornerRadius, zoom)
@@ -246,12 +171,11 @@ internal object SceneRenderer {
                             }
                         }
                         canvas.drawPath(path, paint)
-                        marker(primitive.start, points, true, primitive.color, foreground, zoom, canvas, counts)
-                        marker(primitive.end, points, false, primitive.color, foreground, zoom, canvas, counts)
+                        marker(primitive.start, points, true, primitive.color, foreground, zoom, canvas)
+                        marker(primitive.end, points, false, primitive.color, foreground, zoom, canvas)
                     }
                 }
                 is ScenePrimitive.GraphShape -> {
-                    counts?.let { it.graphShape += 1 }
                     val rect = primitive.rect.toRectF(zoom)
                     val body = if (primitive.outline.isEmpty()) {
                         standardShape(primitive.shape, rect)
@@ -279,7 +203,6 @@ internal object SceneRenderer {
                     }
                 }
                 is ScenePrimitive.LabelBackground -> {
-                    counts?.let { it.labelBackground += 1 }
                     canvas.drawRect(
                         primitive.rect.toRectF(zoom),
                         Paint(Paint.ANTI_ALIAS_FLAG).apply { color = colorInt(primitive.color, foreground) },
@@ -287,8 +210,7 @@ internal object SceneRenderer {
                 }
                 is ScenePrimitive.Text -> {
                     if (!includeText) continue
-                    counts?.let { it.text += 1 }
-                    drawText(canvas, primitive.span, foreground, zoom, counts, diagramKey, clip)
+                    drawText(canvas, primitive.span, foreground, zoom, clip)
                 }
             }
         }
@@ -300,24 +222,12 @@ internal object SceneRenderer {
         span: SceneText,
         foreground: Int,
         zoom: Float,
-        counts: SceneCounts?,
-        diagramKey: String,
         clip: android.graphics.Rect,
     ) {
         val supersample = 16f
         val size = span.fontSize.toFloat() * zoom
         if (size <= 0f) return
         val paint = SceneTextMetrics.paint(span, zoom, colorInt(span.color, foreground))
-        val measured = paint.measureText(span.text).toDouble() / 16.0 / zoom
-        if (counts != null && span.width > 0.0) {
-            val error = abs(measured - span.width)
-            counts.textSamples += 1
-            if (error > counts.maxTextWidthError) {
-                counts.maxTextWidthError = error
-                counts.worstTextDiagram = diagramKey
-                counts.worstText = span.text.take(80)
-            }
-        }
         val x = span.baseline.x.toFloat() * zoom
         val y = span.baseline.y.toFloat() * zoom
         val bounds = RectF(
@@ -342,15 +252,8 @@ internal object SceneRenderer {
         foreground: Int,
         zoom: Float,
         canvas: Canvas,
-        counts: SceneCounts?,
     ) {
         if (kind == "None") return
-        when (kind) {
-            "Arrow" -> counts?.let { it.arrow += 1 }
-            "Circle" -> counts?.let { it.circle += 1 }
-            "Cross" -> counts?.let { it.cross += 1 }
-            else -> counts?.let { it.otherMarker += 1 }
-        }
         if (points.size < 2) return
         val tip = if (atStart) points.first() else points.last()
         val next = if (atStart) points[1] else points[points.size - 2]

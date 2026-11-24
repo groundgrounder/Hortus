@@ -20,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.R
 import io.github.groundgrounder.hortus.core.SceneData
 import androidx.compose.ui.res.stringResource
@@ -143,8 +144,8 @@ internal fun EmbedBlockView(
     }
     val content = embedded
     val info = content?.info
-    if (info != null) {
-        Inspection.recordEmbed("$notePath|${item.target}|${item.heading}", info)
+    if (info != null && DebugProbes.enabled) {
+        DebugProbes.recordEmbed("$notePath|${item.target}|${item.heading}", info)
     }
     val density = LocalDensity.current.density
     val cardShape = RoundedCornerShape(10.dp)

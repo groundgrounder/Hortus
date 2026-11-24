@@ -36,11 +36,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.groundgrounder.hortus.DebugProbes
+import io.github.groundgrounder.hortus.DebugProbes.debugPanel
 import io.github.groundgrounder.hortus.R
 import io.github.groundgrounder.hortus.core.TreeEntry
 
@@ -201,8 +201,10 @@ internal fun KnowledgeTabContent(
 @Composable
 private fun OutlineList(controller: ReaderController, knowledge: KnowledgeState, scope: String) {
     val rows = knowledge.outline
-    LaunchedEffect(rows) { PanelRegistry.retain(scope, rows.map { "outline:${it.start}" }) }
-    DisposableEffect(scope) { onDispose { PanelRegistry.clear(scope) } }
+    if (DebugProbes.enabled) {
+        LaunchedEffect(rows) { DebugProbes.retainPanels(scope, rows.map { "outline:${it.start}" }) }
+        DisposableEffect(scope) { onDispose { DebugProbes.clearPanels(scope) } }
+    }
     if (rows.isEmpty()) {
         EmptyRow(stringResource(R.string.knowledge_empty_outline))
         return
@@ -223,18 +225,14 @@ private fun OutlineList(controller: ReaderController, knowledge: KnowledgeState,
                         top = 9.dp,
                         bottom = 9.dp,
                     )
-                    .trackPanel(scope, "outline:${row.start}") {
-                        PanelHit(
-                            kind = "outline",
-                            label = row.title,
-                            x = 0f,
-                            y = 0f,
-                            width = 0f,
-                            height = 0f,
-                            target = row.start.toString(),
-                            tab = "outline",
-                        )
-                    },
+                    .debugPanel(
+                        scope = scope,
+                        key = "outline:${row.start}",
+                        kind = "outline",
+                        label = row.title,
+                        target = row.start.toString(),
+                        tab = "outline",
+                    ),
             )
         }
     }
@@ -243,8 +241,10 @@ private fun OutlineList(controller: ReaderController, knowledge: KnowledgeState,
 @Composable
 private fun BacklinkList(controller: ReaderController, knowledge: KnowledgeState, scope: String) {
     val rows = knowledge.backlinks
-    LaunchedEffect(rows) { PanelRegistry.retain(scope, rows.map { "backlink:${it.source}:${it.startUtf16}" }) }
-    DisposableEffect(scope) { onDispose { PanelRegistry.clear(scope) } }
+    if (DebugProbes.enabled) {
+        LaunchedEffect(rows) { DebugProbes.retainPanels(scope, rows.map { "backlink:${it.source}:${it.startUtf16}" }) }
+        DisposableEffect(scope) { onDispose { DebugProbes.clearPanels(scope) } }
+    }
     if (rows.isEmpty()) {
         EmptyRow(stringResource(R.string.knowledge_empty_backlinks))
         return
@@ -256,18 +256,14 @@ private fun BacklinkList(controller: ReaderController, knowledge: KnowledgeState
                     .fillMaxWidth()
                     .clickable { controller.openBacklink(row) }
                     .padding(horizontal = 16.dp, vertical = 9.dp)
-                    .trackPanel(scope, "backlink:${row.source}:${row.startUtf16}") {
-                        PanelHit(
-                            kind = "backlink",
-                            label = row.title,
-                            x = 0f,
-                            y = 0f,
-                            width = 0f,
-                            height = 0f,
-                            target = row.source,
-                            tab = "backlinks",
-                        )
-                    },
+                    .debugPanel(
+                        scope = scope,
+                        key = "backlink:${row.source}:${row.startUtf16}",
+                        kind = "backlink",
+                        label = row.title,
+                        target = row.source,
+                        tab = "backlinks",
+                    ),
             ) {
                 Text(
                     row.title,
@@ -338,18 +334,14 @@ private fun TagList(controller: ReaderController, knowledge: KnowledgeState, sco
                                 .fillMaxWidth()
                                 .clickable { controller.openTagNote(note) }
                                 .padding(horizontal = 16.dp, vertical = 9.dp)
-                                .trackPanel(scope, "tag-note:${note.path}") {
-                                    PanelHit(
-                                        kind = "tag-note",
-                                        label = note.title,
-                                        x = 0f,
-                                        y = 0f,
-                                        width = 0f,
-                                        height = 0f,
-                                        target = note.path,
-                                        tab = "tags",
-                                    )
-                                },
+                                .debugPanel(
+                                    scope = scope,
+                                    key = "tag-note:${note.path}",
+                                    kind = "tag-note",
+                                    label = note.title,
+                                    target = note.path,
+                                    tab = "tags",
+                                ),
                         ) {
                             Text(note.title, style = MaterialTheme.typography.bodyMedium)
                             Text(
@@ -367,8 +359,10 @@ private fun TagList(controller: ReaderController, knowledge: KnowledgeState, sco
         return
     }
     val rows = knowledge.tags
-    LaunchedEffect(rows) { PanelRegistry.retain(scope, rows.map { "tag:${it.tag}" }) }
-    DisposableEffect(scope) { onDispose { PanelRegistry.clear(scope) } }
+    if (DebugProbes.enabled) {
+        LaunchedEffect(rows) { DebugProbes.retainPanels(scope, rows.map { "tag:${it.tag}" }) }
+        DisposableEffect(scope) { onDispose { DebugProbes.clearPanels(scope) } }
+    }
     if (rows.isEmpty()) {
         EmptyRow(stringResource(R.string.knowledge_empty_tags))
         return
@@ -380,18 +374,14 @@ private fun TagList(controller: ReaderController, knowledge: KnowledgeState, sco
                     .fillMaxWidth()
                     .clickable { controller.selectTag(row.tag) }
                     .padding(horizontal = 16.dp, vertical = 10.dp)
-                    .trackPanel(scope, "tag:${row.tag}") {
-                        PanelHit(
-                            kind = "tag",
-                            label = row.tag,
-                            x = 0f,
-                            y = 0f,
-                            width = 0f,
-                            height = 0f,
-                            target = row.tag,
-                            tab = "tags",
-                        )
-                    },
+                    .debugPanel(
+                        scope = scope,
+                        key = "tag:${row.tag}",
+                        kind = "tag",
+                        label = row.tag,
+                        target = row.tag,
+                        tab = "tags",
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
@@ -419,24 +409,6 @@ private fun EmptyRow(text: String) {
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(20.dp),
-    )
-}
-
-internal fun Modifier.trackPanel(
-    scope: String,
-    key: String,
-    hit: () -> PanelHit,
-): Modifier = onGloballyPositioned { coordinates ->
-    val position = coordinates.positionInWindow()
-    PanelRegistry.put(
-        scope,
-        key,
-        hit().copy(
-            x = position.x,
-            y = position.y,
-            width = coordinates.size.width.toFloat(),
-            height = coordinates.size.height.toFloat(),
-        ),
     )
 }
 

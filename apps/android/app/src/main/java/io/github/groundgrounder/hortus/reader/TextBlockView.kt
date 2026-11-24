@@ -44,10 +44,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import io.github.groundgrounder.hortus.DebugProbes
+import io.github.groundgrounder.hortus.DebugProbes.debugTextHits
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import io.github.groundgrounder.hortus.core.MathBlock
@@ -211,11 +212,16 @@ internal class ReaderTextView(context: Context) : TextView(context) {
 
     private var item: TextItem? = null
     private var palette: ReaderPalette? = null
-    private var mathByOffset: Map<Int, PreparedMath?> = emptyMap()
-    private var mathLatex: Map<Int, String> = emptyMap()
-    private var links: List<TextLink> = emptyList()
-    private var tags: List<TextTag> = emptyList()
+    internal var mathByOffset: Map<Int, PreparedMath?> = emptyMap()
+        private set
+    internal var mathLatex: Map<Int, String> = emptyMap()
+        private set
+    internal var links: List<TextLink> = emptyList()
+        private set
+    internal var tags: List<TextTag> = emptyList()
+        private set
     private var appliedSpannable: SpannableString? = null
+    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private var downX = 0f
     private var downY = 0f
@@ -257,7 +263,9 @@ internal class ReaderTextView(context: Context) : TextView(context) {
         this.mathLatex = latex
         this.links = item.links
         this.tags = item.tags
-        if (item.links.isEmpty() && item.tags.isEmpty()) HitRegistry.replace("text:${item.key}", emptyList())
+        if (DebugProbes.enabled && item.links.isEmpty() && item.tags.isEmpty()) {
+            DebugProbes.clearTextHits("text:${item.key}")
+        }
         this.onLink = onLink
         this.onTag = onTag
         val (left, right, _) = textBlockWidths(item, contentWidth.coerceAtLeast(1), density)
@@ -276,9 +284,10 @@ internal class ReaderTextView(context: Context) : TextView(context) {
             appliedSpannable = spannable
             setText(spannable, BufferType.SPANNABLE)
         }
-        setTextIsSelectable(true)
-        // 链接命中区依赖布局；首帧布局完成后再刷新一次，避免打开新笔记时漏登记。
-        post { refreshLayoutData() }
+        if (DebugProbes.enabled) {
+            // 链接命中区依赖布局；首帧布局完成后再刷新一次，避免打开新笔记时漏登记。
+            post { DebugProbes.refreshTextLayout(this) }
+        }
     }
 
     override fun onDraw(canvas: AndroidCanvas) {
@@ -288,6 +297,7 @@ internal class ReaderTextView(context: Context) : TextView(context) {
             val density = resources.displayMetrics.density
             val fullWidth = width.toFloat()
             if (item.code) {
+                bgPaint.color = palette.codeBackgroundArgb
                 canvas.drawRoundRect(
                     0f,
                     0f,
@@ -295,10 +305,11 @@ internal class ReaderTextView(context: Context) : TextView(context) {
                     height.toFloat(),
                     8f * density,
                     8f * density,
-                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.codeBackgroundArgb },
+                    bgPaint,
                 )
             }
             if (item.callout != null) {
+                bgPaint.color = calloutBackground(item.callout.kind, palette).toArgbCompat()
                 canvas.drawRoundRect(
                     0f,
                     0f,
@@ -306,35 +317,34 @@ internal class ReaderTextView(context: Context) : TextView(context) {
                     height.toFloat(),
                     8f * density,
                     8f * density,
-                    Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = calloutBackground(item.callout.kind, palette).toArgbCompat()
-                    },
+                    bgPaint,
                 )
+                bgPaint.color = calloutAccent(item.callout.kind, palette).toArgbCompat()
                 canvas.drawRect(
                     0f,
                     0f,
                     3f * density,
                     height.toFloat(),
-                    Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = calloutAccent(item.callout.kind, palette).toArgbCompat()
-                    },
+                    bgPaint,
                 )
             } else if (item.quote) {
+                bgPaint.color = palette.ruleArgb
                 canvas.drawRect(
                     0f,
                     0f,
                     3f * density,
                     height.toFloat(),
-                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.ruleArgb },
+                    bgPaint,
                 )
             }
             if (item.rule) {
+                bgPaint.color = palette.ruleArgb
                 canvas.drawRect(
                     0f,
                     height / 2f,
                     fullWidth,
                     height / 2f + max(1f, density),
-                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.ruleArgb },
+                    bgPaint,
                 )
             }
         }
@@ -343,7 +353,7 @@ internal class ReaderTextView(context: Context) : TextView(context) {
 
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
-        if (changed) {
+        if (changed && DebugProbes.enabled) {
             post { onLayoutReady?.invoke() }
         }
     }
@@ -406,91 +416,6 @@ internal class ReaderTextView(context: Context) : TextView(context) {
             }
         }
         return handled
-    }
-
-    fun refreshHits() {
-        if (links.isEmpty() && tags.isEmpty()) return
-        val layout = layout ?: return
-        val location = IntArray(2)
-        getLocationOnScreen(location)
-        val hits = ArrayList<ScreenHit>(links.size + tags.size)
-        for (link in links) {
-            for (rect in layoutRects(layout, link.start, link.end)) {
-                hits += ScreenHit(
-                    kind = "link",
-                    label = link.alias ?: link.target,
-                    x = location[0] + totalPaddingLeft + rect.left,
-                    y = location[1] + totalPaddingTop + rect.top,
-                    width = rect.width(),
-                    height = rect.height(),
-                    target = link.resolvedPath ?: link.target,
-                    heading = link.heading,
-                    canCollapse = false,
-                    nodeId = null,
-                )
-            }
-        }
-        for (tag in tags) {
-            for (rect in layoutRects(layout, tag.start, tag.end)) {
-                hits += ScreenHit(
-                    kind = "tag",
-                    label = tag.tag,
-                    x = location[0] + totalPaddingLeft + rect.left,
-                    y = location[1] + totalPaddingTop + rect.top,
-                    width = rect.width(),
-                    height = rect.height(),
-                    target = tag.tag,
-                    heading = null,
-                    canCollapse = false,
-                    nodeId = null,
-                )
-            }
-        }
-        HitRegistry.replace("text:$itemKey", hits)
-    }
-
-    fun refreshLayoutData() {
-        refreshHits()
-        if (!Inspection.recordingEnabled) return
-        val layout = layout ?: return
-        val item = item ?: return
-
-        val lines = ArrayList<LineMetrics>(layout.lineCount)
-        for (line in 0 until layout.lineCount) {
-            lines += LineMetrics(
-                index = line,
-                top = layout.getLineTop(line) + totalPaddingTop.toFloat(),
-                bottom = layout.getLineBottom(line) + totalPaddingTop.toFloat(),
-                baselineY = layout.getLineBaseline(line) + totalPaddingTop.toFloat(),
-            )
-        }
-        val boxes = ArrayList<MathBoxMetrics>()
-        for (offset in mathByOffset.keys) {
-            val prepared = mathByOffset[offset] ?: continue
-            if (offset !in 0 until layout.text.length) continue
-            val line = layout.getLineForOffset(offset)
-            val padding = mathInlinePadding(prepared.em)
-            val baseline = layout.getLineBaseline(line) + totalPaddingTop.toFloat()
-            boxes += MathBoxMetrics(
-                formulaKey = "$offset:${mathLatex[offset].orEmpty()}",
-                latex = mathLatex[offset].orEmpty(),
-                lineIndex = line,
-                x = layout.getPrimaryHorizontal(offset) + totalPaddingLeft + padding,
-                top = baseline - prepared.ascent,
-                baselineY = baseline,
-                bottom = baseline + prepared.descent,
-                width = prepared.width + padding * 2f,
-                em = prepared.em,
-                rendered = true,
-            )
-        }
-        LayoutInspection.recordText(
-            "text:$itemKey",
-            notePath,
-            blockId,
-            lines,
-            boxes,
-        )
     }
 }
 
@@ -569,7 +494,9 @@ internal fun TextBlockView(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                     )
-                    onLayoutReady = { refreshLayoutData() }
+                    if (DebugProbes.enabled) {
+                        onLayoutReady = { DebugProbes.refreshTextLayout(this) }
+                    }
                     textView = this
                 }
             },
@@ -587,11 +514,15 @@ internal fun TextBlockView(
                     onLink = onLink,
                     onTag = onTag,
                 )
-                view.refreshLayoutData()
+                if (DebugProbes.enabled) {
+                    DebugProbes.refreshTextLayout(view)
+                }
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .onGloballyPositioned { if (item.links.isNotEmpty() || item.tags.isNotEmpty()) textView?.refreshHits() },
+                .debugTextHits(item.links.isNotEmpty() || item.tags.isNotEmpty()) {
+                    textView?.let(DebugProbes::refreshTextHits)
+                },
         )
         for ((formula, reason) in failures) {
             Text(
@@ -602,8 +533,10 @@ internal fun TextBlockView(
             )
         }
     }
-    DisposableEffect(item.key) {
-        onDispose { HitRegistry.replace("text:${item.key}", emptyList()) }
+    if (DebugProbes.enabled) {
+        DisposableEffect(item.key) {
+            onDispose { DebugProbes.clearTextHits("text:${item.key}") }
+        }
     }
 }
 
@@ -818,28 +751,6 @@ internal fun buildTextSpannable(
         )
     }
     return spannable
-}
-
-private fun layoutRects(layout: Layout, start: Int, end: Int): List<RectF> {
-    if (start >= end || start < 0) return emptyList()
-    val first = layout.getLineForOffset(start)
-    val last = layout.getLineForOffset((end - 1).coerceAtLeast(start))
-    val result = ArrayList<RectF>(last - first + 1)
-    for (line in first..last) {
-        val lineStart = layout.getLineStart(line)
-        val lineEnd = layout.getLineEnd(line)
-        val s = max(start, lineStart).coerceAtMost(lineEnd)
-        val e = min(end, lineEnd).coerceAtLeast(s)
-        val x1 = if (s >= lineEnd) layout.getLineRight(line) else layout.getPrimaryHorizontal(s)
-        val x2 = if (e >= lineEnd) layout.getLineRight(line) else layout.getPrimaryHorizontal(e)
-        result += RectF(
-            min(x1, x2),
-            layout.getLineTop(line).toFloat(),
-            max(x1, x2),
-            layout.getLineBottom(line).toFloat(),
-        )
-    }
-    return result
 }
 
 private fun androidx.compose.ui.graphics.Color.toArgbCompat(): Int = android.graphics.Color.argb(

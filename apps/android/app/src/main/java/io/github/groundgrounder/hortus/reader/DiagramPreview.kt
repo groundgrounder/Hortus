@@ -5,6 +5,7 @@ import android.graphics.RenderNode
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
+import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.core.SceneData
 import io.github.groundgrounder.hortus.core.ScenePrimitive
 import java.util.TreeMap
@@ -38,11 +39,6 @@ internal object DiagramPreviewCache {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, RenderNode>): Boolean =
             size > 12
     }
-    @Volatile var recordings: Int = 0
-        private set
-    @Volatile var replays: Int = 0
-        private set
-    val counts = SceneCounts()
 
     fun size(): Int = synchronized(entries) { entries.size }
 
@@ -66,42 +62,15 @@ internal object DiagramPreviewCache {
             scene,
             foreground,
             zoom = zoom,
-            counts = if (Inspection.recordingEnabled) counts else null,
-            diagramKey = key,
         )
         node.endRecording()
-        recordings += 1
+        DebugProbes.onDiagramPreviewRecorded(key, scene, zoom)
         entries[key] = node
         node
     }
 
-    fun noteReplay() {
-        replays += 1
-    }
-
     fun reset() = synchronized(entries) {
         entries.clear()
-        recordings = 0
-        replays = 0
-        val empty = SceneCounts()
-        counts.roundedRect = empty.roundedRect
-        counts.line = empty.line
-        counts.graphPath = empty.graphPath
-        counts.graphShape = empty.graphShape
-        counts.labelBackground = empty.labelBackground
-        counts.text = empty.text
-        counts.arrow = empty.arrow
-        counts.circle = empty.circle
-        counts.cross = empty.cross
-        counts.solid = empty.solid
-        counts.dotted = empty.dotted
-        counts.thick = empty.thick
-        counts.otherMarker = empty.otherMarker
-        counts.otherLine = empty.otherLine
-        counts.textSamples = empty.textSamples
-        counts.maxTextWidthError = empty.maxTextWidthError
-        counts.worstText = empty.worstText
-        counts.worstTextDiagram = empty.worstTextDiagram
     }
 }
 

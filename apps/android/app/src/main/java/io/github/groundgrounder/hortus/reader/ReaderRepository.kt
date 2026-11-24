@@ -4,6 +4,7 @@ package io.github.groundgrounder.hortus.reader
 import android.content.Context
 import io.github.groundgrounder.hortus.AndroidFonts
 import io.github.groundgrounder.hortus.CoreEnvironment
+import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.core.DiagramEngine
 import io.github.groundgrounder.hortus.core.DiagramFailure
 import io.github.groundgrounder.hortus.core.DocumentOutline
@@ -73,68 +74,9 @@ internal data class DiagramRenderResult(
     val scene: SceneData?,
     val failure: String?,
     val identity: io.github.groundgrounder.hortus.core.DiagramIdentity?,
-    val counts: SceneCounts?,
     val width: Double,
     val height: Double,
 )
-
-internal object DiagramInspection {
-    private val lock = Any()
-    val total = SceneCounts()
-    private val records = LinkedHashMap<String, org.json.JSONObject>()
-
-    fun record(key: String, scene: SceneData, counts: SceneCounts, dark: Boolean, collapsed: List<String>) {
-        synchronized(lock) {
-            total.merge(counts)
-            records[key] = org.json.JSONObject()
-                .put("key", key)
-                .put("width", scene.width)
-                .put("height", scene.height)
-                .put("dark", dark)
-                .put("collapsed", org.json.JSONArray(collapsed))
-                .put("primitives", scene.primitives.size)
-                .put("hits", scene.hitRegions.size)
-                .put("plusLabels", scene.primitives.count {
-                    it is io.github.groundgrounder.hortus.core.ScenePrimitive.Text &&
-                        it.span.text.trim().startsWith("+")
-                })
-                .put("counts", counts.toJson())
-            while (records.size > 240) {
-                val first = records.keys.first()
-                records.remove(first)
-            }
-        }
-    }
-
-    fun snapshot(): org.json.JSONArray = synchronized(lock) {
-        org.json.JSONArray().also { array ->
-            for (value in records.values) array.put(value)
-        }
-    }
-
-    fun reset() = synchronized(lock) {
-        records.clear()
-        val empty = SceneCounts()
-        total.roundedRect = empty.roundedRect
-        total.line = empty.line
-        total.graphPath = empty.graphPath
-        total.graphShape = empty.graphShape
-        total.labelBackground = empty.labelBackground
-        total.text = empty.text
-        total.arrow = empty.arrow
-        total.circle = empty.circle
-        total.cross = empty.cross
-        total.solid = empty.solid
-        total.dotted = empty.dotted
-        total.thick = empty.thick
-        total.otherMarker = empty.otherMarker
-        total.otherLine = empty.otherLine
-        total.textSamples = empty.textSamples
-        total.maxTextWidthError = empty.maxTextWidthError
-        total.worstText = ""
-        total.worstTextDiagram = ""
-    }
-}
 
 internal class ReaderRepository(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -194,7 +136,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
     private fun scan(handle: VaultHandle) {
         try {
             while (true) {
-                val batches: List<TreeBatch> = MainThreadCounters.record("vaultScan") {
+                val batches: List<TreeBatch> = DebugProbes.traceMainThread("vaultScan") {
                     handle.waitForBatches()
                 }
                 if (batches.isEmpty()) continue
@@ -251,7 +193,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
 
     private fun ensureDiagramEngine(): DiagramEngine {
         diagramEngine?.let { return it }
-        val engine = MainThreadCounters.record("diagramRender") {
+        val engine = DebugProbes.traceMainThread("diagramRender") {
             DiagramEngine.withFontPaths(fontPaths)
         }
         diagramEngine = engine
@@ -260,7 +202,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
 
     private fun ensureMathRenderer(): MathSceneRenderer {
         mathRenderer?.let { return it }
-        val engine = MainThreadCounters.record("mathRender") {
+        val engine = DebugProbes.traceMainThread("mathRender") {
             io.github.groundgrounder.hortus.core.MathEngine()
         }
         val renderer = MathSceneRenderer(appContext.assets, engine)
@@ -296,21 +238,21 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         bodySize: Float,
     ): NoteContent {
         val initial = session.initial()
-        val wire: ReadingModel = MainThreadCounters.record("readingModel") {
+        val wire: ReadingModel = DebugProbes.traceMainThread("readingModel") {
             session.readingModel()
         }
         val model = ReadingModelDecoder.decodeFull(wire)
-        val snapshot = MainThreadCounters.record("readingModel") { session.snapshot() }
-        val math = MainThreadCounters.record("readingModel") { session.mathBlocks() }
-        val media = MainThreadCounters.record("mediaBlocks") {
+        val snapshot = DebugProbes.traceMainThread("readingModel") { session.snapshot() }
+        val math = DebugProbes.traceMainThread("readingModel") { session.mathBlocks() }
+        val media = DebugProbes.traceMainThread("mediaBlocks") {
             session.mediaBlocks(width.toDouble(), bodySize.toDouble())
         }
-        val knowledge = MainThreadCounters.record("readingModel") {
+        val knowledge = DebugProbes.traceMainThread("readingModel") {
             vault?.knowledgeMarkup(path, snapshot.text)
                 ?: KnowledgeMarkupInfo(emptyList(), emptyList())
         }
-        val outline = MainThreadCounters.record("readingModel") { session.outline() }
-        val diagrams = MainThreadCounters.record("readingModel") { diagramBlocks(snapshot.text) }
+        val outline = DebugProbes.traceMainThread("readingModel") { session.outline() }
+        val diagrams = DebugProbes.traceMainThread("readingModel") { diagramBlocks(snapshot.text) }
         val isMmd = path.lowercase().endsWith(".mmd")
         val items = buildReaderItems(
             model = model,
@@ -344,7 +286,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
     suspend fun rebuildForWidth(content: NoteContent, width: Int, bodySize: Float): NoteContent =
         lock.withLock {
             if (content.width == width && content.bodySize == bodySize) return@withLock content
-            val media = MainThreadCounters.record("mediaBlocks") {
+            val media = DebugProbes.traceMainThread("mediaBlocks") {
                 document?.mediaBlocks(width.toDouble(), bodySize.toDouble()) ?: content.media
             }
             val items = buildReaderItems(
@@ -368,13 +310,13 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
     suspend fun refresh(content: NoteContent, width: Int, bodySize: Float): NoteContent? = lock.withLock {
         val session = document ?: return@withLock null
         if (notePath != content.path) return@withLock null
-        val update = MainThreadCounters.record("readingModel") { session.refresh() }
+        val update = DebugProbes.traceMainThread("readingModel") { session.refresh() }
         var revised = update.revision.toLong()
         if (update.text != null) {
-            MainThreadCounters.record("readingModel") { session.acceptExternal(update.revision) }
+            DebugProbes.traceMainThread("readingModel") { session.acceptExternal(update.revision) }
         }
         if (revised == content.revision && update.text == null) return@withLock null
-        var wire = MainThreadCounters.record("readingModel") {
+        var wire = DebugProbes.traceMainThread("readingModel") {
             session.readingModelSince(content.revision.toULong())
         }
         val model = try {
@@ -384,20 +326,20 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
                 else -> ReadingModelDecoder.applyDelta(content.model, wire)
             }
         } catch (_: Exception) {
-            wire = MainThreadCounters.record("readingModel") { session.readingModel() }
+            wire = DebugProbes.traceMainThread("readingModel") { session.readingModel() }
             ReadingModelDecoder.decodeFull(wire)
         }
-        val snapshot = MainThreadCounters.record("readingModel") { session.snapshot() }
-        val math = MainThreadCounters.record("readingModel") { session.mathBlocks() }
-        val media = MainThreadCounters.record("mediaBlocks") {
+        val snapshot = DebugProbes.traceMainThread("readingModel") { session.snapshot() }
+        val math = DebugProbes.traceMainThread("readingModel") { session.mathBlocks() }
+        val media = DebugProbes.traceMainThread("mediaBlocks") {
             session.mediaBlocks(width.toDouble(), bodySize.toDouble())
         }
-        val knowledge = MainThreadCounters.record("readingModel") {
+        val knowledge = DebugProbes.traceMainThread("readingModel") {
             vault?.knowledgeMarkup(content.path, snapshot.text)
                 ?: KnowledgeMarkupInfo(emptyList(), emptyList())
         }
-        val outline = MainThreadCounters.record("readingModel") { session.outline() }
-        val diagrams = MainThreadCounters.record("readingModel") { diagramBlocks(snapshot.text) }
+        val outline = DebugProbes.traceMainThread("readingModel") { session.outline() }
+        val diagrams = DebugProbes.traceMainThread("readingModel") { diagramBlocks(snapshot.text) }
         val items = buildReaderItems(
             model = model,
             sourceText = snapshot.text,
@@ -434,7 +376,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
             } else {
                 renderer.render(formula.latex, formula.style, em)
             }
-            Inspection.recordMath(note, formula, result, bodySize)
+            DebugProbes.recordMath(note, formula, result, bodySize)
             result
         }
     }
@@ -464,7 +406,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
             requestGeneration = request.toULong(),
         )
         try {
-            val scene = MainThreadCounters.record("diagramRender") {
+            val scene = DebugProbes.traceMainThread("diagramRender") {
                 engine.renderRequest(
                     source = engineText,
                     mmd = mmd,
@@ -475,98 +417,19 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
                     viewport = emptyList(),
                 )
             }
-            val counts = if (Inspection.recordingEnabled) measureScene(scene, documentKey) else SceneCounts()
-            if (Inspection.recordingEnabled) DiagramInspection.record(
-                "$documentKey#$ordinal@${width.toInt()}/$dark",
-                scene,
-                counts,
-                dark,
-                collapsed,
-            )
-            val result = DiagramRenderResult(scene, null, scene.identity, counts, scene.width, scene.height)
+            DebugProbes.recordDiagram(documentKey, ordinal, width, dark, collapsed, scene)
+            val result = DiagramRenderResult(scene, null, scene.identity, scene.width, scene.height)
             synchronized(diagramCache) { diagramCache[key] = result }
             result
         } catch (failure: DiagramFailure) {
             val reason = diagramFailureText(failure)
-            Inspection.recordDiagramFailure("${documentKey}#${ordinal}", ordinal, reason)
-            DiagramRenderResult(null, reason, identity, null, 0.0, 0.0)
+            DebugProbes.recordDiagramFailure("${documentKey}#${ordinal}", ordinal, reason)
+            DiagramRenderResult(null, reason, identity, 0.0, 0.0)
         } catch (error: Exception) {
             val reason = error.message ?: error.javaClass.simpleName
-            Inspection.recordDiagramFailure("${documentKey}#${ordinal}", ordinal, reason)
-            DiagramRenderResult(null, reason, identity, null, 0.0, 0.0)
+            DebugProbes.recordDiagramFailure("${documentKey}#${ordinal}", ordinal, reason)
+            DiagramRenderResult(null, reason, identity, 0.0, 0.0)
         }
-    }
-
-    private fun measureScene(scene: SceneData, documentKey: String): SceneCounts {
-        val counts = SceneCounts()
-        for (primitive in scene.primitives) {
-            when (primitive) {
-                is io.github.groundgrounder.hortus.core.ScenePrimitive.RoundedRect -> counts.roundedRect += 1
-                is io.github.groundgrounder.hortus.core.ScenePrimitive.Line -> counts.line += 1
-                is io.github.groundgrounder.hortus.core.ScenePrimitive.GraphShape -> counts.graphShape += 1
-                is io.github.groundgrounder.hortus.core.ScenePrimitive.LabelBackground -> counts.labelBackground += 1
-                is io.github.groundgrounder.hortus.core.ScenePrimitive.GraphPath -> {
-                    counts.graphPath += 1
-                    when (primitive.line) {
-                        "Solid" -> counts.solid += 1
-                        "Dotted" -> counts.dotted += 1
-                        "Thick" -> counts.thick += 1
-                        else -> counts.otherLine += 1
-                    }
-                    when (primitive.start) {
-                        "Arrow" -> counts.arrow += 1
-                        "Circle" -> counts.circle += 1
-                        "Cross" -> counts.cross += 1
-                        "None" -> Unit
-                        else -> counts.otherMarker += 1
-                    }
-                    when (primitive.end) {
-                        "Arrow" -> counts.arrow += 1
-                        "Circle" -> counts.circle += 1
-                        "Cross" -> counts.cross += 1
-                        "None" -> Unit
-                        else -> counts.otherMarker += 1
-                    }
-                }
-                is io.github.groundgrounder.hortus.core.ScenePrimitive.Text -> {
-                    counts.text += 1
-                    val span = primitive.span
-                    if (span.width > 0.0) {
-                        val paint = android.graphics.Paint(
-                            android.graphics.Paint.ANTI_ALIAS_FLAG or
-                                android.graphics.Paint.SUBPIXEL_TEXT_FLAG or
-                                android.graphics.Paint.LINEAR_TEXT_FLAG,
-                        ).apply {
-                            typeface = DiagramFonts.typeface(span.fontFamily, span.fontWeight.toInt())
-                            textSize = span.fontSize.toFloat() * 16f
-                            isLinearText = true
-                            isSubpixelText = true
-                            hinting = android.graphics.Paint.HINTING_OFF
-                            textLocale = DiagramFonts.localeFor(span.fontFamily)
-                        }
-                        if (span.width > 0.0) {
-                            val target = span.width * 16.0
-                            repeat(5) {
-                                val raw = paint.measureText(span.text).toDouble()
-                                if (raw <= 0.0) return@repeat
-                                if (kotlin.math.abs(target - raw) <= 0.01) return@repeat
-                                paint.textScaleX *= (target / raw).toFloat()
-                            }
-                            SceneTextMetrics.put(span, 1f, paint.textScaleX)
-                        }
-                        val measured = paint.measureText(span.text).toDouble() / 16.0
-                        val error = kotlin.math.abs(measured - span.width)
-                        counts.textSamples += 1
-                        if (error > counts.maxTextWidthError) {
-                            counts.maxTextWidthError = error
-                            counts.worstTextDiagram = documentKey
-                            counts.worstText = span.text.take(80)
-                        }
-                    }
-                }
-            }
-        }
-        return counts
     }
 
     private fun diagramFailureText(failure: DiagramFailure): String = when (failure) {
@@ -611,7 +474,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         )
         val key = "$sourcePath|$target|$heading|$alias|${ancestors.joinToString(">")}|${width.toInt()}|${size.toInt()}"
         synchronized(embedCache) { embedCache[key]?.let { return@withLock it } }
-        val info = MainThreadCounters.record("resolveEmbed") {
+        val info = DebugProbes.traceMainThread("resolveEmbed") {
             handle.resolveEmbed(
                 sourcePath = sourcePath,
                 rawTarget = target,
@@ -682,7 +545,7 @@ internal class ReaderRepository(context: Context) : AutoCloseable {
         collapsed: List<String>,
     ): String = lock.withLock {
         val engine = ensureDiagramEngine()
-        MainThreadCounters.record("diagramRender") {
+        DebugProbes.traceMainThread("diagramRender") {
             engine.renderSvg(engineText, mmd, ordinal.toUInt(), width, dark, collapsed)
         }
     }

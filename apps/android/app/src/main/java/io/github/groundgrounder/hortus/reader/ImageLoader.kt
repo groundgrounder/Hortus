@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.util.LruCache
 import com.caverock.androidsvg.SVG
+import io.github.groundgrounder.hortus.DebugProbes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -23,13 +24,6 @@ internal data class LoadedImage(
     val reason: String,
 )
 
-internal object ImageInspection {
-    private val records = java.util.concurrent.ConcurrentHashMap<String, LoadedImage>()
-    fun record(path: String, image: LoadedImage) { records[path] = image }
-    fun snapshot(): List<Pair<String, LoadedImage>> = records.entries.map { it.key to it.value }
-    fun clear() = records.clear()
-}
-
 internal object ImageLoader {
     private val cache = object : LruCache<String, LoadedImage>(64 * 1024 * 1024) {
         override fun sizeOf(key: String, value: LoadedImage): Int =
@@ -46,7 +40,7 @@ internal object ImageLoader {
         targetWidthPx: Int,
         requestedWidthPx: Int? = null,
     ): LoadedImage = withContext(Dispatchers.IO) {
-        MainThreadCounters.record("imageDecode") {
+        DebugProbes.traceMainThread("imageDecode") {
             loadBlocking(path, targetWidthPx, requestedWidthPx)
         }
     }
@@ -60,7 +54,7 @@ internal object ImageLoader {
         val extension = path.substringAfterLast('.', "").lowercase()
         val loaded = if (extension == "svg") loadSvg(path, target) else loadBitmap(path, target)
         if (loaded.bitmap != null || loaded.reason.isNotEmpty()) cache.put(key, loaded)
-        ImageInspection.record(path, loaded)
+        DebugProbes.recordImage(path, loaded)
         return loaded
     }
 

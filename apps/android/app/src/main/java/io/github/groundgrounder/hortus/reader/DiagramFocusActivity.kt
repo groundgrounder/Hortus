@@ -62,6 +62,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import io.github.groundgrounder.hortus.AndroidFonts
 import io.github.groundgrounder.hortus.CoreEnvironment
+import io.github.groundgrounder.hortus.DebugProbes
+import io.github.groundgrounder.hortus.DebugProbes.debugFocusBackTop
 import io.github.groundgrounder.hortus.MainActivity
 import io.github.groundgrounder.hortus.R
 import io.github.groundgrounder.hortus.core.DiagramEngine
@@ -72,13 +74,18 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 private const val DOWNLOAD_DOCUMENT_URI =
     "content://com.android.externalstorage.documents/document/primary%3ADownload"
+
+private class FocusViewportState {
+    @Volatile var scale: Float = 0f
+    @Volatile var offsetX: Float = 0f
+    @Volatile var offsetY: Float = 0f
+}
 
 internal class DiagramFocusActivity : ComponentActivity() {
     companion object {
@@ -93,6 +100,7 @@ internal class DiagramFocusActivity : ComponentActivity() {
     }
 
     private var payload: FocusPayload? = null
+    private val viewportState = FocusViewportState()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -101,7 +109,7 @@ internal class DiagramFocusActivity : ComponentActivity() {
         payload = FocusPayloads.get(intent.getIntExtra(EXTRA_TOKEN, -1))
         setContent {
             HortusTheme {
-                FocusScreen(payload, ::finish)
+                FocusScreen(payload, viewportState, ::finish)
             }
         }
     }
@@ -109,9 +117,11 @@ internal class DiagramFocusActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         val value = payload ?: return
-        FocusDebug.write(applicationContext, focusDebugState())
-        val scale = FocusStateRegistry.lastScale
+        DebugProbes.writeFocusDebug(applicationContext)
+        val scale = viewportState.scale
         if (scale <= 0f) return
+        val offsetX = viewportState.offsetX
+        val offsetY = viewportState.offsetY
         val appContext = applicationContext
         CoroutineScope(Dispatchers.IO).launch {
             val core = try {
@@ -125,8 +135,8 @@ internal class DiagramFocusActivity : ComponentActivity() {
                     value.notePath,
                     value.ordinal.toUInt(),
                     scale.toDouble(),
-                    FocusStateRegistry.lastOffsetX.toDouble(),
-                    FocusStateRegistry.lastOffsetY.toDouble(),
+                    offsetX.toDouble(),
+                    offsetY.toDouble(),
                 )
             } catch (_: Exception) {
                 Unit
@@ -141,24 +151,6 @@ internal class DiagramFocusActivity : ComponentActivity() {
     }
 }
 
-internal object FocusCounts {
-    @Volatile var counts = SceneCounts()
-}
-
-/** 顶栏与系统安全区的实测像素值，随 focus-state.json 输出，供验收脚本断言。 */
-private object FocusChromeMetrics {
-    @Volatile var topInsetPx: Int = 0
-    @Volatile var topBarContentTopPx: Int = 0
-    @Volatile var topBarBottomPx: Int = 0
-}
-
-private fun focusDebugState(): JSONObject =
-    FocusDebug.stateJson().apply {
-        put("topInsetPx", FocusChromeMetrics.topInsetPx)
-        put("topBarContentTopPx", FocusChromeMetrics.topBarContentTopPx)
-        put("topBarBottomPx", FocusChromeMetrics.topBarBottomPx)
-    }
-
 private data class SaveRequest(
     val bytes: ByteArray,
     val name: String,
@@ -166,7 +158,11 @@ private data class SaveRequest(
 )
 
 @Composable
-private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
+private fun FocusScreen(
+    payload: FocusPayload?,
+    viewportState: FocusViewportState,
+    onClose: () -> Unit,
+) {
     if (payload == null) return
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -203,7 +199,7 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             scope.launch {
                 try {
                     withContext(Dispatchers.IO) { DiagramExporter.write(context, uri, request.bytes) }
-                    Inspection.recordExport(
+                    DebugProbes.recordExport(
                         request.format.extension,
                         request.name,
                         request.bytes.size,
@@ -272,36 +268,29 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
     }
 
     fun rememberNow() {
-        FocusStateRegistry.lastScale = scale
-        FocusStateRegistry.lastOffsetX = offsetX
-        FocusStateRegistry.lastOffsetY = offsetY
-        FocusStateRegistry.sceneWidth = scene?.width?.toFloat() ?: 0f
-        FocusStateRegistry.sceneHeight = scene?.height?.toFloat() ?: 0f
-        FocusStateRegistry.fitScale = fitScale()
-        val base = scene?.primitives
-            ?.filterIsInstance<io.github.groundgrounder.hortus.core.ScenePrimitive.Text>()
-            ?.maxOfOrNull { it.span.fontSize.toFloat() } ?: 0f
-        FocusStateRegistry.sceneFontSize = base
-        FocusStateRegistry.unitScale = unitScale
-        FocusStateRegistry.drawnFontSize = base * scale * unitScale
-        FocusStateRegistry.sceneKey = "${payload.documentKey}#${payload.ordinal}"
-        FocusStateRegistry.notePath = payload.notePath
-        FocusStateRegistry.ordinal = payload.ordinal
-        FocusStateRegistry.collapsed = collapsed
-        FocusStateRegistry.visibleNodes = scene?.hitRegions?.size ?: 0
-        FocusStateRegistry.hits = scene?.hitRegions.orEmpty()
-        FocusStateRegistry.plusLabels = scene?.primitives?.count {
-            it is io.github.groundgrounder.hortus.core.ScenePrimitive.Text &&
-                it.span.text.trim().startsWith("+")
-        } ?: 0
+        viewportState.scale = scale
+        viewportState.offsetX = offsetX
+        viewportState.offsetY = offsetY
+        DebugProbes.recordFocusState(
+            scale = scale,
+            offsetX = offsetX,
+            offsetY = offsetY,
+            fitScale = fitScale(),
+            unitScale = unitScale,
+            scene = scene,
+            documentKey = payload.documentKey,
+            notePath = payload.notePath,
+            ordinal = payload.ordinal,
+            collapsed = collapsed,
+        )
     }
 
     fun toggleNode(nodeId: String) {
         val next = if (nodeId in collapsed) collapsed - nodeId else collapsed + nodeId
         collapsed = next
         DiagramStateBus.publish(payload.notePath, payload.ordinal, next)
-        FocusStateRegistry.collapsed = next
-        FocusDebug.write(context, focusDebugState())
+        DebugProbes.recordFocusCollapsed(next)
+        DebugProbes.writeFocusDebug(context)
         scope.launch {
             try {
                 engine.rememberCollapsed(next)
@@ -344,16 +333,18 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                     DiagramExporter.shareFile(context, name, bytes)
                 }
                 val uri = DiagramExporter.shareUri(context, file)
-                val readBack = withContext(Dispatchers.IO) { DiagramExporter.readBack(context, uri) }
-                Inspection.recordShare(
-                    Intent.ACTION_SEND,
-                    format.mime,
-                    uri.toString(),
-                    name,
-                    bytes.size,
-                    readBack?.contentEquals(bytes) == true,
-                    readBack?.size ?: -1,
-                )
+                if (DebugProbes.enabled) {
+                    val readBack = withContext(Dispatchers.IO) { DiagramExporter.readBack(context, uri) }
+                    DebugProbes.recordShare(
+                        Intent.ACTION_SEND,
+                        format.mime,
+                        uri.toString(),
+                        name,
+                        bytes.size,
+                        readBack?.contentEquals(bytes) == true,
+                        readBack?.size ?: -1,
+                    )
+                }
                 val intent = DiagramExporter.shareIntent(context, file, format, payload.title)
                 context.startActivity(Intent.createChooser(intent, context.getString(R.string.share_sheet_title)))
             } catch (_: Exception) {
@@ -386,7 +377,11 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             val rendered = engine.render(payload, collapsed, dark)
             scene = rendered
             failure = null
-            withContext(Dispatchers.IO) { measureFocusScene(rendered, payload) }
+            if (DebugProbes.enabled) {
+                withContext(Dispatchers.IO) {
+                    DebugProbes.recordFocusScene(rendered, payload.documentKey, payload.ordinal)
+                }
+            }
         } catch (error: Exception) {
             failure = error.message ?: error.javaClass.simpleName
             scene = null
@@ -412,7 +407,7 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             offsetY = y
         }
         rememberNow()
-        FocusDebug.write(context, focusDebugState())
+        DebugProbes.writeFocusDebug(context)
     }
     LaunchedEffect(scale, offsetX, offsetY, scene, collapsed) { rememberNow() }
 
@@ -438,7 +433,7 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                             var tapPosition = first.position
                             while (true) {
                                 val event = awaitPointerEvent()
-                                FocusStateRegistry.pointerEvents += 1
+                                DebugProbes.recordFocusPointerEvent()
                                 if (event.type == PointerEventType.Release) break
                                 val pressed = event.changes.filter { it.pressed }.ifEmpty { event.changes }
                                 val centroid = pressed.map { it.position }
@@ -449,7 +444,7 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                                 } else {
                                     0f
                                 }
-                                FocusStateRegistry.gestureDistance = distance
+                                DebugProbes.recordFocusGestureDistance(distance)
                                 val fit = fitScale()
                                 if (pressed.size >= 2 && previousDistance > 1f && distance > 1f) {
                                     val next = (scale * (distance / previousDistance)).coerceIn(fit, 4f)
@@ -488,12 +483,8 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                                     lastTapPosition = tapPosition
                                     val sceneX = (tapPosition.x - offsetX) / (scale * unitScale)
                                     val sceneY = (tapPosition.y - offsetY) / (scale * unitScale)
-                                    FocusStateRegistry.lastTapSceneX = sceneX
-                                    FocusStateRegistry.lastTapSceneY = sceneY
                                     val hit = SceneRenderer.hitAt(value, sceneX, sceneY)
-                                    FocusStateRegistry.lastHitLabel = hit?.label ?: ""
-                                    FocusStateRegistry.lastHitNodeId = hit?.nodeId ?: ""
-                                    FocusStateRegistry.lastHitCanCollapse = hit?.canCollapse == true
+                                    DebugProbes.recordFocusTap(sceneX, sceneY, hit)
                                     if (hit != null) {
                                         if (hit.canCollapse) {
                                             toggleNode(hit.nodeId)
@@ -514,7 +505,6 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                         zoom = scale * unitScale,
                         translateX = offsetX,
                         translateY = offsetY,
-                        diagramKey = "focus:${payload.documentKey}#${payload.ordinal}",
                     )
                 }
             }
@@ -530,8 +520,7 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
                 .windowInsetsPadding(systemInsets)
                 .onGloballyPositioned { coordinates ->
                     val bottom = coordinates.positionInRoot().y + coordinates.size.height
-                    FocusChromeMetrics.topInsetPx = topInsetPx
-                    FocusChromeMetrics.topBarBottomPx = bottom.roundToInt()
+                    DebugProbes.recordFocusChrome(topInsetPx, bottom.roundToInt())
                     if (kotlin.math.abs(bottom - topBarBottomPx) > 0.5f) {
                         topBarBottomPx = bottom
                     }
@@ -541,10 +530,7 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
         ) {
             IconButton(
                 onClick = onClose,
-                modifier = Modifier.onGloballyPositioned { coordinates ->
-                    FocusChromeMetrics.topBarContentTopPx =
-                        coordinates.positionInRoot().y.roundToInt()
-                },
+                modifier = Modifier.debugFocusBackTop(),
             ) {
                 Icon(Icons.Default.ArrowBack, contentDescription = stringResource(R.string.reader_back))
             }
@@ -612,29 +598,6 @@ private fun FocusScreen(payload: FocusPayload?, onClose: () -> Unit) {
             }
         }
     }
-}
-
-private fun measureFocusScene(scene: SceneData, payload: FocusPayload) {
-    val counts = SceneCounts()
-    val width = scene.width.toInt().coerceAtLeast(1)
-    val height = scene.height.toInt().coerceAtLeast(1)
-    val bitmap = android.graphics.Bitmap.createBitmap(
-        width,
-        height,
-        android.graphics.Bitmap.Config.ARGB_8888,
-    )
-    try {
-        SceneRenderer.draw(
-            android.graphics.Canvas(bitmap),
-            scene,
-            android.graphics.Color.BLACK,
-            counts = counts,
-            diagramKey = "focus:${payload.documentKey}#${payload.ordinal}",
-        )
-    } finally {
-        bitmap.recycle()
-    }
-    FocusCounts.counts = counts
 }
 
 private class FocusEngine(private val appContext: Context) {

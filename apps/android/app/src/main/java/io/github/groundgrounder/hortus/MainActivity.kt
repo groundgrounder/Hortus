@@ -22,13 +22,12 @@ import androidx.lifecycle.lifecycleScope
 import io.github.groundgrounder.hortus.reader.ReaderApp
 import io.github.groundgrounder.hortus.reader.ReaderController
 import io.github.groundgrounder.hortus.ui.HortusTheme
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-open class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_OPEN_NOTE = "io.github.groundgrounder.hortus.OPEN_NOTE"
         const val EXTRA_OPEN_HEADING = "io.github.groundgrounder.hortus.OPEN_HEADING"
@@ -39,9 +38,6 @@ open class MainActivity : ComponentActivity() {
         private set
     private var hasAccess by mutableStateOf(false)
     private var path by mutableStateOf("")
-    private var running by mutableStateOf(false)
-    private var failed by mutableStateOf(false)
-    private var result by mutableStateOf<FoundationResult?>(null)
 
     private val settings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         refreshPermission()
@@ -58,7 +54,6 @@ open class MainActivity : ComponentActivity() {
         controller.markActivityCreated()
         enableEdgeToEdge()
         refreshPermission()
-        DebugHooks.onActivityCreate(this, intent)
         setContent {
             val dark = isSystemInDarkTheme()
             SideEffect {
@@ -75,25 +70,33 @@ open class MainActivity : ComponentActivity() {
                 )
             }
         }
-        if (intent.getBooleanExtra("run_smoke", false)) {
-            // DebugSmokeActivity 子类自行处理；MainActivity 不启动任何检查。
-        } else if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
+        val handledExternal = if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
             handleExternalIntent(intent)
-        } else if (intent.getStringExtra("debug_vault") == null) {
+            true
+        } else {
+            false
+        }
+        val handledDebug = DebugHooks.handlesLaunch(intent)
+        if (!handledExternal && !handledDebug) {
             if (intent.getStringExtra(EXTRA_OPEN_NOTE) != null) {
                 handleOpenIntent(intent)
             } else {
                 openSavedOrRequested()
             }
         }
+        DebugHooks.onActivityCreate(this, intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
+        val handledExternal = if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
             handleExternalIntent(intent)
+            true
         } else {
+            false
+        }
+        if (!handledExternal && !DebugHooks.handlesLaunch(intent)) {
             handleOpenIntent(intent)
         }
         DebugHooks.onNewIntent(this, intent)
@@ -148,12 +151,12 @@ open class MainActivity : ComponentActivity() {
                 mode = "parent_vault"
             }
             if (controller.state.vaultPath == vault) {
-                controller.recordExternalMode(mode)
+                DebugProbes.recordExternalMode(mode)
                 controller.openNote(note.replace(File.separatorChar, '/'))
             } else {
                 path = vault
                 controller.start(vault, note.replace(File.separatorChar, '/'))
-                controller.recordExternalMode(mode)
+                DebugProbes.recordExternalMode(mode)
             }
             return
         }
@@ -257,7 +260,6 @@ open class MainActivity : ComponentActivity() {
 
     private fun openSavedOrRequested() {
         if (!hasAccess) return
-        if (intent?.getStringExtra("debug_vault") != null) return
         if (controller.state.vaultPath != null || controller.state.loading) return
         val saved = controller.preferencesState
         val requested = intent?.getStringExtra(EXTRA_OPEN_NOTE)
@@ -281,47 +283,6 @@ open class MainActivity : ComponentActivity() {
                     Manifest.permission.WRITE_EXTERNAL_STORAGE,
                 ),
             )
-        }
-    }
-
-    internal fun openDebugVault(vault: String, note: String?) {
-        if (!hasAccess) return
-        path = vault
-        controller.start(vault, note)
-    }
-
-    internal fun openDebugNote(note: String, heading: String? = null) {
-        if (!hasAccess) return
-        if (controller.state.vaultPath == null) {
-            val vault = path.ifBlank { controller.preferencesState.vaultPath }
-            if (vault != null) controller.start(vault, note) else return
-        } else {
-            controller.openPath(note, heading)
-        }
-    }
-
-    internal fun launchChecks(
-        vaultPath: String,
-        testSave: Boolean,
-        publish: (FoundationResult) -> Unit = {},
-    ) {
-        if (running || !hasAccess || !java.io.File(vaultPath).isAbsolute) return
-        path = vaultPath
-        running = true
-        failed = false
-        result = null
-        lifecycleScope.launch {
-            try {
-                val completed = FoundationChecks.run(applicationContext, vaultPath, testSave)
-                if (hasAccess) result = completed
-                withContext(Dispatchers.IO) { publish(completed) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                failed = true
-            } finally {
-                running = false
-            }
         }
     }
 }

@@ -4,6 +4,7 @@ package io.github.groundgrounder.hortus
 import android.content.Intent
 import io.github.groundgrounder.hortus.reader.DebugInspection
 import io.github.groundgrounder.hortus.reader.DebugReadingExports
+import io.github.groundgrounder.hortus.reader.DebugSessionMetrics
 import io.github.groundgrounder.hortus.reader.KnowledgeTab
 import io.github.groundgrounder.hortus.reader.SearchTab
 import io.github.groundgrounder.hortus.reader.SideMode
@@ -16,6 +17,10 @@ import java.io.File
 
 /** Debug 构建的检查入口；Release 源集里的同名对象什么也不做。 */
 internal object DebugHooks {
+    fun handlesLaunch(intent: Intent): Boolean =
+        intent.getStringExtra("debug_vault") != null ||
+            intent.getStringExtra("debug_note") != null
+
     fun onActivityCreate(activity: MainActivity, intent: Intent) = handle(activity, intent)
     fun onNewIntent(activity: MainActivity, intent: Intent) = handle(activity, intent)
 
@@ -23,10 +28,18 @@ internal object DebugHooks {
         fun decode(value: String?): String? = value?.let(android.net.Uri::decode)
         val vault = decode(intent.getStringExtra("debug_vault"))
         val note = decode(intent.getStringExtra("debug_note"))
-        if (vault != null) {
-            activity.openDebugVault(vault, note)
-        } else if (note != null) {
-            activity.openDebugNote(note, decode(intent.getStringExtra("debug_heading")))
+        val heading = decode(intent.getStringExtra("debug_heading"))
+        if (StoragePermissions.hasAllFilesAccess(activity)) {
+            if (vault != null) {
+                activity.controller.start(vault, note)
+            } else if (note != null) {
+                if (activity.controller.state.vaultPath == null) {
+                    val savedVault = activity.controller.preferencesState.vaultPath
+                    if (savedVault != null) activity.controller.start(savedVault, note)
+                } else {
+                    activity.controller.openPath(note, heading)
+                }
+            }
         }
         val action = intent.getStringExtra("debug_action")
         val dump = intent.getStringExtra("debug_dump")
@@ -122,14 +135,14 @@ internal object DebugHooks {
                     intent.getStringExtra("debug_name")?.let(android.net.Uri::decode) ?: "Note",
                 )
                 delay(120)
-                val previousCreated = controller.lastCreatedNote
+                val previousCreated = DebugSessionMetrics.lastCreatedNote
                 controller.createNewNote()
                 var waited = 0
                 while (waited < 15_000 && controller.newNoteState.creating) {
                     delay(50)
                     waited += 50
                 }
-                val created = controller.lastCreatedNote
+                val created = DebugSessionMetrics.lastCreatedNote
                 if (created != null && created != previousCreated &&
                     controller.newNoteState.error == null
                 ) {

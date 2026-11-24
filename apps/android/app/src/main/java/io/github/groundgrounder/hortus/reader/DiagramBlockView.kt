@@ -23,11 +23,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import io.github.groundgrounder.hortus.DebugProbes
+import io.github.groundgrounder.hortus.DebugProbes.debugDiagramRect
 import io.github.groundgrounder.hortus.R
 import io.github.groundgrounder.hortus.core.SceneData
 import kotlinx.coroutines.Dispatchers
@@ -90,18 +90,17 @@ internal fun DiagramBlock(
     } else {
         unitScale
     }
-    LaunchedEffect(result) {
-        result?.failure?.takeIf { it.isNotBlank() }?.let { reason ->
-            Inspection.recordDiagramFailure("${item.documentKey}#${item.ordinal}", item.ordinal, reason)
+    if (DebugProbes.enabled) {
+        LaunchedEffect(result) {
+            result?.failure?.takeIf { it.isNotBlank() }?.let { reason ->
+                DebugProbes.recordDiagramFailure("${item.documentKey}#${item.ordinal}", item.ordinal, reason)
+            }
         }
-    }
-    DisposableEffect(item.documentKey, item.ordinal) {
-        val count = Inspection.composedDiagramCanvases.incrementAndGet()
-        if (count > Inspection.maxComposedDiagramCanvases.get()) {
-            Inspection.maxComposedDiagramCanvases.set(count)
-        }
-        onDispose {
-            Inspection.composedDiagramCanvases.decrementAndGet()
+        DisposableEffect(item.documentKey, item.ordinal) {
+            DebugProbes.onDiagramComposed(1)
+            onDispose {
+                DebugProbes.onDiagramComposed(-1)
+            }
         }
     }
     val canvasHeight = if (scene != null) {
@@ -129,38 +128,25 @@ internal fun DiagramBlock(
                     palette.textArgb,
                 )
             }
-            LaunchedEffect(scene, key) {
-                if (!Inspection.recordingEnabled) return@LaunchedEffect
-                Inspection.recordInlinePreview(
-                    "diagram:${item.documentKey}:${item.ordinal}",
-                    scene.hitRegions.size,
-                    scene.primitives.count {
-                        it is io.github.groundgrounder.hortus.core.ScenePrimitive.Text &&
-                            it.span.text.trim().startsWith("+")
-                    },
-                    collapsed.orEmpty(),
-                    key,
-                    canvasHeight.toFloat(),
-                    layoutWidth,
-                    unitScale,
-                    drawZoom,
-                    diagramMainFontSize(scene) * drawZoom,
-                )
+            if (DebugProbes.enabled) {
+                LaunchedEffect(scene, key) {
+                    DebugProbes.recordInlinePreview(
+                        "diagram:${item.documentKey}:${item.ordinal}",
+                        scene,
+                        collapsed.orEmpty(),
+                        key,
+                        canvasHeight.toFloat(),
+                        layoutWidth,
+                        unitScale,
+                        drawZoom,
+                    )
+                }
             }
             Canvas(
                 Modifier
                     .fillMaxWidth()
                     .height(with(LocalDensity.current) { canvasHeight.toDp() })
-                    .onGloballyPositioned { coordinates ->
-                        val origin = coordinates.positionInWindow()
-                        Inspection.recordDiagramRect(
-                            "diagram:${item.documentKey}:${item.ordinal}",
-                            origin.x,
-                            origin.y,
-                            coordinates.size.width.toFloat(),
-                            coordinates.size.height.toFloat(),
-                        )
-                    }
+                    .debugDiagramRect("diagram:${item.documentKey}:${item.ordinal}")
                     .pointerInput(scene, collapsed) {
                         detectTapGestures {
                             onFocus(item, scene, collapsed.orEmpty())
@@ -169,7 +155,7 @@ internal fun DiagramBlock(
             ) {
                 drawIntoCanvas { canvas ->
                     canvas.nativeCanvas.drawRenderNode(renderNode)
-                    DiagramPreviewCache.noteReplay()
+                    DebugProbes.onDiagramPreviewReplayed()
                 }
             }
         } else {

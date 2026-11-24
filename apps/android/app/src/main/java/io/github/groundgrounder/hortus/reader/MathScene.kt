@@ -11,6 +11,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.text.TextRunShaper
 import android.os.Build
+import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.core.MathFailure
 import io.github.groundgrounder.hortus.core.MathGlyphMetrics
 import io.github.groundgrounder.hortus.core.MathStyle
@@ -213,7 +214,7 @@ internal class MathSceneRenderer(
             cache[key]?.let { return MathRenderResult(it, null, 0) }
             failed[key]?.let { return MathRenderResult(null, it, 0) }
         }
-        return MainThreadCounters.record("mathRender") {
+        return DebugProbes.traceMainThread("mathRender") {
             try {
                 var bytes = engine.render(latex, style)
                 var measured = 0

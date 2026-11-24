@@ -8,6 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.input.TextFieldValue
+import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.R
 import io.github.groundgrounder.hortus.core.DocumentIssue
 import io.github.groundgrounder.hortus.core.DocumentUpdate
@@ -43,43 +44,6 @@ internal data class ReaderUiState(
     val openSequence: Long = 0,
 )
 
-internal object ReaderTiming {
-    @Volatile var activityCreatedAt: Long = 0
-    @Volatile var openStartedAt: Long = 0
-    @Volatile var contentInstalledAt: Long = 0
-    @Volatile var firstFrameAt: Long = 0
-    @Volatile var fullyDrawnAt: Long = 0
-    @Volatile var openCount: Int = 0
-}
-
-internal object HitRegistry {
-    private val entries = LinkedHashMap<String, List<ScreenHit>>()
-
-    fun replace(scope: String, hits: List<ScreenHit>) {
-        synchronized(entries) {
-            if (hits.isEmpty()) entries.remove(scope) else entries[scope] = hits
-            while (entries.size > 256) entries.remove(entries.keys.first())
-        }
-    }
-
-    fun snapshot(): List<ScreenHit> = synchronized(entries) { entries.values.flatten() }
-
-    fun clear() = synchronized(entries) { entries.clear() }
-}
-
-internal data class ScreenHit(
-    val kind: String,
-    val label: String,
-    val x: Float,
-    val y: Float,
-    val width: Float,
-    val height: Float,
-    val target: String?,
-    val heading: String?,
-    val canCollapse: Boolean,
-    val nodeId: String?,
-)
-
 internal class ReaderController(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val repository = ReaderRepository(appContext)
@@ -104,30 +68,8 @@ internal class ReaderController(context: Context) : AutoCloseable {
         private set
     var newNoteState by mutableStateOf(NewNoteState())
         private set
-    var layoutMode by mutableStateOf("phone")
-        private set
     var sidePaneOpen by mutableStateOf(true)
     var sideMode by mutableStateOf(SideMode.FILES)
-    var externalMode: String? = null
-        private set
-    var sidePaneWidthPx: Int = 0
-        private set
-    var detailPaneWidthPx: Int = 0
-        private set
-    var querySummary: String = ""
-        private set
-    var lastSearchMicros: Long = 0
-        private set
-    var lastSaveIssue: String? = null
-        private set
-    var lastCreatedNote: String? = null
-        private set
-    @Volatile var shortcutsPublished: List<String> = emptyList()
-        private set
-    @Volatile var lastShortcutLaunchNote: String? = null
-        private set
-    @Volatile var lastShortcutLaunchVault: String? = null
-        private set
     private val shortcuts = ShortcutStore(appContext)
     private var searchJob: Job? = null
     private var searchCancellation: SearchCancellation? = null
@@ -150,10 +92,6 @@ internal class ReaderController(context: Context) : AutoCloseable {
         private set
     var lastVisiblePath: String? = null
         private set
-    var lastAction: String = ""
-        private set
-    var lastOpenTarget: ScrollTarget? = null
-        private set
 
     val preferencesState: ReaderPreferenceState get() = preferences.load()
 
@@ -161,15 +99,6 @@ internal class ReaderController(context: Context) : AutoCloseable {
         get() = state.content?.let {
             !it.externalPreview && it.readOnlyReason == null && !state.loading
         } ?: false
-
-    fun updateLayoutMode(value: String) {
-        if (layoutMode != value) layoutMode = value
-    }
-
-    fun recordPaneWidths(side: Int, detail: Int) {
-        sidePaneWidthPx = side
-        detailPaneWidthPx = detail
-    }
 
     fun toggleSidePane() {
         sidePaneOpen = !sidePaneOpen
@@ -233,16 +162,17 @@ internal class ReaderController(context: Context) : AutoCloseable {
                 val started = SystemClock.uptimeMillis()
                 val pair = withContext(Dispatchers.IO) {
                     if (tab == SearchTab.QUICK) {
-                        MainThreadCounters.record("quickOpen") {
+                        DebugProbes.traceMainThread("quickOpen") {
                             repository.quickOpen(query, 50)
                         } to emptyList()
                     } else {
-                        emptyList<QuickRow>() to MainThreadCounters.record("search") {
+                        emptyList<QuickRow>() to DebugProbes.traceMainThread("search") {
                             repository.search(query, cancellation)
                         }
                     }
                 }
-                lastSearchMicros = SystemClock.uptimeMillis() - started
+                val elapsedMs = SystemClock.uptimeMillis() - started
+                DebugProbes.recordSearchMicros(elapsedMs)
                 if (generation != searchState.generation || !searchState.open ||
                     searchState.tab != tab
                 ) {
@@ -257,7 +187,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
                     full = pair.second,
                     running = false,
                 )
-                querySummary = when {
+                val summary = when {
                     tab == SearchTab.QUICK -> pair.first.firstOrNull()?.let {
                         "quick:${it.path}:${pair.first.size}"
                     } ?: "quick:none"
@@ -265,6 +195,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
                         "full:${it.path}:${it.count}:${pair.second.size}"
                     } ?: "full:none"
                 }
+                DebugProbes.recordQuerySummary(summary, elapsedMs)
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -309,13 +240,13 @@ internal class ReaderController(context: Context) : AutoCloseable {
         knowledgeJob = scope.launch {
             try {
                 val loaded = withContext(Dispatchers.IO) {
-                    val outline = MainThreadCounters.record("outline") {
+                    val outline = DebugProbes.traceMainThread("outline") {
                         repository.outlineRows()
                     }
-                    val backlinks = MainThreadCounters.record("backlinks") {
+                    val backlinks = DebugProbes.traceMainThread("backlinks") {
                         repository.backlinks(content.path)
                     }
-                    val tags = MainThreadCounters.record("tags") { repository.tags() }
+                    val tags = DebugProbes.traceMainThread("tags") { repository.tags() }
                     Triple(outline, backlinks, tags)
                 }
                 if (state.content?.path != content.path) return@launch
@@ -339,7 +270,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
         tagJob = scope.launch {
             try {
                 val notes = withContext(Dispatchers.IO) {
-                    MainThreadCounters.record("tags") { repository.notesWithTag(tag) }
+                    DebugProbes.traceMainThread("tags") { repository.notesWithTag(tag) }
                 }
                 if (knowledgeState.selectedTag == tag) {
                     knowledgeState = knowledgeState.copy(tagNotes = notes)
@@ -385,9 +316,9 @@ internal class ReaderController(context: Context) : AutoCloseable {
 
     private fun scrollToSourceOffset(content: NoteContent, offset: Int) {
         val target = sourceOffsetTarget(content, offset) ?: return
-        lastOpenTarget = target
+        DebugProbes.recordOpenTarget(target)
         state = state.copy(scrollTarget = target)
-        lastAction = "scroll_source:$offset"
+        DebugProbes.recordAction("scroll_source:$offset")
     }
 
     private fun sourceOffsetTarget(content: NoteContent, offset: Int): ScrollTarget? {
@@ -432,7 +363,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
             sessionId = SystemClock.uptimeMillis(),
             readOnlyReason = content.readOnlyReason,
         )
-        lastAction = "edit_start:${content.path}"
+        DebugProbes.recordAction("edit_start:${content.path}")
     }
 
     fun updateEditText(value: TextFieldValue) {
@@ -529,7 +460,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
         val update: DocumentUpdate? = try {
             loadMutex.withLock {
                 withContext(Dispatchers.IO) {
-                    MainThreadCounters.record("save") {
+                    DebugProbes.traceMainThread("save") {
                         repository.replaceAndSave(text, temporary, choice)
                     }
                 }
@@ -540,11 +471,11 @@ internal class ReaderController(context: Context) : AutoCloseable {
             null
         }
         if (update == null) {
-            lastSaveIssue = "io.failure"
+            DebugProbes.recordSaveIssue("io.failure")
             editState = editState.copy(saving = false, issue = "save_failed", lastSaveOk = false)
             return false
         }
-        lastSaveIssue = update.issue.name
+        DebugProbes.recordSaveIssue(update.issue.name)
         if (update.copyPath != null) {
             val copy = update.copyPath
             try {
@@ -625,7 +556,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
         scope.launch {
             val entry = try {
                 withContext(Dispatchers.IO) {
-                    MainThreadCounters.record("createNote") {
+                    DebugProbes.traceMainThread("createNote") {
                         repository.createNote(parent, name)
                     }
                 }
@@ -639,7 +570,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
                 newNoteState = newNoteState.copy(creating = false, error = "vault.create_failed")
                 return@launch
             }
-            lastCreatedNote = entry.path
+            DebugProbes.recordCreatedNote(entry.path)
             newNoteState = NewNoteState()
             pendingEditPath = entry.path
             openNote(entry.path)
@@ -664,20 +595,14 @@ internal class ReaderController(context: Context) : AutoCloseable {
 
     fun launchShortcut(index: Int): Boolean {
         val intent = shortcuts.launchIntent(index) ?: return false
-        lastShortcutLaunchNote = intent.getStringExtra(
-            io.github.groundgrounder.hortus.MainActivity.EXTRA_OPEN_NOTE,
-        )
-        lastShortcutLaunchVault = intent.getStringExtra(
-            io.github.groundgrounder.hortus.MainActivity.EXTRA_OPEN_VAULT,
+        DebugProbes.recordShortcutLaunch(
+            intent.getStringExtra(io.github.groundgrounder.hortus.MainActivity.EXTRA_OPEN_NOTE),
+            intent.getStringExtra(io.github.groundgrounder.hortus.MainActivity.EXTRA_OPEN_VAULT),
         )
         appContext.startActivity(
             intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
         )
         return true
-    }
-
-    fun recordExternalMode(mode: String) {
-        externalMode = mode
     }
 
     fun shortcutNotes(): List<RecentNote> = shortcuts.load()
@@ -697,7 +622,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
                     return@withLock
                 }
                 editState = EditState()
-                externalMode = "readonly_stream"
+                DebugProbes.recordExternalMode("readonly_stream")
                 state = state.copy(
                     loading = false,
                     error = null,
@@ -705,8 +630,8 @@ internal class ReaderController(context: Context) : AutoCloseable {
                     scrollTarget = null,
                     openSequence = state.openSequence + 1,
                 )
-                ReaderTiming.contentInstalledAt = SystemClock.uptimeMillis()
-                lastAction = "external_preview:$fileName"
+                DebugProbes.markContentInstalled()
+                DebugProbes.recordAction("external_preview:$fileName")
             }
         }
     }
@@ -738,7 +663,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
         if (vaultPath == null) return
         scope.launch {
             loadMutex.withLock {
-                ReaderTiming.openCount += 1
+                DebugProbes.incrementOpenCount()
                 editState = EditState()
                 searchState = SearchState()
                 knowledgeState = KnowledgeState()
@@ -837,21 +762,19 @@ internal class ReaderController(context: Context) : AutoCloseable {
 
     fun followLink(link: TextLink) {
         if (link.resolution == "note" && link.resolvedPath != null) {
-            lastAction = "link_open:${link.resolvedPath}"
+            DebugProbes.recordAction("link_open:${link.resolvedPath}")
             openNote(link.resolvedPath, link.heading)
         } else if (link.resolution == "attachment") {
-            lastAction = "link_attachment:${link.target}"
+            DebugProbes.recordAction("link_attachment:${link.target}")
             notice(appContext.getString(io.github.groundgrounder.hortus.R.string.link_not_found))
         } else {
-            lastAction = "link_missing:${link.target}"
+            DebugProbes.recordAction("link_missing:${link.target}")
             notice(appContext.getString(io.github.groundgrounder.hortus.R.string.link_not_found))
         }
     }
 
     private suspend fun openInternal(path: String, heading: String?, push: Boolean, restoreAnchor: Boolean) {
-        val start = SystemClock.uptimeMillis()
-        ReaderTiming.openStartedAt = start
-        ReaderTiming.firstFrameAt = 0
+        DebugProbes.markOpenStarted()
         state = state.copy(loading = true, error = null, notice = null)
         val width = if (contentWidthPx > 0) contentWidthPx else defaultWidth()
         try {
@@ -875,7 +798,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
             } else {
                 scrollTargetFor(content, heading, restoreAnchor)
             }
-            lastOpenTarget = target
+            DebugProbes.recordOpenTarget(target)
             state = state.copy(
                 loading = false,
                 error = null,
@@ -884,9 +807,9 @@ internal class ReaderController(context: Context) : AutoCloseable {
                 scrollTarget = target,
                 openSequence = state.openSequence + 1,
             )
-            ReaderTiming.contentInstalledAt = SystemClock.uptimeMillis()
+            DebugProbes.markContentInstalled()
             preferences.save(content.vaultPath, content.path)
-            HitRegistry.clear()
+            DebugProbes.clearAllHits()
             rememberShortcut(content)
             if (pendingEditPath == content.path) {
                 pendingEditPath = null
@@ -1036,7 +959,7 @@ internal class ReaderController(context: Context) : AutoCloseable {
                     content.title,
                     System.currentTimeMillis(),
                 )
-                shortcutsPublished = shortcuts.publish(notes)
+                DebugProbes.recordShortcutsPublished(shortcuts.publish(notes))
             } catch (_: Exception) {
                 Unit
             }
@@ -1093,21 +1016,21 @@ internal class ReaderController(context: Context) : AutoCloseable {
     }
 
     fun markFirstFrame() {
-        if (ReaderTiming.firstFrameAt == 0L && state.content != null) {
-            ReaderTiming.firstFrameAt = SystemClock.uptimeMillis()
+        if (state.content != null) {
+            DebugProbes.markFirstFrame()
         }
     }
 
     fun markFullyDrawn() {
-        ReaderTiming.fullyDrawnAt = SystemClock.uptimeMillis()
+        DebugProbes.markFullyDrawn()
     }
 
     fun markActivityCreated() {
-        ReaderTiming.activityCreatedAt = SystemClock.uptimeMillis()
+        DebugProbes.markActivityCreated()
     }
 
     fun recordAction(action: String) {
-        lastAction = action
+        DebugProbes.recordAction(action)
     }
 
     fun openVaultFromPicker(path: String) {

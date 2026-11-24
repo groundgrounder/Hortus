@@ -110,7 +110,7 @@ internal object FoundationChecks {
                         }
                     }
                 }
-                AndroidFonts.compareWidths(systemFonts, fonts)
+                FontWidthCheck.compareWidths(systemFonts, fonts)
             }
             if (!diagramChecks.has("passed")) {
                 diagramChecks.put("passed", false).put("error", "System fonts are unavailable")

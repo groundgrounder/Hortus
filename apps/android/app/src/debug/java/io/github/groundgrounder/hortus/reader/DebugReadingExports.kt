@@ -79,7 +79,7 @@ internal object DebugReadingExports {
                         DiagramExportFormat.Pdf -> DiagramExporter.encodePdf(scene, dark)
                     }
                 }
-                val file = DiagramExporter.writeDebugFile(activity, fileName, bytes)
+                val file = Inspection.writeDebugFile(activity, fileName, bytes)
                 val extra = JSONObject()
                     .put("sceneWidth", scene.width)
                     .put("sceneHeight", scene.height)

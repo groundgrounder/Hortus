@@ -70,14 +70,16 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.groundgrounder.hortus.DebugProbes
+import io.github.groundgrounder.hortus.DebugProbes.debugItemBounds
+import io.github.groundgrounder.hortus.DebugProbes.debugPaneWidth
+import io.github.groundgrounder.hortus.DebugProbes.debugPanel
 import io.github.groundgrounder.hortus.R
 import io.github.groundgrounder.hortus.core.TreeEntry
 import kotlinx.coroutines.Dispatchers
@@ -115,8 +117,10 @@ private fun ReaderScaffold(
     val snackbarHost = remember { SnackbarHostState() }
     val configuration = LocalConfiguration.current
     val tablet = configuration.screenWidthDp >= 600
-    LaunchedEffect(tablet) {
-        controller.updateLayoutMode(if (tablet) "tablet" else "phone")
+    if (DebugProbes.enabled) {
+        LaunchedEffect(tablet) {
+            DebugProbes.recordLayoutMode(if (tablet) "tablet" else "phone")
+        }
     }
     fun focusDiagram(
         item: DiagramItem,
@@ -263,6 +267,11 @@ private fun TabletScaffold(
         snackbarHost = { SnackbarHost(snackbarHost) },
     ) { insets ->
         Row(Modifier.fillMaxSize().padding(insets)) {
+            if (DebugProbes.enabled) {
+                LaunchedEffect(controller.sidePaneOpen) {
+                    if (!controller.sidePaneOpen) DebugProbes.clearSidePaneWidth()
+                }
+            }
             if (controller.sidePaneOpen) {
                 SidePane(
                     controller = controller,
@@ -271,12 +280,7 @@ private fun TabletScaffold(
                     modifier = Modifier
                         .width(320.dp)
                         .fillMaxHeight()
-                        .onGloballyPositioned {
-                            controller.recordPaneWidths(
-                                it.size.width,
-                                controller.detailPaneWidthPx,
-                            )
-                        },
+                        .debugPaneWidth(isSide = true),
                 )
                 VerticalDivider()
             }
@@ -289,9 +293,7 @@ private fun TabletScaffold(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
-                    .onGloballyPositioned {
-                        controller.recordPaneWidths(if (controller.sidePaneOpen) controller.sidePaneWidthPx else 0, it.size.width)
-                    },
+                    .debugPaneWidth(isSide = false),
             )
         }
     }
@@ -523,15 +525,14 @@ private fun ReaderContent(
             }
         }
     }
-    LaunchedEffect(listState, content) {
-        snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo.count { info ->
-                content.items.getOrNull(info.index) is DiagramItem
-            }
-        }.collectLatest { count ->
-            Inspection.visibleDiagramCanvases.set(count)
-            if (count > Inspection.maxVisibleDiagramCanvases.get()) {
-                Inspection.maxVisibleDiagramCanvases.set(count)
+    if (DebugProbes.enabled) {
+        LaunchedEffect(listState, content) {
+            snapshotFlow {
+                listState.layoutInfo.visibleItemsInfo.count { info ->
+                    content.items.getOrNull(info.index) is DiagramItem
+                }
+            }.collectLatest { count ->
+                DebugProbes.setVisibleDiagramCount(count)
             }
         }
     }
@@ -572,14 +573,7 @@ private fun ReaderContent(
                     callbacks = callbacks,
                     modifier = Modifier
                         .padding(vertical = 1.dp)
-                        .onGloballyPositioned { coordinates ->
-                            LayoutInspection.recordItemBounds(
-                                item.key,
-                                item.blockId,
-                                coordinates.positionInWindow().y,
-                                coordinates.size.height.toFloat(),
-                            )
-                        },
+                        .debugItemBounds(item.key, item.blockId),
                 )
             }
         }
@@ -630,18 +624,14 @@ internal fun FileTreeList(
                         }
                     }
                     .padding(start = (12 + depth * 16).dp, end = 12.dp, top = 9.dp, bottom = 9.dp)
-                    .trackPanel("files", "file:${entry.path}") {
-                        PanelHit(
-                            kind = "file",
-                            label = entry.name,
-                            x = 0f,
-                            y = 0f,
-                            width = 0f,
-                            height = 0f,
-                            target = entry.path,
-                            tab = "files",
-                        )
-                    },
+                    .debugPanel(
+                        scope = "files",
+                        key = "file:${entry.path}",
+                        kind = "file",
+                        label = entry.name,
+                        target = entry.path,
+                        tab = "files",
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (entry.directory) {

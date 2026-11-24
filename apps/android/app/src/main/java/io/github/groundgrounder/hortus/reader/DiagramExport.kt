@@ -92,30 +92,6 @@ object DiagramExporter {
             ?: throw IllegalStateException("output stream unavailable")
     }
 
-    fun writeDebugFile(context: Context, name: String, bytes: ByteArray): File {
-        val directory = checkNotNull(context.getExternalFilesDir("exports")) { "external files unavailable" }
-        directory.mkdirs()
-        val file = File(directory, name)
-        val temporary = File(directory, ".$name.tmp")
-        temporary.writeBytes(bytes)
-        check(temporary.setReadable(true, false)) { "cannot make export readable" }
-        try {
-            java.nio.file.Files.move(
-                temporary.toPath(),
-                file.toPath(),
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-            )
-        } catch (_: Exception) {
-            java.nio.file.Files.move(
-                temporary.toPath(),
-                file.toPath(),
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-            )
-        }
-        return file
-    }
-
     /** 分享用的临时文件上限；超出时按最后修改时间删除最旧的文件。 */
     const val SHARE_CACHE_MAX_BYTES = 24L * 1024 * 1024
     const val SHARE_CACHE_MAX_FILES = 32
@@ -208,32 +184,4 @@ object FocusPayloads {
     fun get(token: Int): FocusPayload? = synchronized(this) { payloads[token] }
 
     fun remove(token: Int) = synchronized(this) { payloads.remove(token) }
-}
-
-object FocusStateRegistry {
-    @Volatile var lastScale: Float = 0f
-    @Volatile var lastOffsetX: Float = 0f
-    @Volatile var lastOffsetY: Float = 0f
-    @Volatile var sceneWidth: Float = 0f
-    @Volatile var sceneHeight: Float = 0f
-    @Volatile var largestFontPx: Float = 0f
-    @Volatile var baseLargestFontPx: Float = 0f
-    @Volatile var pointerEvents: Int = 0
-    @Volatile var gestureDistance: Float = 0f
-    @Volatile var sceneFontSize: Float = 0f
-    @Volatile var unitScale: Float = 0f
-    @Volatile var drawnFontSize: Float = 0f
-    @Volatile var sceneKey: String = ""
-    @Volatile var notePath: String = ""
-    @Volatile var ordinal: Int = 0
-    @Volatile var collapsed: List<String> = emptyList()
-    @Volatile var visibleNodes: Int = 0
-    @Volatile var plusLabels: Int = 0
-    @Volatile var fitScale: Float = 0f
-    @Volatile var lastTapSceneX: Float = 0f
-    @Volatile var lastTapSceneY: Float = 0f
-    @Volatile var lastHitLabel: String = ""
-    @Volatile var lastHitNodeId: String = ""
-    @Volatile var lastHitCanCollapse: Boolean = false
-    @Volatile var hits: List<io.github.groundgrounder.hortus.core.SceneHit> = emptyList()
 }

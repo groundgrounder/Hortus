@@ -38,6 +38,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.groundgrounder.hortus.DebugProbes.debugPanel
 import io.github.groundgrounder.hortus.R
 
 @Composable
@@ -134,18 +135,14 @@ private fun QuickResults(
                     .fillMaxWidth()
                     .clickable { onOpen(row) }
                     .padding(horizontal = 20.dp, vertical = 11.dp)
-                    .trackPanel("search", "quick:${row.path}") {
-                        PanelHit(
-                            kind = "quick",
-                            label = row.title,
-                            x = 0f,
-                            y = 0f,
-                            width = 0f,
-                            height = 0f,
-                            target = row.path,
-                            tab = "quick",
-                        )
-                    },
+                    .debugPanel(
+                        scope = "search",
+                        key = "quick:${row.path}",
+                        kind = "quick",
+                        label = row.title,
+                        target = row.path,
+                        tab = "quick",
+                    ),
             ) {
                 Highlighted(
                     text = row.title,
@@ -247,18 +244,14 @@ private fun FullResults(
                             .fillMaxWidth()
                             .clickable { onOpen(row, match) }
                             .padding(horizontal = 24.dp, vertical = 8.dp)
-                            .trackPanel("search", "full:${row.path}:${match.start}") {
-                                PanelHit(
-                                    kind = "search-snippet",
-                                    label = row.title,
-                                    x = 0f,
-                                    y = 0f,
-                                    width = 0f,
-                                    height = 0f,
-                                    target = "${row.path}#${match.start}",
-                                    tab = "full",
-                                )
-                            },
+                            .debugPanel(
+                                scope = "search",
+                                key = "full:${row.path}:${match.start}",
+                                kind = "search-snippet",
+                                label = row.title,
+                                target = "${row.path}#${match.start}",
+                                tab = "full",
+                            ),
                     ) {
                         Highlighted(
                             text = display.text,
