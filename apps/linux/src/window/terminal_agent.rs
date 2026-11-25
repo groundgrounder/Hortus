@@ -51,9 +51,9 @@ impl WindowInner {
                     win.tool_dock.close_terminal_tab(id);
                 }
             }),
-            on_agent_exited: Rc::new(move |sid, code| {
+            on_agent_ended: Rc::new(move |sid, state, code| {
                 if let Some(win) = weak_exit.upgrade() {
-                    win.handle_agent_process_exited(sid, code);
+                    win.handle_agent_process_ended(sid, state, code);
                 }
             }),
         });
@@ -279,16 +279,38 @@ impl WindowInner {
             Rc::new(move |choice| {
                 apply_color_scheme(choice);
                 if let Some(win) = weak_scheme.upgrade() {
-                    win.refresh_all_reading_tabs();
+                    win.sync_color_scheme_action(choice);
                 }
             }),
         ))
     }
 
     pub fn open_settings_dialog(self: &Rc<Self>, page: Option<SettingsPage>) {
+        if let Some(old) = self.state.borrow_mut().settings_dialog.take() {
+            old.force_close();
+        }
         if let Some(dlg) = self.build_settings_dialog() {
+            let weak = Rc::downgrade(self);
+            dlg.connect_closed(move |closed_dlg| {
+                if let Some(win) = weak.upgrade() {
+                    let mut st = win.state.borrow_mut();
+                    if st
+                        .settings_dialog
+                        .as_ref()
+                        .is_some_and(|cur| cur.same_instance(closed_dlg))
+                    {
+                        st.settings_dialog = None;
+                    }
+                }
+            });
+            self.state.borrow_mut().settings_dialog = Some(dlg.clone());
             dlg.present(&self.window, page);
         }
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn settings_dialog(&self) -> Option<SettingsDialog> {
+        self.state.borrow().settings_dialog.clone()
     }
 
     pub fn apply_config_update(self: &Rc<Self>, cfg: &ConfigSnapshot) {
@@ -296,7 +318,12 @@ impl WindowInner {
         self.refresh_all_reading_tabs();
     }
 
-    fn handle_agent_process_exited(self: &Rc<Self>, sid: String, code: i32) {
+    fn handle_agent_process_ended(
+        self: &Rc<Self>,
+        sid: String,
+        state: &'static str,
+        code: Option<i32>,
+    ) {
         let core = self
             .state
             .borrow()
@@ -307,7 +334,7 @@ impl WindowInner {
         glib::MainContext::default().spawn_local(async move {
             if let Some(core_bg) = core {
                 let _ = gio::spawn_blocking(move || {
-                    core_bg.mark_agent_session(sid, "exited".into(), Some(code))
+                    core_bg.mark_agent_session(sid, state.into(), code)
                 })
                 .await;
             }
@@ -319,12 +346,19 @@ impl WindowInner {
             }
             win.changes_panel.refresh();
             win.refresh_vault_tabs_and_broadcast();
-            win.show_toast(&crate::i18n::fmt1(crate::i18n::Key::ToastAgentExited, code));
+            if state == "exited"
+                && let Some(exit_code) = code
+            {
+                win.show_toast(&crate::i18n::fmt1(
+                    crate::i18n::Key::ToastAgentExited,
+                    exit_code,
+                ));
+            }
         });
     }
 
     fn handle_changes_rolled_back(self: &Rc<Self>, paths: &[String]) {
-        self.sync_paths_with_disk(paths);
+        self.sync_paths_with_disk(paths, true);
         let (services, reg_id, vault_root) = {
             let st = self.state.borrow();
             (st.services.clone(), st.window_reg_id, st.vault_root())
@@ -336,7 +370,7 @@ impl WindowInner {
 
     pub(crate) fn refresh_vault_tabs_and_broadcast(self: &Rc<Self>) {
         let open_paths: Vec<String> = self.state.borrow().tabs.keys().cloned().collect();
-        self.sync_paths_with_disk(&open_paths);
+        self.sync_paths_with_disk(&open_paths, false);
         let (services, reg_id, vault_root) = {
             let st = self.state.borrow();
             (st.services.clone(), st.window_reg_id, st.vault_root())
@@ -347,7 +381,11 @@ impl WindowInner {
         }
     }
 
-    pub(crate) fn sync_paths_with_disk(self: &Rc<Self>, paths: &[String]) {
+    pub(crate) fn sync_paths_with_disk(
+        self: &Rc<Self>,
+        paths: &[String],
+        close_clean_missing: bool,
+    ) {
         let Some(vault_root) = self.state.borrow().vault_root() else {
             return;
         };
@@ -361,14 +399,21 @@ impl WindowInner {
         {
             let st = self.state.borrow();
             for rel in targets {
-                if !st.tabs.contains_key(&rel) {
+                let Some(tab) = st.tabs.get(&rel) else {
                     continue;
-                }
+                };
                 let abs = Path::new(&vault_root).join(&rel);
                 if abs.exists() {
                     to_refresh.push(rel);
-                } else {
+                } else if close_clean_missing
+                    && !tab.edit_state.borrow().dirty
+                    && tab.session.as_ref().is_some_and(|s| {
+                        s.persistence() == hortus_ffi::DocumentPersistence::Persisted
+                    })
+                {
                     to_close.push(rel);
+                } else {
+                    to_refresh.push(rel);
                 }
             }
         }
@@ -394,6 +439,16 @@ impl WindowInner {
         };
         if let (Some(svcs), Some(root)) = (services, vault_root) {
             svcs.windows.notify_vault_written(reg_id, &root, paths);
+        }
+    }
+
+    pub fn notify_sibling_windows_renamed(&self, renames: &[(String, String)]) {
+        let (services, reg_id, vault_root) = {
+            let st = self.state.borrow();
+            (st.services.clone(), st.window_reg_id, st.vault_root())
+        };
+        if let (Some(svcs), Some(root)) = (services, vault_root) {
+            svcs.windows.notify_vault_renamed(reg_id, &root, renames);
         }
     }
 }

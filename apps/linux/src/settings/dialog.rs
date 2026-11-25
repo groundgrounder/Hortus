@@ -7,6 +7,7 @@
 use crate::core::ColorSchemeChoice;
 use crate::i18n::{Key, fmt1, tr};
 use crate::services::AppServices;
+use crate::services::config_service::{FONT_SIZE_MAX, FONT_SIZE_MIN};
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -46,6 +47,7 @@ struct SettingsState {
     on_toast: Rc<dyn Fn(String)>,
     on_scheme: Rc<dyn Fn(ColorSchemeChoice)>,
     suppress_probe: bool,
+    suppress_scheme: bool,
     guide_overridden: bool,
     discovered: Vec<Arc<DiscoveredAgentInfo>>,
     last_probe: Option<Arc<AgentProbeInfo>>,
@@ -105,7 +107,7 @@ impl SettingsDialog {
             .title(glib::markup_escape_text(tr(Key::SettingsGroupReading)))
             .build();
 
-        let font_adj = gtk4::Adjustment::new(15.0, 12.0, 24.0, 0.5, 1.0, 0.0);
+        let font_adj = gtk4::Adjustment::new(15.0, FONT_SIZE_MIN, FONT_SIZE_MAX, 0.5, 1.0, 0.0);
         let font_spin = adw::SpinRow::builder()
             .title(tr(Key::SettingsFontSize))
             .adjustment(&font_adj)
@@ -342,6 +344,7 @@ impl SettingsDialog {
                 on_toast,
                 on_scheme,
                 suppress_probe: false,
+                suppress_scheme: false,
                 guide_overridden: false,
                 discovered: Vec::new(),
                 last_probe: None,
@@ -392,6 +395,9 @@ impl SettingsDialog {
             let weak = Rc::downgrade(inner);
             inner.scheme_combo.connect_selected_notify(move |combo| {
                 let Some(this) = weak.upgrade() else { return };
+                if this.state.borrow().suppress_scheme {
+                    return;
+                }
                 let choice = match combo.selected() {
                     1 => ColorSchemeChoice::Light,
                     2 => ColorSchemeChoice::Dark,
@@ -455,6 +461,57 @@ impl SettingsDialog {
         self.inner.dialog.present(Some(parent));
     }
 
+    pub fn same_instance(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub fn connect_closed(&self, cb: impl Fn(&Self) + 'static) {
+        let weak = Rc::downgrade(&self.inner);
+        self.inner.dialog.connect_closed(move |_| {
+            if let Some(inner) = weak.upgrade() {
+                cb(&Self { inner });
+            }
+        });
+    }
+
+    pub fn sync_color_scheme(&self, choice: ColorSchemeChoice) {
+        let target = match choice {
+            ColorSchemeChoice::System => 0,
+            ColorSchemeChoice::Light => 1,
+            ColorSchemeChoice::Dark => 2,
+        };
+        if self.inner.scheme_combo.selected() == target {
+            return;
+        }
+        self.inner.state.borrow_mut().suppress_scheme = true;
+        self.inner.scheme_combo.set_selected(target);
+        self.inner.state.borrow_mut().suppress_scheme = false;
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn close(&self) {
+        self.dismiss_conflict_dialog();
+        let _ = self.inner.dialog.close();
+    }
+
+    pub fn force_close(&self) {
+        self.dismiss_conflict_dialog();
+        self.inner.dialog.force_close();
+    }
+
+    fn dismiss_conflict_dialog(&self) {
+        let alert = {
+            let mut st = self.inner.state.borrow_mut();
+            st.last_conflict = false;
+            let a = st.conflict_dialog.upgrade();
+            st.conflict_dialog.set(None);
+            a
+        };
+        if let Some(alert) = alert {
+            alert.force_close();
+        }
+    }
+
     pub fn select_page(&self, page: SettingsPage) {
         let target = match page {
             SettingsPage::Appearance => &self.inner.appearance_page,
@@ -498,7 +555,9 @@ impl SettingsDialog {
             st.suppress_probe = true;
         }
         inner.config_path_row.set_subtitle(&info.config_path);
-        inner.font_spin.set_value(info.font_size.clamp(12.0, 24.0));
+        inner
+            .font_spin
+            .set_value(info.font_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX));
         inner
             .default_view_combo
             .set_selected(if info.default_view == "editing" { 1 } else { 0 });
@@ -723,7 +782,8 @@ impl SettingsDialog {
     }
 
     fn build_input(inner: &Rc<SettingsInner>) -> EditableConfigInputInfo {
-        let font_size = (inner.font_spin.value() * 2.0).round() / 2.0;
+        let font_size =
+            ((inner.font_spin.value() * 2.0).round() / 2.0).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
         let default_view = if inner.default_view_combo.selected() == 1 {
             "editing".to_string()
         } else {
@@ -929,18 +989,12 @@ impl SettingsDialog {
         SettingsDialog::reset_guide_impl(&self.inner);
     }
 
-    pub fn close(&self) {
-        let alert = {
-            let mut st = self.inner.state.borrow_mut();
-            st.last_conflict = false;
-            let a = st.conflict_dialog.upgrade();
-            st.conflict_dialog.set(None);
-            a
-        };
-        if let Some(alert) = alert {
-            alert.force_close();
-        }
-        let _ = self.inner.dialog.close();
+    pub fn config_path_subtitle(&self) -> String {
+        self.inner
+            .config_path_row
+            .subtitle()
+            .map(|s| s.to_string())
+            .unwrap_or_default()
     }
 }
 

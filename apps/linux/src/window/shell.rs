@@ -394,9 +394,12 @@ impl HortusWindow {
             close_approved: false,
             last_alert: None,
             last_alert_dialog: glib::WeakRef::new(),
+            settings_dialog: None,
             disposing: false,
             #[cfg(feature = "automation")]
             last_stage: String::new(),
+            #[cfg(feature = "automation")]
+            theme_refreshes: 0,
             close_requests: 0,
             close_unsaved: 0,
             force_close: HashSet::new(),
@@ -522,7 +525,7 @@ impl WindowInner {
             }
             WindowCommand::DockCloseTab(tab_id) => self.tool_dock.close_tab(tab_id),
             WindowCommand::CloseTabPage(page) => self.request_close_tab(page),
-            WindowCommand::ApplyColorScheme(scheme) => apply_color_scheme(scheme),
+            WindowCommand::ApplyColorScheme(scheme) => self.apply_color_scheme_and_sync(scheme),
             WindowCommand::NewWindow => self.open_new_window(),
             WindowCommand::OpenSettings(page) => self.open_settings_dialog(page),
             WindowCommand::LaunchAgent => self.launch_agent_action(),
@@ -531,6 +534,9 @@ impl WindowInner {
             WindowCommand::ConfigChanged(cfg) => self.apply_config_update(&cfg),
             WindowCommand::ExternalVaultRefresh(paths) => {
                 self.handle_external_vault_refresh(&paths)
+            }
+            WindowCommand::ExternalVaultRename(renames) => {
+                self.handle_external_vault_rename(&renames)
             }
         }
     }
@@ -627,7 +633,7 @@ impl WindowInner {
     }
 
     pub fn teardown(&self) {
-        let (keepalive, services, reg_id, vault_ctx, vault_sub_id, tabs) = {
+        let (keepalive, services, reg_id, vault_ctx, vault_sub_id, tabs, settings_dialog) = {
             let mut st = self.state.borrow_mut();
             if st.disposing {
                 return;
@@ -643,8 +649,12 @@ impl WindowInner {
                 st.vault_ctx.take(),
                 st.vault_sub_id.take(),
                 std::mem::take(&mut st.tabs),
+                st.settings_dialog.take(),
             )
         };
+        if let Some(dlg) = settings_dialog {
+            dlg.force_close();
+        }
         if let (Some(ctx), Some(sub_id)) = (&vault_ctx, vault_sub_id) {
             ctx.unsubscribe(sub_id);
         }
@@ -696,9 +706,17 @@ mod tests {
         let weak_slot_act = Rc::clone(&weak_slot);
         app.connect_activate(move |app| {
             let win = HortusWindow::new(app, CliOptions::default());
+            if let Ok((services, _)) = crate::services::AppServices::init_blocking() {
+                win.inner.state.borrow_mut().services = Some(services);
+            }
             let weak = win.downgrade();
             *weak_slot_act.borrow_mut() = Some(weak);
             win.present();
+            win.inner.open_settings_dialog(None);
+            assert!(
+                win.inner.state.borrow().settings_dialog.is_some(),
+                "SettingsDialog should be tracked when opened"
+            );
             let gtk_win = win.inner.window.clone();
             drop(win);
             let app_on_close = app.clone();

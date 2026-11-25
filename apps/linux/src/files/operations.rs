@@ -32,7 +32,7 @@ pub fn device_of(path: &Path) -> Option<u64> {
     }
 }
 
-pub fn save_temp_for(temp_dir: &Path, vault_root: &str, rel: &str) -> PathBuf {
+pub fn resolve_save_temp(temp_dir: &Path, vault_root: &str, rel: &str) -> (PathBuf, bool) {
     let note_abs = Path::new(vault_root).join(rel);
     let parent = note_abs.parent().unwrap_or(Path::new(vault_root));
     let parent_device = device_of(parent);
@@ -49,10 +49,16 @@ pub fn save_temp_for(temp_dir: &Path, vault_root: &str, rel: &str) -> PathBuf {
             continue;
         }
         if parent_device.is_none() || device_of(&candidate) == parent_device {
-            return candidate;
+            return (candidate, true);
         }
     }
-    std::env::temp_dir()
+    let fallback = std::env::temp_dir();
+    let same_volume = parent_device.is_none() || device_of(&fallback) == parent_device;
+    (fallback, same_volume)
+}
+
+pub fn save_temp_for(temp_dir: &Path, vault_root: &str, rel: &str) -> PathBuf {
+    resolve_save_temp(temp_dir, vault_root, rel).0
 }
 
 /// 错误提示只保留简短原因，避免长路径/英文 io 错误把通知条撑宽。

@@ -107,6 +107,13 @@ impl WindowInner {
             return;
         };
 
+        let existing_pages: Vec<adw::TabPage> = (0..self.tab_view.n_pages())
+            .map(|i| self.tab_view.nth_page(i))
+            .collect();
+        for page in existing_pages {
+            self.tab_view.close_page(&page);
+        }
+
         let (old_ctx, old_sub_id, open_gen) = {
             let mut st = self.state.borrow_mut();
             st.vault_open_gen = st.vault_open_gen.wrapping_add(1);
@@ -123,12 +130,6 @@ impl WindowInner {
         }
         drop(old_ctx);
 
-        let existing_pages: Vec<adw::TabPage> = (0..self.tab_view.n_pages())
-            .map(|i| self.tab_view.nth_page(i))
-            .collect();
-        for page in existing_pages {
-            self.tab_view.close_page(&page);
-        }
         self.vault_tree.clear();
         self.render_outline_empty(crate::i18n::tr(crate::i18n::Key::ScanningFolder));
 
@@ -320,18 +321,26 @@ impl WindowInner {
             self.teardown();
             return glib::Propagation::Proceed;
         }
-        let pending: Vec<(String, Arc<hortus_ffi::DocumentSession>)> = {
+        let pending: Vec<(String, String, Arc<hortus_ffi::DocumentSession>)> = {
             let st = self.state.borrow();
+            let fallback_root = st.vault_root().unwrap_or_default();
             st.tabs
                 .iter()
                 .filter_map(|(path, tab)| {
-                    tab.session.clone().map(|session| (path.clone(), session))
+                    let root = if tab.vault_root.is_empty() {
+                        fallback_root.clone()
+                    } else {
+                        tab.vault_root.clone()
+                    };
+                    tab.session
+                        .clone()
+                        .map(|session| (path.clone(), root, session))
                 })
                 .collect()
         };
-        let unsaved: Vec<(String, Arc<hortus_ffi::DocumentSession>)> = pending
+        let unsaved: Vec<(String, String, Arc<hortus_ffi::DocumentSession>)> = pending
             .into_iter()
-            .filter(|(_, session)| session.persistence() != DocumentPersistence::Persisted)
+            .filter(|(_, _, session)| session.persistence() != DocumentPersistence::Persisted)
             .collect();
         self.state.borrow_mut().close_unsaved = unsaved.len() as u32;
         if unsaved.is_empty() {
@@ -342,14 +351,13 @@ impl WindowInner {
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let Some(win) = weak.upgrade() else { return };
-            let vault_root = win.state.borrow().vault_root().unwrap_or_default();
             let jobs: Vec<(String, String, Arc<hortus_ffi::DocumentSession>)> = unsaved
                 .iter()
-                .map(|(path, session)| {
-                    let temp = if vault_root.is_empty() {
+                .map(|(path, tab_root, session)| {
+                    let temp = if tab_root.is_empty() {
                         std::env::temp_dir()
                     } else {
-                        win.save_temp_for(&vault_root, path)
+                        win.save_temp_for(tab_root, path)
                     };
                     (
                         path.clone(),

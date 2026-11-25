@@ -66,6 +66,15 @@ impl WindowBridge for WindowInnerBridge {
         }
     }
 
+    fn on_vault_renamed(&self, vault_root: &str, renames: &[(String, String)]) {
+        if let Some(win) = self.weak.upgrade()
+            && !win.state.borrow().disposing
+            && win.state.borrow().vault_root().as_deref() == Some(vault_root)
+        {
+            win.send_command(WindowCommand::ExternalVaultRename(renames.to_vec()));
+        }
+    }
+
     fn session_entry(&self) -> Option<WindowSessionEntry> {
         let win = self.weak.upgrade()?;
         if win.state.borrow().disposing {
@@ -144,7 +153,13 @@ impl WindowInner {
     }
 
     pub fn handle_external_vault_refresh(self: &Rc<Self>, paths: &[String]) {
-        self.sync_paths_with_disk(paths);
+        self.sync_paths_with_disk(paths, false);
+        self.changes_panel.refresh();
+    }
+
+    pub fn handle_external_vault_rename(self: &Rc<Self>, renames: &[(String, String)]) {
+        self.migrate_renamed_tabs(renames);
+        self.refresh_knowledge_after_write();
         self.changes_panel.refresh();
     }
 
