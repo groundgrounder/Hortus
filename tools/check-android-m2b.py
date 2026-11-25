@@ -36,6 +36,49 @@ flowchart LR
 '''
 
 
+WIDE_TABLE_MATH_NOTE = '''# Wide Table And Long Math
+
+| Col1 | Col2 | Col3 | Col4 | Col5 | Col6 |
+| --- | --- | --- | --- | --- | --- |
+| AlphaLongCellValue | BetaLongCellValue | GammaLongCellValue | DeltaLongCellValue | EpsilonLongCellValue | ZetaLongCellValue |
+
+$$\\sum_{i=1}^{24} \\frac{a_i x_i + b_i y_i + c_i z_i}{\\sqrt{d_i^2 + e_i^2 + f_i^2}} + \\prod_{j=1}^{12} \\left(1 + \\frac{u_j}{v_j + w_j}\\right)$$
+'''
+
+EMBED_TARGET_NOTE = '# Embed Target\n\nTarget reached.\n'
+
+EMBED_SYNC_B_NOTE = '''# Embed Sync Child
+
+```mermaid
+mindmap
+  root((RootNode))
+    BranchOne
+      LeafAlpha
+      LeafBeta
+    [[EmbedTarget]]
+```
+'''
+
+EMBED_SYNC_A_NOTE = '# Embed Sync Host\n\n![[EmbedSyncB]]\n'
+
+LONG_SCROLL_NOTE = '# Long Scroll Note\n\n' + '\n'.join(
+    f'## Section {i:02d}\n\nParagraph {i:02d} with enough body text for vertical scrolling checks.\n'
+    for i in range(1, 31)
+)
+
+BROKEN_ZH_NOTE = '''# 中文渲染失败验证
+
+```mermaid
+flowchart LR
+  A -->
+```
+
+![[missing-zh-pic.png]]
+
+$$\\unknowncommand{1}$$
+'''
+
+
 def log(message: str) -> None:
     print(message, flush=True)
 
@@ -143,6 +186,7 @@ class Device:
         local = self.output / name
         self.pull(remote, local)
         root = ET.fromstring(local.read_text())
+        parents = {child: parent for parent in root.iter() for child in parent}
         nodes = []
         for elem in root.iter('node'):
             bounds = elem.attrib.get('bounds', '')
@@ -150,11 +194,19 @@ class Device:
             if not m:
                 continue
             x1, y1, x2, y2 = (int(v) for v in m.groups())
+            cur = elem
+            effective_enabled = True
+            while cur is not None:
+                if cur.attrib.get('enabled') == 'false':
+                    effective_enabled = False
+                    break
+                cur = parents.get(cur)
             nodes.append({
                 'text': elem.attrib.get('text', ''),
                 'desc': elem.attrib.get('content-desc', ''),
                 'class': elem.attrib.get('class', ''),
                 'clickable': elem.attrib.get('clickable') == 'true',
+                'enabled': effective_enabled,
                 'cx': (x1 + x2) // 2,
                 'cy': (y1 + y2) // 2,
                 'bounds': (x1, y1, x2, y2),
@@ -275,6 +327,12 @@ def main() -> int:
     try:
         copy_tree(ROOT / 'fixtures/demo-vault', stage)
         (stage / 'M2b check.md').write_text(M2B_NOTE, encoding='utf-8')
+        (stage / 'WideTableMath.md').write_text(WIDE_TABLE_MATH_NOTE, encoding='utf-8')
+        (stage / 'EmbedTarget.md').write_text(EMBED_TARGET_NOTE, encoding='utf-8')
+        (stage / 'EmbedSyncB.md').write_text(EMBED_SYNC_B_NOTE, encoding='utf-8')
+        (stage / 'EmbedSyncA.md').write_text(EMBED_SYNC_A_NOTE, encoding='utf-8')
+        (stage / 'LongScroll.md').write_text(LONG_SCROLL_NOTE, encoding='utf-8')
+        (stage / 'BrokenZh.md').write_text(BROKEN_ZH_NOTE, encoding='utf-8')
         baseline = tree_hashes(stage)
         (output / 'vault-baseline.json').write_text(json.dumps(baseline, indent=2) + '\n')
 
@@ -289,10 +347,28 @@ def main() -> int:
         device.night(False)
         device.shell(f'cmd locale set-app-locales {PACKAGE} --locales en-US', check=False)
 
-        # 1. 首页进入设置并检查 About 字段（仅名称/版本/GPL-3.0-only/仓库链接）
+        # 1. 首页进入设置并检查 About 字段（仅名称/版本/GPL-3.0-only/仓库链接），以及存储根目录拦截（M4-17）
         device.start(cold=True)
         time.sleep(1.5)
         home_nodes = device.ui_dump('home-ui.xml')
+        device.tap_node(home_nodes, text='Open folder')
+        picker_nodes = device.ui_dump('home-picker-root.xml')
+        use_btn = next((n for n in picker_nodes if n['text'] == 'Use this folder'), None)
+        still_open = False
+        if use_btn is not None:
+            device.tap(use_btn['cx'], use_btn['cy'], wait=0.4)
+            after_tap_nodes = device.ui_dump('home-picker-after-tap.xml')
+            still_open = any(n['text'] == 'Use this folder' for n in after_tap_nodes)
+        results.check(
+            'A2',
+            'home folder picker blocks storage root selection',
+            use_btn is not None and use_btn.get('enabled') is False and still_open,
+            {'button': use_btn, 'stillOpenAfterTap': still_open},
+        )
+        device.screenshot(media / 'home-root-blocked.png')
+        device.key(4)
+        time.sleep(0.5)
+        home_nodes = device.ui_dump('home-ui-after-picker.xml')
         device.tap_node(home_nodes, desc='Settings')
         settings_light_nodes = device.ui_dump('settings-light-ui.xml')
         texts = [n['text'] for n in settings_light_nodes if n['text']]
@@ -475,6 +551,106 @@ def main() -> int:
                 'after': ac_settings,
             },
         )
+
+        # 4b. 宽表与超宽公式横滑（M4-15）
+        wide_dump = device.dump('m2b-wide-table-math.json', note='WideTableMath.md', cold=True, wait_ms=1600)
+        tables = wide_dump.get('tableLayouts', [])
+        bmath = wide_dump.get('blockMath', [])
+        wide_table_ok = bool(tables) and sum(tables[0].get('columns', [])) > wide_dump.get('contentWidth', 0)
+        wide_math_ok = bool(bmath) and any(
+            f.get('width', 0) > wide_dump.get('contentWidth', 0)
+            for item in bmath for f in item.get('formulas', [])
+        )
+        device.shell('input swipe 900 500 200 500 220')
+        time.sleep(0.4)
+        device.screenshot(media / 'wide-table-math-scroll.png')
+        results.check(
+            'A2',
+            'wide table and wide block math overflow content width with horizontal scroll',
+            wide_table_ok and wide_math_ok,
+            {'wideTableOk': wide_table_ok, 'wideMathOk': wide_math_ok},
+        )
+
+        # 4c. 嵌入图 documentKey 与全屏折叠同步（M4-12）
+        embed_dump = device.dump('m2b-embed-sync.json', note='EmbedSyncA.md', cold=True, wait_ms=1800)
+        embed_rect = (embed_dump.get('diagramRects') or [{}])[0]
+        embed_sync_ok = False
+        embed_detail: dict = {'rect': embed_rect}
+        if embed_rect:
+            device.shell(f'rm -f {REMOTE_DIR}/focus/focus-state.json', check=False)
+            device.tap(embed_rect['x'] + embed_rect['width'] / 2, embed_rect['y'] + embed_rect['height'] / 2, wait=1.5)
+            f_local = output / 'embed-focus-state.json'
+            pulled_f = device.pull(f'{REMOTE_DIR}/focus/focus-state.json', f_local)
+            f_data = json.loads(f_local.read_text()) if pulled_f else {}
+            note_key_ok = f_data.get('notePath') == 'EmbedSyncB.md'
+            collapse_hit = next((h for h in f_data.get('hits', []) if h.get('canCollapse')), None)
+            collapsed_after: list[str] = []
+            if collapse_hit:
+                scale = float(f_data.get('scale', 1.0))
+                unit = float(f_data.get('unitScale', 1.0))
+                ox = float(f_data.get('offsetX', 0.0))
+                oy = float(f_data.get('offsetY', 0.0))
+                tx = ox + (collapse_hit['x'] + collapse_hit['width'] / 2.0) * scale * unit
+                ty = oy + (collapse_hit['y'] + collapse_hit['height'] / 2.0) * scale * unit
+                device.tap(tx, ty, wait=1.2)
+                f_local2 = output / 'embed-focus-collapsed.json'
+                if device.pull(f'{REMOTE_DIR}/focus/focus-state.json', f_local2):
+                    collapsed_after = json.loads(f_local2.read_text()).get('collapsed', [])
+            device.key(4)
+            time.sleep(0.8)
+            device.screenshot(media / 'embed-diagram-sync.png')
+            after_embed_dump = device.dump('m2b-embed-sync-after.json', wait_ms=800)
+            inline_collapsed = [
+                p.get('collapsed', [])
+                for p in after_embed_dump.get('inlinePreviews', [])
+                if 'EmbedSyncB.md' in p.get('key', '')
+            ]
+            embed_sync_ok = note_key_ok and bool(collapsed_after) and any(c == collapsed_after for c in inline_collapsed)
+            embed_detail = {
+                'notePath': f_data.get('notePath'),
+                'collapsedAfter': collapsed_after,
+                'inlineCollapsed': inline_collapsed,
+            }
+        results.check('A2', 'embedded diagram uses real notePath and syncs collapse state', embed_sync_ok, embed_detail)
+
+        # 4d. 640ms 滚动不劫持（M4-19）：从 M2b check 跳转至 LongScroll#Section 25（热切换触发 heading 定位）
+        device.dump('m2b-scroll-primer.json', note='M2b check.md', cold=False, wait_ms=600)
+        anchor_dump = device.dump('m2b-scroll-at-target.json', note='LongScroll.md', cold=False,
+                                  extra=['--es', 'debug_heading', 'Section%2025'], wait_ms=900)
+        anchor_block = anchor_dump.get('firstVisibleBlockId')
+        device.dump('m2b-scroll-reset.json', note='M2b check.md', cold=False, wait_ms=600)
+        device.start(note='LongScroll.md', cold=False, extra=['--es', 'debug_heading', 'Section%2025'])
+        time.sleep(0.25)
+        device.shell('input swipe 540 500 540 1600 120')
+        time.sleep(0.85)
+        after_swipe = device.dump('m2b-scroll-after-swipe.json', wait_ms=200)
+        swiped_block = after_swipe.get('firstVisibleBlockId')
+        results.check(
+            'A2',
+            'anchor scroll does not hijack manual swipe within 640ms',
+            anchor_block is not None and swiped_block is not None and anchor_block > 10 and swiped_block < anchor_block,
+            {'anchorBlock': anchor_block, 'swipedBlock': swiped_block},
+        )
+
+        # 4e. 中文渲染失败提示本地化（M4-19）
+        device.shell(f'cmd locale set-app-locales {PACKAGE} --locales zh-CN', check=False)
+        device.dump('m2b-zh-errors.json', note='BrokenZh.md', cold=True, wait_ms=1800)
+        zh_nodes = device.ui_dump('zh-errors-ui.xml')
+        zh_texts = [n['text'] for n in zh_nodes if n['text']]
+        device.screenshot(media / 'zh-render-errors.png')
+        has_zh_diagram = any('无法解析图表语法' in t or '图表未能' in t or '无法显示图表' in t for t in zh_texts)
+        has_zh_image = any('找不到图片文件' in t for t in zh_texts)
+        has_zh_math = any('无法渲染公式' in t for t in zh_texts)
+        no_raw_codes = not any(
+            code in t for t in zh_texts for code in ('diagram.', 'image.', 'math.')
+        )
+        results.check(
+            'A2',
+            'Chinese UI localizes diagram, image, and math failure messages without raw codes',
+            has_zh_diagram and has_zh_image and has_zh_math and no_raw_codes,
+            {'zhTexts': zh_texts[:30]},
+        )
+        device.shell(f'cmd locale set-app-locales {PACKAGE} --locales en-US', check=False)
 
         # 5. 检查笔记文件夹零写入
         pulled_vault = output / 'pulled-vault'

@@ -60,6 +60,13 @@ internal object DebugHooks {
                         expectedVault = savedVault
                         openJob = viewModel.start(savedVault, note)
                         minSequence = initialSequence + 1L
+                    } else if (!viewModel.isPreferencesLoaded) {
+                        minSequence = initialSequence + 1L
+                        openJob = activity.lifecycleScope.launch {
+                            val loaded = viewModel.awaitPreferences().vaultPath ?: return@launch
+                            expectedVault = loaded
+                            viewModel.start(loaded, note)?.join()
+                        }
                     }
                 } else {
                     expectedVault = current.vaultPath

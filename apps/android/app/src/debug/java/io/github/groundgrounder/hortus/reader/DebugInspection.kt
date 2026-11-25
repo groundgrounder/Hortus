@@ -119,7 +119,10 @@ internal object DebugInspection {
                     content.bodySize,
                 )
                 for (media in content.media.filter { it.columns.isEmpty() && it.imagePath.isNotBlank() }) {
-                    ImageLoader.load(media.imagePath, content.width, media.imageWidth?.toInt())
+                    val requestedPx = media.imageWidth?.takeIf { it > 0u }?.let {
+                        kotlin.math.round(it.toFloat() * density).toInt().coerceAtLeast(1)
+                    }
+                    ImageLoader.load(media.imagePath, content.width, requestedPx)
                 }
                 for (item in content.diagramItems) {
                     val collapsed = renderBridge.collapsedNodes(content.vaultPath, item.documentKey, item.ordinal)
