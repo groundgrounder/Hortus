@@ -179,7 +179,12 @@ mod imp {
                 let Some(obj) = weak.upgrade() else { return };
                 let imp = obj.imp();
                 imp.viewport_idle_source.borrow_mut().take();
-                let vp_w = obj.width().max(imp.last_viewport_w.get());
+                let last_vp_w = imp.last_viewport_w.get();
+                let vp_w = if last_vp_w > 0 {
+                    last_vp_w
+                } else {
+                    obj.width()
+                };
                 let cb = imp.on_viewport_width.borrow().clone();
                 if let Some(cb) = cb
                     && vp_w > 0
@@ -385,7 +390,14 @@ mod edit_imp {
             let Some(child) = child else {
                 return (0, 0, -1, -1);
             };
-            child.measure(orientation, for_size)
+            let (min, nat, min_base, nat_base) = child.measure(orientation, for_size);
+            if orientation == gtk4::Orientation::Horizontal {
+                // 避免缩窗瞬间旧居中边距 (255*2) 暂时顶破 AdwToastOverlay 最小宽度预算。
+                let safe_min = min.clamp(0, MIN_VIEWPORT_WIDTH);
+                (safe_min, nat.max(safe_min), min_base, nat_base)
+            } else {
+                (min, nat, min_base, nat_base)
+            }
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
@@ -409,7 +421,8 @@ mod edit_imp {
             let id = glib::idle_add_local_once(move || {
                 let Some(obj) = weak.upgrade() else { return };
                 obj.imp().idle_source.borrow_mut().take();
-                let w = obj.width().max(obj.imp().last_width.get());
+                let last_w = obj.imp().last_width.get();
+                let w = if last_w > 0 { last_w } else { obj.width() };
                 obj.sync_margins_for_width(w);
             });
             *self.idle_source.borrow_mut() = Some(id);
@@ -459,8 +472,10 @@ impl HortusEditHost {
         if width <= 0 {
             return;
         }
-        let (_, side_offset) =
+        let (_, raw_side_offset) =
             effective_reading_column_width(width, Some(READING_COLUMN_MAX_WIDTH));
+        let max_side_offset = (width - 120).max(0) / 2;
+        let side_offset = raw_side_offset.min(max_side_offset);
         let Some(view) = self
             .imp()
             .edit_view
@@ -470,11 +485,21 @@ impl HortusEditHost {
         else {
             return;
         };
+        let mut changed = false;
         if view.left_margin() != side_offset {
             view.set_left_margin(side_offset);
+            changed = true;
         }
         if view.right_margin() != side_offset {
             view.set_right_margin(side_offset);
+            changed = true;
+        }
+        if changed || view.measure(gtk4::Orientation::Horizontal, -1).0 > width {
+            view.queue_resize();
+            if let Some(child) = self.imp().child.borrow().as_ref() {
+                child.queue_resize();
+            }
+            self.queue_resize();
         }
     }
 
@@ -616,7 +641,7 @@ mod tests {
         let host = HortusEditHost::new();
         let edit_view = gtk4::TextView::new();
         let scrolled = gtk4::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk4::PolicyType::Never)
+            .hscrollbar_policy(gtk4::PolicyType::External)
             .vscrollbar_policy(gtk4::PolicyType::Automatic)
             .child(&edit_view)
             .build();
@@ -645,6 +670,15 @@ mod tests {
             scrolled.width() - edit_view.left_margin() - edit_view.right_margin(),
             700 - H_PADDING_NARROW * 2
         );
+
+        // 极窄平铺窗口：钳制 side_offset <= ((width - 120).max(0)) / 2，保证正文列宽 >= 120
+        host.allocate(140, 800, -1, None);
+        while ctx.pending() {
+            ctx.iteration(false);
+        }
+        assert!(edit_view.left_margin() <= (140 - 120) / 2);
+        assert_eq!(edit_view.left_margin(), edit_view.right_margin());
+        assert!(scrolled.width() - edit_view.left_margin() - edit_view.right_margin() >= 120);
 
         let weak_host = host.downgrade();
         let weak_view = edit_view.downgrade();

@@ -14,6 +14,7 @@ use crate::reading::{
 use crate::render::embed::EmbedCallbacks;
 use crate::render::math::MathRenderService;
 use crate::window::commands::WindowCommand;
+use crate::window::outline::{launch_edit_scroll_sync, schedule_reading_scroll_restore};
 use crate::window::shell::WindowInner;
 use gtk4::gio;
 use gtk4::glib;
@@ -23,7 +24,6 @@ use libadwaita as adw;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 pub fn is_mmd_path(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".mmd")
@@ -486,9 +486,11 @@ impl WindowInner {
                 tab.edit_host.clone(),
             )
         };
-        let vp_w = viewport.width();
-        if vp_w > 0 {
-            edit_host.sync_margins_for_width(vp_w);
+        if !editing {
+            let vp_w = viewport.width();
+            if vp_w > 0 {
+                edit_host.sync_margins_for_width(vp_w);
+            }
         }
         if !loaded || editing {
             return;
@@ -521,9 +523,11 @@ impl WindowInner {
                 tab.edit_host.clone(),
             )
         };
-        let vp_w = viewport.width();
-        if vp_w > 0 {
-            edit_host.sync_margins_for_width(vp_w);
+        if !editing {
+            let vp_w = viewport.width();
+            if vp_w > 0 {
+                edit_host.sync_margins_for_width(vp_w);
+            }
         }
         if !loaded || editing || alloc_w <= 240 {
             return;
@@ -572,24 +576,48 @@ impl WindowInner {
             };
             let u16_off = Utf16Mapper::new(&tab.text).byte_to_utf16(byte_start as usize) as u64;
             tab.editing = true;
+            tab.edit_scroll_gen = tab.edit_scroll_gen.wrapping_add(1);
             Some((
                 tab.edit_view.clone(),
+                tab.edit_scrolled.clone(),
+                tab.edit_buffer.clone(),
                 u16_off,
+                tab.edit_scroll_gen,
                 tab.content_stack.clone(),
                 tab.edit_host.clone(),
                 tab.reading_viewport.width(),
             ))
         };
-        if let Some((ev, u16_off, content_stack, edit_host, vp_w)) = mapper_u16 {
+        if let Some((
+            ev,
+            edit_scrolled,
+            edit_buffer,
+            u16_off,
+            scroll_gen,
+            content_stack,
+            edit_host,
+            vp_w,
+        )) = mapper_u16
+        {
             let sync_w = if vp_w > 0 {
                 vp_w
+            } else if edit_host.width() > 0 {
+                edit_host.width()
             } else {
                 self.reading_viewport_width_hint()
             };
             edit_host.sync_margins_for_width(sync_w);
             content_stack.set_visible_child_name("edit");
             self.sync_active_tab_ui();
-            self.scroll_to_utf16_offset(note_path, u16_off);
+            launch_edit_scroll_sync(
+                self,
+                note_path,
+                &edit_buffer,
+                &edit_scrolled,
+                u16_off,
+                scroll_gen,
+                10,
+            );
             ev.grab_focus();
         }
     }
@@ -608,7 +636,10 @@ impl WindowInner {
             new_editing,
             needs_reading_refresh,
             anchor_u16,
+            scroll_gen,
             edit_view,
+            edit_scrolled,
+            edit_buffer,
             content_stack,
             edit_host,
             vp_w,
@@ -625,16 +656,26 @@ impl WindowInner {
                     .unwrap_or(0);
                 (u16_off, false)
             } else {
-                let top_y = tab.edit_scrolled.vadjustment().value().max(0.0) as i32;
-                let (iter, _) = tab.edit_view.line_at_y(top_y + 12);
-                let char_off = iter.offset().max(0) as usize;
+                let scroll_val = tab.edit_scrolled.vadjustment().value();
                 let edit = tab.edit_state.borrow();
-                let u16_off: u64 = edit
-                    .text
-                    .chars()
-                    .take(char_off)
-                    .map(|c| c.len_utf16() as u64)
-                    .sum();
+                let u16_off = if scroll_val <= 1.0 {
+                    0
+                } else {
+                    let by = if tab.edit_view.height() > 0 {
+                        tab.edit_view
+                            .window_to_buffer_coords(gtk4::TextWindowType::Widget, 0, 4)
+                            .1
+                    } else {
+                        (scroll_val - f64::from(tab.edit_view.top_margin())).max(0.0) as i32
+                    };
+                    let (iter, _) = tab.edit_view.line_at_y(by.max(0));
+                    let char_off = iter.offset().max(0) as usize;
+                    edit.text
+                        .chars()
+                        .take(char_off)
+                        .map(|c| c.len_utf16() as u64)
+                        .sum()
+                };
                 let edit_text = edit.text.clone();
                 let edit_rev = edit.revision;
                 drop(edit);
@@ -643,11 +684,15 @@ impl WindowInner {
                 (u16_off, dirty_rev)
             };
             tab.editing = !tab.editing;
+            tab.edit_scroll_gen = tab.edit_scroll_gen.wrapping_add(1);
             (
                 tab.editing,
                 needs_refresh,
                 target_u16,
+                tab.edit_scroll_gen,
                 tab.edit_view.clone(),
+                tab.edit_scrolled.clone(),
+                tab.edit_buffer.clone(),
                 tab.content_stack.clone(),
                 tab.edit_host.clone(),
                 tab.reading_viewport.width(),
@@ -656,6 +701,8 @@ impl WindowInner {
         if new_editing {
             let sync_w = if vp_w > 0 {
                 vp_w
+            } else if edit_host.width() > 0 {
+                edit_host.width()
             } else {
                 self.reading_viewport_width_hint()
             };
@@ -668,10 +715,27 @@ impl WindowInner {
                 self.refresh_reading_tab(&path, Some(ReadingScrollTarget::SourceUtf16(anchor_u16)));
             } else {
                 self.check_active_tab_width_alignment();
+                if let Some(reading) = self
+                    .state
+                    .borrow()
+                    .tabs
+                    .get(&path)
+                    .and_then(|t| t.reading.clone())
+                {
+                    reading.content_box.queue_resize();
+                }
                 self.scroll_to_utf16_offset(&path, anchor_u16);
             }
         } else {
-            self.scroll_to_utf16_offset(&path, anchor_u16);
+            launch_edit_scroll_sync(
+                self,
+                &path,
+                &edit_buffer,
+                &edit_scrolled,
+                anchor_u16,
+                scroll_gen,
+                10,
+            );
             edit_view.grab_focus();
         }
         if announce {
@@ -682,58 +746,4 @@ impl WindowInner {
             }
         }
     }
-}
-
-fn schedule_reading_scroll_restore(
-    weak_win: std::rc::Weak<WindowInner>,
-    rel: String,
-    target: ReadingScrollTarget,
-    expected_token: u64,
-    last_upper: f64,
-    stable_ticks: u8,
-    attempts_left: u8,
-) {
-    glib::idle_add_local_once(move || {
-        let Some(win) = weak_win.upgrade() else {
-            return;
-        };
-        let reading = win
-            .state
-            .borrow()
-            .tabs
-            .get(&rel)
-            .and_then(|tab| tab.reading.clone());
-        let Some(reading) = reading else {
-            return;
-        };
-        if reading.scroll_token() != expected_token {
-            return;
-        }
-        let adj = reading.scrolled.vadjustment();
-        let cur_upper = adj.upper();
-        let unsettled_height = reading.content_box.height() <= 0 || cur_upper <= 0.0;
-        let next_stable = if !unsettled_height && (cur_upper - last_upper).abs() <= 1.0 {
-            stable_ticks.saturating_add(1)
-        } else {
-            0
-        };
-        if (unsettled_height || next_stable < 2) && attempts_left > 0 {
-            glib::timeout_add_local_once(Duration::from_millis(24), move || {
-                schedule_reading_scroll_restore(
-                    weak_win,
-                    rel,
-                    target,
-                    expected_token,
-                    cur_upper,
-                    next_stable,
-                    attempts_left - 1,
-                );
-            });
-            return;
-        }
-        match target {
-            ReadingScrollTarget::Fraction(fraction) => reading.scroll_fraction(fraction),
-            ReadingScrollTarget::SourceUtf16(u16_off) => reading.scroll_to_source_utf16(u16_off),
-        }
-    });
 }

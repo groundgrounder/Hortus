@@ -5,7 +5,7 @@
 //! 分段块级 Reading View 表面组装：合并连续文本段（随 `HortusReadingViewport` 统一居中列宽）+ 原生块级控件，
 //! 支持原地宽度重排（零销毁重建）、精准跨段滚动锚点与双链坐标命中。
 
-use crate::platform::style::{MaskTagSet, apply_mask_tags_cached, create_tag_table};
+use crate::platform::style::{MaskTagSet, apply_mask_tags_cached, create_reading_tag_table};
 #[cfg(feature = "automation")]
 use crate::reading::assemble::compute_stats;
 use crate::reading::assemble::{
@@ -316,6 +316,10 @@ impl ReadingSurfaceHandle {
 
     pub fn scroll_to_source_utf16(&self, target_utf16: u64) {
         self.bump_scroll_token();
+        if target_utf16 == 0 {
+            self.scrolled.vadjustment().set_value(0.0);
+            return;
+        }
         if self.segments.is_empty() {
             return;
         }
@@ -359,7 +363,15 @@ impl ReadingSurfaceHandle {
     }
 
     pub fn current_source_utf16(&self) -> u64 {
-        let top_y = self.scrolled.vadjustment().value().max(0.0) + 12.0;
+        let scroll_val = self.scrolled.vadjustment().value();
+        if scroll_val <= 1.0 {
+            return 0;
+        }
+        let top_y = self
+            .scrolled
+            .compute_point(&self.content_box, &graphene::Point::new(0.0, 4.0))
+            .map(|pt| f64::from(pt.y()).max(0.0))
+            .unwrap_or_else(|| (scroll_val - f64::from(self.content_box.margin_top())).max(0.0));
         for seg in &self.segments {
             let w = seg.widget();
             if let Some(bounds) = w.compute_bounds(&self.content_box) {
@@ -371,7 +383,7 @@ impl ReadingSurfaceHandle {
                                 .content_box
                                 .compute_point(&t.view, &graphene::Point::new(0.0, top_y as f32))
                                 .map(|pt| f64::from(pt.y()).max(0.0))
-                                .unwrap_or(0.0);
+                                .unwrap_or_else(|| (top_y - f64::from(bounds.y())).max(0.0));
                             let (_, by) = t.view.window_to_buffer_coords(
                                 gtk4::TextWindowType::Widget,
                                 0,
@@ -819,7 +831,7 @@ fn install_text_segment(
     env: &ReadingEnv,
     embedded: bool,
 ) -> (gtk4::Widget, TextSegment) {
-    let tag_table = create_tag_table();
+    let tag_table = create_reading_tag_table();
     let tag_set = MaskTagSet::new(&tag_table);
     let buffer = gtk4::TextBuffer::new(Some(&tag_table));
     buffer.set_text(&data.text);

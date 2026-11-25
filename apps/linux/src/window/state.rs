@@ -41,6 +41,8 @@ pub struct OpenNoteTab {
     pub surface_rebuilds: u32,
     /// 原地宽度重排次数。
     pub in_place_relayouts: u32,
+    /// 编辑态延迟滚动代号：防止切回阅读态或重复切换后旧 idle 覆盖当前滚动。
+    pub edit_scroll_gen: u64,
     pub edit_host: HortusEditHost,
     pub edit_scrolled: gtk4::ScrolledWindow,
     pub edit_view: gtk4::TextView,

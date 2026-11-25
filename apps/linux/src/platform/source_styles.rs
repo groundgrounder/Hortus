@@ -91,13 +91,13 @@ impl MaskTagSet {
         let lookup = |name: &str| table.lookup(name);
         Self {
             heading: [
+                None,
                 lookup("h1"),
                 lookup("h2"),
                 lookup("h3"),
                 lookup("h4"),
                 lookup("h5"),
                 lookup("h6"),
-                None,
             ],
             marker: lookup("marker"),
             strong: lookup("strong"),
@@ -346,5 +346,68 @@ mod tests {
             packed.len() / 20
         );
         assert!(total < 400_000, "style application took {total}us");
+    }
+
+    #[test]
+    fn heading_masks_apply_exact_levels_and_monotonic_scales() {
+        if !crate::platform::style::ensure_gtk_test_thread() {
+            eprintln!("skipping heading style test: GTK 初始化失败或非主线程");
+            return;
+        }
+        use crate::platform::style::create_edit_tag_table;
+
+        let text = "# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6\n";
+        let mut packed = Vec::new();
+        let mut offset_u16 = 0u64;
+        for (idx, line) in text.split_inclusive('\n').enumerate() {
+            let len_u16 = line.encode_utf16().count() as u64;
+            let level = (idx as u32) + 1;
+            let mask = level << 24;
+            packed.extend_from_slice(&offset_u16.to_le_bytes());
+            packed.extend_from_slice(&len_u16.to_le_bytes());
+            packed.extend_from_slice(&mask.to_le_bytes());
+            offset_u16 += len_u16;
+        }
+
+        let table = create_edit_tag_table();
+        let buffer = gtk4::TextBuffer::new(Some(&table));
+        buffer.set_text(text);
+        apply_source_styles(&buffer, text, &packed);
+
+        let scales: Vec<f64> = (1u8..=6)
+            .map(|lvl| table.lookup(&format!("h{lvl}")).unwrap().scale())
+            .collect();
+        assert!(scales[0] > scales[1]);
+        assert!(scales[1] > scales[2]);
+        assert!(scales[2] > scales[3]);
+        assert!(scales[3] > scales[4]);
+        assert!(scales[4] > 1.0);
+
+        let mut char_cursor = 0i32;
+        for (idx, line) in text.split_inclusive('\n').enumerate() {
+            let expected_lvl = (idx as u8) + 1;
+            let iter = buffer.iter_at_offset(char_cursor);
+            for lvl in 1u8..=6 {
+                let tag = table.lookup(&format!("h{lvl}")).unwrap();
+                assert_eq!(
+                    iter.has_tag(&tag),
+                    lvl == expected_lvl,
+                    "line {expected_lvl} unexpected h{lvl} tag state"
+                );
+            }
+            char_cursor += line.chars().count() as i32;
+        }
+
+        // 同样验证直接调用 apply_mask_tags_cached 时 H1..H6 下标无错位
+        let buffer2 = gtk4::TextBuffer::new(Some(&table));
+        buffer2.set_text("abcdef");
+        let tags = MaskTagSet::new(&table);
+        for lvl in 1u32..=6 {
+            let s = buffer2.iter_at_offset((lvl - 1) as i32);
+            let e = buffer2.iter_at_offset(lvl as i32);
+            apply_mask_tags_cached(&buffer2, &tags, &s, &e, lvl << 24);
+            let expected_tag = table.lookup(&format!("h{lvl}")).unwrap();
+            assert!(s.has_tag(&expected_tag), "cached h{lvl} missing");
+        }
     }
 }

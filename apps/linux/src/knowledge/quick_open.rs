@@ -41,7 +41,8 @@ pub struct QuickOpenStats {
 }
 
 struct QuickOpenInner {
-    dialog: adw::Dialog,
+    dialog: RefCell<Option<adw::Dialog>>,
+    root: gtk4::Box,
     entry: gtk4::SearchEntry,
     list: gtk4::ListBox,
     state: RefCell<QuickState>,
@@ -61,13 +62,6 @@ impl Default for QuickOpen {
 
 impl QuickOpen {
     pub fn new() -> Self {
-        let dialog = adw::Dialog::builder()
-            .title(crate::i18n::tr(crate::i18n::Key::QuickOpenTitle))
-            .content_width(500)
-            .content_height(460)
-            .build();
-        dialog.add_css_class("hortus-quick-open");
-
         let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         let entry = gtk4::SearchEntry::builder()
             .placeholder_text(crate::i18n::tr(crate::i18n::Key::QuickOpenPlaceholder))
@@ -88,10 +82,10 @@ impl QuickOpen {
         root.append(&entry);
         root.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
         root.append(&scroll);
-        dialog.set_child(Some(&root));
 
         let inner = Rc::new(QuickOpenInner {
-            dialog,
+            dialog: RefCell::new(None),
+            root,
             entry,
             list,
             state: RefCell::new(QuickState::default()),
@@ -139,6 +133,9 @@ impl QuickOpen {
     }
 
     pub fn open(&self, parent: &gtk4::Window) {
+        Self::dismiss_active_dialog(&self.inner);
+        let dialog = Self::build_dialog(&self.inner);
+        *self.inner.dialog.borrow_mut() = Some(dialog.clone());
         {
             let mut st = self.inner.state.borrow_mut();
             st.open = true;
@@ -150,7 +147,7 @@ impl QuickOpen {
         render_quick_hits(&self.inner.list, &[], 0);
         self.inner.window.borrow().set(Some(parent));
         self.inner.entry.set_text("");
-        self.inner.dialog.present(Some(parent));
+        dialog.present(Some(parent));
         self.inner.entry.grab_focus();
         Self::query_now(&self.inner, "");
     }
@@ -166,23 +163,50 @@ impl QuickOpen {
     }
 
     pub fn close_if_open(&self) {
-        if self.inner.state.borrow().open {
-            self.inner.state.borrow_mut().open = false;
-            self.inner.dialog.force_close();
-        }
+        Self::dismiss_active_dialog(&self.inner);
         self.inner.window.borrow().set(None);
     }
 
-    fn bind(inner: &Rc<QuickOpenInner>) {
-        {
-            let weak = Rc::downgrade(inner);
-            inner.dialog.connect_closed(move |_| {
-                if let Some(inner) = weak.upgrade() {
-                    inner.state.borrow_mut().open = false;
-                }
-            });
-        }
+    fn build_dialog(inner: &Rc<QuickOpenInner>) -> adw::Dialog {
+        let dialog = adw::Dialog::builder()
+            .title(crate::i18n::tr(crate::i18n::Key::QuickOpenTitle))
+            .content_width(500)
+            .content_height(460)
+            .build();
+        dialog.add_css_class("hortus-quick-open");
+        dialog.set_child(Some(&inner.root));
+        let weak = Rc::downgrade(inner);
+        dialog.connect_closed(move |closed| {
+            closed.set_child(None::<&gtk4::Widget>);
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            let mut active = inner.dialog.borrow_mut();
+            if active.as_ref().is_some_and(|current| current == closed) {
+                *active = None;
+                inner.state.borrow_mut().open = false;
+            }
+        });
+        dialog
+    }
 
+    fn dismiss_active_dialog(inner: &Rc<QuickOpenInner>) {
+        let was_open = {
+            let mut st = inner.state.borrow_mut();
+            let prev = st.open;
+            st.open = false;
+            prev
+        };
+        let dialog = inner.dialog.borrow_mut().take();
+        if let Some(dialog) = dialog {
+            dialog.set_child(None::<&gtk4::Widget>);
+            if was_open {
+                dialog.force_close();
+            }
+        }
+    }
+
+    fn bind(inner: &Rc<QuickOpenInner>) {
         {
             let weak = Rc::downgrade(inner);
             inner.entry.connect_search_changed(move |entry| {
@@ -288,8 +312,7 @@ impl QuickOpen {
             return;
         }
         open_selected_impl(&inner.state);
-        inner.state.borrow_mut().open = false;
-        inner.dialog.close();
+        Self::dismiss_active_dialog(inner);
     }
 
     fn query_now(inner: &Rc<QuickOpenInner>, query: &str) {

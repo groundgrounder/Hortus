@@ -504,8 +504,44 @@ pub fn apply_tag_table_theme(table: &gtk4::TextTagTable, is_dark: bool) {
     set_bg("find_current", &p.find_current_bg);
 }
 
-pub fn create_tag_table_for_theme(is_dark: bool) -> gtk4::TextTagTable {
+pub fn create_tag_table_for_mode(is_dark: bool, is_reading: bool) -> gtk4::TextTagTable {
     let table = gtk4::TextTagTable::new();
+
+    // 块级/引用容器标签必须先于行内高亮与链接标签加入，确保链接蓝、查找高亮等覆盖引用灰。
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("frontmatter")
+            .family("monospace")
+            .scale(0.92)
+            .build(),
+    );
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("codeblock")
+            .family("monospace")
+            .build(),
+    );
+    if is_reading {
+        table.add(
+            &gtk4::TextTag::builder()
+                .name("callout_block")
+                .left_margin(10)
+                .right_margin(10)
+                .build(),
+        );
+        table.add(
+            &gtk4::TextTag::builder()
+                .name("quote_block")
+                .left_margin(16)
+                .build(),
+        );
+    } else {
+        // 编辑态绝不在 TextTag 上设置绝对 left/right_margin，避免覆盖 TextView 的居中列宽。
+        table.add(&gtk4::TextTag::builder().name("callout_block").build());
+        table.add(&gtk4::TextTag::builder().name("quote_block").build());
+    }
+    table.add(&gtk4::TextTag::builder().name("quote").build());
+    table.add(&gtk4::TextTag::builder().name("callout").weight(600).build());
 
     for level in 1u8..=6 {
         let (scale, above, below) = match level {
@@ -542,61 +578,10 @@ pub fn create_tag_table_for_theme(is_dark: bool) -> gtk4::TextTagTable {
     );
     table.add(
         &gtk4::TextTag::builder()
-            .name("code")
-            .family("monospace")
-            .build(),
-    );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("codeblock")
-            .family("monospace")
-            .build(),
-    );
-    table.add(&gtk4::TextTag::builder().name("quote").build());
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("link")
-            .underline(pango::Underline::Single)
-            .build(),
-    );
-    table.add(&gtk4::TextTag::builder().name("tag").weight(500).build());
-    table.add(&gtk4::TextTag::builder().name("highlight").build());
-    table.add(
-        &gtk4::TextTag::builder()
             .name("comment")
             .style(pango::Style::Italic)
             .build(),
     );
-    table.add(&gtk4::TextTag::builder().name("callout").weight(600).build());
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("frontmatter")
-            .family("monospace")
-            .scale(0.92)
-            .build(),
-    );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("unresolved_link")
-            .underline(pango::Underline::Single)
-            .build(),
-    );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("callout_block")
-            .left_margin(10)
-            .right_margin(10)
-            .build(),
-    );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("quote_block")
-            .left_margin(16)
-            .build(),
-    );
-    table.add(&gtk4::TextTag::builder().name("task").weight(600).build());
-    table.add(&gtk4::TextTag::builder().name("find_match").build());
-    table.add(&gtk4::TextTag::builder().name("find_current").build());
     table.add(
         &gtk4::TextTag::builder()
             .name("blank_line")
@@ -605,14 +590,52 @@ pub fn create_tag_table_for_theme(is_dark: bool) -> gtk4::TextTagTable {
             .pixels_below_lines(0)
             .build(),
     );
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("code")
+            .family("monospace")
+            .build(),
+    );
+    table.add(&gtk4::TextTag::builder().name("highlight").build());
+    table.add(&gtk4::TextTag::builder().name("task").weight(600).build());
+    table.add(&gtk4::TextTag::builder().name("tag").weight(500).build());
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("unresolved_link")
+            .underline(pango::Underline::Single)
+            .build(),
+    );
+    table.add(
+        &gtk4::TextTag::builder()
+            .name("link")
+            .underline(pango::Underline::Single)
+            .build(),
+    );
+    table.add(&gtk4::TextTag::builder().name("find_match").build());
+    table.add(&gtk4::TextTag::builder().name("find_current").build());
 
     apply_tag_table_theme(&table, is_dark);
     table
 }
 
-pub fn create_tag_table() -> gtk4::TextTagTable {
+#[cfg(test)]
+pub fn create_tag_table_for_theme(is_dark: bool) -> gtk4::TextTagTable {
+    create_tag_table_for_mode(is_dark, true)
+}
+
+pub fn create_reading_tag_table() -> gtk4::TextTagTable {
     let is_dark = adw::is_initialized() && adw::StyleManager::default().is_dark();
-    create_tag_table_for_theme(is_dark)
+    create_tag_table_for_mode(is_dark, true)
+}
+
+pub fn create_edit_tag_table() -> gtk4::TextTagTable {
+    let is_dark = adw::is_initialized() && adw::StyleManager::default().is_dark();
+    create_tag_table_for_mode(is_dark, false)
+}
+
+#[allow(dead_code)]
+pub fn create_tag_table() -> gtk4::TextTagTable {
+    create_reading_tag_table()
 }
 
 #[cfg(test)]
@@ -659,5 +682,43 @@ mod tests {
         assert_ne!(light_link, dark_link);
         assert_ne!(light_callout, dark_callout);
         assert_eq!(dark_link, palette_for_theme(true).link);
+    }
+
+    #[test]
+    fn link_priority_beats_quote_and_callout_and_edit_clears_margins() {
+        if !ensure_gtk_test_thread() {
+            return;
+        }
+        for is_dark in [false, true] {
+            let read_tbl = create_tag_table_for_mode(is_dark, true);
+            let edit_tbl = create_tag_table_for_mode(is_dark, false);
+
+            for tbl in [&read_tbl, &edit_tbl] {
+                let link = tbl.lookup("link").unwrap();
+                let unresolved = tbl.lookup("unresolved_link").unwrap();
+                let quote = tbl.lookup("quote").unwrap();
+                let quote_block = tbl.lookup("quote_block").unwrap();
+                let callout_block = tbl.lookup("callout_block").unwrap();
+                assert!(link.priority() > quote.priority());
+                assert!(link.priority() > quote_block.priority());
+                assert!(link.priority() > callout_block.priority());
+                assert!(unresolved.priority() > quote_block.priority());
+                assert!(unresolved.priority() > callout_block.priority());
+            }
+
+            let read_callout = read_tbl.lookup("callout_block").unwrap();
+            let read_quote = read_tbl.lookup("quote_block").unwrap();
+            assert!(read_callout.property::<bool>("left-margin-set"));
+            assert_eq!(read_callout.left_margin(), 10);
+            assert!(read_quote.property::<bool>("left-margin-set"));
+            assert_eq!(read_quote.left_margin(), 16);
+
+            let edit_callout = edit_tbl.lookup("callout_block").unwrap();
+            let edit_quote = edit_tbl.lookup("quote_block").unwrap();
+            assert!(!edit_callout.property::<bool>("left-margin-set"));
+            assert!(!edit_callout.property::<bool>("right-margin-set"));
+            assert!(!edit_quote.property::<bool>("left-margin-set"));
+            assert!(!edit_quote.property::<bool>("right-margin-set"));
+        }
     }
 }

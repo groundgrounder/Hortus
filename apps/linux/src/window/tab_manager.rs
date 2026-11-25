@@ -7,7 +7,7 @@
 use crate::core::model::HeadingItem;
 use crate::editor::{EditState, FindBar, LinkCompletion};
 use crate::knowledge::clear_box;
-use crate::platform::style::{apply_source_styles, create_tag_table};
+use crate::platform::style::{apply_source_styles, create_edit_tag_table};
 use crate::platform::{
     HortusEditHost, HortusReadingViewport, READING_COLUMN_MAX_WIDTH, effective_reading_column_width,
 };
@@ -61,6 +61,8 @@ impl WindowInner {
         };
 
         let content_stack = gtk4::Stack::new();
+        content_stack.set_hhomogeneous(false);
+        content_stack.set_vhomogeneous(false);
         content_stack.set_vexpand(true);
         content_stack.set_hexpand(true);
 
@@ -98,7 +100,7 @@ impl WindowInner {
             .build();
         content_stack.add_named(&reading_scrolled, Some("reading"));
 
-        let tag_table = create_tag_table();
+        let tag_table = create_edit_tag_table();
         let edit_buffer = gtk4::TextBuffer::new(Some(&tag_table));
         edit_buffer.set_enable_undo(true);
         edit_buffer.set_text(crate::i18n::tr(crate::i18n::Key::RenderingReading));
@@ -122,7 +124,7 @@ impl WindowInner {
             .build();
         edit_view.add_css_class("hortus-note-view");
         let edit_scrolled = gtk4::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk4::PolicyType::Never)
+            .hscrollbar_policy(gtk4::PolicyType::External)
             .vscrollbar_policy(gtk4::PolicyType::Automatic)
             .vexpand(true)
             .hexpand(true)
@@ -199,6 +201,7 @@ impl WindowInner {
                 reading_revision: 0,
                 surface_rebuilds: 0,
                 in_place_relayouts: 0,
+                edit_scroll_gen: 0,
                 edit_host,
                 edit_scrolled,
                 edit_view,
@@ -456,7 +459,7 @@ impl WindowInner {
         clear_box(&reading_slot);
         reading_slot.append(&surface.root);
         let default_edit = services.config.snapshot().default_view == "editing";
-        let (pending_heading, pending_scroll, viewport, old, content_stack_edit) = {
+        let (pending_heading, pending_scroll, viewport, old, edit_launch) = {
             let mut st = self.state.borrow_mut();
             let view_override = st.initial_tab_views.remove(rel);
             let want_edit = match view_override.as_deref() {
@@ -479,6 +482,7 @@ impl WindowInner {
             tab.reading_loaded = true;
             if want_edit {
                 tab.editing = true;
+                tab.edit_scroll_gen = tab.edit_scroll_gen.wrapping_add(1);
             }
             (
                 tab.pending_heading.take(),
@@ -486,21 +490,48 @@ impl WindowInner {
                 tab.reading_viewport.clone(),
                 (old_reading, old_diagrams),
                 if want_edit {
-                    Some(tab.content_stack.clone())
+                    Some((
+                        tab.content_stack.clone(),
+                        tab.edit_host.clone(),
+                        tab.edit_scrolled.clone(),
+                        tab.edit_buffer.clone(),
+                        tab.edit_scroll_gen,
+                    ))
                 } else {
                     None
                 },
             )
         };
-        if let Some(stack) = content_stack_edit {
+        let want_edit = edit_launch.is_some();
+        if let Some((stack, host, edit_scrolled, edit_buffer, scroll_gen)) = edit_launch {
+            let vp_w = viewport.width();
+            let sync_w = if vp_w > 0 {
+                vp_w
+            } else if host.width() > 0 {
+                host.width()
+            } else {
+                self.reading_viewport_width_hint()
+            };
+            host.sync_margins_for_width(sync_w);
             stack.set_visible_child_name("edit");
             self.sync_active_tab_ui();
+            if pending_heading.is_none() && pending_scroll.is_none() {
+                crate::window::outline::launch_edit_scroll_sync(
+                    self,
+                    rel,
+                    &edit_buffer,
+                    &edit_scrolled,
+                    0,
+                    scroll_gen,
+                    8,
+                );
+            }
         }
         drop(old);
 
         let alloc_w = viewport.last_allocated_width();
         let vp_w = viewport.width();
-        if vp_w > 0 {
+        if !want_edit && vp_w > 0 {
             let host = self
                 .state
                 .borrow()

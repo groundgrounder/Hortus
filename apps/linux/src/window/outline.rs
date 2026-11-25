@@ -12,11 +12,14 @@ use crate::reading::{FocusCallbacks, FocusRequest};
 use crate::render::diagram::{
     DiagramExportKind, DiagramExportMeta, default_export_filename, export_diagram_to_file,
 };
+use crate::window::reading_layout::ReadingScrollTarget;
 use crate::window::shell::WindowInner;
 use gtk4::gio;
+use gtk4::glib;
 use gtk4::prelude::*;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 impl WindowInner {
     pub fn render_outline_empty(&self, message: &str) {
@@ -74,7 +77,7 @@ impl WindowInner {
     }
 
     pub fn scroll_to_utf16_offset(&self, note_path: &str, start_utf16: u64) {
-        let (editing, edit_view, edit_buffer, reading, char_off) = {
+        let (editing, edit_scrolled, edit_view, edit_buffer, reading, char_off) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(note_path) else {
                 return;
@@ -87,6 +90,7 @@ impl WindowInner {
             };
             (
                 tab.editing,
+                tab.edit_scrolled.clone(),
                 tab.edit_view.clone(),
                 tab.edit_buffer.clone(),
                 tab.reading.clone(),
@@ -95,6 +99,12 @@ impl WindowInner {
         };
         if !editing && let Some(reading) = reading {
             reading.scroll_to_source_utf16(start_utf16);
+            return;
+        }
+        if start_utf16 == 0 {
+            let start_iter = edit_buffer.start_iter();
+            edit_buffer.place_cursor(&start_iter);
+            edit_scrolled.vadjustment().set_value(0.0);
             return;
         }
         let mut iter = edit_buffer.iter_at_offset(char_off as i32);
@@ -240,4 +250,175 @@ impl WindowInner {
             });
         });
     }
+}
+
+pub(crate) fn launch_edit_scroll_sync(
+    win: &Rc<WindowInner>,
+    rel: &str,
+    edit_buffer: &gtk4::TextBuffer,
+    edit_scrolled: &gtk4::ScrolledWindow,
+    anchor_u16: u64,
+    scroll_gen: u64,
+    attempts_left: u8,
+) {
+    if anchor_u16 == 0 {
+        let start_iter = edit_buffer.start_iter();
+        edit_buffer.place_cursor(&start_iter);
+        edit_scrolled.vadjustment().set_value(0.0);
+    } else {
+        let text = win
+            .state
+            .borrow()
+            .tabs
+            .get(rel)
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+        let byte_off =
+            crate::core::text::Utf16Mapper::new(&text).utf16_to_byte(anchor_u16 as usize);
+        let char_off = text[..byte_off.min(text.len())].chars().count() as i32;
+        let iter = edit_buffer.iter_at_offset(char_off);
+        edit_buffer.place_cursor(&iter);
+    }
+    let expected_cursor = edit_buffer.cursor_position();
+    let initial_scroll = edit_scrolled.vadjustment().value();
+    schedule_edit_scroll_sync(
+        Rc::downgrade(win),
+        rel.to_string(),
+        anchor_u16,
+        scroll_gen,
+        expected_cursor,
+        initial_scroll,
+        attempts_left,
+    );
+}
+
+pub(crate) fn schedule_edit_scroll_sync(
+    weak_win: std::rc::Weak<WindowInner>,
+    rel: String,
+    anchor_u16: u64,
+    expected_gen: u64,
+    expected_cursor: i32,
+    initial_scroll: f64,
+    attempts_left: u8,
+) {
+    glib::idle_add_local_once(move || {
+        let Some(win) = weak_win.upgrade() else {
+            return;
+        };
+        if win.state.borrow().disposing {
+            return;
+        }
+        let info = {
+            let st = win.state.borrow();
+            st.tabs.get(&rel).map(|tab| {
+                (
+                    tab.editing,
+                    tab.edit_scroll_gen,
+                    tab.edit_view.is_mapped(),
+                    tab.edit_view.width(),
+                    tab.edit_host.width(),
+                    tab.edit_host.clone(),
+                    tab.edit_scrolled.clone(),
+                    tab.edit_buffer.clone(),
+                )
+            })
+        };
+        let Some((editing, cur_gen, mapped, view_w, host_w, edit_host, edit_scrolled, edit_buffer)) =
+            info
+        else {
+            return;
+        };
+        if !editing || cur_gen != expected_gen {
+            return;
+        }
+        // 若调用方/用户已在切入编辑态后显式移动光标或滚动位置，则不再回写旧锚点。
+        if edit_buffer.cursor_position() != expected_cursor
+            || (edit_scrolled.vadjustment().value() - initial_scroll).abs() > 2.0
+        {
+            return;
+        }
+        if (!mapped || view_w <= 0 || host_w <= 0) && attempts_left > 0 {
+            let retry = move || {
+                schedule_edit_scroll_sync(
+                    weak_win,
+                    rel,
+                    anchor_u16,
+                    expected_gen,
+                    expected_cursor,
+                    initial_scroll,
+                    attempts_left - 1,
+                );
+            };
+            if attempts_left > 6 {
+                glib::idle_add_local_once(retry);
+            } else {
+                glib::timeout_add_local_once(Duration::from_millis(16), retry);
+            }
+            return;
+        }
+        if host_w > 0 {
+            edit_host.sync_margins_for_width(host_w);
+        }
+        if anchor_u16 == 0 {
+            let start_iter = edit_buffer.start_iter();
+            edit_buffer.place_cursor(&start_iter);
+            edit_scrolled.vadjustment().set_value(0.0);
+        } else {
+            win.scroll_to_utf16_offset(&rel, anchor_u16);
+        }
+    });
+}
+
+pub(crate) fn schedule_reading_scroll_restore(
+    weak_win: std::rc::Weak<WindowInner>,
+    rel: String,
+    target: ReadingScrollTarget,
+    expected_token: u64,
+    last_upper: f64,
+    stable_ticks: u8,
+    attempts_left: u8,
+) {
+    glib::idle_add_local_once(move || {
+        let Some(win) = weak_win.upgrade() else {
+            return;
+        };
+        let reading = win
+            .state
+            .borrow()
+            .tabs
+            .get(&rel)
+            .and_then(|tab| tab.reading.clone());
+        let Some(reading) = reading else {
+            return;
+        };
+        if reading.scroll_token() != expected_token {
+            return;
+        }
+        let adj = reading.scrolled.vadjustment();
+        let cur_upper = adj.upper();
+        let unsettled_height = reading.content_box.height() <= 0 || cur_upper <= 0.0;
+        let next_stable = if !unsettled_height && (cur_upper - last_upper).abs() <= 1.0 {
+            stable_ticks.saturating_add(1)
+        } else {
+            0
+        };
+        if (unsettled_height || next_stable < 2) && attempts_left > 0 {
+            glib::timeout_add_local_once(Duration::from_millis(24), move || {
+                schedule_reading_scroll_restore(
+                    weak_win,
+                    rel,
+                    target,
+                    expected_token,
+                    cur_upper,
+                    next_stable,
+                    attempts_left - 1,
+                );
+            });
+            return;
+        }
+        match target {
+            ReadingScrollTarget::Fraction(fraction) => reading.scroll_fraction(fraction),
+            ReadingScrollTarget::SourceUtf16(u16_off) => reading.scroll_to_source_utf16(u16_off),
+        }
+    });
 }

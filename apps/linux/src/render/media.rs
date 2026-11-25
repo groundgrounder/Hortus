@@ -611,7 +611,7 @@ pub fn build_table_widget(
             }
 
             let (table, tag_set) = shared_table_cache.get_or_insert_with(|| {
-                let tbl = crate::platform::style::create_tag_table();
+                let tbl = crate::platform::style::create_reading_tag_table();
                 let set = crate::platform::style::MaskTagSet::new(&tbl);
                 (tbl, set)
             });
