@@ -23,7 +23,7 @@ PUBLIC = load('check-public-tree')
 
 class MathCheckTests(unittest.TestCase):
     def test_font_filename_list_matches_runtime_registration(self):
-        source = (Path(__file__).resolve().parents[1] / 'apps/macos/Sources/Hortus/MathRenderer.swift').read_text()
+        source = (Path(__file__).resolve().parents[1] / 'apps/apple/Sources/HortusApple/MathRenderer.swift').read_text()
         filenames = re.findall(r'"(KaTeX_[^"]+\.ttf)"', source)
         self.assertEqual(set(filenames), PUBLIC.KATEX_FONT_FILES)
 

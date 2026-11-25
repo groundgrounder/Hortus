@@ -1,11 +1,11 @@
-import Foundation
 import CoreText
+import Foundation
 import HortusCore
 
 /// 按 Unicode scalar 边界一次建立映射；同一 revision 的所有节点和边共用。
-struct DiagramSourceOffsets {
-    let utf16: [Int]
-    init(_ source: String) {
+public struct DiagramSourceOffsets {
+    public let utf16: [Int]
+    public init(_ source: String) {
         var values = [Int](repeating: -1, count: source.utf8.count + 1)
         var byte = 0, unit = 0
         values[0] = 0
@@ -17,7 +17,7 @@ struct DiagramSourceOffsets {
         }
         utf16 = values
     }
-    func range(start: UInt64, end: UInt64) -> NSRange? {
+    public func range(start: UInt64, end: UInt64) -> NSRange? {
         guard start <= end, end < utf16.count else { return nil }
         let a = utf16[Int(start)], b = utf16[Int(end)]
         guard a >= 0, b >= a else { return nil }
@@ -25,19 +25,19 @@ struct DiagramSourceOffsets {
     }
 }
 
-struct NoteDiagram: Sendable {
-    let ordinal: UInt32
-    var sourceStart: UInt64 = 0
-    var range: NSRange
-    var collapsed: Set<String>
-    var tailStart = 0
-    var prepared: PreparedScene?
-    var documentIdentity = ""
-    var revision: UInt64 = 0
-    var sceneVersion: UInt32 = 0
-    var previous: DiagramPrevious?
-    var viewport: [DiagramViewportAnchor] = []
-    mutating func inherit(_ old: NoteDiagram) {
+public struct NoteDiagram: Sendable {
+    public let ordinal: UInt32
+    public var sourceStart: UInt64 = 0
+    public var range: NSRange
+    public var collapsed: Set<String>
+    public var tailStart = 0
+    public var prepared: PreparedScene?
+    public var documentIdentity = ""
+    public var revision: UInt64 = 0
+    public var sceneVersion: UInt32 = 0
+    public var previous: DiagramPrevious?
+    public var viewport: [DiagramViewportAnchor] = []
+    public mutating func inherit(_ old: NoteDiagram) {
         guard documentIdentity == old.documentIdentity, sourceStart == old.sourceStart else { return }
         collapsed = old.collapsed
         prepared = old.prepared
@@ -45,16 +45,30 @@ struct NoteDiagram: Sendable {
         sceneVersion = old.sceneVersion
         viewport = old.viewport
     }
-    var reason: String?
-    var diagnostic: String?
-    var heavyWorkThreadChecks: [String: Bool] = [:]
-    var heavyWorkThreadEvidence: [String: [String]] = [:]
-    var renderMilliseconds = 0.0
-    var transferMilliseconds = 0.0
-    var layoutMilliseconds = 0.0
+    public var reason: String?
+    public var diagnostic: String?
+    public var heavyWorkThreadChecks: [String: Bool] = [:]
+    public var heavyWorkThreadEvidence: [String: [String]] = [:]
+    public var renderMilliseconds = 0.0
+    public var transferMilliseconds = 0.0
+    public var layoutMilliseconds = 0.0
+
+    public init(ordinal: UInt32, sourceStart: UInt64 = 0, range: NSRange, collapsed: Set<String>,
+                tailStart: Int = 0, prepared: PreparedScene? = nil, documentIdentity: String = "",
+                revision: UInt64 = 0) {
+        self.ordinal = ordinal
+        self.sourceStart = sourceStart
+        self.range = range
+        self.collapsed = collapsed
+        self.tailStart = tailStart
+        self.prepared = prepared
+        self.documentIdentity = documentIdentity
+        self.revision = revision
+    }
 }
+
 /// 应用存活期间复用单个引擎。Task 创建即在后台预热，不占用主线程。
-actor DiagramService {
+public actor DiagramService {
     /// 调用栈只在首次渲染时取一次；每次重排都符号化会把验收计时拖慢。
     private lazy var renderThreadEvidence: [String] = Self.threadEvidence()
     private var lineCache: [DiagramLineKey: CTLine] = [:]
@@ -62,9 +76,18 @@ actor DiagramService {
     private var sourceOffsets: DiagramSourceOffsets?
     private var activeDocument = ""
     private var previousBlocks: [UInt32: NoteDiagram] = [:]
-    private let engine = Task.detached(priority: .userInitiated) { try DiagramEngine() }
+    private let engine = Task.detached(priority: .userInitiated) { try PlatformGraphics.makeDiagramEngine() }
 
-    func blocks(snapshot: DocumentSnapshot, vault: String, note: String, core: WorkspaceCore?, documentIdentity: String? = nil) throws -> [NoteDiagram] {
+    public init() {}
+
+    public func clearCache() {
+        lineCache.removeAll(keepingCapacity: false)
+        previousBlocks.removeAll(keepingCapacity: false)
+        cachedSource = nil
+        sourceOffsets = nil
+    }
+
+    public func blocks(snapshot: DocumentSnapshot, vault: String, note: String, core: WorkspaceCore?, documentIdentity: String? = nil) throws -> [NoteDiagram] {
         let text = snapshot.text as NSString
         return try snapshot.blocks.map { block in
             let collapsed = try core?.collapsedNodes(vault: vault, note: note, block: block.ordinal) ?? []
@@ -75,7 +98,7 @@ actor DiagramService {
         }
     }
 
-    func blocks(source: String, mmd: Bool, vault: String, note: String, core: WorkspaceCore?, documentIdentity: String? = nil) throws -> [NoteDiagram] {
+    public func blocks(source: String, mmd: Bool, vault: String, note: String, core: WorkspaceCore?, documentIdentity: String? = nil) throws -> [NoteDiagram] {
         let blocks = mmd ? [DiagramBlock(ordinal: 1, fenceStart: 0, fenceEnd: UInt64(source.utf8.count),
                                          sourceStart: 0, sourceEnd: UInt64(source.utf8.count), diagramType: "")]
             : diagramBlocks(note: source)
@@ -139,11 +162,11 @@ actor DiagramService {
     }
 
     /// 仅验收使用：丢弃旧图锚点，下一次 render 从初排开始。
-    func discardPrevious() {
+    public func discardPrevious() {
         previousBlocks = [:]
     }
 
-    func render(source: String, mmd: Bool, blocks: [NoteDiagram], width: Double, dark: Bool, requestGeneration: UInt64 = 0, fontGeneration: UInt64 = 0) async -> [NoteDiagram] {
+    public func render(source: String, mmd: Bool, blocks: [NoteDiagram], width: Double, dark: Bool, requestGeneration: UInt64 = 0, fontGeneration: UInt64 = 0) async -> [NoteDiagram] {
         // 空正文无需排版；保留最后一篇图文档的有界行缓存，重新打开时复用 CoreText 对象。
         guard !blocks.isEmpty else { return blocks }
         var result = blocks
@@ -234,13 +257,13 @@ actor DiagramService {
     }
 
     /// UTF-8 与 UTF-16 都必须落在原文字符边界，越界或截断时不构造命中范围。
-    static func sourceRange(start: UInt64, end: UInt64, in source: String) -> NSRange? {
+    public static func sourceRange(start: UInt64, end: UInt64, in source: String) -> NSRange? {
         guard start <= end, end <= source.utf8.count,
               let a = source.utf8.index(source.utf8.startIndex, offsetBy: Int(start)).samePosition(in: source),
               let b = source.utf8.index(source.utf8.startIndex, offsetBy: Int(end)).samePosition(in: source) else { return nil }
         return NSRange(a..<b, in: source)
     }
-    static func byteRange(_ range: NSRange, in source: String) -> Range<Int>? {
+    public static func byteRange(_ range: NSRange, in source: String) -> Range<Int>? {
         guard let value = Range(range, in: source),
               let a = value.lowerBound.samePosition(in: source.utf8), let b = value.upperBound.samePosition(in: source.utf8) else { return nil }
         return source.utf8.distance(from: source.utf8.startIndex, to: a)..<source.utf8.distance(from: source.utf8.startIndex, to: b)
@@ -252,7 +275,7 @@ actor DiagramService {
             + Thread.callStackSymbols.prefix(8)
     }
 
-    static func reason(_ error: Error) -> String {
+    public static func reason(_ error: Error) -> String {
         if let error = error as? DiagramSceneFailure {
             return switch error {
             case let .schema(version): "Unsupported diagram scene schema: \(version)"

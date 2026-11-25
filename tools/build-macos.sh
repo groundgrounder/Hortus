@@ -25,11 +25,11 @@ export CARGO_ENCODED_RUSTFLAGS="${(pj:\x1f:)rust_flags}"
 cargo build --release -p hortus-ffi
 cargo run --release -p hortus-ffi --features bindgen --bin hortus-bindgen -- generate \
   --library target/release/libhortus_ffi.dylib --language swift \
-  --config crates/hortus-ffi/uniffi.toml --out-dir apps/macos/Generated/bindings
-mkdir -p apps/macos/Generated/HortusCore apps/macos/Generated/HortusFFI
-cp apps/macos/Generated/bindings/HortusCore.swift apps/macos/Generated/HortusCore/
-cp apps/macos/Generated/bindings/HortusFFI.h apps/macos/Generated/HortusFFI/
-cp apps/macos/Generated/bindings/HortusFFI.modulemap apps/macos/Generated/HortusFFI/module.modulemap
+  --config crates/hortus-ffi/uniffi.toml --out-dir apps/apple/Generated/bindings
+mkdir -p apps/apple/Generated/HortusCore apps/apple/Generated/HortusFFI
+cp apps/apple/Generated/bindings/HortusCore.swift apps/apple/Generated/HortusCore/
+cp apps/apple/Generated/bindings/HortusFFI.h apps/apple/Generated/HortusFFI/
+cp apps/apple/Generated/bindings/HortusFFI.modulemap apps/apple/Generated/HortusFFI/module.modulemap
 swift build --package-path apps/macos -c release \
   -Xswiftc -warnings-as-errors -Xlinker "$PWD/target/release/libhortus_ffi.a" \
   -Xlinker -framework -Xlinker CoreFoundation -Xlinker -framework -Xlinker CoreServices \

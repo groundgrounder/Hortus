@@ -32,8 +32,12 @@ fixtures/mermaid/tree/
 *.jks
 *.keystore
 
-# macOS 构建命令生成的 UniFFI 绑定
+# macOS / Apple 共享构建命令生成的 UniFFI 绑定
 apps/macos/Generated/
+apps/apple/Generated/
+apps/ios/Generated/
+apps/ios/build/
+apps/ios/DerivedData/
 
 # Android 构建与生成目录
 apps/android/.gradle/

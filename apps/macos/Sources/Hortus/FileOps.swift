@@ -1,5 +1,6 @@
 import AppKit
 import HortusCore
+import HortusApple
 
 /// 文件命名弹窗：NSAlert + 文本框附件，一次提交并就地回显校验错误；
 /// 取消不触碰磁盘，确认后由调用方在后台执行 I/O。
@@ -7,20 +8,12 @@ import HortusCore
 enum FileNaming {
     /// 与内核 `vault.invalid_name` 同口径的本地校验；返回可向用户展示的错误文案。
     static func localError(_ name: String) -> String? {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed == "." || trimmed == ".."
-            || trimmed.hasPrefix(".") || trimmed == "node_modules"
-            || trimmed.contains("/") || trimmed.contains("\\")
-            || trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
-            return L10n.string("The name is invalid")
-        }
-        return nil
+        FileNamingRules.localError(name)
     }
 
     /// 笔记默认高亮主干：主干为主文件名（不含扩展名），便于直接改名。
     private static func stemLength(_ name: String) -> Int {
-        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return name.count }
-        return name.utf16.distance(from: name.startIndex, to: dot)
+        FileNamingRules.stemLength(name)
     }
     static func present(window: NSWindow?, title: String, button: String, initial: String,
                         note: Bool, error: String) async -> String? {

@@ -1,14 +1,16 @@
 import Foundation
 import HortusCore
 
-enum L10n {
-    static func string(_ key: String, _ arguments: CVarArg...) -> String {
-        let format = NSLocalizedString(key, bundle: .main, comment: "")
+public enum L10n {
+    nonisolated(unsafe) public static var bundle: Bundle = .main
+
+    public static func string(_ key: String, _ arguments: CVarArg...) -> String {
+        let format = NSLocalizedString(key, bundle: bundle, comment: "")
         guard !arguments.isEmpty else { return format }
         return String(format: format, locale: Locale.current, arguments: arguments)
     }
 
-    static func error(_ error: Error) -> String {
+    public static func error(_ error: Error) -> String {
         if let error = error as? CoreError {
             switch error {
             case let .Failure(kind): return errorKey(kind)
@@ -17,7 +19,7 @@ enum L10n {
         return string("Operation failed")
     }
 
-    static func errorKey(_ key: String) -> String {
+    public static func errorKey(_ key: String) -> String {
         switch key {
         case "document.missing", "io.not_found":
             return string("The file was deleted or moved")
@@ -156,7 +158,7 @@ enum L10n {
         }
     }
 
-    static func documentMessage(issue: DocumentIssue, readOnlyReason: String?, raw: String) -> String {
+    public static func documentMessage(issue: DocumentIssue, readOnlyReason: String?, raw: String) -> String {
         if issue == .none, let readOnlyReason {
             switch readOnlyReason {
             case "readonly.invalid_utf8": return string("This file is not UTF-8 and is read-only")
