@@ -43,11 +43,12 @@ tempfile = "=3.27.0"
 maintainer = "groundgrounder"
 copyright = "2026, groundgrounder"
 license-file = ["../LICENSE", "0"]
-depends = "$auto, gsettings-desktop-schemas, adwaita-icon-theme, hicolor-icon-theme"
+depends = "$auto, libgtk-4-1 (>= 4.16), libadwaita-1-0 (>= 1.6), libvte-2.91-gtk4-0 (>= 0.76), librsvg2-common, webp-pixbuf-loader, gsettings-desktop-schemas, adwaita-icon-theme, hicolor-icon-theme"
 section = "editors"
 priority = "optional"
 assets = [
     ["target/release/hortus-gtk", "usr/bin/hortus-gtk", "755"],
+    ["../../target/release/hortus", "usr/bin/hortus", "755"],
     ["data/io.github.groundgrounder.Hortus.desktop", "usr/share/applications/io.github.groundgrounder.Hortus.desktop", "644"],
     ["data/io.github.groundgrounder.Hortus.metainfo.xml", "usr/share/metainfo/io.github.groundgrounder.Hortus.metainfo.xml", "644"],
     ["data/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg", "usr/share/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg", "644"],
@@ -58,9 +59,20 @@ assets = [
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/hortus-gtk", dest = "/usr/bin/hortus-gtk", mode = "755" },
+    { source = "../../target/release/hortus", dest = "/usr/bin/hortus", mode = "755" },
     { source = "data/io.github.groundgrounder.Hortus.desktop", dest = "/usr/share/applications/io.github.groundgrounder.Hortus.desktop", mode = "644" },
     { source = "data/io.github.groundgrounder.Hortus.metainfo.xml", dest = "/usr/share/metainfo/io.github.groundgrounder.Hortus.metainfo.xml", mode = "644" },
     { source = "data/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg", mode = "644" },
     { source = "data/THIRD_PARTY_NOTICES.txt", dest = "/usr/share/licenses/hortus-linux/THIRD_PARTY_NOTICES.txt", mode = "644" },
     { source = "../macos/Resources/Fonts/KaTeX/*", dest = "/usr/share/hortus/fonts/KaTeX/", mode = "644" },
 ]
+
+[package.metadata.generate-rpm.requires]
+"gtk4" = ">= 4.16"
+"libadwaita" = ">= 1.6"
+"vte291-gtk4" = ">= 0.76"
+"librsvg2" = "*"
+"webp-pixbuf-loader" = "*"
+"gsettings-desktop-schemas" = "*"
+"adwaita-icon-theme" = "*"
+"hicolor-icon-theme" = "*"

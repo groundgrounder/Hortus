@@ -508,6 +508,10 @@ def assert_report(report: dict, vault: Path, env: dict, real_trash_before: list[
     check(guard["alert_shown"] is True, "关闭未保存标签页时未弹出原生对话框")
     check(guard["tab_kept"] is True, "关闭保护失败：标签页被静默关闭")
     check(guard["text_kept"] is True, "关闭保护失败：未保存正文丢失")
+    rec_draft_close = external.get("recovery_draft_closes_cleanly") or {}
+    check(rec_draft_close.get("closed_cleanly") is True and rec_draft_close.get("alert_shown") is False, f"RecoveryDraft 关闭未免弹窗放行：{rec_draft_close}")
+    edit_reload = external.get("edit_reload_preserve") or {}
+    check(edit_reload.get("cursor_preserved") is True and edit_reload.get("scroll_preserved") is True, f"编辑态干净重载未保留光标或滚动位置：{edit_reload}")
     window_guard = external["window_close_guard"]
     check(window_guard["alert_shown"] is True, "关闭窗口时未弹出未保存保护对话框")
     check(window_guard["window_kept"] is True, "关闭窗口保护失败：窗口被静默退出")
@@ -521,6 +525,7 @@ def assert_report(report: dict, vault: Path, env: dict, real_trash_before: list[
     check(find["next_advances"] is True, "查找的下一个匹配未前进")
     check(find["replace_all"]["session_has_replacement"] is True, "全部替换未写入正文")
     check(find["replace_all"]["session_has_no_query"] is True, "全部替换后仍残留旧查询文本")
+    check(find.get("stale_guard_ok") is True, f"编辑态修改正文后查找替换 stale 防护失败：{find}")
     check(find["closed"] is True, "Esc 未关闭查找条")
     check(find["reading_view"]["open"] is True, "阅读视图未打开查找条")
     check(find["reading_view"]["editable"] is False, "阅读视图不应展开替换行")
@@ -564,6 +569,7 @@ def assert_report(report: dict, vault: Path, env: dict, real_trash_before: list[
     check(backlinks["clicked_row"] is not None, "反链行点击未处理")
     quick = knowledge["quick_open"]
     check(quick["hits"] > 0, "快速打开没有命中")
+    check(quick.get("pending_blocked_enter") is True, f"QuickOpen 未在查询未就绪前拦截陈旧命中：{quick}")
     check(quick["closed_after_enter"] is True, "快速打开在 Enter 后未关闭")
     check(quick["opened_first"] is True, "快速打开未打开首个命中")
     completion = knowledge["completion"]
@@ -960,6 +966,10 @@ def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: d
     check(
         base_scenes[0] <= base_content + 24,
         f"1280 图表横向溢出：scene={base_scenes[0]} content={base_content}",
+    )
+    check(
+        not any(base.get("diagram_horizontal_overflows") or []),
+        f"1280 冷启动出现 <16px 多余横向滚动条：{base.get('diagram_horizontal_overflows')}",
     )
 
     wide = layout_wide["report"]["after"]

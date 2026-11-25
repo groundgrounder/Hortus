@@ -341,6 +341,8 @@ def main() -> int:
                 ("settings", "theme_switch_single_refresh"),
                 ("multi_window", "dirty_missing_preserved_across_windows"),
                 ("agent_changes", "running_agent_close_interrupted"),
+                ("sidebar_resize", "layout_visibility_restored_ok"),
+                ("sidebar_resize", "ui_prefs_persisted_ok"),
             ):
                 check(data[req_sec].get(req_key) is True, f"缺少或未通过 L5a 校验 {req_sec}.{req_key}: {data}")
             check(

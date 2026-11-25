@@ -1466,7 +1466,8 @@ async fn run_suite(
         false
     };
 
-    // 持久化到 layout.toml 并开新窗口验证真实启动恢复
+    // 持久化到 layout.toml（含显隐 visible）并开新窗口验证真实启动恢复
+    win.left_split.set_show_sidebar(false);
     win.persist_layout_now();
     let layout_persisted_ok = wait_for(3000, || {
         layout_toml_path.exists()
@@ -1479,12 +1480,23 @@ async fn run_suite(
                 .is_some_and(|st| {
                     let l = st.regions.get("left").map(|r| r.size).unwrap_or(0.0);
                     let r = st.regions.get("right").map(|r| r.size).unwrap_or(0.0);
-                    (l - 380.0).abs() <= 4.0 && (r - 360.0).abs() <= 4.0
+                    let lv = st.regions.get("left").and_then(|r| r.visible);
+                    let rv = st.regions.get("right").and_then(|r| r.visible);
+                    (l - 380.0).abs() <= 4.0
+                        && (r - 360.0).abs() <= 4.0
+                        && lv == Some(false)
+                        && rv == Some(true)
                 })
     })
     .await;
 
+    // L5-20: 主题偏好持久化到 linux-ui.toml
+    win.apply_color_scheme_and_sync(crate::core::ColorSchemeChoice::Dark);
+    let ui_prefs_persisted_ok = crate::services::ui_prefs::load_saved_color_scheme()
+        == crate::core::ColorSchemeChoice::Dark;
+
     let mut layout_restored_ok = false;
+    let mut layout_visibility_restored_ok = false;
     if let Some(app) = win
         .window
         .application()
@@ -1507,9 +1519,13 @@ async fn run_suite(
                     <= 4.0
         })
         .await;
+        layout_visibility_restored_ok = !win_restore.inner.left_split.shows_sidebar()
+            && win_restore.inner.right_split.shows_sidebar();
         win_restore.inner.close_now_clean();
         drop(win_restore);
     }
+    win.left_split.set_show_sidebar(true);
+    win.apply_color_scheme_and_sync(crate::core::ColorSchemeChoice::System);
 
     win.reset_sidebar_width(PanelRegion::Left);
     win.reset_sidebar_width(PanelRegion::Right);
@@ -1623,6 +1639,8 @@ async fn run_suite(
             "center_adapted_ok": center_adapted_ok,
             "layout_persisted_ok": layout_persisted_ok,
             "layout_restored_ok": layout_restored_ok,
+            "layout_visibility_restored_ok": layout_visibility_restored_ok,
+            "ui_prefs_persisted_ok": ui_prefs_persisted_ok,
             "double_click_reset_ok": double_click_reset_ok,
             "left_w_before": left_w_before,
             "right_w_before": right_w_before,
@@ -1659,7 +1677,16 @@ pub fn execute_session_restore_check(app: &adw::Application, opts: CliOptions) {
     services.ensure_dark_listener();
     services.config.ensure_monitor_and_css();
 
+    if opts.color_scheme.is_none() {
+        crate::window::actions::apply_color_scheme(
+            crate::services::ui_prefs::load_saved_color_scheme(),
+        );
+    }
+
     let entries = parse_restorable_entries(&services.core);
+    for entry in &entries {
+        crate::window::shell::bump_next_window_id(&entry.id);
+    }
     let mut windows: Vec<HortusWindow> = Vec::new();
     for entry in &entries {
         let vault_path = PathBuf::from(&entry.path);

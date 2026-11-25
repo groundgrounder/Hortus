@@ -93,6 +93,7 @@ sanitize_rpath() {
 }
 
 cargo build --release -p hortus-cli
+sanitize_rpath "${ROOT}/target/release/hortus"
 cp -f "${ROOT}/target/release/hortus" "${OUT_DIR}/bin/hortus"
 sanitize_rpath "${OUT_DIR}/bin/hortus"
 
@@ -104,6 +105,7 @@ sanitize_rpath "${OUT_DIR}/bin/hortus"
     cargo build --release --locked --no-default-features
   fi
 )
+sanitize_rpath "${ROOT}/apps/linux/target/release/hortus-gtk"
 cp -f "${ROOT}/apps/linux/target/release/hortus-gtk" "${OUT_DIR}/bin/hortus-gtk"
 sanitize_rpath "${OUT_DIR}/bin/hortus-gtk"
 

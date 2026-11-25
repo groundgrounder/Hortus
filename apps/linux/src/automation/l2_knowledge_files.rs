@@ -183,10 +183,16 @@ pub async fn run_knowledge_files_and_misc(
     );
 
     win.open_quick_open();
+    let pending_snap = win.quick_open.stats();
+    if pending_snap.pending {
+        win.quick_open.activate_selected();
+    }
+    let pending_blocked_enter =
+        pending_snap.pending && pending_snap.hits == 0 && win.quick_open.is_open();
     win.quick_open.set_query("Start");
     let _ = wait_for(4000, || {
         let stats = win.quick_open.stats();
-        stats.last_query == "Start" && stats.hits > 0
+        !stats.pending && stats.last_query == "Start" && stats.hits > 0
     })
     .await;
     let quick_stats = win.quick_open.stats();
@@ -205,6 +211,7 @@ pub async fn run_knowledge_files_and_misc(
             "queries": quick_stats.queries,
             "last_query": quick_stats.last_query,
             "open_before_activate": quick_stats.open,
+            "pending_blocked_enter": pending_blocked_enter,
             "hits": quick_stats.hits,
             "first": quick_stats.first,
             "closed_after_enter": quick_closed,

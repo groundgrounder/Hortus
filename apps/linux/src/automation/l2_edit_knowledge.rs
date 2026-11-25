@@ -531,6 +531,67 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
         serde_json::json!((scroll_after - scroll_before).abs() < 0.12),
     );
 
+    // L5-28: 编辑态外部干净重载保留纵向滚动比例与光标字符偏移
+    if !win.tab_facts(note).is_some_and(|f| f.editing) {
+        win.switch_edit_mode(false);
+        let _ = wait_for(2000, || win.tab_facts(note).is_some_and(|f| f.editing)).await;
+    }
+    let (edit_cursor_target, edit_scroll_before) = {
+        let st = win.state.borrow();
+        if let Some(tab) = st.tabs.get(note) {
+            let char_len = tab.edit_buffer.char_count();
+            let target_off = (char_len / 2).clamp(1, char_len.max(1));
+            let iter = tab.edit_buffer.iter_at_offset(target_off);
+            tab.edit_buffer.place_cursor(&iter);
+            let adj = tab.edit_scrolled.vadjustment();
+            let max = (adj.upper() - adj.page_size()).max(0.0);
+            if max > 0.0 {
+                adj.set_value(max * 0.45);
+            }
+            let frac = if max > 0.0 { adj.value() / max } else { 0.0 };
+            (target_off, frac)
+        } else {
+            (0, 0.0)
+        }
+    };
+    glib::timeout_future(Duration::from_millis(100)).await;
+    let reloads_before_edit = win.tab_facts(note).map(|f| f.reloads).unwrap_or(0);
+    let edit_base_disk = win.read_disk_note(note).unwrap_or_default();
+    let edit_ext_disk = format!("{edit_base_disk}\nL5-28 编辑态重载追加行\n");
+    let _ = win.writing_ext(note, &edit_ext_disk);
+    let edit_clean_reload = wait_for(9000, || {
+        win.tab_facts(note).is_some_and(|f| {
+            f.reloads > reloads_before_edit && f.text.contains("L5-28 编辑态重载追加行")
+        })
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(160)).await;
+    let (edit_cursor_after, edit_scroll_after) = {
+        let st = win.state.borrow();
+        if let Some(tab) = st.tabs.get(note) {
+            let mark = tab.edit_buffer.get_insert();
+            let off = tab.edit_buffer.iter_at_mark(&mark).offset();
+            let adj = tab.edit_scrolled.vadjustment();
+            let max = (adj.upper() - adj.page_size()).max(0.0);
+            let frac = if max > 0.0 { adj.value() / max } else { 0.0 };
+            (off, frac)
+        } else {
+            (0, 0.0)
+        }
+    };
+    external.insert(
+        "edit_reload_preserve".into(),
+        serde_json::json!({
+            "reloaded": edit_clean_reload,
+            "cursor_before": edit_cursor_target,
+            "cursor_after": edit_cursor_after,
+            "cursor_preserved": edit_clean_reload && edit_cursor_after == edit_cursor_target,
+            "scroll_before": edit_scroll_before,
+            "scroll_after": edit_scroll_after,
+            "scroll_preserved": edit_clean_reload && (edit_scroll_before == 0.0 || (edit_scroll_after - edit_scroll_before).abs() < 0.15),
+        }),
+    );
+
     win.insert_into_edit(note, "\n\n冲突前本地输入\n");
     let _ = wait_for(600, || win.tab_facts(note).is_some_and(|f| f.dirty)).await;
     let _ = win.writing_ext(note, "# 外部改写\n\n覆盖内容，不应进入界面。\n");
@@ -653,7 +714,86 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
         }),
     );
 
-    // 关闭保护（G-05 真弱引用弹窗 + close() 关闭，不残留窗体）
+    // L5-17: RecoveryDraft（缺失笔记但恢复稿写入成功）应允许直接关闭，不弹阻塞对话框
+    let rec_close_note = "L2-恢复稿关闭.md";
+    let _ = std::fs::write(
+        Path::new(&root).join(rec_close_note),
+        "# 恢复稿关闭\n\n验证 RecoveryDraft 直接关闭行为。\n",
+    );
+    if let Some(handle) = win.state.borrow().vault_handle() {
+        handle.update_search_index(vec![rec_close_note.into()], vec![]);
+    }
+    win.open_note_at(rec_close_note, None);
+    let _ = wait_for(6000, || {
+        win.state
+            .borrow()
+            .tabs
+            .get(rec_close_note)
+            .is_some_and(|tab| tab.source_loaded)
+    })
+    .await;
+    if !win
+        .state
+        .borrow()
+        .tabs
+        .get(rec_close_note)
+        .is_some_and(|tab| tab.editing)
+    {
+        win.toggle_active_tab_edit_mode();
+    }
+    win.insert_into_edit(rec_close_note, "\n\n可写入恢复稿的未保存内容\n");
+    let _ = wait_for(800, || {
+        win.tab_facts(rec_close_note).is_some_and(|f| f.dirty)
+    })
+    .await;
+    let _ = std::fs::remove_file(Path::new(&root).join(rec_close_note));
+    let _ = wait_for(7000, || {
+        win.tab_facts(rec_close_note)
+            .is_some_and(|f| f.issue == Some(DocumentIssue::Missing))
+    })
+    .await;
+    {
+        let mut st = win.state.borrow_mut();
+        st.last_alert = None;
+        st.last_alert_dialog.set(None);
+    }
+    win.close_tab_by_path(rec_close_note);
+    let rec_draft_closed = wait_for(4000, || {
+        !win.state.borrow().tabs.contains_key(rec_close_note)
+    })
+    .await;
+    let rec_draft_alert = win.state.borrow().last_alert.is_some();
+    external.insert(
+        "recovery_draft_closes_cleanly".into(),
+        serde_json::json!({
+            "closed_cleanly": rec_draft_closed,
+            "alert_shown": rec_draft_alert,
+        }),
+    );
+
+    // 关闭保护（L5-17 真 Unsaved：磁盘与恢复稿均不可写时弹出原生保护对话框）
+    #[cfg(unix)]
+    let recovery_dir_guard = {
+        let dir = std::env::var("HORTUS_CACHE_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| PathBuf::from(s).join("recovery"));
+        if let Some(ref d) = dir {
+            let _ = std::fs::create_dir_all(d);
+        }
+        dir
+    };
+    #[cfg(unix)]
+    let lock_recovery_dir = |locked: bool| {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(ref d) = recovery_dir_guard {
+            let mode = if locked { 0o555 } else { 0o755 };
+            let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(mode));
+        }
+    };
+    #[cfg(not(unix))]
+    let lock_recovery_dir = |_locked: bool| {};
+
     let close_guard_note = "L2-关闭保护.md";
     let _ = std::fs::write(
         Path::new(&root).join(close_guard_note),
@@ -680,12 +820,14 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     {
         win.toggle_active_tab_edit_mode();
     }
+    lock_recovery_dir(true);
     win.insert_into_edit(close_guard_note, "\n\n未保存的关闭保护内容\n");
     let _ = wait_for(800, || {
         win.tab_facts(close_guard_note).is_some_and(|f| f.dirty)
     })
     .await;
     let _ = std::fs::remove_file(Path::new(&root).join(close_guard_note));
+    win.process_file_changes(&[close_guard_note.to_string()]);
     let _ = wait_for(7000, || {
         win.tab_facts(close_guard_note)
             .is_some_and(|f| f.issue == Some(DocumentIssue::Missing))
@@ -710,6 +852,7 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     if let Some(dialog) = dialog {
         dialog.close();
     }
+    lock_recovery_dir(false);
     external.insert(
         "close_guard".into(),
         serde_json::json!({
@@ -756,12 +899,14 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     {
         win.toggle_active_tab_edit_mode();
     }
+    lock_recovery_dir(true);
     win.insert_into_edit(window_guard_note, "\n\n窗口关闭前的未保存输入\n");
     let _ = wait_for(800, || {
         win.tab_facts(window_guard_note).is_some_and(|f| f.dirty)
     })
     .await;
     let _ = std::fs::remove_file(Path::new(&root).join(window_guard_note));
+    win.process_file_changes(&[window_guard_note.to_string()]);
     let _ = wait_for(7000, || {
         win.tab_facts(window_guard_note)
             .is_some_and(|f| f.issue == Some(DocumentIssue::Missing))
@@ -783,6 +928,7 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     if let Some(dialog) = dialog {
         dialog.close();
     }
+    lock_recovery_dir(false);
     let _ = wait_for(1200, || {
         win.state.borrow().last_alert_dialog.upgrade().is_none()
     })
@@ -950,6 +1096,28 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
                 "session_has_replacement": replaced_text.contains("L2Find"),
                 "session_has_no_query": !replaced_text.contains("Hortus"),
             }),
+        );
+        // L5-25: 保持查找条开启时修改正文，立即替换前自动校验/重算，避免错位覆盖新插入前缀
+        find_bar.set_query("L2Find");
+        let _ = wait_for(1500, || find_bar.stats().matches > 0).await;
+        find_bar.set_replacement("L5FindOk");
+        if let Some(buf) = win
+            .state
+            .borrow()
+            .tabs
+            .get(note)
+            .map(|t| t.edit_buffer.clone())
+        {
+            let mut start = buf.start_iter();
+            buf.insert(&mut start, "STALE_GUARD_PREFIX ");
+        }
+        find_bar.replace_current();
+        let after_stale = win.tab_facts(note).map(|f| f.text).unwrap_or_default();
+        find.insert(
+            "stale_guard_ok".into(),
+            serde_json::json!(
+                after_stale.starts_with("STALE_GUARD_PREFIX ") && after_stale.contains("L5FindOk")
+            ),
         );
         find_bar.close();
         find.insert("closed".into(), serde_json::json!(!find_bar.is_open()));
