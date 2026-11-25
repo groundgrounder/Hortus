@@ -298,6 +298,24 @@ pub async fn run_knowledge_files_and_misc(
                 .await
                 .unwrap_or_default()
                 .contains(&format!("[[{accepted_target}]]"));
+
+        // L5-10: ![[ 嵌入补全保留前缀感叹号
+        win.insert_into_edit(note, "\n\n![[Start");
+        let embed_visible = wait_for(4000, || {
+            completion.is_visible() && completion.item_count() > 0
+        })
+        .await;
+        let embed_target = completion.first_insert_target().unwrap_or_default();
+        if embed_visible {
+            completion.accept_selected();
+        }
+        glib::timeout_future(Duration::from_millis(250)).await;
+        let embed_kept_bang = embed_visible
+            && !embed_target.is_empty()
+            && win
+                .tab_facts(note)
+                .is_some_and(|f| f.text.contains(&format!("![[{embed_target}]]")));
+
         completion_report = serde_json::json!({
             "visible": visible,
             "items": items_at_visible,
@@ -307,6 +325,7 @@ pub async fn run_knowledge_files_and_misc(
             "typed_after_popup": typed_kept,
             "view_kept_focus": view_focus,
             "accepted": accepted_text && accepted_in_session && completion.stats().accepted > 0,
+            "embed_kept_bang": embed_kept_bang,
             "target": target,
             "stats": {
                 "queries": completion.stats().queries,
@@ -388,10 +407,69 @@ pub async fn run_knowledge_files_and_misc(
     let _ = wait_for(2500, || win.state.borrow().last_file_op.is_some()).await;
     let rename_op = win.state.borrow().last_file_op.clone();
     let referrer_text = win.read_disk_note("L2-引用者.md").unwrap_or_default();
+
+    // L5-05: 改名后的已打开标签页视口重排与定时保存闭包使用新路径
+    let _ = win.select_tab("L2-被引用改名.md");
+    win.apply_relayout_width(540);
+    let layout_w_after_rename = win
+        .state
+        .borrow()
+        .tabs
+        .get("L2-被引用改名.md")
+        .map(|t| t.layout_width)
+        .unwrap_or(0.0);
+    win.insert_into_edit("L2-被引用改名.md", "\n改名后增量保存标记\n");
+    let renamed_autosaved = wait_for(6000, || {
+        win.tab_facts("L2-被引用改名.md").is_some_and(|f| !f.dirty)
+            && win
+                .read_disk_note("L2-被引用改名.md")
+                .is_some_and(|t| t.contains("改名后增量保存标记"))
+    })
+    .await;
+    let renamed_closure_ok = (layout_w_after_rename - 540.0).abs() < 24.0 && renamed_autosaved;
+
+    // L5-04: 无引用孤立笔记开启更新链接也应成功改名
+    win.state.borrow_mut().last_file_op = None;
+    let standalone_disk = Path::new(root).join("L2-孤立笔记.md");
+    let _ = std::fs::write(
+        &standalone_disk,
+        "# 孤立笔记\n\n没有任何反向链接引用此文件。\n",
+    );
+    if let Some(handle) = win.state.borrow().vault_handle() {
+        handle.update_search_index(vec!["L2-孤立笔记.md".into()], vec![]);
+    }
+    win.open_note_at("L2-孤立笔记.md", None);
+    let _ = wait_for(6000, || {
+        win.state
+            .borrow()
+            .tabs
+            .get("L2-孤立笔记.md")
+            .is_some_and(|tab| tab.reading_loaded)
+    })
+    .await;
+    win.perform_rename("L2-孤立笔记.md", "L2-孤立改名.md", true, false);
+    let standalone_renamed = wait_for(9000, || {
+        win.state.borrow().tabs.contains_key("L2-孤立改名.md")
+            && Path::new(root).join("L2-孤立改名.md").is_file()
+            && !standalone_disk.exists()
+    })
+    .await;
+    let _ = wait_for(2500, || win.state.borrow().last_file_op.is_some()).await;
+    let standalone_op = win.state.borrow().last_file_op.clone();
+    win.close_tab_by_path("L2-孤立改名.md");
+
+    files.insert(
+        "rename_standalone".into(),
+        serde_json::json!({
+            "ok": standalone_renamed,
+            "op": standalone_op,
+        }),
+    );
     files.insert(
         "rename_note".into(),
         serde_json::json!({
             "tab_migrated": note_renamed,
+            "renamed_closure_ok": renamed_closure_ok,
             "referrer_updated": referrer_text.contains("[[L2-被引用改名"),
             "referrer_keeps_old": referrer_text.contains("[[L2-被引用]]"),
             "op": rename_op,

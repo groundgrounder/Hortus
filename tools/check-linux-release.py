@@ -908,6 +908,34 @@ selected = "terminal"
                 )
             )
 
+            # 截图 5 (L5a): 暗色模式英文主窗 + 阅读（公式/图表示例）
+            screenshots.append(
+                run_scene(
+                    "l5a-dark-main-and-reading.png",
+                    "en_US.UTF-8",
+                    1280,
+                    820,
+                    ["Markdown field guide.md", "Learning/Learning map.md"],
+                    "Markdown field guide.md",
+                    None,
+                    [("color-scheme", "dark")],
+                )
+            )
+
+            # 截图 6 (L5a): 暗色模式设置对话框 + 底部终端
+            screenshots.append(
+                run_scene(
+                    "l5a-dark-settings-and-terminal.png",
+                    "en_US.UTF-8",
+                    1280,
+                    820,
+                    ["Markdown field guide.md", "Learning/Learning map.md"],
+                    "Markdown field guide.md",
+                    None,
+                    [("color-scheme", "dark"), ("dock-new-shell", "bottom"), ("open-settings", None)],
+                )
+            )
+
             return {
                 "startup_runs_ms": startup_ms,
                 "startup_median_ms": round(statistics.median(startup_ms), 1),

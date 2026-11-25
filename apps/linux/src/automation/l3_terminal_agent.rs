@@ -792,9 +792,18 @@ async fn run_suite(
     let config_path = services.config.snapshot().config_path.clone();
     let mock_agent = std::env::var("HORTUS_L3_MOCK_AGENT").unwrap_or_default();
 
-    let dlg = win.build_settings_dialog().expect("settings dialog");
-    dlg.present(&win.window, Some(SettingsPage::Agent));
-    glib::timeout_future(Duration::from_millis(350)).await;
+    win.open_settings_dialog(Some(SettingsPage::Agent));
+    let dlg_tracked = wait_for(2000, || win.settings_dialog().is_some()).await;
+    let dlg = win.settings_dialog().expect("settings dialog");
+    let config_subtitle_resolved = wait_for(3000, || {
+        let sub = dlg.config_path_subtitle();
+        !sub.is_empty()
+            && !sub.contains("Loading")
+            && !sub.contains("读取")
+            && sub.contains("config.toml")
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(200)).await;
     let discovered_ids = dlg.discovered_ids();
     if let Some(first_id) = discovered_ids.first() {
         let _ = dlg.fill_discovered_agent(first_id);
@@ -843,6 +852,8 @@ async fn run_suite(
     dlg.reset_guide_now();
     let guide_reset = wait_for(2000, || !dlg.guide_overridden()).await;
     dlg.close();
+    drop(dlg);
+    let dlg_cleared_after_close = wait_for(2500, || win.settings_dialog().is_none()).await;
     glib::timeout_future(Duration::from_millis(200)).await;
 
     let disk_edit = std::fs::read_to_string(&config_path)
@@ -881,6 +892,42 @@ async fn run_suite(
         services.config.snapshot().default_view == "reading"
     })
     .await;
+    // 等待前序 config.toml 写入引发的 120ms 监视防抖彻底落定，再单独测量主题切换刷新次数
+    glib::timeout_future(Duration::from_millis(260)).await;
+
+    // L5-12: 单次主题切换去重（先显式切到 Light 基线，避免宿主系统默认暗色导致 Dark 无变化）
+    win.send_command(WindowCommand::ApplyColorScheme(
+        crate::core::ColorSchemeChoice::Light,
+    ));
+    let _ = wait_for(2000, || !adw::StyleManager::default().is_dark()).await;
+    glib::timeout_future(Duration::from_millis(260)).await;
+
+    let refreshes_before_dark = win.state.borrow().theme_refreshes;
+    win.send_command(WindowCommand::ApplyColorScheme(
+        crate::core::ColorSchemeChoice::Dark,
+    ));
+    let _ = wait_for(2000, || {
+        win.state.borrow().theme_refreshes > refreshes_before_dark
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(180)).await;
+    let refreshes_after_dark = win.state.borrow().theme_refreshes;
+    let action_state_dark = win
+        .window
+        .lookup_action("color-scheme")
+        .and_then(|a| a.state())
+        .and_then(|v| v.str().map(str::to_string));
+    let theme_switch_delta = refreshes_after_dark.saturating_sub(refreshes_before_dark);
+    let theme_switch_single_refresh =
+        theme_switch_delta == 1 && action_state_dark.as_deref() == Some("dark");
+    win.send_command(WindowCommand::ApplyColorScheme(
+        crate::core::ColorSchemeChoice::Light,
+    ));
+    let _ = wait_for(2000, || {
+        win.state.borrow().theme_refreshes > refreshes_after_dark
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(100)).await;
 
     // -------------------------------------------------------------------------
     // Part 4: 右侧栏直接启动 Agent + 快照闸门 + Changes 面板 + 红绿 Diff + 多窗口合成截图
@@ -987,6 +1034,7 @@ async fn run_suite(
     let mut isolated_vault_ok = false;
     let mut win2_closed_clean = false;
     let mut win2_pty_reaped = false;
+    let mut dirty_missing_preserved_across_windows = false;
     let mut shot_agent_changes_multi = false;
 
     if let Some(win2) = win.open_new_window_with_vault(None) {
@@ -1063,6 +1111,66 @@ async fn run_suite(
                     capture_dual_window_png(&win.window, &win2.inner.window, &p).is_ok()
                         && p.exists();
             }
+
+            // L5-02 + L5-03: 双窗口同库外部删除未保存页不触发 RefCell 重入，且保留脏页标示 Missing
+            let sub_rel = "folder/sub note.md";
+            let sub_disk = vault_path.join(sub_rel);
+            let sub_backup = std::fs::read_to_string(&sub_disk).unwrap_or_default();
+            win2.inner.open_note_at(sub_rel, None);
+            let sub_loaded_w2 = wait_for(4000, || {
+                win2.inner
+                    .state
+                    .borrow()
+                    .tabs
+                    .get(sub_rel)
+                    .is_some_and(|t| t.source_loaded)
+            })
+            .await;
+            if sub_loaded_w2 {
+                if !win2
+                    .inner
+                    .state
+                    .borrow()
+                    .tabs
+                    .get(sub_rel)
+                    .is_some_and(|t| t.editing)
+                {
+                    win2.inner.toggle_active_tab_edit_mode();
+                }
+                if let Some(buf) = win2
+                    .inner
+                    .state
+                    .borrow()
+                    .tabs
+                    .get(sub_rel)
+                    .map(|t| t.edit_buffer.clone())
+                {
+                    let cur = buf
+                        .text(&buf.start_iter(), &buf.end_iter(), false)
+                        .to_string();
+                    buf.set_text(&format!("{cur}\nUNSAVED_IN_WIN2\n"));
+                }
+            }
+            let _ = std::fs::remove_file(&sub_disk);
+            let src_win_id = win.state.borrow().window_reg_id;
+            services
+                .windows
+                .notify_vault_written(src_win_id, &vault_root, &[sub_rel.to_string()]);
+            dirty_missing_preserved_across_windows = wait_for(4000, || {
+                win2.inner
+                    .state
+                    .borrow()
+                    .tabs
+                    .get(sub_rel)
+                    .is_some_and(|t| {
+                        let edit = t.edit_state.borrow();
+                        edit.issue == Some(hortus_ffi::DocumentIssue::Missing)
+                            && edit.dirty
+                            && edit.text.contains("UNSAVED_IN_WIN2")
+                    })
+            })
+            .await;
+            let _ = std::fs::write(&sub_disk, sub_backup);
 
             if let Some(v2) = vault2_opt {
                 win2.inner.open_vault_path(v2.to_path_buf());
@@ -1170,6 +1278,96 @@ async fn run_suite(
     let vault_intact_after_delete = vault_path.join("to-delete.md").exists();
     for id in agent_tab_ids {
         win.terminal_host.close_tab_by_id(id);
+    }
+
+    // L5-11: 手动关闭仍在运行的 Agent 终端标签页应收敛会话为 interrupted 并可删除
+    if let Ok(cur) = services.core.editable_config() {
+        let _ = services.core.save_editable_config(
+            EditableConfigInputInfo {
+                font_size: cur.font_size,
+                default_view: cur.default_view,
+                terminal_font: cur.terminal_font,
+                agent_command: Some(mock_agent.clone()),
+                agent_args: vec!["--sleep".into(), "{guide}".into()],
+            },
+            None,
+        );
+    }
+    let _ = wait_for(2000, || {
+        services
+            .config
+            .snapshot()
+            .agent_args
+            .first()
+            .is_some_and(|a| a == "--sleep")
+    })
+    .await;
+    let tabs_before_sleep: std::collections::HashSet<u64> =
+        win.terminal_host.tab_ids().into_iter().collect();
+    let sessions_before_sleep: std::collections::HashSet<String> = win
+        .changes_panel
+        .sessions()
+        .into_iter()
+        .map(|s| s.id.clone())
+        .collect();
+    win.launch_agent_action();
+    let sleep_running = wait_for(5000, || {
+        win.changes_panel
+            .sessions()
+            .iter()
+            .any(|s| !sessions_before_sleep.contains(&s.id) && s.state == "running")
+            && win
+                .terminal_host
+                .tab_ids()
+                .into_iter()
+                .any(|id| !tabs_before_sleep.contains(&id))
+    })
+    .await;
+    let sleep_sid = win
+        .changes_panel
+        .sessions()
+        .into_iter()
+        .find(|s| !sessions_before_sleep.contains(&s.id))
+        .map(|s| s.id.clone())
+        .unwrap_or_default();
+    if let Some(sleep_tid) = win
+        .terminal_host
+        .tab_ids()
+        .into_iter()
+        .find(|id| !tabs_before_sleep.contains(id))
+    {
+        win.terminal_host.close_tab_by_id(sleep_tid);
+    }
+    let running_agent_close_interrupted = sleep_running
+        && !sleep_sid.is_empty()
+        && wait_for(5000, || {
+            win.changes_panel
+                .sessions()
+                .iter()
+                .any(|s| s.id == sleep_sid && s.state != "running" && s.usable)
+        })
+        .await;
+    if !sleep_sid.is_empty() {
+        win.changes_panel.delete_session_now(&sleep_sid);
+        let _ = wait_for(3000, || {
+            !win.changes_panel
+                .sessions()
+                .iter()
+                .any(|s| s.id == sleep_sid)
+        })
+        .await;
+    }
+    if let Ok(cur) = services.core.editable_config() {
+        let _ = services.core.save_editable_config(
+            EditableConfigInputInfo {
+                font_size: cur.font_size,
+                default_view: cur.default_view,
+                terminal_font: cur.terminal_font,
+                agent_command: Some(mock_agent.clone()),
+                agent_args: vec!["{guide}".into()],
+            },
+            None,
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1374,6 +1572,12 @@ async fn run_suite(
         },
         "settings": {
             "bad_gate_blocked": bad_gate_blocked,
+            "dlg_tracked": dlg_tracked,
+            "config_subtitle_resolved": config_subtitle_resolved,
+            "dlg_cleared_after_close": dlg_cleared_after_close,
+            "theme_switch_single_refresh": theme_switch_single_refresh,
+            "theme_switch_delta": theme_switch_delta,
+            "theme_action_state_dark": action_state_dark,
             "probe_ok": probe_ok,
             "discovered_ids": discovered_ids,
             "config_saved": config_saved,
@@ -1387,6 +1591,7 @@ async fn run_suite(
         },
         "agent_changes": {
             "agent_exited": agent_exited,
+            "running_agent_close_interrupted": running_agent_close_interrupted,
             "selected_ok": selected_ok,
             "detail_loaded": detail_loaded,
             "changes_title": changes_title,
@@ -1404,6 +1609,7 @@ async fn run_suite(
             "same_vault_ctx_ptr": same_vault_ctx_ptr,
             "live_two_windows": live_two_windows,
             "multi_win_sync_ok": multi_win_sync_ok,
+            "dirty_missing_preserved_across_windows": dirty_missing_preserved_across_windows,
             "isolated_vault_ok": isolated_vault_ok,
             "win2_closed_clean": win2_closed_clean,
             "win2_pty_reaped": win2_pty_reaped,

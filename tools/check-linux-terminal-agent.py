@@ -171,6 +171,10 @@ def write_vault_fixtures(vault1: Path, vault2: Path) -> None:
 def write_mock_agent(path: Path) -> None:
     script = """#!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == "--sleep" ]]; then
+  sleep 30
+  exit 0
+fi
 GUIDE_TEXT="${1:-}"
 if [[ -z "$GUIDE_TEXT" ]] || [[ "$GUIDE_TEXT" != *"Hortus"* ]]; then
   echo "missing expanded guide text" >&2
@@ -330,6 +334,15 @@ def main() -> int:
                 for tab in tabs:
                     check(tab.get("has_close_button") is False, f"工具标签不应存在内联关闭按钮: {tab}")
                     check(tab.get("has_motion_controller") is False, f"工具标签不应存在悬停控制器: {tab}")
+            for req_sec, req_key in (
+                ("settings", "dlg_tracked"),
+                ("settings", "config_subtitle_resolved"),
+                ("settings", "dlg_cleared_after_close"),
+                ("settings", "theme_switch_single_refresh"),
+                ("multi_window", "dirty_missing_preserved_across_windows"),
+                ("agent_changes", "running_agent_close_interrupted"),
+            ):
+                check(data[req_sec].get(req_key) is True, f"缺少或未通过 L5a 校验 {req_sec}.{req_key}: {data}")
             check(
                 data["terminal"]["quoted_space_path"] == "'folder/sub note.md' ",
                 f"空格路径 shell 引用异常: {data['terminal']['quoted_space_path']}",

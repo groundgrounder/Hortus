@@ -479,10 +479,21 @@ def assert_report(report: dict, vault: Path, env: dict, real_trash_before: list[
     check(edit["align_table_patch"] is True, "表格自动对齐未改写正文")
     check(edit["autosaved"] is True, "停止输入后未自动保存")
     check(900 <= edit["autosave_ms"] <= 6000, f"自动保存延迟异常：{edit['autosave_ms']}ms")
+    check(edit.get("queued_save_followup") is True, f"save_inflight 期间尾随输入补保存失败：{edit}")
 
     external = report["external"]
     check(external["clean_reload"] is True, "干净态外部修改未实时刷新")
     check(external["scroll_preserved"] is True, f"外部刷新后滚动位置跳动：{external}")
+    rec_ro = external.get("recovery_readonly") or {}
+    check(
+        rec_ro.get("seeded") is True and rec_ro.get("locked") is True and rec_ro.get("unlocked") is True,
+        f"恢复稿未决期间只读锁定失败：{rec_ro}",
+    )
+    ro_lock = external.get("readonly_disk_lock") or {}
+    check(
+        ro_lock.get("opened_editable") is True and ro_lock.get("locked") is True and ro_lock.get("unlocked") is True,
+        f"磁盘只读刷新锁定/解锁失败：{ro_lock}",
+    )
     conflict = external["conflict"]
     check(conflict["shown"] is True, "脏态外部修改未显示 Conflict 提示条")
     check(conflict["local_preserved"] is True, "冲突时本地输入被覆盖")
@@ -565,6 +576,7 @@ def assert_report(report: dict, vault: Path, env: dict, real_trash_before: list[
             "补全弹层弹出后编辑视图失去了键盘焦点",
         )
     check(completion["accepted"] is True, "[[ 补全接受失败")
+    check(completion.get("embed_kept_bang") is True, f"![[ 嵌入补全丢失感叹号前缀：{completion}")
     check(completion["stats"]["accepted"] > 0, "[[ 补全未记录接受次数")
     check(completion["target"], "[[ 补全未给出插入目标")
 
@@ -573,8 +585,18 @@ def assert_report(report: dict, vault: Path, env: dict, real_trash_before: list[
     check(create["note_opened"] is True, "新建笔记未自动打开")
     check(create["note_on_disk"] is True, "新建笔记未落盘")
     check(create["folder_on_disk"] is True, "新建文件夹未落盘")
+    rename_standalone = files.get("rename_standalone") or {}
+    rename_standalone_op = rename_standalone.get("op") or {}
+    check(
+        rename_standalone.get("ok") is True
+        and rename_standalone_op.get("op") == "rename"
+        and rename_standalone_op.get("link_error") is None
+        and rename_standalone_op.get("rewrites") == 0,
+        f"无引用孤立笔记重命名失败：{rename_standalone}",
+    )
     rename = files["rename_note"]
     check(rename["tab_migrated"] is True, "重命名后标签页未迁移")
+    check(rename.get("renamed_closure_ok") is True, f"改名后标签页视口重排/自动保存闭合失败：{rename}")
     check(rename["referrer_updated"] is True, "重命名未更新引用笔记双链")
     check(rename["referrer_keeps_old"] is False, "重命名后仍残留旧双链")
     check(rename["op"] and rename["op"]["updated_notes"] >= 1, f"改链统计缺失：{rename}")
@@ -1585,6 +1607,10 @@ def main():
             "L2-引用组.md",
             "L2-被引用.md",
             "L2-被引用改名.md",
+            "L2-孤立笔记.md",
+            "L2-孤立改名.md",
+            "L2-恢复稿锁定.md",
+            "L2-只读回滚.md",
             "L2-待删除.md",
             "L2-关闭保护.md",
             "L2-窗口保护.md",

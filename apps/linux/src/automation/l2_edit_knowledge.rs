@@ -448,6 +448,22 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
         }),
     );
 
+    let saves_before_queue = win.tab_facts(note).map(|f| f.saves).unwrap_or(0);
+    win.request_save(note, SaveChoice::Normal, false);
+    win.insert_into_edit(note, "\nQUEUED_SAVE_TAIL\n");
+    let queued_save_ok = wait_for(6000, || {
+        win.tab_facts(note)
+            .is_some_and(|f| !f.dirty && f.saves > saves_before_queue)
+            && win
+                .read_disk_note(note)
+                .is_some_and(|d| d.contains("QUEUED_SAVE_TAIL"))
+    })
+    .await;
+    edit.insert(
+        "queued_save_followup".into(),
+        serde_json::json!(queued_save_ok),
+    );
+
     let _ = gio::spawn_blocking(|| {}).await;
     report.insert("edit".into(), serde_json::Value::Object(edit));
 
@@ -787,6 +803,115 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     })
     .await;
     win.close_tab_by_path(window_guard_note);
+
+    // L5-06: 恢复稿未决期间编辑器只读锁定，恢复或丢弃后解锁
+    let rec_note = "L2-恢复稿锁定.md";
+    let _ = std::fs::write(
+        Path::new(&root).join(rec_note),
+        "# 恢复稿锁定\n\n初始正文。\n",
+    );
+    if let Some(handle) = win.state.borrow().vault_handle() {
+        handle.update_search_index(vec![rec_note.into()], vec![]);
+    }
+    let rec_svc = win.state.borrow().services.clone();
+    let seeded_recovery = if let Some(svc) = rec_svc {
+        let root_c = root.clone();
+        gio::spawn_blocking(move || {
+            let Ok(sess) = svc.core.open_document(root_c, rec_note.into()) else {
+                return false;
+            };
+            let _ = sess.replace(0, 0, "CRASH_RECOVERY_DRAFT\n".to_string());
+            sess.checkpoint().is_ok()
+        })
+        .await
+        .unwrap_or(false)
+    } else {
+        false
+    };
+    win.open_note_at(rec_note, None);
+    let rec_locked = wait_for(6000, || {
+        win.state.borrow().tabs.get(rec_note).is_some_and(|t| {
+            t.source_loaded
+                && t.edit_state.borrow().issue == Some(DocumentIssue::Recovery)
+                && t.notice.reveals_child()
+                && !t.edit_view.is_editable()
+        })
+    })
+    .await;
+    win.recover_draft(rec_note, true);
+    let rec_unlocked = wait_for(4000, || {
+        win.state.borrow().tabs.get(rec_note).is_some_and(|t| {
+            t.edit_state.borrow().issue.is_none()
+                && t.edit_view.is_editable()
+                && t.edit_state.borrow().text.contains("CRASH_RECOVERY_DRAFT")
+        })
+    })
+    .await;
+    win.request_save(rec_note, SaveChoice::Normal, false);
+    let _ = wait_for(4000, || win.tab_facts(rec_note).is_some_and(|f| !f.dirty)).await;
+    win.close_tab_by_path(rec_note);
+    external.insert(
+        "recovery_readonly".into(),
+        serde_json::json!({
+            "seeded": seeded_recovery,
+            "locked": rec_locked,
+            "unlocked": rec_unlocked,
+        }),
+    );
+
+    // L5-07: 磁盘只读时外部刷新锁定 edit_view，恢复写权限后解锁
+    let ro_note = "L2-只读回滚.md";
+    let ro_disk = Path::new(&root).join(ro_note);
+    let _ = std::fs::write(&ro_disk, "# 只读锁定测试\n\n原始可写文本。\n");
+    if let Some(handle) = win.state.borrow().vault_handle() {
+        handle.update_search_index(vec![ro_note.into()], vec![]);
+    }
+    win.open_note_at(ro_note, None);
+    let ro_opened = wait_for(6000, || {
+        win.state
+            .borrow()
+            .tabs
+            .get(ro_note)
+            .is_some_and(|t| t.source_loaded && t.edit_view.is_editable())
+    })
+    .await;
+    #[cfg(unix)]
+    let (ro_locked, ro_unlocked) = {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&ro_disk, std::fs::Permissions::from_mode(0o444));
+        win.process_file_changes(&[ro_note.to_string()]);
+        let locked = wait_for(6000, || {
+            win.state
+                .borrow()
+                .tabs
+                .get(ro_note)
+                .is_some_and(|t| !t.edit_view.is_editable())
+        })
+        .await;
+        let _ = std::fs::set_permissions(&ro_disk, std::fs::Permissions::from_mode(0o644));
+        win.process_file_changes(&[ro_note.to_string()]);
+        let unlocked = wait_for(6000, || {
+            win.state
+                .borrow()
+                .tabs
+                .get(ro_note)
+                .is_some_and(|t| t.edit_view.is_editable())
+        })
+        .await;
+        (locked, unlocked)
+    };
+    #[cfg(not(unix))]
+    let (ro_locked, ro_unlocked) = (true, true);
+    win.close_tab_by_path(ro_note);
+    external.insert(
+        "readonly_disk_lock".into(),
+        serde_json::json!({
+            "opened_editable": ro_opened,
+            "locked": ro_locked,
+            "unlocked": ro_unlocked,
+        }),
+    );
+
     report.insert("external".into(), serde_json::Value::Object(external));
 
     stage!("C-find");
