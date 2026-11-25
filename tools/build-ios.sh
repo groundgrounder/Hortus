@@ -7,7 +7,7 @@ ROOT="$(pwd)"
 export PATH="/opt/homebrew/opt/rustup/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:${PATH}"
 
 MODE=""
-ARCHIVE_DIR="${HOME}/syncD/media/release/hortus/ios-m3"
+ARCHIVE_DIR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
