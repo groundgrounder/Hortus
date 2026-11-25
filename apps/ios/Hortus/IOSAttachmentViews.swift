@@ -528,7 +528,7 @@ private final class MediaBlockViewProvider: NSTextAttachmentViewProvider {
     }
 }
 
-private enum TableLayoutMetrics {
+enum TableLayoutMetrics {
     struct Measured {
         let texts: [NSAttributedString]
         let heights: [Double]
@@ -577,10 +577,41 @@ private enum TableLayoutMetrics {
     }
 }
 
-private final class TableCanvasUIView: UIView {
+final class TableCanvasUIView: UIView {
+    private struct CellLayout {
+        let storage: NSTextStorage
+        let layoutManager: NSLayoutManager
+        let textContainer: NSTextContainer
+        let attachments: [(range: NSRange, attachment: InlineMathAttachment)]
+    }
+
     let measured: TableLayoutMetrics.Measured
+    private var cellLayouts: [Int: CellLayout] = [:]
+
     init(measured: TableLayoutMetrics.Measured) {
         self.measured = measured
+        var layouts: [Int: CellLayout] = [:]
+        if !measured.columns.isEmpty {
+            for (index, attr) in measured.texts.enumerated() {
+                var attachments: [(range: NSRange, attachment: InlineMathAttachment)] = []
+                attr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attr.length)) { value, range, _ in
+                    if let inlineMath = value as? InlineMathAttachment {
+                        attachments.append((range: range, attachment: inlineMath))
+                    }
+                }
+                if !attachments.isEmpty {
+                    let storage = NSTextStorage(attributedString: attr)
+                    let layoutManager = NSLayoutManager()
+                    let colWidth = measured.columns[index % measured.columns.count]
+                    let container = NSTextContainer(size: CGSize(width: max(1, colWidth - 20), height: .greatestFiniteMagnitude))
+                    container.lineFragmentPadding = 0
+                    layoutManager.addTextContainer(container)
+                    storage.addLayoutManager(layoutManager)
+                    layouts[index] = CellLayout(storage: storage, layoutManager: layoutManager, textContainer: container, attachments: attachments)
+                }
+            }
+        }
+        self.cellLayouts = layouts
         super.init(frame: CGRect(x: 0, y: 0, width: measured.totalWidth, height: measured.totalHeight))
         isOpaque = false
         backgroundColor = .clear
@@ -592,6 +623,8 @@ private final class TableCanvasUIView: UIView {
     required init?(coder: NSCoder) { nil }
 
     override func draw(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        let deviceScale = Double(traitCollection.displayScale > 0 ? traitCollection.displayScale : 2)
         var y: CGFloat = 0
         UIColor.separator.resolvedColor(with: traitCollection).setStroke()
         let lines = UIBezierPath()
@@ -599,9 +632,44 @@ private final class TableCanvasUIView: UIView {
         for (row, height) in measured.heights.enumerated() {
             var x: CGFloat = 0
             for (col, width) in measured.columns.enumerated() {
-                let text = measured.texts[row * measured.columns.count + col]
+                let cellIndex = row * measured.columns.count + col
                 let cellRect = CGRect(x: x + 10, y: y + 8, width: width - 20, height: height - 8)
-                text.draw(with: cellRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+                if let cellLayout = cellLayouts[cellIndex] {
+                    cellLayout.layoutManager.ensureLayout(for: cellLayout.textContainer)
+                    let glyphRange = cellLayout.layoutManager.glyphRange(for: cellLayout.textContainer)
+                    cellLayout.layoutManager.drawBackground(forGlyphRange: glyphRange, at: cellRect.origin)
+                    cellLayout.layoutManager.drawGlyphs(forGlyphRange: glyphRange, at: cellRect.origin)
+                    for item in cellLayout.attachments {
+                        let charGlyphs = cellLayout.layoutManager.glyphRange(forCharacterRange: item.range, actualCharacterRange: nil)
+                        guard charGlyphs.location != NSNotFound, charGlyphs.length > 0 else { continue }
+                        let lineRect = cellLayout.layoutManager.lineFragmentRect(forGlyphAt: charGlyphs.location, effectiveRange: nil)
+                        let glyphLocation = cellLayout.layoutManager.location(forGlyphAt: charGlyphs.location)
+                        let boxOrigin = CGPoint(
+                            x: cellRect.origin.x + lineRect.origin.x + glyphLocation.x,
+                            y: cellRect.origin.y + lineRect.origin.y + glyphLocation.y - CGFloat(item.attachment.ascent)
+                        )
+                        let resolved = item.attachment.foreground.resolvedColor(with: traitCollection)
+                        let foreground = PlatformGraphics.sRGBCGColor(resolved)
+                        context.saveGState()
+                        context.clip(to: cellRect)
+                        if let math = item.attachment.item.prepared.math {
+                            MathRenderer.draw(math, in: context, origin: boxOrigin, foreground: foreground, deviceScale: deviceScale)
+                        } else if let line = item.attachment.item.prepared.fallbackLines.first {
+                            UIColor.quaternaryLabel.withAlphaComponent(0.10).resolvedColor(with: traitCollection).setFill()
+                            UIRectFill(CGRect(origin: boxOrigin, size: item.attachment.bounds.size))
+                            context.setFillColor(foreground)
+                            context.translateBy(x: boxOrigin.x, y: boxOrigin.y + CGFloat(item.attachment.ascent))
+                            context.scaleBy(x: 1, y: -1)
+                            context.textMatrix = .identity
+                            context.textPosition = .zero
+                            CTLineDraw(line, context)
+                        }
+                        context.restoreGState()
+                    }
+                } else {
+                    let text = measured.texts[cellIndex]
+                    text.draw(with: cellRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+                }
                 x += width
             }
             y += height

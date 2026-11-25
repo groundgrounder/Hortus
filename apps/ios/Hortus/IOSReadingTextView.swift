@@ -96,9 +96,20 @@ final class HortusReadingUITextView: UITextView {
     var mathCopyItems: [(range: NSRange, source: String)] = []
     var onTapAtOffset: ((Int) -> Bool)?
     var onAttachmentLayoutChanged: (() -> Void)?
+    var onAppearanceChanged: ((Bool) -> Void)?
     var lastRevealRange: NSRange?
     private var mountedAttachmentViews: [ObjectIdentifier: UIView] = [:]
     private var isSyncingAttachments = false
+    private var attachmentsDirty = true
+    private var lastSyncedWidth: CGFloat = -1
+    private var lastSyncedInsets: UIEdgeInsets = .zero
+    private(set) var attachmentSyncCount = 0
+
+    override var attributedText: NSAttributedString! {
+        didSet {
+            attachmentsDirty = true
+        }
+    }
 
     convenience init() {
         self.init(frame: .zero, textContainer: nil)
@@ -110,6 +121,9 @@ final class HortusReadingUITextView: UITextView {
         tap.cancelsTouchesInView = false
         addGestureRecognizer(tap)
         panGestureRecognizer.addTarget(self, action: #selector(handleUserScroll))
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in
+            self.onAppearanceChanged?(self.traitCollection.userInterfaceStyle == .dark)
+        }
     }
 
     required init?(coder: NSCoder) { nil }
@@ -143,6 +157,7 @@ final class HortusReadingUITextView: UITextView {
         } else {
             tlm.invalidateLayout(for: content.documentRange)
         }
+        attachmentsDirty = true
         invalidateIntrinsicContentSize()
         setNeedsLayout()
         layoutIfNeeded()
@@ -177,6 +192,10 @@ final class HortusReadingUITextView: UITextView {
         guard !isSyncingAttachments, window != nil, bounds.width > 0,
               let tlm = textLayoutManager, let content = tlm.textContentManager,
               let attr = attributedText, attr.length > 0 else { return }
+        let needsSync = attachmentsDirty
+            || abs(bounds.width - lastSyncedWidth) > 0.5
+            || textContainerInset != lastSyncedInsets
+        guard needsSync else { return }
         isSyncingAttachments = true
         defer { isSyncingAttachments = false }
 
@@ -238,6 +257,10 @@ final class HortusReadingUITextView: UITextView {
             oldView.removeFromSuperview()
         }
         mountedAttachmentViews = active
+        attachmentsDirty = false
+        lastSyncedWidth = bounds.width
+        lastSyncedInsets = textContainerInset
+        attachmentSyncCount += 1
     }
 
     func selectedPlainTextWithLatex() -> String? {
@@ -290,6 +313,7 @@ final class HortusReadingUITextView: UITextView {
 }
 
 struct IOSReadingTextView: UIViewRepresentable {
+    @Environment(\.colorScheme) private var colorScheme
     let document: IOSNoteDocument
     let path: String
     let vault: String
@@ -319,11 +343,15 @@ struct IOSReadingTextView: UIViewRepresentable {
         view.textLayoutManager?.delegate = context.coordinator.layoutDelegate
         view.accessibilityIdentifier = "ios-reading-text"
         context.coordinator.view = view
+        let coordinator = context.coordinator
+        view.onAppearanceChanged = { [weak coordinator] dark in
+            coordinator?.handleAppearanceChange(dark: dark)
+        }
         return view
     }
 
     func updateUIView(_ view: HortusReadingUITextView, context: Context) {
-        context.coordinator.update(self)
+        context.coordinator.update(self, dark: colorScheme == .dark)
     }
 
     @MainActor
@@ -348,7 +376,14 @@ struct IOSReadingTextView: UIViewRepresentable {
         private var refreshTask: Task<Void, Never>?
         private var generation = 0
 
-        func update(_ next: IOSReadingTextView) {
+        func handleAppearanceChange(dark: Bool) {
+            guard lastDark != dark, let view else { return }
+            let boundsWidth = Double(view.bounds.width)
+            let contentWidth = max(200.0, (boundsWidth > 40 ? boundsWidth : 360.0) - Double(view.textContainerInset.left + view.textContainerInset.right))
+            refresh(width: contentWidth, dark: dark)
+        }
+
+        func update(_ next: IOSReadingTextView, dark resolvedDark: Bool? = nil) {
             let docChanged = input?.document !== next.document
             if docChanged {
                 model = nil
@@ -366,7 +401,7 @@ struct IOSReadingTextView: UIViewRepresentable {
                 self?.handleTap(at: offset) ?? false
             }
 
-            let dark = view.traitCollection.userInterfaceStyle == .dark
+            let dark = resolvedDark ?? (view.traitCollection.userInterfaceStyle == .dark)
             let boundsWidth = Double(view.bounds.width)
             let contentWidth = max(200.0, (boundsWidth > 40 ? boundsWidth : 360.0) - Double(view.textContainerInset.left + view.textContainerInset.right))
 
