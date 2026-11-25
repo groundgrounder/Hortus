@@ -493,10 +493,11 @@ impl WindowInner {
         if !loaded || editing {
             return;
         }
-        if viewport.settled_width() == 0 {
+        let first_settle = viewport.settled_width() == 0;
+        if first_settle {
             viewport.set_settled_width(avail_w);
         }
-        if current > 0.0 && (target - current).abs() < 16.0 {
+        if current > 0.0 && (target - current).abs() < 16.0 && !(first_settle && target < current) {
             return;
         }
         self.relayout_reading_width(&path, target);

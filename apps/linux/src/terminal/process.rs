@@ -37,7 +37,56 @@ pub fn user_shell_program() -> String {
         .unwrap_or_else(|| "/bin/sh".to_string())
 }
 
-/// 探测登录 shell PATH（供桌面菜单启动等缺失终端 PATH 的场景使用；非关键路径，超时安全）。
+/// 带超时的子进程标准输出读取：超时后主动 `kill()` 并 `wait()` 回收，避免启动阻塞。
+pub fn run_command_with_timeout(
+    cmd: &mut Command,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let reader = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let bytes = reader
+                    .and_then(|handle| handle.join().ok())
+                    .unwrap_or_default();
+                return status.success().then_some(bytes);
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some(handle) = reader {
+                        let _ = handle.join();
+                    }
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(handle) = reader {
+                    let _ = handle.join();
+                }
+                return None;
+            }
+        }
+    }
+}
+
+/// 探测登录 shell PATH（供桌面菜单启动等缺失终端 PATH 的场景使用；非关键路径，1.5s 超时保护）。
 pub fn resolve_login_path() -> Option<String> {
     let shell = user_shell_program();
     let name = Path::new(&shell)
@@ -47,16 +96,10 @@ pub fn resolve_login_path() -> Option<String> {
     if !matches!(name, "sh" | "bash" | "zsh" | "fish") {
         return None;
     }
-    let output = Command::new(&shell)
-        .args(["-lc", "printf '%s' \"$PATH\""])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8(output.stdout).ok()?;
+    let mut cmd = Command::new(&shell);
+    cmd.args(["-lc", "printf '%s' \"$PATH\""]);
+    let bytes = run_command_with_timeout(&mut cmd, std::time::Duration::from_millis(1500))?;
+    let path = String::from_utf8(bytes).ok()?;
     let trimmed = path.trim().to_string();
     (!trimmed.is_empty()).then_some(trimmed)
 }
@@ -237,5 +280,25 @@ mod tests {
         assert!(env.iter().any(|item| item == "HORTUS_VAULT=/tmp/vault"));
         assert!(env.iter().any(|item| item == "HORTUS_AGENT_SESSION=sess-1"));
         assert!(!env.iter().any(|item| item.contains("ignored")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_kills_stalled_process_without_blocking() {
+        if !Path::new("/bin/sh").exists() {
+            return;
+        }
+        let mut ok_cmd = Command::new("/bin/sh");
+        ok_cmd.args(["-c", "printf 'ok'"]);
+        let out = run_command_with_timeout(&mut ok_cmd, std::time::Duration::from_millis(800));
+        assert_eq!(out.as_deref(), Some(b"ok".as_slice()));
+
+        let started = std::time::Instant::now();
+        let mut slow_cmd = Command::new("/bin/sh");
+        slow_cmd.args(["-c", "sleep 5"]);
+        let slow_out =
+            run_command_with_timeout(&mut slow_cmd, std::time::Duration::from_millis(120));
+        assert!(slow_out.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_millis(1000));
     }
 }

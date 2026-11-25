@@ -5,7 +5,7 @@
 //! 窗口级终端、Agent 启动闸门、「本次会话改动」面板、统一工具区回调与设置对话框协调。
 
 use crate::agent::{AgentLaunchCallbacks, ChangesCallbacks, launch_agent_with_snapshot_gate};
-use crate::core::{ColorSchemeChoice, PanelRegion};
+use crate::core::PanelRegion;
 use crate::dock::DockCallbacks;
 use crate::services::ConfigSnapshot;
 use crate::settings::{SettingsDialog, SettingsPage};
@@ -97,9 +97,9 @@ impl WindowInner {
                     win.terminal_host.set_tab_region(tid, region);
                 }
             }),
-            on_changes_shown: Rc::new(move || {
+            on_static_tool_shown: Rc::new(move |kind| {
                 if let Some(win) = weak_chg.upgrade() {
-                    win.changes_panel.refresh();
+                    win.handle_static_tool_shown(kind);
                 }
             }),
             on_layout_changed: Rc::new(move || {
@@ -260,11 +260,7 @@ impl WindowInner {
             self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastCoreNotReady));
             return None;
         };
-        let scheme = match adw::StyleManager::default().color_scheme() {
-            adw::ColorScheme::ForceLight => ColorSchemeChoice::Light,
-            adw::ColorScheme::ForceDark => ColorSchemeChoice::Dark,
-            _ => ColorSchemeChoice::System,
-        };
+        let scheme = crate::window::actions::current_color_scheme();
         let weak_toast = Rc::downgrade(self);
         let weak_scheme = Rc::downgrade(self);
         Some(SettingsDialog::new(
@@ -278,6 +274,7 @@ impl WindowInner {
             }),
             Rc::new(move |choice| {
                 apply_color_scheme(choice);
+                let _ = crate::services::ui_prefs::save_color_scheme(choice);
                 if let Some(win) = weak_scheme.upgrade() {
                     win.sync_color_scheme_action(choice);
                 }

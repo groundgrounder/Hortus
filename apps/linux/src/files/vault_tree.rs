@@ -68,6 +68,7 @@ struct VaultTreeInner {
     root_store: gio::ListStore,
     selection: gtk4::SingleSelection,
     entries: RefCell<BTreeMap<String, TreeEntryItem>>,
+    children_by_parent: RefCell<HashMap<String, BTreeSet<String>>>,
     dir_stores: RefCell<HashMap<String, gio::ListStore>>,
     on_open_note: RefCell<Option<OpenNoteCallback>>,
     on_context_menu: RefCell<Option<ContextMenuCallback>>,
@@ -96,6 +97,7 @@ impl VaultTree {
             root_store: root_store.clone(),
             selection: gtk4::SingleSelection::new(None::<gio::ListModel>),
             entries: RefCell::new(BTreeMap::new()),
+            children_by_parent: RefCell::new(HashMap::new()),
             dir_stores: RefCell::new(HashMap::from([(String::new(), root_store.clone())])),
             on_open_note: RefCell::new(None),
             on_context_menu: RefCell::new(None),
@@ -119,7 +121,8 @@ impl VaultTree {
             };
             let objects = {
                 let entries = inner.entries.borrow();
-                build_store_children(&path, &entries)
+                let children = inner.children_by_parent.borrow();
+                build_store_children(&path, &entries, &children)
             };
             replace_store_items(&store, &objects);
             Some(store.upcast())
@@ -289,6 +292,7 @@ impl VaultTree {
 
     pub fn clear(&self) {
         self.inner.entries.borrow_mut().clear();
+        self.inner.children_by_parent.borrow_mut().clear();
         let stores: Vec<gio::ListStore> = {
             let mut map = self.inner.dir_stores.borrow_mut();
             let list = map.values().cloned().collect();
@@ -302,42 +306,33 @@ impl VaultTree {
     }
 
     pub fn apply_batches(&self, batches: &[TreeBatch]) -> (bool, u64) {
-        let mut scan_complete = false;
-        let mut scan_micros = 0u64;
         let mut dirty_parents: BTreeSet<String> = BTreeSet::new();
-
-        {
+        let (scan_complete, scan_micros) = {
             let mut entries = self.inner.entries.borrow_mut();
+            let mut children = self.inner.children_by_parent.borrow_mut();
             let mut stores = self.inner.dir_stores.borrow_mut();
-            for batch in batches {
-                if batch.scan_complete {
-                    scan_complete = true;
-                    scan_micros = scan_micros.max(batch.scan_micros);
-                }
-                for removed in &batch.removed {
-                    if let Some(old) = entries.remove(removed) {
-                        dirty_parents.insert(old.parent);
-                    }
+            apply_batches_to_index(
+                batches,
+                &mut entries,
+                &mut children,
+                &mut dirty_parents,
+                |removed| {
                     stores.remove(removed);
-                }
-                for entry in &batch.upserted {
-                    dirty_parents.insert(entry.parent.clone());
-                    entries.insert(entry.path.clone(), TreeEntryItem::from(entry));
-                }
-            }
-        }
+                },
+            )
+        };
 
         if !dirty_parents.is_empty() {
             let pending: Vec<(gio::ListStore, Vec<VaultNode>)> = {
                 let entries = self.inner.entries.borrow();
+                let children = self.inner.children_by_parent.borrow();
                 let stores = self.inner.dir_stores.borrow();
                 dirty_parents
                     .into_iter()
                     .filter_map(|parent| {
-                        stores
-                            .get(&parent)
-                            .cloned()
-                            .map(|store| (store, build_store_children(&parent, &entries)))
+                        stores.get(&parent).cloned().map(|store| {
+                            (store, build_store_children(&parent, &entries, &children))
+                        })
                     })
                     .collect()
             };
@@ -412,16 +407,150 @@ impl VaultTree {
     }
 }
 
-fn build_store_children(parent: &str, entries: &BTreeMap<String, TreeEntryItem>) -> Vec<VaultNode> {
-    let mut children: Vec<TreeEntryItem> = entries
-        .values()
-        .filter(|entry| entry.parent == parent)
-        .cloned()
+fn apply_batches_to_index(
+    batches: &[TreeBatch],
+    entries: &mut BTreeMap<String, TreeEntryItem>,
+    children_by_parent: &mut HashMap<String, BTreeSet<String>>,
+    dirty_parents: &mut BTreeSet<String>,
+    mut on_removed: impl FnMut(&str),
+) -> (bool, u64) {
+    let mut scan_complete = false;
+    let mut scan_micros = 0u64;
+    for batch in batches {
+        if batch.scan_complete {
+            scan_complete = true;
+            scan_micros = scan_micros.max(batch.scan_micros);
+        }
+        for removed in &batch.removed {
+            if let Some(old) = entries.remove(removed) {
+                if let Some(set) = children_by_parent.get_mut(&old.parent) {
+                    set.remove(removed);
+                    if set.is_empty() {
+                        children_by_parent.remove(&old.parent);
+                    }
+                }
+                dirty_parents.insert(old.parent);
+            }
+            on_removed(removed);
+        }
+        for entry in &batch.upserted {
+            let item = TreeEntryItem::from(entry);
+            dirty_parents.insert(item.parent.clone());
+            if let Some(prev) = entries.insert(item.path.clone(), item.clone())
+                && prev.parent != item.parent
+            {
+                if let Some(set) = children_by_parent.get_mut(&prev.parent) {
+                    set.remove(&item.path);
+                    if set.is_empty() {
+                        children_by_parent.remove(&prev.parent);
+                    }
+                }
+                dirty_parents.insert(prev.parent);
+            }
+            children_by_parent
+                .entry(item.parent)
+                .or_default()
+                .insert(item.path);
+        }
+    }
+    (scan_complete, scan_micros)
+}
+
+fn sorted_children_for_parent(
+    parent: &str,
+    entries: &BTreeMap<String, TreeEntryItem>,
+    children_by_parent: &HashMap<String, BTreeSet<String>>,
+) -> Vec<TreeEntryItem> {
+    let Some(paths) = children_by_parent.get(parent) else {
+        return Vec::new();
+    };
+    let mut children: Vec<TreeEntryItem> = paths
+        .iter()
+        .filter_map(|path| entries.get(path).cloned())
         .collect();
     sort_tree_entries(&mut children);
-    children.iter().map(VaultNode::new).collect()
+    children
+}
+
+fn build_store_children(
+    parent: &str,
+    entries: &BTreeMap<String, TreeEntryItem>,
+    children_by_parent: &HashMap<String, BTreeSet<String>>,
+) -> Vec<VaultNode> {
+    sorted_children_for_parent(parent, entries, children_by_parent)
+        .iter()
+        .map(VaultNode::new)
+        .collect()
 }
 
 fn replace_store_items(store: &gio::ListStore, objects: &[VaultNode]) {
     store.splice(0, store.n_items(), objects);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hortus_ffi::TreeEntry;
+
+    #[test]
+    fn parent_index_tracks_upserts_moves_and_removals() {
+        let mut entries = BTreeMap::new();
+        let mut children = HashMap::new();
+        let mut dirty = BTreeSet::new();
+        let b1 = TreeBatch {
+            upserted: vec![
+                TreeEntry {
+                    path: "dir".into(),
+                    parent: String::new(),
+                    name: "dir".into(),
+                    directory: true,
+                },
+                TreeEntry {
+                    path: "dir/a.md".into(),
+                    parent: "dir".into(),
+                    name: "a.md".into(),
+                    directory: false,
+                },
+                TreeEntry {
+                    path: "root.md".into(),
+                    parent: String::new(),
+                    name: "root.md".into(),
+                    directory: false,
+                },
+            ],
+            removed: Vec::new(),
+            scan_complete: true,
+            scan_micros: 12,
+            errors: Vec::new(),
+        };
+        let (done, micros) =
+            apply_batches_to_index(&[b1], &mut entries, &mut children, &mut dirty, |_| {});
+        assert!(done);
+        assert_eq!(micros, 12);
+        assert_eq!(
+            sorted_children_for_parent("", &entries, &children)
+                .into_iter()
+                .map(|e| e.path)
+                .collect::<Vec<_>>(),
+            vec!["dir", "root.md"]
+        );
+        assert_eq!(
+            sorted_children_for_parent("dir", &entries, &children)
+                .into_iter()
+                .map(|e| e.path)
+                .collect::<Vec<_>>(),
+            vec!["dir/a.md"]
+        );
+
+        let b2 = TreeBatch {
+            upserted: Vec::new(),
+            removed: vec!["dir/a.md".into()],
+            scan_complete: false,
+            scan_micros: 0,
+            errors: Vec::new(),
+        };
+        apply_batches_to_index(&[b2], &mut entries, &mut children, &mut dirty, |_| {});
+        assert!(sorted_children_for_parent("dir", &entries, &children).is_empty());
+        assert!(!children.contains_key("dir"));
+    }
 }

@@ -123,6 +123,15 @@ struct CharRun {
     mask: u32,
 }
 
+fn find_link_at<'a>(links: &[&'a ResolvedLinkInfo], src_u16: u64) -> Option<&'a ResolvedLinkInfo> {
+    let end_idx = links.partition_point(|l| l.start_utf16 <= src_u16);
+    links[..end_idx]
+        .iter()
+        .rev()
+        .copied()
+        .find(|l| src_u16 < l.start_utf16 + l.length_utf16)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_reading_segments(
     model: &DecodedReadingModel,
@@ -137,19 +146,24 @@ pub fn assemble_reading_segments(
     on_diagram_scene_updated: Rc<dyn Fn(u32, hortus_ffi::SceneData)>,
     embed_body_builder: &EmbedBodyBuilder,
 ) -> Vec<AssembledSegment> {
-    let mut text = model.text.clone();
-    let has_props = text.starts_with('\u{e000}');
     let prop_label = crate::i18n::tr(crate::i18n::Key::ReadingPropertiesLabel);
-    let prop_delta_u16: isize = if has_props {
-        text.remove(0);
-        text.insert_str(0, prop_label);
-        prop_label.encode_utf16().count() as isize - 1
+    let has_props = model.text.starts_with('\u{e000}');
+    let (text_cow, prop_delta_u16): (std::borrow::Cow<'_, str>, isize) = if has_props {
+        let mut owned = String::with_capacity(model.text.len() + prop_label.len());
+        owned.push_str(prop_label);
+        owned.push_str(&model.text['\u{e000}'.len_utf8()..]);
+        (
+            std::borrow::Cow::Owned(owned),
+            prop_label.encode_utf16().count() as isize - 1,
+        )
     } else {
-        0
+        (std::borrow::Cow::Borrowed(model.text.as_str()), 0)
     };
+    let text: &str = text_cow.as_ref();
 
-    let disp_mapper = Utf16Mapper::new(&text);
+    let disp_mapper = Utf16Mapper::new(text);
     let src_mapper = Utf16Mapper::new(source_text);
+    let shared_diagram_source: Arc<str> = Arc::from(source_text);
 
     let mut block_index_by_id = HashMap::with_capacity(model.blocks.len());
     let mut block_disp_starts_u16 = Vec::with_capacity(model.blocks.len());
@@ -163,7 +177,7 @@ pub fn assemble_reading_segments(
         block_disp_starts_u16.push(shifted);
     }
 
-    let wiki_links: Vec<&ResolvedLinkInfo> = knowledge
+    let mut wiki_links: Vec<&ResolvedLinkInfo> = knowledge
         .map(|k| {
             k.links
                 .iter()
@@ -171,7 +185,8 @@ pub fn assemble_reading_segments(
                 .collect()
         })
         .unwrap_or_default();
-    let embed_links: Vec<&ResolvedLinkInfo> = knowledge
+    wiki_links.sort_by_key(|l| l.start_utf16);
+    let mut embed_links: Vec<&ResolvedLinkInfo> = knowledge
         .map(|k| {
             k.links
                 .iter()
@@ -179,6 +194,7 @@ pub fn assemble_reading_segments(
                 .collect()
         })
         .unwrap_or_default();
+    embed_links.sort_by_key(|l| l.start_utf16);
 
     let mut char_runs: Vec<CharRun> = Vec::with_capacity(model.runs.len());
     let mut block_breaks: Vec<BlockBreak> = Vec::new();
@@ -212,7 +228,7 @@ pub fn assemble_reading_segments(
 
             if final_mask & 32768 != 0
                 && let Some(zw_byte) =
-                    find_char_near_utf16(&text, &disp_mapper, r_start, r_len, '\u{200b}')
+                    find_char_near_utf16(text, &disp_mapper, r_start, r_len, '\u{200b}')
             {
                 let zw_char = disp_mapper.byte_to_char(zw_byte);
                 if seen_hr_chars.insert(zw_char) {
@@ -226,9 +242,7 @@ pub fn assemble_reading_segments(
             }
 
             if final_mask & (1 << 18) != 0 {
-                if let Some(link) = wiki_links.iter().find(|l| {
-                    abs_src_u16 >= l.start_utf16 && abs_src_u16 < l.start_utf16 + l.length_utf16
-                }) {
+                if let Some(link) = find_link_at(&wiki_links, abs_src_u16) {
                     if link.resolved_path.is_none() {
                         final_mask |= 1 << 19;
                     }
@@ -293,7 +307,7 @@ pub fn assemble_reading_segments(
         let blk_disp_u16 = block_disp_starts_u16[idx];
         let blk_len_u16 = blk.display_length as usize;
         if let Some(byte_pos) =
-            find_char_near_utf16(&text, &disp_mapper, blk_disp_u16, blk_len_u16, '\u{fffc}')
+            find_char_near_utf16(text, &disp_mapper, blk_disp_u16, blk_len_u16, '\u{fffc}')
         {
             let char_pos = disp_mapper.byte_to_char(byte_pos);
             let diag = diagrams
@@ -311,7 +325,7 @@ pub fn assemble_reading_segments(
                 });
             let card = build_diagram_card(
                 env.note_path.clone(),
-                source_text.to_string(),
+                Arc::clone(&shared_diagram_source),
                 false,
                 diag,
                 Arc::clone(&env.diagram_engine),
@@ -340,7 +354,7 @@ pub fn assemble_reading_segments(
         let local_u16 = m.block.display_start.saturating_sub(blk.display_start) as usize;
         let disp_u16 = block_disp_starts_u16[blk_idx] + local_u16;
         if let Some(byte_pos) = find_char_near_utf16(
-            &text,
+            text,
             &disp_mapper,
             disp_u16,
             m.block.display_length.max(1) as usize,
@@ -379,7 +393,7 @@ pub fn assemble_reading_segments(
         let local_u16 = item.block.display_start.saturating_sub(blk.display_start) as usize;
         let disp_u16 = block_disp_starts_u16[blk_idx] + local_u16;
         let Some(byte_pos) = find_char_near_utf16(
-            &text,
+            text,
             &disp_mapper,
             disp_u16,
             item.block.display_length.max(1) as usize,
@@ -391,10 +405,7 @@ pub fn assemble_reading_segments(
 
         if item.block.image_wiki && item.reason.starts_with("embed.") {
             let src_u16 = item.block.source_start;
-            if let Some(link) = embed_links
-                .iter()
-                .find(|l| src_u16 >= l.start_utf16 && src_u16 < l.start_utf16 + l.length_utf16)
-            {
+            if let Some(link) = find_link_at(&embed_links, src_u16) {
                 let embed_req = EmbedRequest {
                     source_path: env.note_path.clone(),
                     target: link.target.clone(),
@@ -462,12 +473,14 @@ pub fn assemble_reading_segments(
 
     block_breaks.sort_by_key(|b| b.char_pos);
     block_breaks.dedup_by_key(|b| b.char_pos);
+    char_runs.sort_by_key(|r| r.char_start);
     inline_anchors.sort_by_key(|a| a.0);
     inline_anchors.dedup_by_key(|a| a.0);
-    source_char_anchors.sort_by_key(|a| a.0);
+    link_spans.sort_by_key(|l| l.char_start);
+    source_char_anchors.sort_by_key(|a| (a.1, a.0));
 
     split_into_segments(
-        &text,
+        text,
         &disp_mapper,
         &char_runs,
         &inline_anchors,
@@ -475,6 +488,14 @@ pub fn assemble_reading_segments(
         &source_char_anchors,
         block_breaks,
     )
+}
+
+#[derive(Default)]
+struct SegmentCursors {
+    run_idx: usize,
+    inline_idx: usize,
+    link_idx: usize,
+    anchor_idx: usize,
 }
 
 fn split_into_segments(
@@ -490,6 +511,7 @@ fn split_into_segments(
     let mut segments = Vec::with_capacity(block_breaks.len() * 2 + 1);
     let mut raw_start = 0usize;
     let mut last_src_u16 = source_char_anchors.first().map(|a| a.0).unwrap_or(0);
+    let mut cursors = SegmentCursors::default();
 
     for brk in block_breaks {
         let raw_end = brk.char_pos.min(total_chars);
@@ -501,6 +523,7 @@ fn split_into_segments(
                 inline_anchors,
                 link_spans,
                 source_char_anchors,
+                &mut cursors,
                 raw_start,
                 raw_end,
                 last_src_u16,
@@ -549,8 +572,9 @@ fn split_into_segments(
 
     if raw_start < total_chars {
         let end_src_u16 = source_char_anchors
-            .last()
+            .iter()
             .map(|a| a.0)
+            .max()
             .unwrap_or(last_src_u16)
             .max(last_src_u16);
         if let Some(seg) = build_text_segment_slice(
@@ -560,6 +584,7 @@ fn split_into_segments(
             inline_anchors,
             link_spans,
             source_char_anchors,
+            &mut cursors,
             raw_start,
             total_chars,
             last_src_u16,
@@ -580,6 +605,7 @@ fn build_text_segment_slice(
     inline_anchors: &[(usize, gtk4::Widget, i32)],
     link_spans: &[LinkSpan],
     source_char_anchors: &[(u64, usize)],
+    cursors: &mut SegmentCursors,
     raw_start: usize,
     raw_end: usize,
     fallback_src_start: u64,
@@ -615,45 +641,77 @@ fn build_text_segment_slice(
         return None;
     }
 
-    let seg_runs: Vec<(i32, i32, u32)> = char_runs
-        .iter()
-        .filter(|r| r.char_end > seg_start && r.char_start < seg_end)
-        .filter_map(|r| {
+    while cursors.run_idx < char_runs.len() && char_runs[cursors.run_idx].char_end <= seg_start {
+        cursors.run_idx += 1;
+    }
+    let mut seg_runs = Vec::new();
+    for r in &char_runs[cursors.run_idx..] {
+        if r.char_start >= seg_end {
+            break;
+        }
+        if r.char_end > seg_start {
             let cs = r.char_start.max(seg_start) - seg_start;
             let ce = r.char_end.min(seg_end) - seg_start;
-            (cs < ce).then_some((cs as i32, ce as i32, r.mask))
-        })
-        .collect();
+            if cs < ce {
+                seg_runs.push((cs as i32, ce as i32, r.mask));
+            }
+        }
+    }
 
-    let seg_inline: Vec<InlineAnchor> = inline_anchors
-        .iter()
-        .filter(|(pos, _, _)| *pos >= seg_start && *pos < seg_end)
-        .map(|(pos, w, rise)| InlineAnchor {
+    while cursors.inline_idx < inline_anchors.len()
+        && inline_anchors[cursors.inline_idx].0 < seg_start
+    {
+        cursors.inline_idx += 1;
+    }
+    let mut seg_inline = Vec::new();
+    for (pos, w, rise) in &inline_anchors[cursors.inline_idx..] {
+        if *pos >= seg_end {
+            break;
+        }
+        seg_inline.push(InlineAnchor {
             local_char_pos: *pos - seg_start,
             widget: w.clone(),
             rise_pango: *rise,
-        })
-        .collect();
+        });
+        cursors.inline_idx += 1;
+    }
 
-    let seg_links: Vec<LinkSpan> = link_spans
-        .iter()
-        .filter(|l| (l.char_end as usize) > seg_start && (l.char_start as usize) < seg_end)
-        .filter_map(|l| {
+    while cursors.link_idx < link_spans.len()
+        && (link_spans[cursors.link_idx].char_end as usize) <= seg_start
+    {
+        cursors.link_idx += 1;
+    }
+    let mut seg_links = Vec::new();
+    for l in &link_spans[cursors.link_idx..] {
+        if (l.char_start as usize) >= seg_end {
+            break;
+        }
+        if (l.char_end as usize) > seg_start {
             let cs = (l.char_start as usize).max(seg_start) - seg_start;
             let ce = (l.char_end as usize).min(seg_end) - seg_start;
-            (cs < ce).then(|| LinkSpan {
-                char_start: cs as i32,
-                char_end: ce as i32,
-                action: l.action.clone(),
-            })
-        })
-        .collect();
+            if cs < ce {
+                seg_links.push(LinkSpan {
+                    char_start: cs as i32,
+                    char_end: ce as i32,
+                    action: l.action.clone(),
+                });
+            }
+        }
+    }
 
-    let mut seg_anchors: Vec<(u64, i32)> = source_char_anchors
-        .iter()
-        .filter(|(_, ch)| *ch >= raw_start && *ch <= raw_end)
-        .map(|&(src, ch)| (src, (ch.clamp(seg_start, seg_end) - seg_start) as i32))
-        .collect();
+    while cursors.anchor_idx < source_char_anchors.len()
+        && source_char_anchors[cursors.anchor_idx].1 < raw_start
+    {
+        cursors.anchor_idx += 1;
+    }
+    let mut seg_anchors = Vec::new();
+    for &(src, ch) in &source_char_anchors[cursors.anchor_idx..] {
+        if ch > raw_end {
+            break;
+        }
+        seg_anchors.push((src, (ch.clamp(seg_start, seg_end) - seg_start) as i32));
+        cursors.anchor_idx += 1;
+    }
     if seg_anchors.is_empty() {
         seg_anchors.push((fallback_src_start, 0));
     }
@@ -878,6 +936,7 @@ mod tests {
             action: LinkAction::Tag("demo".into()),
         }];
         let anchors = vec![(0, 2), (10, 8)];
+        let mut cursors = SegmentCursors::default();
         let seg = build_text_segment_slice(
             text,
             &mapper,
@@ -885,6 +944,7 @@ mod tests {
             &[],
             &links,
             &anchors,
+            &mut cursors,
             0,
             text.chars().count(),
             0,

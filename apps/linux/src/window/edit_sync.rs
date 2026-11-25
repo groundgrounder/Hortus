@@ -409,9 +409,11 @@ impl WindowInner {
                 let Some(tab) = st.tabs.get(&path_now) else {
                     return glib::ControlFlow::Break;
                 };
-                if !tab.edit_state.borrow().dirty {
+                let mut edit = tab.edit_state.borrow_mut();
+                if !edit.dirty || edit.edit_seq == edit.last_checkpoint_seq {
                     return glib::ControlFlow::Continue;
                 }
+                edit.last_checkpoint_seq = edit.edit_seq;
                 tab.session.clone()
             };
             if let Some(session) = session {

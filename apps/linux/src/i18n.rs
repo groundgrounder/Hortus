@@ -686,8 +686,8 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::ToastCannotOpenNewWindow => ("Unable to open a new window", "无法打开新窗口"),
         Key::AboutThirdPartyNoticesTitle => ("Third-Party Notices", "第三方许可证声明"),
         Key::AboutThirdPartyNoticesSummary => (
-            "Includes Rust libraries (MIT / Apache-2.0 / Unicode-3.0), the Rust standard library, and bundled KaTeX fonts (SIL OFL-1.1). Full license texts are installed in share/licenses/hortus-linux/THIRD_PARTY_NOTICES.txt.",
-            "包含第三方 Rust 库（MIT / Apache-2.0 / Unicode-3.0）、Rust 标准库及内置 KaTeX 字体（SIL OFL-1.1）。完整许可证全文见安装目录下的 share/licenses/hortus-linux/THIRD_PARTY_NOTICES.txt。",
+            "Includes third-party Rust libraries (MIT / Apache-2.0 / Unicode-3.0), the Rust standard library, and bundled KaTeX fonts (SIL OFL-1.1).",
+            "包含第三方 Rust 库（MIT / Apache-2.0 / Unicode-3.0）、Rust 标准库及内置 KaTeX 字体（SIL OFL-1.1）。",
         ),
 
         Key::MenuOpenFolder => ("Open Folder…", "打开文件夹…"),
@@ -803,7 +803,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::TagsNoNotes => ("No notes with this tag", "没有笔记使用该标签"),
         Key::TagsLoadingNotes => ("Loading notes…", "正在加载标签笔记…"),
 
-        Key::LocationRoot => ("Location: Root folder", "位置：根目录"),
+        Key::LocationRoot => ("Location: Root folder", "位置：根文件夹"),
         Key::LocationSub => ("Location: {0}", "位置：{0}"),
         Key::FolderNamePlaceholder => ("Folder name", "文件夹名称"),
         Key::NoteNamePlaceholder => (
@@ -814,7 +814,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::CreateFolder => ("New Folder", "新建文件夹"),
         Key::CreateNote => ("New Note", "新建笔记"),
         Key::ErrNameEmpty => ("Name cannot be empty", "名称不能为空"),
-        Key::ErrThread => ("Operation failed unexpectedly", "操作线程异常"),
+        Key::ErrThread => ("Operation failed unexpectedly", "操作失败，请重试"),
         Key::CreateFailed => ("Couldn’t create: {0}", "创建失败：{0}"),
         Key::RenameFolderTitle => ("Rename Folder", "重命名文件夹"),
         Key::RenameNoteTitle => ("Rename Note", "重命名笔记"),
@@ -941,7 +941,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::ToastKatexNotice => ("Math fonts: {0}", "数学字体提示：{0}"),
         Key::SelectFolderTitle => ("Open Folder", "打开文件夹"),
         Key::ScanningFolder => ("Scanning folder…", "正在扫描文件夹…"),
-        Key::EmptySelectNoteHint => ("Select a note from the sidebar.", "从左侧选择一篇笔记。"),
+        Key::EmptySelectNoteHint => ("Select a note from the sidebar.", "从侧栏选择一篇笔记。"),
         Key::OpenFolderFailed => ("Couldn’t open folder: {0}", "无法打开文件夹：{0}"),
         Key::RenderingReading => ("Loading…", "正在加载…"),
         Key::ReadNoteFailed => ("Couldn’t read note: {0}", "读取笔记失败：{0}"),
@@ -959,7 +959,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::ErrExportFailed => ("Export failed", "导出失败"),
         Key::ToastAmbiguousLink => (
             "Multiple notes match “{0}” ({1}); choose one from the sidebar",
-            "有多个笔记匹配「{0}」（{1} 篇），请在左侧目录选择",
+            "有多个笔记匹配「{0}」（{1} 篇），请在文件面板选择",
         ),
         Key::ToastMissingLink => ("Note not found: {0}", "未找到链接目标：{0}"),
         Key::ToastCopiedPlainText => ("Copied note text", "已复制整篇笔记纯文本"),
@@ -1048,7 +1048,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::ChangesNoFolder => ("No folder open", "未打开文件夹"),
         Key::ChangesNoSnapshots => ("No Agent snapshots yet", "暂无 Agent 会话快照"),
         Key::ChangesSessionOption => ("{0} · {1} ({2})", "{0} · {1} ({2} 项)"),
-        Key::ChangesSessionMeta => ("Status: {0} · {1} items", "状态：{0} · 快照 {1} 项"),
+        Key::ChangesSessionMeta => ("Status: {0} · {1} items", "状态：{0} · {1} 个改动条目"),
         Key::ChangesSessionUnusable => ("Session unavailable ({0})", "会话不可用（{0}）"),
         Key::ChangesLoadingSummary => ("Comparing changes…", "正在对比本次会话改动…"),
         Key::ChangesReviewFailed => ("Couldn’t load changes: {0}", "加载改动失败：{0}"),
@@ -1848,6 +1848,21 @@ mod tests {
                 assert!(!en.contains(word), "forbidden {word:?} in en {key:?}: {en}");
                 assert!(!zh.contains(word), "forbidden {word:?} in zh {key:?}: {zh}");
             }
+            for extra in ["线程", "根目录", "THIRD_PARTY_NOTICES"] {
+                assert!(
+                    !en.contains(extra),
+                    "forbidden {extra:?} in en {key:?}: {en}"
+                );
+                assert!(
+                    !zh.contains(extra),
+                    "forbidden {extra:?} in zh {key:?}: {zh}"
+                );
+            }
+            let zh_no_side_name = zh.replace("左侧栏", "").replace("右侧栏", "");
+            assert!(
+                !zh_no_side_name.contains("左侧") && !zh_no_side_name.contains("右侧"),
+                "hardcoded side direction in zh {key:?}: {zh}"
+            );
         }
     }
 }

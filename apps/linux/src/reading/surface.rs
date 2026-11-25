@@ -603,7 +603,7 @@ pub fn build_reading_surface(
             });
         let card = build_diagram_card(
             prepared.path.clone(),
-            prepared.source_text.clone(),
+            Arc::from(prepared.source_text.as_str()),
             true,
             diag,
             Arc::clone(&env.diagram_engine),

@@ -60,6 +60,7 @@ pub fn build_display_math_widget(item: &PreparedMathBlock, max_width: f64) -> Di
         .halign(gtk4::Align::Fill)
         .child(&drawing)
         .build();
+    crate::platform::viewport::install_vertical_scroll_passthrough(&scroll);
     DisplayMathBlock {
         root: scroll.upcast(),
     }

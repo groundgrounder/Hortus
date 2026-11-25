@@ -487,6 +487,51 @@ impl HortusEditHost {
     }
 }
 
+pub fn should_forward_vertical_scroll(dx: f64, dy: f64, state: gtk4::gdk::ModifierType) -> bool {
+    if state.contains(gtk4::gdk::ModifierType::SHIFT_MASK) {
+        return false;
+    }
+    dy.abs() > 0.0 && dy.abs() >= dx.abs()
+}
+
+pub fn install_vertical_scroll_passthrough(horizontal_scroll: &gtk4::ScrolledWindow) {
+    let ctrl = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::BOTH_AXES);
+    ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let weak_self = horizontal_scroll.downgrade();
+    ctrl.connect_scroll(move |controller, dx, dy| {
+        let Some(scroller) = weak_self.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
+        if !should_forward_vertical_scroll(dx, dy, controller.current_event_state()) {
+            return glib::Propagation::Proceed;
+        }
+        let mut cursor = scroller.parent();
+        while let Some(ancestor) = cursor {
+            if let Some(outer) = ancestor.downcast_ref::<gtk4::ScrolledWindow>()
+                && outer.vscrollbar_policy() != gtk4::PolicyType::Never
+            {
+                let adj = outer.vadjustment();
+                let upper_bound = (adj.upper() - adj.page_size()).max(adj.lower());
+                let delta_px = match controller.unit() {
+                    gtk4::gdk::ScrollUnit::Wheel => {
+                        dy * (f64::from(outer.height().max(240)) * 0.15).max(40.0)
+                    }
+                    _ => dy,
+                };
+                let next = (adj.value() + delta_px).clamp(adj.lower(), upper_bound);
+                if (next - adj.value()).abs() > 0.01 {
+                    adj.set_value(next);
+                    return glib::Propagation::Stop;
+                }
+                return glib::Propagation::Proceed;
+            }
+            cursor = ancestor.parent();
+        }
+        glib::Propagation::Proceed
+    });
+    horizontal_scroll.add_controller(ctrl);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,5 +656,30 @@ mod tests {
         drop(host);
         assert!(weak_host.upgrade().is_none(), "HortusEditHost cycle leaked");
         assert!(weak_view.upgrade().is_none(), "TextView cycle leaked");
+    }
+
+    #[test]
+    fn vertical_scroll_passthrough_predicate_respects_shift_and_dominant_axis() {
+        use gtk4::gdk;
+        assert!(should_forward_vertical_scroll(
+            0.0,
+            1.0,
+            gdk::ModifierType::empty()
+        ));
+        assert!(!should_forward_vertical_scroll(
+            0.0,
+            1.0,
+            gdk::ModifierType::SHIFT_MASK
+        ));
+        assert!(!should_forward_vertical_scroll(
+            12.0,
+            2.0,
+            gdk::ModifierType::empty()
+        ));
+        assert!(should_forward_vertical_scroll(
+            1.5,
+            6.0,
+            gdk::ModifierType::empty()
+        ));
     }
 }

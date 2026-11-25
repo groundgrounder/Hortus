@@ -30,6 +30,7 @@ struct TagsState {
     notes_gen: u64,
     loading_tags: bool,
     loading_notes: bool,
+    dirty: bool,
     tag_buttons: Vec<(String, gtk4::Button)>,
     note_buttons: Vec<(String, gtk4::Button)>,
 }
@@ -158,10 +159,29 @@ impl TagsPanel {
         Self::render(&self.inner);
     }
 
+    pub fn mark_dirty(&self) {
+        self.inner.state.borrow_mut().dirty = true;
+    }
+
+    pub fn refresh_if_dirty(&self) {
+        let needs = {
+            let mut st = self.inner.state.borrow_mut();
+            if !st.dirty {
+                return;
+            }
+            st.dirty = false;
+            st.handle.is_some()
+        };
+        if needs {
+            self.refresh();
+        }
+    }
+
     /// 后台异步刷新全库标签列表（不阻塞主线程）。
     pub fn refresh(&self) {
         let (handle, generation) = {
             let mut st = self.inner.state.borrow_mut();
+            st.dirty = false;
             let Some(handle) = st.handle.clone() else {
                 return;
             };

@@ -454,7 +454,7 @@ fn populate_embed_card(
                 };
                 let diag_card = build_diagram_card(
                     target_note,
-                    info.content.clone(),
+                    Arc::from(info.content.as_str()),
                     true,
                     diagram,
                     Arc::clone(&req.diagram_engine),

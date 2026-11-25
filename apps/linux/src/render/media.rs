@@ -15,8 +15,113 @@ use gtk4::pango;
 use gtk4::prelude::*;
 use hortus_ffi::MathBlock;
 use libadwaita as adw;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
+
+const IMAGE_CACHE_MAX_ENTRIES: usize = 64;
+const IMAGE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ImageCacheKey {
+    path: PathBuf,
+    modified_nanos: u128,
+    len: u64,
+}
+
+#[derive(Clone)]
+struct CachedItem<V> {
+    key: ImageCacheKey,
+    value: V,
+    estimated_bytes: usize,
+}
+
+struct ImageLruCache<V> {
+    entries: VecDeque<CachedItem<V>>,
+    total_bytes: usize,
+    max_entries: usize,
+    max_bytes: usize,
+}
+
+impl<V: Clone> ImageLruCache<V> {
+    fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            total_bytes: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    fn get(&mut self, key: &ImageCacheKey) -> Option<V> {
+        let pos = self.entries.iter().position(|e| &e.key == key)?;
+        let item = self.entries.remove(pos)?;
+        let val = item.value.clone();
+        self.entries.push_back(item);
+        Some(val)
+    }
+
+    fn insert(&mut self, key: ImageCacheKey, value: V, estimated_bytes: usize) {
+        if let Some(pos) = self.entries.iter().position(|e| e.key == key)
+            && let Some(old) = self.entries.remove(pos)
+        {
+            self.total_bytes = self.total_bytes.saturating_sub(old.estimated_bytes);
+        }
+        self.total_bytes = self.total_bytes.saturating_add(estimated_bytes);
+        self.entries.push_back(CachedItem {
+            key,
+            value,
+            estimated_bytes,
+        });
+        while self.entries.len() > self.max_entries
+            || (self.total_bytes > self.max_bytes && self.entries.len() > 1)
+        {
+            if let Some(evicted) = self.entries.pop_front() {
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.estimated_bytes);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.total_bytes = 0;
+    }
+}
+
+type DecodedTextureCache = ImageLruCache<(gdk::Texture, usize, usize)>;
+static LOCAL_IMAGE_CACHE: OnceLock<Mutex<DecodedTextureCache>> = OnceLock::new();
+
+fn local_image_cache() -> &'static Mutex<DecodedTextureCache> {
+    LOCAL_IMAGE_CACHE.get_or_init(|| {
+        Mutex::new(ImageLruCache::new(
+            IMAGE_CACHE_MAX_ENTRIES,
+            IMAGE_CACHE_MAX_BYTES,
+        ))
+    })
+}
+
+pub fn clear_local_image_cache() {
+    if let Some(cache) = LOCAL_IMAGE_CACHE.get() {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+fn image_cache_key(path: &Path) -> Option<ImageCacheKey> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified_nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    Some(ImageCacheKey {
+        path: canonical,
+        modified_nanos,
+        len: meta.len(),
+    })
+}
 
 #[derive(Clone, Debug)]
 pub struct LocalMediaRun {
@@ -107,8 +212,32 @@ pub struct PreparedMedia {
     pub sanitized_svg_scripts: usize,
 }
 
-/// 在后台线程解码本地图片字节（raster 直接通过 GdkTexture/Pixbuf，SVG 先经安全清洗再用 librsvg 解码）。
+/// 在后台线程解码本地图片字节（带容量与像素预算 LRU 缓存；SVG 先经安全清洗再用 librsvg 解码）。
 fn decode_local_image(path: &Path) -> Result<(gdk::Texture, usize, usize), String> {
+    let key = image_cache_key(path);
+    if let Some(ref k) = key
+        && let Some(hit) = local_image_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(k)
+    {
+        return Ok(hit);
+    }
+
+    let decoded = decode_local_image_uncached(path)?;
+    if let Some(k) = key {
+        let est_bytes = (decoded.0.width().max(1) as usize)
+            .saturating_mul(decoded.0.height().max(1) as usize)
+            .saturating_mul(4);
+        local_image_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(k, decoded.clone(), est_bytes);
+    }
+    Ok(decoded)
+}
+
+fn decode_local_image_uncached(path: &Path) -> Result<(gdk::Texture, usize, usize), String> {
     let raw = std::fs::read(path).map_err(|_| "image.missing".to_string())?;
     let is_svg = path
         .extension()
@@ -138,13 +267,14 @@ fn decode_local_image(path: &Path) -> Result<(gdk::Texture, usize, usize), Strin
         ));
     }
 
-    if let Ok(tex) = gdk::Texture::from_bytes(&glib::Bytes::from_owned(raw.clone())) {
+    let bytes = glib::Bytes::from_owned(raw);
+    if let Ok(tex) = gdk::Texture::from_bytes(&bytes) {
         return Ok((tex, 0, 0));
     }
 
     let loader = gdk_pixbuf::PixbufLoader::new();
     loader
-        .write(&raw)
+        .write(bytes.as_ref())
         .map_err(|_| "image.decode_failed".to_string())?;
     loader
         .close()
@@ -598,6 +728,7 @@ pub fn build_table_widget(
         .child(&grid)
         .build();
     scroll.add_css_class("hortus-table-wrap");
+    crate::platform::viewport::install_vertical_scroll_passthrough(&scroll);
     TableBlock {
         root: scroll.upcast(),
     }
@@ -800,5 +931,36 @@ mod tests {
         }
         assert_eq!(plain_count, 90);
         assert_eq!(rich_count, 10);
+    }
+
+    #[test]
+    fn image_lru_cache_enforces_capacity_budget_and_clear() {
+        let mut cache: ImageLruCache<String> = ImageLruCache::new(64, 64 * 1024 * 1024);
+        let mk_key = |i: u64, mtime: u128| ImageCacheKey {
+            path: PathBuf::from(format!("/vault/img-{i}.png")),
+            modified_nanos: mtime,
+            len: 1024,
+        };
+        for i in 0..70u64 {
+            cache.insert(mk_key(i, 1), format!("tex-{i}"), 1024);
+        }
+        assert_eq!(cache.entries.len(), 64);
+        assert!(cache.get(&mk_key(0, 1)).is_none());
+        assert_eq!(cache.get(&mk_key(69, 1)).as_deref(), Some("tex-69"));
+        // 相同路径 mtime 变化应视为缓存未命中。
+        assert!(cache.get(&mk_key(69, 2)).is_none());
+
+        cache.clear();
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.total_bytes, 0);
+
+        // 像素总字节预算（64 MiB）驱逐验证。
+        let big = 20 * 1024 * 1024;
+        for i in 0..5u64 {
+            cache.insert(mk_key(i, 10), format!("big-{i}"), big);
+        }
+        assert!(cache.total_bytes <= 64 * 1024 * 1024);
+        assert!(cache.get(&mk_key(0, 10)).is_none());
+        assert_eq!(cache.get(&mk_key(4, 10)).as_deref(), Some("big-4"));
     }
 }

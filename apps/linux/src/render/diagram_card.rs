@@ -32,7 +32,7 @@ pub struct DiagramCallbacks {
 
 struct DiagramCardState {
     note_path: String,
-    source: String,
+    source: Arc<str>,
     mmd: bool,
     ordinal: u32,
     scene: RefCell<SceneData>,
@@ -154,7 +154,7 @@ impl DiagramCard {
 /// 构造内联 Mermaid 图表控件（支持节点折叠、双链跳转、专注模式、SVG/PNG/PDF 导出及降级源码卡片）。
 pub fn build_diagram_card(
     note_path: String,
-    source: String,
+    source: Arc<str>,
     mmd: bool,
     initial: RenderedDiagram,
     engine: Arc<DiagramEngine>,
@@ -439,7 +439,7 @@ pub fn build_diagram_card(
             let meta = DiagramExportMeta {
                 note_path: st.note_path.clone(),
                 ordinal: st.ordinal,
-                source: st.source.clone(),
+                source: st.source.to_string(),
                 mmd: st.mmd,
                 collapsed: st.collapsed.borrow().clone(),
                 scene: st.scene.borrow().clone(),
@@ -472,6 +472,7 @@ pub fn build_diagram_card(
         .child(&drawing)
         .build();
     canvas.add_css_class("hortus-diagram-canvas");
+    crate::platform::viewport::install_vertical_scroll_passthrough(&canvas);
     let overlay = gtk4::Overlay::new();
     overlay.set_child(Some(&canvas));
     overlay.add_overlay(&tools);

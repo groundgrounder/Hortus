@@ -350,7 +350,7 @@ impl WindowInner {
             return;
         };
 
-        let env = self.make_reading_env(
+        let mut env = self.make_reading_env(
             rel,
             vault_root.clone(),
             Arc::clone(&services.core),
@@ -358,6 +358,7 @@ impl WindowInner {
             Arc::clone(&services.diagram_engine),
             Arc::clone(&services.math_service),
         );
+        env.content_width = content_width;
         let shared_path = Rc::clone(&env.shared_note_path);
         let weak_collapse = Rc::downgrade(self);
         let path_collapse = Rc::clone(&shared_path);
@@ -512,10 +513,9 @@ impl WindowInner {
         }
         if alloc_w > 240 {
             let clamped = f64::from(alloc_w).max(260.0);
-            if (clamped - content_width).abs() < 16.0 {
-                viewport.set_settled_width(alloc_w);
-            } else {
-                viewport.set_settled_width(alloc_w);
+            let needs_relayout = clamped < content_width || (clamped - content_width).abs() >= 16.0;
+            viewport.set_settled_width(alloc_w);
+            if needs_relayout {
                 self.relayout_reading_width(rel, clamped);
             }
         }

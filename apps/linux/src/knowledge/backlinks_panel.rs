@@ -22,6 +22,7 @@ struct BacklinksState {
     updates: u32,
     generation: u64,
     loading: bool,
+    dirty: bool,
     on_open: Option<OpenNoteCallback>,
     row_buttons: Vec<(String, u64, gtk4::Button)>,
 }
@@ -125,13 +126,22 @@ impl BacklinksPanel {
         self.inner.state.borrow().path.clone()
     }
 
+    pub fn mark_dirty(&self) {
+        self.inner.state.borrow_mut().dirty = true;
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.inner.state.borrow().dirty
+    }
+
     /// 切换激活笔记或磁盘变化后异步刷新；相同路径且 `force` 为假时跳过重复查询。
     pub fn update(&self, path: Option<String>, force: bool) {
         let (handle, generation) = {
             let mut st = self.inner.state.borrow_mut();
-            if !force && st.path == path {
+            if !force && !st.dirty && st.path == path {
                 return;
             }
+            st.dirty = false;
             st.path = path.clone();
             st.updates += 1;
             st.generation = st.generation.wrapping_add(1);

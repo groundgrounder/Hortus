@@ -4,7 +4,7 @@
 
 use crate::core::{NotifyQueue, is_note_file_name};
 use hortus_ffi::{TreeBatch, TreeEntry, VaultHandle, WorkspaceCore};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -36,13 +36,55 @@ struct Subscriber {
     queue: Weak<NotifyQueue<Vec<TreeBatch>>>,
 }
 
+#[derive(Default)]
+struct CompactedTreeSnapshot {
+    entries: BTreeMap<String, TreeEntry>,
+    scan_complete: bool,
+    scan_micros: u64,
+}
+
+impl CompactedTreeSnapshot {
+    fn apply_batches(&mut self, batches: &[TreeBatch]) {
+        for batch in batches {
+            if batch.scan_complete {
+                self.scan_complete = true;
+            }
+            self.scan_micros = self.scan_micros.max(batch.scan_micros);
+            for removed in &batch.removed {
+                self.entries.remove(removed);
+            }
+            for entry in &batch.upserted {
+                self.entries.insert(entry.path.clone(), clone_entry(entry));
+            }
+        }
+    }
+
+    fn to_replay_batches(&self) -> Vec<TreeBatch> {
+        if self.entries.is_empty() && !self.scan_complete {
+            return Vec::new();
+        }
+        vec![TreeBatch {
+            upserted: self.entries.values().map(clone_entry).collect(),
+            removed: Vec::new(),
+            scan_complete: self.scan_complete,
+            scan_micros: self.scan_micros,
+            errors: Vec::new(),
+        }]
+    }
+}
+
+#[derive(Default)]
+struct VaultContextState {
+    snapshot: CompactedTreeSnapshot,
+    subscribers: Vec<Subscriber>,
+}
+
 /// 知识库上下文：按规范路径复用同一 `VaultHandle` 与单一后台监听线程，并在最后引用释放时关闭。
 pub struct VaultContext {
     pub root: String,
     pub handle: Arc<VaultHandle>,
-    subscribers: Mutex<Vec<Subscriber>>,
+    state: Mutex<VaultContextState>,
     next_id: AtomicU64,
-    cached_batches: Mutex<Vec<TreeBatch>>,
 }
 
 impl VaultContext {
@@ -51,9 +93,8 @@ impl VaultContext {
         let ctx = Arc::new(Self {
             root,
             handle: Arc::clone(&handle),
-            subscribers: Mutex::new(Vec::new()),
+            state: Mutex::new(VaultContextState::default()),
             next_id: AtomicU64::new(1),
-            cached_batches: Mutex::new(Vec::new()),
         });
         let weak_ctx = Arc::downgrade(&ctx);
         std::thread::spawn(move || {
@@ -78,12 +119,9 @@ impl VaultContext {
                 let Some(ctx) = weak_ctx.upgrade() else {
                     break;
                 };
-                {
-                    let mut cached = ctx.cached_batches.lock().unwrap_or_else(|e| e.into_inner());
-                    cached.extend(clone_batches(&batches));
-                }
-                let mut subs = ctx.subscribers.lock().unwrap_or_else(|e| e.into_inner());
-                subs.retain(|sub| {
+                let mut st = ctx.state.lock().unwrap_or_else(|e| e.into_inner());
+                st.snapshot.apply_batches(&batches);
+                st.subscribers.retain(|sub| {
                     if let Some(q) = sub.queue.upgrade() {
                         q.push(clone_batches(&batches));
                         true
@@ -99,18 +137,12 @@ impl VaultContext {
     pub fn subscribe(&self) -> (u64, Arc<NotifyQueue<Vec<TreeBatch>>>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let queue = NotifyQueue::new();
-        let replay = {
-            let cached = self
-                .cached_batches
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            clone_batches(&cached)
-        };
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let replay = st.snapshot.to_replay_batches();
         if !replay.is_empty() {
             queue.push(replay);
         }
-        let mut subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
-        subs.push(Subscriber {
+        st.subscribers.push(Subscriber {
             id,
             queue: Arc::downgrade(&queue),
         });
@@ -118,8 +150,8 @@ impl VaultContext {
     }
 
     pub fn unsubscribe(&self, id: u64) {
-        let mut subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
-        subs.retain(|sub| {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.subscribers.retain(|sub| {
             if sub.id == id {
                 if let Some(q) = sub.queue.upgrade() {
                     q.close();
@@ -134,8 +166,8 @@ impl VaultContext {
 
 impl Drop for VaultContext {
     fn drop(&mut self) {
-        let subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
-        for sub in subs.iter() {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        for sub in &st.subscribers {
             if let Some(q) = sub.queue.upgrade() {
                 q.close();
             }
@@ -184,5 +216,49 @@ impl VaultRegistry {
         let ctx = VaultContext::new(handle);
         map.insert(canonical, Arc::downgrade(&ctx));
         Ok(ctx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compacted_snapshot_deduplicates_repeated_updates_and_removals() {
+        let mut snap = CompactedTreeSnapshot::default();
+        for i in 0..50u64 {
+            snap.apply_batches(&[TreeBatch {
+                upserted: vec![
+                    TreeEntry {
+                        path: "a.md".into(),
+                        parent: String::new(),
+                        name: "a.md".into(),
+                        directory: false,
+                    },
+                    TreeEntry {
+                        path: "b.md".into(),
+                        parent: String::new(),
+                        name: "b.md".into(),
+                        directory: false,
+                    },
+                ],
+                removed: Vec::new(),
+                scan_complete: i == 0,
+                scan_micros: i,
+                errors: Vec::new(),
+            }]);
+        }
+        snap.apply_batches(&[TreeBatch {
+            upserted: Vec::new(),
+            removed: vec!["b.md".into()],
+            scan_complete: false,
+            scan_micros: 0,
+            errors: Vec::new(),
+        }]);
+        let replay = snap.to_replay_batches();
+        assert_eq!(replay.len(), 1);
+        assert!(replay[0].scan_complete);
+        assert_eq!(replay[0].upserted.len(), 1);
+        assert_eq!(replay[0].upserted[0].path, "a.md");
     }
 }
