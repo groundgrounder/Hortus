@@ -18,6 +18,7 @@ struct HortusApp: App {
 struct IOSRootView: View {
     @Bindable var appModel: IOSAppModel
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -47,11 +48,14 @@ struct IOSRootView: View {
             switch result {
             case .success(let urls):
                 if let url = urls.first {
-                    appModel.openVault(url: url, securityScoped: true)
+                    Task { await appModel.openVault(url: url, securityScoped: true) }
                 }
             case .failure(let error):
                 appModel.errorMessage = error.localizedDescription
             }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            appModel.handleScenePhase(phase)
         }
         .sheet(isPresented: $appModel.settingsPresented) {
             IOSSettingsView(settings: appModel.settings, diagramService: appModel.diagramService)
@@ -163,7 +167,7 @@ private struct IOSWelcomeView: View {
 
                     if appModel.hasBundledSampleFolder() {
                         Button {
-                            appModel.importSampleFolder()
+                            Task { await appModel.importSampleFolder() }
                         } label: {
                             Text(L10n.string("Import Sample Folder"))
                                 .frame(maxWidth: 260)
@@ -271,7 +275,7 @@ private struct IOSDocumentDetailView: View {
                             .accessibilityIdentifier("toolbar-save")
                         }
                         Button {
-                            appModel.toggleReadingMode()
+                            Task { await appModel.toggleReadingMode() }
                         } label: {
                             Image(systemName: document.reading ? "pencil" : "book")
                                 .accessibilityLabel(L10n.string(document.reading ? "Edit" : "Read"))

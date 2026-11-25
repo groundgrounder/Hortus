@@ -65,6 +65,9 @@ final class IOSSettingsStore {
     private let cacheDirectory: URL
     private weak var core: WorkspaceCore?
     private var loading = false
+    private var persistTask: Task<Void, Never>?
+    private var syncFontTask: Task<Void, Never>?
+    private let writeQueue = DispatchQueue(label: "app.hortus.ios.settings", qos: .utility)
 
     init(supportDirectory: URL, cacheDirectory: URL) {
         self.settingsURL = supportDirectory.appendingPathComponent("ios-settings.json")
@@ -103,29 +106,66 @@ final class IOSSettingsStore {
 
     private func persist() {
         guard !loading else { return }
-        let payload = IOSSettingsPayload(appearance: appearance, bodyFontSize: bodyFontSize)
-        let url = settingsURL
-        Task.detached(priority: .utility) {
-            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if let data = try? JSONEncoder().encode(payload) {
-                try? data.write(to: url, options: .atomic)
+        persistTask?.cancel()
+        persistTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            let payload = IOSSettingsPayload(appearance: self.appearance, bodyFontSize: self.bodyFontSize)
+            let url = self.settingsURL
+            self.writeQueue.async {
+                try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if let data = try? JSONEncoder().encode(payload) {
+                    try? data.write(to: url, options: .atomic)
+                }
             }
         }
     }
 
     private func syncConfigFontSize() {
         guard !loading, let core else { return }
-        let size = bodyFontSize
-        Task.detached(priority: .utility) {
-            guard let current = try? core.editableConfig() else { return }
-            let input = EditableConfigInputInfo(
-                fontSize: size,
-                defaultView: current.defaultView,
-                terminalFont: current.terminalFont,
-                agentCommand: current.agentCommand,
-                agentArgs: current.agentArgs
-            )
-            _ = try? core.saveEditableConfig(input: input, expectedDigest: current.digest)
+        syncFontTask?.cancel()
+        syncFontTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            let size = self.bodyFontSize
+            self.writeQueue.async {
+                guard let current = try? core.editableConfig() else { return }
+                let input = EditableConfigInputInfo(
+                    fontSize: size,
+                    defaultView: current.defaultView,
+                    terminalFont: current.terminalFont,
+                    agentCommand: current.agentCommand,
+                    agentArgs: current.agentArgs
+                )
+                _ = try? core.saveEditableConfig(input: input, expectedDigest: current.digest)
+            }
+        }
+    }
+
+    func flushPendingWrites() async {
+        persistTask?.cancel()
+        syncFontTask?.cancel()
+        let payload = IOSSettingsPayload(appearance: appearance, bodyFontSize: bodyFontSize)
+        let url = settingsURL
+        let core = core
+        await withCheckedContinuation { continuation in
+            writeQueue.async {
+                try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if let data = try? JSONEncoder().encode(payload) {
+                    try? data.write(to: url, options: .atomic)
+                }
+                if let core, let current = try? core.editableConfig() {
+                    let input = EditableConfigInputInfo(
+                        fontSize: payload.bodyFontSize,
+                        defaultView: current.defaultView,
+                        terminalFont: current.terminalFont,
+                        agentCommand: current.agentCommand,
+                        agentArgs: current.agentArgs
+                    )
+                    _ = try? core.saveEditableConfig(input: input, expectedDigest: current.digest)
+                }
+                continuation.resume()
+            }
         }
     }
 
@@ -134,10 +174,11 @@ final class IOSSettingsStore {
         await LocalImageCache.shared.clear()
         await diagramService.clearCache()
         let cacheDir = cacheDirectory
+        let preserved: Set<String> = ["session.toml", "recovery"]
         await Task.detached(priority: .utility) {
             let fm = FileManager.default
             if let items = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
-                for item in items where item.lastPathComponent != "session.toml" {
+                for item in items where !preserved.contains(item.lastPathComponent) {
                     try? fm.removeItem(at: item)
                 }
             }

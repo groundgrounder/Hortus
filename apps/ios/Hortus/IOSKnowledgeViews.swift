@@ -53,7 +53,7 @@ struct IOSFilesList: View {
                     }
                     if appModel.hasBundledSampleFolder() {
                         Button {
-                            appModel.importSampleFolder()
+                            Task { await appModel.importSampleFolder() }
                         } label: {
                             Label(L10n.string("Import Sample Folder"), systemImage: "doc.on.doc")
                         }

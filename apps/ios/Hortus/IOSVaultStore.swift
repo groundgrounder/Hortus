@@ -1,6 +1,8 @@
 import Foundation
 import HortusApple
 import HortusCore
+import SwiftUI
+import UIKit
 
 enum KnowledgeTab: String, CaseIterable, Identifiable {
     case files
@@ -82,12 +84,18 @@ final class IOSAppModel {
     private var activeSecurityScopedURL: URL?
     private var searchTask: Task<Void, Never>?
     private var searchCancellation: SearchCancellation?
+    private var openNoteTask: Task<Void, Never>?
+    private var openRequestID: UInt64 = 0
+    private var vaultGeneration: UInt64 = 0
+    private var togglingReadingMode = false
+    private var hasRequestedNoteInVault = false
     private var suppressAutoStartNote = false
     private var preserveKnowledgeSheetOnOpen = false
     private var pendingLaunchFocus: UInt32?
     private var pendingLaunchReveal: String?
     private let supportDirectory: URL
     private let bookmarksURL: URL
+    @ObservationIgnored var beforeOpenDocumentForTesting: ((String) async -> Void)?
 
     init() {
         let fm = FileManager.default
@@ -138,46 +146,103 @@ final class IOSAppModel {
         Bundle.main.url(forResource: "demo-vault", withExtension: nil) != nil
     }
 
-    func importSampleFolder() {
+    private func prepareDemoFolder() -> URL? {
         guard let source = Bundle.main.url(forResource: "demo-vault", withExtension: nil),
               let docs = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true) else {
             errorMessage = L10n.string("Operation failed")
-            return
+            return nil
         }
         let target = docs.appendingPathComponent("HortusDemo", isDirectory: true)
         do {
             if !FileManager.default.fileExists(atPath: target.path) {
                 try FileManager.default.copyItem(at: source, to: target)
             }
-            openVault(url: target, securityScoped: false)
+            return target
         } catch {
             errorMessage = L10n.error(error)
+            return nil
         }
     }
 
-    func openPickedFolder(_ result: Result<URL, Error>) {
+    func importSampleFolder() async {
+        guard let target = prepareDemoFolder() else { return }
+        await openVault(url: target, securityScoped: false)
+    }
+
+    func openPickedFolder(_ result: Result<URL, Error>) async {
         switch result {
         case .success(let url):
-            openVault(url: url, securityScoped: true)
+            await openVault(url: url, securityScoped: true)
         case .failure(let error):
             errorMessage = error.localizedDescription
         }
     }
 
-    func openVault(url: URL, securityScoped: Bool) {
+    func handleScenePhase(_ phase: ScenePhase) {
+        guard phase == .inactive || phase == .background else { return }
+        Task { await settings.flushPendingWrites() }
+        guard let doc = currentDocument, doc.dirty || doc.marked || doc.issue == .missing else { return }
+        flushDocumentForBackground(doc)
+    }
+
+    @discardableResult
+    func flushDocumentForBackground(_ doc: IOSNoteDocument) -> Task<DocumentPersistence, Never> {
+        var taskID: UIBackgroundTaskIdentifier = .invalid
+        taskID = UIApplication.shared.beginBackgroundTask(withName: "hortus-prepare-close") {
+            Task { @MainActor in
+                if taskID != .invalid {
+                    UIApplication.shared.endBackgroundTask(taskID)
+                    taskID = .invalid
+                }
+            }
+        }
+        return Task { @MainActor in
+            let persistence = await doc.prepareToClose()
+            if taskID != .invalid {
+                UIApplication.shared.endBackgroundTask(taskID)
+                taskID = .invalid
+            }
+            return persistence
+        }
+    }
+
+    private func openVaultImmediate(url: URL, securityScoped: Bool) {
+        vaultGeneration &+= 1
         let accessed = securityScoped ? url.startAccessingSecurityScopedResource() : false
+        activeSecurityScopedURL = accessed ? url : nil
+        openVaultCore(url: url, securityScoped: securityScoped)
+    }
+
+    func openVault(url: URL, securityScoped: Bool) async {
+        vaultGeneration &+= 1
+        let expectedGen = vaultGeneration
+        let normalizedTarget = url.standardizedFileURL
         let previousScoped = activeSecurityScopedURL
-        closeCurrentVault(stopSecurity: false)
-        if let previousScoped, previousScoped != url {
+        let reusingScoped = securityScoped && previousScoped?.standardizedFileURL == normalizedTarget
+        let newlyAccessed = (securityScoped && !reusingScoped) ? url.startAccessingSecurityScopedResource() : false
+
+        await closeCurrentVault(stopSecurity: false, incrementGeneration: false)
+        guard expectedGen == vaultGeneration else {
+            if newlyAccessed {
+                url.stopAccessingSecurityScopedResource()
+            }
+            return
+        }
+        if let previousScoped, !reusingScoped {
             previousScoped.stopAccessingSecurityScopedResource()
         }
-        activeSecurityScopedURL = accessed ? url : nil
+        activeSecurityScopedURL = reusingScoped ? previousScoped : (newlyAccessed ? url : nil)
+        openVaultCore(url: url, securityScoped: securityScoped)
+    }
 
+    private func openVaultCore(url: URL, securityScoped: Bool) {
+        hasRequestedNoteInVault = false
         if securityScoped {
             saveBookmark(for: url)
         }
 
         let path = url.path
+        let expectedGen = vaultGeneration
         do {
             guard let core else { throw CoreError.Failure(kind: "config.home_missing") }
             let handle = try core.openVault(path: path)
@@ -188,7 +253,7 @@ final class IOSAppModel {
             treeVersion += 1
             subscription = VaultSubscription(handle: handle) { [weak self] batches in
                 Task { @MainActor [weak self] in
-                    self?.applyVaultBatches(batches)
+                    self?.applyVaultBatches(batches, generation: expectedGen)
                 }
                 let upserted = batches.flatMap { $0.upserted.filter { !$0.directory }.map(\.path) }
                 let removed = batches.flatMap(\.removed)
@@ -197,24 +262,37 @@ final class IOSAppModel {
                 let scanFinished = batches.contains(where: \.scanComplete)
                 if changed || scanFinished {
                     Task { @MainActor [weak self] in
-                        self?.knowledgeVersion &+= 1
+                        guard let self, self.vaultGeneration == expectedGen else { return }
+                        self.knowledgeVersion &+= 1
                     }
                 }
             }
             try? core.remember(path: path, tabs: [], selected: nil)
         } catch {
-            if accessed {
-                url.stopAccessingSecurityScopedResource()
+            if let scoped = activeSecurityScopedURL {
+                scoped.stopAccessingSecurityScopedResource()
                 activeSecurityScopedURL = nil
             }
             errorMessage = L10n.error(error)
         }
     }
 
-    private func closeCurrentVault(stopSecurity: Bool) {
+    func closeCurrentVault(stopSecurity: Bool = true, incrementGeneration: Bool = true) async {
+        if incrementGeneration {
+            vaultGeneration &+= 1
+        }
+        hasRequestedNoteInVault = false
+        openRequestID &+= 1
+        openNoteTask?.cancel()
+        openNoteTask = nil
         searchTask?.cancel()
         searchCancellation?.cancel()
-        currentDocument?.stopForShutdown()
+        if let doc = currentDocument {
+            if doc.dirty || doc.marked || doc.issue == .missing {
+                _ = await doc.prepareToClose()
+            }
+            doc.stopForShutdown()
+        }
         currentDocument = nil
         currentPath = nil
         activeFocus = nil
@@ -231,7 +309,8 @@ final class IOSAppModel {
         }
     }
 
-    private func applyVaultBatches(_ batches: [TreeBatch]) {
+    private func applyVaultBatches(_ batches: [TreeBatch], generation: UInt64) {
+        guard generation == vaultGeneration else { return }
         for batch in batches {
             for removed in batch.removed { entries.removeValue(forKey: removed) }
             for item in batch.upserted { entries[item.path] = item }
@@ -241,7 +320,7 @@ final class IOSAppModel {
         if let currentPath, batches.contains(where: { $0.upserted.contains(where: { $0.path == currentPath }) }) {
             currentDocument?.refresh()
         }
-        if !suppressAutoStartNote, currentPath == nil,
+        if !suppressAutoStartNote, !hasRequestedNoteInVault, currentPath == nil,
            let start = entries["Start here.md"]?.path ?? sortedTreeEntries.first(where: { !$0.directory })?.path {
             openNote(start)
         }
@@ -250,6 +329,12 @@ final class IOSAppModel {
     func openNote(_ relativePath: String, heading: String? = nil, sourceOffset: Int? = nil,
                   selectionLength: Int = 0, editing: Bool? = nil) {
         guard let core, let vaultRoot else { return }
+        hasRequestedNoteInVault = true
+        openRequestID &+= 1
+        let requestID = openRequestID
+        let expectedVaultGen = vaultGeneration
+        openNoteTask?.cancel()
+
         if currentPath == relativePath, let doc = currentDocument {
             if let editing { doc.reading = !editing }
             if let sourceOffset {
@@ -264,11 +349,21 @@ final class IOSAppModel {
         }
 
         let previous = currentDocument
-        Task { [weak self] in
-            if let previous, previous.dirty {
+        let beforeHook = beforeOpenDocumentForTesting
+        openNoteTask = Task { [weak self] in
+            if let previous, previous.dirty || previous.marked || previous.issue == .missing {
                 _ = await previous.prepareToClose()
             }
+            guard !Task.isCancelled, let self,
+                  self.openRequestID == requestID,
+                  self.vaultGeneration == expectedVaultGen else { return }
             previous?.stopForShutdown()
+            if let beforeHook {
+                await beforeHook(relativePath)
+            }
+            guard !Task.isCancelled,
+                  self.openRequestID == requestID,
+                  self.vaultGeneration == expectedVaultGen else { return }
             do {
                 let (io, initial) = try await Task.detached(priority: .userInitiated) {
                     let session = try core.openDocument(vault: vaultRoot, path: relativePath)
@@ -276,8 +371,13 @@ final class IOSAppModel {
                     let url = URL(fileURLWithPath: vaultRoot).appendingPathComponent(relativePath)
                     return (DocumentIO(session: session, url: url), initial)
                 }.value
-                guard let self else { return }
                 let doc = IOSNoteDocument(io: io, initial: initial)
+                guard !Task.isCancelled,
+                      self.openRequestID == requestID,
+                      self.vaultGeneration == expectedVaultGen else {
+                    doc.stopForShutdown()
+                    return
+                }
                 if let editing { doc.reading = !editing }
                 doc.onSaved = { [weak self, weak doc] in
                     guard let self, let doc, self.currentDocument === doc else { return }
@@ -285,6 +385,9 @@ final class IOSAppModel {
                 }
                 doc.onConflictCopy = { [weak self] copyPath in
                     self?.openNote(copyPath)
+                }
+                if let staleCurrent = self.currentDocument, staleCurrent !== doc {
+                    staleCurrent.stopForShutdown()
                 }
                 self.currentPath = relativePath
                 self.currentDocument = doc
@@ -315,7 +418,10 @@ final class IOSAppModel {
                     }
                 }
             } catch {
-                self?.errorMessage = L10n.error(error)
+                guard !Task.isCancelled,
+                      self.openRequestID == requestID,
+                      self.vaultGeneration == expectedVaultGen else { return }
+                self.errorMessage = L10n.error(error)
             }
         }
     }
@@ -376,12 +482,20 @@ final class IOSAppModel {
         openNote(entry.source, sourceOffset: Int(entry.startUtf16), selectionLength: Int(entry.lengthUtf16))
     }
 
-    func toggleReadingMode() {
-        guard let doc = currentDocument else { return }
-        if !doc.reading, doc.dirty {
-            Task { await doc.saveNow() }
+    func toggleReadingMode() async {
+        guard !togglingReadingMode, let doc = currentDocument else { return }
+        togglingReadingMode = true
+        defer { togglingReadingMode = false }
+        if !doc.reading {
+            doc.finishEditingSession()
+            if doc.dirty {
+                await doc.saveNow()
+            }
+            guard currentDocument === doc else { return }
+            doc.reading = true
+        } else {
+            doc.reading = false
         }
-        doc.reading.toggle()
         refreshToken &+= 1
     }
 
@@ -429,7 +543,7 @@ final class IOSAppModel {
         }
     }
 
-    func runSearch(query: String) {
+    func runSearch(query: String, debounce: Duration = .milliseconds(140)) {
         searchQuery = query
         searchTask?.cancel()
         searchCancellation?.cancel()
@@ -442,6 +556,10 @@ final class IOSAppModel {
         let cancellation = SearchCancellation()
         searchCancellation = cancellation
         searchTask = Task {
+            if debounce != .zero {
+                try? await Task.sleep(for: debounce)
+                guard !Task.isCancelled else { return }
+            }
             let (quick, full) = await Task.detached(priority: .userInitiated) {
                 let q = handle.quickOpen(query: trimmed, limit: 20)
                 let f = handle.search(query: trimmed, maxMatchesPerNote: 5, cancellation: cancellation)
@@ -482,6 +600,13 @@ final class IOSAppModel {
         try? (dict as NSDictionary).write(to: bookmarksURL)
     }
 
+    private func removeBookmark(forPath path: String) {
+        var dict = (try? NSDictionary(contentsOf: bookmarksURL, error: ())) as? [String: Data] ?? [:]
+        if dict.removeValue(forKey: path) != nil {
+            try? (dict as NSDictionary).write(to: bookmarksURL)
+        }
+    }
+
     private func restoreLastVaultIfAvailable() {
         guard let sessionJSON = try? core?.sessionJson(),
               let data = sessionJSON.data(using: .utf8),
@@ -494,12 +619,15 @@ final class IOSAppModel {
            let bookmarkData = dict[firstPath] {
             var stale = false
             if let resolved = try? URL(resolvingBookmarkData: bookmarkData, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) {
-                openVault(url: resolved, securityScoped: true)
+                if stale && resolved.path != firstPath {
+                    removeBookmark(forPath: firstPath)
+                }
+                openVaultImmediate(url: resolved, securityScoped: true)
                 return
             }
         }
         if FileManager.default.fileExists(atPath: firstPath) {
-            openVault(url: URL(fileURLWithPath: firstPath), securityScoped: false)
+            openVaultImmediate(url: URL(fileURLWithPath: firstPath), securityScoped: false)
         }
     }
 
@@ -540,11 +668,11 @@ final class IOSAppModel {
             let demo = docs.appendingPathComponent("HortusDemo", isDirectory: true)
             try? FileManager.default.removeItem(at: demo)
         }
-        if args.contains("--demo") {
-            importSampleFolder()
+        if args.contains("--demo"), let demoTarget = prepareDemoFolder() {
+            openVaultImmediate(url: demoTarget, securityScoped: false)
             opened = true
         } else if let vaultPath = value(after: "--vault"), FileManager.default.fileExists(atPath: vaultPath) {
-            openVault(url: URL(fileURLWithPath: vaultPath), securityScoped: false)
+            openVaultImmediate(url: URL(fileURLWithPath: vaultPath), securityScoped: false)
             opened = true
         }
         if opened, let note = requestedNote {

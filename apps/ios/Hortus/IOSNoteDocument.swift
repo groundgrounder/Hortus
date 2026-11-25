@@ -25,6 +25,7 @@ final class IOSNoteDocument {
     @ObservationIgnored var onReload: ((String) -> Void)?
     @ObservationIgnored var onSaved: (() -> Void)?
     @ObservationIgnored var onConflictCopy: ((String) -> Void)?
+    @ObservationIgnored var onEndEditing: (() -> Void)?
     @ObservationIgnored private var autoSave: Task<Void, Never>?
     @ObservationIgnored private var outlineTask: Task<Void, Never>?
     @ObservationIgnored private var refreshing = false
@@ -176,6 +177,14 @@ final class IOSNoteDocument {
         closed = true
         autoSave?.cancel()
         outlineTask?.cancel()
+        onEndEditing = nil
+    }
+
+    func finishEditingSession() {
+        onEndEditing?()
+        if marked {
+            compositionChanged(false)
+        }
     }
 
     private func apply(_ update: DocumentUpdate, external: Bool = false) {
@@ -187,6 +196,7 @@ final class IOSNoteDocument {
                 issue = update.issue
                 message = update.message
             }
+            if let copy = update.copyPath { onConflictCopy?(copy) }
             return
         }
         if external || update.copyPath != nil {
