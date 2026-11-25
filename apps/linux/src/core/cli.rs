@@ -62,6 +62,16 @@ pub struct CliOptions {
     pub terminal_agent_vault2: Option<PathBuf>,
     #[cfg(feature = "automation")]
     pub restore_session_json: Option<PathBuf>,
+    #[cfg(feature = "automation")]
+    pub matrix_audit_json: Option<PathBuf>,
+    #[cfg(feature = "automation")]
+    pub fuzz_json: Option<PathBuf>,
+    #[cfg(feature = "automation")]
+    pub fuzz_seed: Option<u64>,
+    #[cfg(feature = "automation")]
+    pub fuzz_steps: Option<usize>,
+    #[cfg(feature = "automation")]
+    pub fuzz_media: Option<PathBuf>,
 }
 
 impl CliOptions {
@@ -94,6 +104,11 @@ impl CliOptions {
             || self.live_resize_json.is_some()
             || self.terminal_agent_json.is_some()
             || self.restore_session_json.is_some()
+            || self.matrix_audit_json.is_some()
+            || self.fuzz_json.is_some()
+            || self.fuzz_seed.is_some()
+            || self.fuzz_steps.is_some()
+            || self.fuzz_media.is_some()
             || self.screenshot.is_some()
             || self.focus_diagram.is_some()
             || self.edit_mode
@@ -113,6 +128,8 @@ impl CliOptions {
         self.width.is_some()
             && self.height.is_some()
             && self.live_resize_json.is_none()
+            && self.matrix_audit_json.is_none()
+            && self.fuzz_json.is_none()
             && (self.screenshot.is_some()
                 || self.smoke_json.is_some()
                 || self.reading_json.is_some())
@@ -298,6 +315,40 @@ impl CliOptions {
                         .next()
                         .ok_or("--restore-session-json requires a path")?;
                     options.restore_session_json = Some(PathBuf::from(value));
+                }
+                #[cfg(feature = "automation")]
+                "--matrix-audit-json" => {
+                    let value = iter.next().ok_or("--matrix-audit-json requires a path")?;
+                    options.matrix_audit_json = Some(PathBuf::from(value));
+                }
+                #[cfg(feature = "automation")]
+                "--fuzz-json" => {
+                    let value = iter.next().ok_or("--fuzz-json requires a path")?;
+                    options.fuzz_json = Some(PathBuf::from(value));
+                }
+                #[cfg(feature = "automation")]
+                "--fuzz-seed" => {
+                    let value = iter.next().ok_or("--fuzz-seed requires a u64")?;
+                    let parsed = value
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid --fuzz-seed value: {value}"))?;
+                    options.fuzz_seed = Some(parsed);
+                }
+                #[cfg(feature = "automation")]
+                "--fuzz-steps" => {
+                    let value = iter.next().ok_or("--fuzz-steps requires an integer")?;
+                    let parsed = value
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid --fuzz-steps value: {value}"))?;
+                    if parsed == 0 {
+                        return Err("--fuzz-steps must be >= 1".into());
+                    }
+                    options.fuzz_steps = Some(parsed);
+                }
+                #[cfg(feature = "automation")]
+                "--fuzz-media" => {
+                    let value = iter.next().ok_or("--fuzz-media requires a directory")?;
+                    options.fuzz_media = Some(PathBuf::from(value));
                 }
                 other => return Err(crate::i18n::fmt1(crate::i18n::Key::CliUnknownArg, other)),
             }

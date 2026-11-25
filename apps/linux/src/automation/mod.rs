@@ -9,6 +9,7 @@ pub mod l2_edit_knowledge;
 pub mod l2_knowledge_files;
 pub mod l3_terminal_agent;
 pub mod layout_width;
+pub mod matrix_fuzz;
 pub mod scenes;
 
 use crate::window::shell::WindowInner;
@@ -52,6 +53,8 @@ pub fn maybe_schedule_automation(win: &Rc<WindowInner>) {
         && opts.layout_width_json.is_none()
         && opts.live_resize_json.is_none()
         && opts.terminal_agent_json.is_none()
+        && opts.matrix_audit_json.is_none()
+        && opts.fuzz_json.is_none()
         && opts.screenshot.is_none()
         && opts.focus_diagram.is_none()
         && !opts.edit_mode
@@ -164,6 +167,20 @@ pub fn maybe_schedule_automation(win: &Rc<WindowInner>) {
 }
 
 pub fn run_automation(win: &Rc<WindowInner>) {
+    if let Some(ref json_path) = win.options.matrix_audit_json {
+        matrix_fuzz::execute_matrix_audit(win, json_path.clone());
+        return;
+    }
+    if let Some(ref json_path) = win.options.fuzz_json {
+        matrix_fuzz::execute_fuzz(
+            win,
+            json_path.clone(),
+            win.options.fuzz_seed.unwrap_or(20_261_126),
+            win.options.fuzz_steps.unwrap_or(200),
+            win.options.fuzz_media.clone(),
+        );
+        return;
+    }
     if let Some(ref json_path) = win.options.terminal_agent_json {
         l3_terminal_agent::execute_terminal_agent_checks(
             win,
