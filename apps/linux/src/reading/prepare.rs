@@ -6,6 +6,7 @@
 
 use crate::core::model::HeadingItem;
 use crate::render::diagram::{RenderedDiagram, format_diagram_failure, render_block_with_engine};
+use crate::render::diagram_card::diagram_render_width;
 use crate::render::embed::{EmbedRequest, PreparedEmbed, prepare_embed_bg};
 use crate::render::math::{MathRenderService, PreparedMathBlock};
 use crate::render::media::{PreparedMedia, prepare_media_blocks_bg};
@@ -255,6 +256,7 @@ pub fn prepare_reading_note_bg(req: &PrepareReadingRequest) -> Result<PreparedRe
 
     let mut diagrams = Vec::new();
     let mut ordinal = 0u32;
+    let diagram_width = diagram_render_width(req.content_width);
     if is_mmd {
         let collapsed = req
             .core
@@ -264,7 +266,7 @@ pub fn prepare_reading_note_bg(req: &PrepareReadingRequest) -> Result<PreparedRe
             &req.diagram_engine,
             &source_text,
             true,
-            req.content_width.max(240.0),
+            diagram_width,
             &collapsed,
             DiagramIdentity {
                 document: req.note_path.clone(),
@@ -314,7 +316,7 @@ pub fn prepare_reading_note_bg(req: &PrepareReadingRequest) -> Result<PreparedRe
                 &req.diagram_engine,
                 &source_text,
                 false,
-                req.content_width.max(240.0),
+                diagram_width,
                 &collapsed,
                 DiagramIdentity {
                     document: req.note_path.clone(),

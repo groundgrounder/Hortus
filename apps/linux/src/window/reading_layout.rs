@@ -6,6 +6,7 @@
 
 use crate::core::Utf16Mapper;
 use crate::knowledge::clear_box;
+use crate::platform::{READING_COLUMN_MAX_WIDTH, effective_reading_column_width};
 use crate::reading::{
     PrepareReadingRequest, ReadingEnv, ReadingSurfaceHandle, build_reading_surface,
     prepare_reading_note_bg,
@@ -22,6 +23,10 @@ use libadwaita as adw;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub fn is_mmd_path(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".mmd")
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum ReadingScrollTarget {
@@ -108,7 +113,7 @@ impl WindowInner {
             diagram_engine,
             math_service,
             font_size,
-            content_width: self.reading_content_width(),
+            content_width: self.reading_content_width_for(is_mmd_path(note_path)),
             ancestors: vec![note_path.to_string()],
             depth: 0,
             parent_window: Some(self.window.clone().upcast()),
@@ -191,14 +196,20 @@ impl WindowInner {
         note_path: &str,
         restore_scroll: Option<ReadingScrollTarget>,
     ) {
-        let (session, generation) = {
+        let is_mmd = is_mmd_path(note_path);
+        let (session, generation, reading_viewport) = {
             let mut st = self.state.borrow_mut();
             let Some(tab) = st.tabs.get_mut(note_path) else {
                 return;
             };
             tab.reading_generation = tab.reading_generation.wrapping_add(1);
-            (tab.session.clone(), tab.reading_generation)
+            (
+                tab.session.clone(),
+                tab.reading_generation,
+                tab.reading_viewport.clone(),
+            )
         };
+        reading_viewport.set_max_content_width((!is_mmd).then_some(READING_COLUMN_MAX_WIDTH));
         let (services, vault_root, vault_handle) = {
             let st = self.state.borrow();
             (st.services.clone(), st.vault_root(), st.vault_handle())
@@ -208,7 +219,7 @@ impl WindowInner {
             return;
         };
 
-        let content_width = self.reading_content_width();
+        let content_width = self.reading_content_width_for(is_mmd);
         let font_size = services.config.snapshot().font_size;
         let dark = adw::StyleManager::default().is_dark();
         let main_thread = std::thread::current().id();
@@ -360,27 +371,17 @@ impl WindowInner {
         });
     }
 
-    pub fn reading_content_width(&self) -> f64 {
-        let viewport_alloc = self
-            .active_tab_path()
-            .and_then(|path| {
-                let st = self.state.borrow();
-                st.tabs
-                    .get(&path)
-                    .map(|tab| tab.reading_viewport.last_allocated_width())
-            })
-            .unwrap_or(0);
-        if viewport_alloc > 240 {
-            return f64::from(viewport_alloc).max(260.0);
+    pub fn reading_viewport_width_hint(&self) -> i32 {
+        let tab_view_width = self.tab_view.width();
+        if tab_view_width > 160 {
+            return tab_view_width;
         }
-        let tab_view_width = f64::from(self.tab_view.width());
-        if tab_view_width > 160.0 {
-            let pad = f64::from(crate::platform::viewport::responsive_horizontal_padding(
-                tab_view_width as i32,
-            ));
-            return (tab_view_width - pad).max(260.0);
-        }
-        let window_w = f64::from(self.window.width()).max(720.0);
+        let window_w = f64::from(
+            self.window
+                .width()
+                .max(self.window.default_width())
+                .max(720),
+        );
         let mut content = window_w;
         if self.left_split.shows_sidebar() && !self.left_split.is_collapsed() {
             content -= self.current_sidebar_width(crate::core::PanelRegion::Left);
@@ -388,10 +389,27 @@ impl WindowInner {
         if self.right_split.shows_sidebar() && !self.right_split.is_collapsed() {
             content -= self.current_sidebar_width(crate::core::PanelRegion::Right);
         }
-        let pad = f64::from(crate::platform::viewport::responsive_horizontal_padding(
-            content as i32,
-        ));
-        (content - pad).max(260.0)
+        content.round().max(260.0) as i32
+    }
+
+    pub fn reading_content_width_for(&self, is_mmd: bool) -> f64 {
+        let max_w = (!is_mmd).then_some(READING_COLUMN_MAX_WIDTH);
+        let viewport_alloc = self
+            .active_tab_path()
+            .and_then(|path| {
+                let st = self.state.borrow();
+                st.tabs
+                    .get(&path)
+                    .filter(|tab| is_mmd_path(&tab.path) == is_mmd)
+                    .map(|tab| tab.reading_viewport.last_allocated_width())
+            })
+            .unwrap_or(0);
+        if viewport_alloc > 240 {
+            return f64::from(viewport_alloc).max(260.0);
+        }
+        let vp_w = self.reading_viewport_width_hint();
+        let (col_w, _) = effective_reading_column_width(vp_w, max_w);
+        f64::from(col_w).max(260.0)
     }
 
     pub fn relayout_reading_width(&self, note_path: &str, target_width: f64) {
@@ -417,7 +435,7 @@ impl WindowInner {
             return;
         };
         let target = f64::from(avail_w).max(260.0);
-        let (loaded, editing, current, viewport) = {
+        let (loaded, editing, current, viewport, edit_host) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(&path) else {
                 return;
@@ -427,8 +445,13 @@ impl WindowInner {
                 tab.editing,
                 tab.layout_width,
                 tab.reading_viewport.clone(),
+                tab.edit_host.clone(),
             )
         };
+        let vp_w = viewport.width();
+        if vp_w > 0 {
+            edit_host.sync_margins_for_width(vp_w);
+        }
         if !loaded || editing {
             return;
         }
@@ -445,7 +468,7 @@ impl WindowInner {
         let Some(path) = self.active_tab_path() else {
             return;
         };
-        let (loaded, editing, current, alloc_w, viewport) = {
+        let (loaded, editing, current, alloc_w, viewport, edit_host) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(&path) else {
                 return;
@@ -456,8 +479,13 @@ impl WindowInner {
                 tab.layout_width,
                 tab.reading_viewport.last_allocated_width(),
                 tab.reading_viewport.clone(),
+                tab.edit_host.clone(),
             )
         };
+        let vp_w = viewport.width();
+        if vp_w > 0 {
+            edit_host.sync_margins_for_width(vp_w);
+        }
         if !loaded || editing || alloc_w <= 240 {
             return;
         }
@@ -505,9 +533,21 @@ impl WindowInner {
             };
             let u16_off = Utf16Mapper::new(&tab.text).byte_to_utf16(byte_start as usize) as u64;
             tab.editing = true;
-            Some((tab.edit_view.clone(), u16_off, tab.content_stack.clone()))
+            Some((
+                tab.edit_view.clone(),
+                u16_off,
+                tab.content_stack.clone(),
+                tab.edit_host.clone(),
+                tab.reading_viewport.width(),
+            ))
         };
-        if let Some((ev, u16_off, content_stack)) = mapper_u16 {
+        if let Some((ev, u16_off, content_stack, edit_host, vp_w)) = mapper_u16 {
+            let sync_w = if vp_w > 0 {
+                vp_w
+            } else {
+                self.reading_viewport_width_hint()
+            };
+            edit_host.sync_margins_for_width(sync_w);
             content_stack.set_visible_child_name("edit");
             self.sync_active_tab_ui();
             self.scroll_to_utf16_offset(note_path, u16_off);
@@ -525,7 +565,15 @@ impl WindowInner {
             self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastNoNoteOpen));
             return;
         };
-        let (new_editing, needs_reading_refresh, anchor_u16, edit_view, content_stack) = {
+        let (
+            new_editing,
+            needs_reading_refresh,
+            anchor_u16,
+            edit_view,
+            content_stack,
+            edit_host,
+            vp_w,
+        ) = {
             let mut st = self.state.borrow_mut();
             let Some(tab) = st.tabs.get_mut(&path) else {
                 return;
@@ -562,8 +610,18 @@ impl WindowInner {
                 target_u16,
                 tab.edit_view.clone(),
                 tab.content_stack.clone(),
+                tab.edit_host.clone(),
+                tab.reading_viewport.width(),
             )
         };
+        if new_editing {
+            let sync_w = if vp_w > 0 {
+                vp_w
+            } else {
+                self.reading_viewport_width_hint()
+            };
+            edit_host.sync_margins_for_width(sync_w);
+        }
         content_stack.set_visible_child_name(if new_editing { "edit" } else { "reading" });
         self.sync_active_tab_ui();
         if !new_editing {

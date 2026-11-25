@@ -4,7 +4,7 @@
 
 use crate::core::model::HeadingItem;
 use crate::editor::{EditState, FindBar, LinkCompletion};
-use crate::platform::HortusReadingViewport;
+use crate::platform::{HortusEditHost, HortusReadingViewport};
 use crate::reading::ReadingSurfaceHandle;
 use crate::render::diagram::RenderedDiagram;
 use crate::render::math::MathRenderService;
@@ -39,6 +39,7 @@ pub struct OpenNoteTab {
     pub surface_rebuilds: u32,
     /// 原地宽度重排次数。
     pub in_place_relayouts: u32,
+    pub edit_host: HortusEditHost,
     pub edit_scrolled: gtk4::ScrolledWindow,
     pub edit_view: gtk4::TextView,
     pub edit_buffer: gtk4::TextBuffer,

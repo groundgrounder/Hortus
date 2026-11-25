@@ -8,7 +8,9 @@ use crate::render::diagram::{
     DiagramExportKind, DiagramExportMeta, RenderedDiagram, format_diagram_failure,
     render_block_with_engine,
 };
-use crate::render::diagram_card::{DiagramCallbacks, DiagramCard, build_diagram_card};
+use crate::render::diagram_card::{
+    DiagramCallbacks, DiagramCard, build_diagram_card, diagram_render_width,
+};
 use crate::render::math::{MathRenderService, PreparedMathBlock};
 use crate::render::media::{PreparedMedia, prepare_media_blocks_bg};
 use gtk4::gio;
@@ -148,7 +150,7 @@ pub fn prepare_embed_bg(req: &EmbedRequest) -> Result<PreparedEmbed, String> {
                     &req.diagram_engine,
                     &info.content,
                     info.is_mmd,
-                    body_width,
+                    diagram_render_width(body_width),
                     &collapsed,
                     DiagramIdentity {
                         document: doc_id.clone(),
@@ -196,7 +198,7 @@ pub fn prepare_embed_bg(req: &EmbedRequest) -> Result<PreparedEmbed, String> {
             &req.diagram_engine,
             &info.content,
             true,
-            body_width,
+            diagram_render_width(body_width),
             &collapsed,
             DiagramIdentity {
                 document: doc_id,

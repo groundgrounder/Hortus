@@ -316,11 +316,45 @@ impl WindowInner {
                 }
             });
         let h_pad = crate::platform::viewport::responsive_horizontal_padding(scrolled_width);
-        let pad = f64::from(h_pad);
+        let max_content_width = tab.reading_viewport.max_content_width();
+        let (effective_col_w, _) =
+            crate::platform::effective_reading_column_width(scrolled_width, max_content_width);
+        let content_width_measured = if scrolled_width > 0 {
+            f64::from(effective_col_w)
+        } else {
+            0.0
+        };
         let widths = |widgets: Vec<gtk4::Widget>| -> Vec<i32> {
             widgets.into_iter().map(|widget| widget.width()).collect()
         };
-        serde_json::json!({
+        let box_bounds = |widgets: Vec<gtk4::Widget>| -> Vec<serde_json::Value> {
+            widgets
+                .into_iter()
+                .filter_map(|w| {
+                    w.compute_bounds(&tab.reading_scrolled).map(|b| {
+                        let x = f64::from(b.x());
+                        let width = f64::from(b.width());
+                        serde_json::json!({
+                            "x": x,
+                            "width": width,
+                            "right": x + width,
+                            "height": f64::from(b.height()),
+                        })
+                    })
+                })
+                .collect()
+        };
+        let edit_left_margin = tab.edit_view.left_margin();
+        let edit_right_margin = tab.edit_view.right_margin();
+        let edit_top_margin = tab.edit_view.top_margin();
+        let edit_allocated_width = tab.edit_view.width();
+        let edit_host_w = if edit_allocated_width > 0 {
+            edit_allocated_width
+        } else {
+            tab.reading_viewport.width()
+        };
+        let edit_column_width = (edit_host_w - edit_left_margin - edit_right_margin).max(0);
+        let mut snap = serde_json::json!({
             "found": true,
             "note": note,
             "window_width": window_width,
@@ -331,6 +365,7 @@ impl WindowInner {
             "layout_width": tab.layout_width,
             "scrolled_width": scrolled_width,
             "reading_box_width": reading_box_width,
+            "max_content_width": max_content_width,
             "text_view_width": text_width,
             "text_view_widths": text_widths,
             "text_view_offsets": text_offsets,
@@ -338,27 +373,152 @@ impl WindowInner {
             "first_text_scrolled_x": first_text_scrolled_x,
             "viewport_horizontal_padding": h_pad,
             "text_view_centered": text_centered,
-            "content_width_measured": (f64::from(scrolled_width) - pad).max(0.0),
+            "content_width_measured": content_width_measured,
             "viewport_last_alloc": tab.reading_viewport.last_allocated_width(),
             "viewport_settled": tab.reading_viewport.settled_width(),
             "resize_alloc_count": tab.reading_viewport.resize_alloc_count(),
             "reflow_count": tab.reading_viewport.reflow_count(),
             "surface_rebuilds": tab.surface_rebuilds,
             "in_place_relayouts": tab.in_place_relayouts,
-            "diagram_scene_widths": tab
-                .prepared_diagrams
-                .iter()
-                .filter_map(|diagram| diagram.scene.as_ref().map(|scene| scene.width))
-                .collect::<Vec<f64>>(),
-            "diagram_scene_heights": tab
-                .prepared_diagrams
-                .iter()
-                .filter_map(|diagram| diagram.scene.as_ref().map(|scene| scene.height))
-                .collect::<Vec<f64>>(),
-            "diagram_widget_widths": reading.map(|r| widths(r.diagram_widgets())).unwrap_or_default(),
-            "table_widget_widths": reading.map(|r| widths(r.table_widgets())).unwrap_or_default(),
-            "image_widget_widths": reading.map(|r| widths(r.image_widgets())).unwrap_or_default(),
-            "embed_widget_widths": reading.map(|r| widths(r.embed_widgets())).unwrap_or_default(),
-        })
+        });
+        if let Some(obj) = snap.as_object_mut() {
+            obj.insert(
+                "diagram_scene_widths".into(),
+                serde_json::json!(
+                    tab.prepared_diagrams
+                        .iter()
+                        .filter_map(|diagram| diagram.scene.as_ref().map(|scene| scene.width))
+                        .collect::<Vec<f64>>()
+                ),
+            );
+            obj.insert(
+                "diagram_scene_heights".into(),
+                serde_json::json!(
+                    tab.prepared_diagrams
+                        .iter()
+                        .filter_map(|diagram| diagram.scene.as_ref().map(|scene| scene.height))
+                        .collect::<Vec<f64>>()
+                ),
+            );
+            obj.insert(
+                "diagram_horizontal_overflows".into(),
+                serde_json::json!(
+                    reading
+                        .map(ReadingSurfaceHandle::diagram_horizontal_overflows)
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "diagram_widget_widths".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| widths(r.diagram_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "table_widget_widths".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| widths(r.table_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "image_widget_widths".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| widths(r.image_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "embed_widget_widths".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| widths(r.embed_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "text_box_bounds".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| box_bounds(
+                            r.text_views()
+                                .into_iter()
+                                .map(|(v, _)| v.upcast())
+                                .collect()
+                        ))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "diagram_box_bounds".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| box_bounds(r.diagram_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "table_box_bounds".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| box_bounds(r.table_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "embed_box_bounds".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| box_bounds(r.embed_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "hr_box_bounds".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| box_bounds(r.hr_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "math_box_bounds".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| box_bounds(r.math_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "image_box_bounds".into(),
+                serde_json::json!(
+                    reading
+                        .map(|r| box_bounds(r.image_widgets()))
+                        .unwrap_or_default()
+                ),
+            );
+            obj.insert(
+                "edit_left_margin".into(),
+                serde_json::json!(edit_left_margin),
+            );
+            obj.insert(
+                "edit_right_margin".into(),
+                serde_json::json!(edit_right_margin),
+            );
+            obj.insert("edit_top_margin".into(), serde_json::json!(edit_top_margin));
+            obj.insert(
+                "edit_allocated_width".into(),
+                serde_json::json!(edit_allocated_width),
+            );
+            obj.insert(
+                "edit_column_width".into(),
+                serde_json::json!(edit_column_width),
+            );
+        }
+        snap
     }
 }

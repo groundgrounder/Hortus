@@ -8,4 +8,6 @@ pub mod source_styles;
 pub mod style;
 pub mod viewport;
 
-pub use viewport::HortusReadingViewport;
+pub use viewport::{
+    HortusEditHost, HortusReadingViewport, READING_COLUMN_MAX_WIDTH, effective_reading_column_width,
+};

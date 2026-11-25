@@ -323,6 +323,10 @@ Hortus 补全场景用于截图，正文保持在首屏内。
     (vault / "L2-重名二").mkdir(exist_ok=True)
     (vault / "L2-重名一/同名.md").write_text("# 同名 A\n\n歧义目标 A。\n", encoding="utf-8")
     (vault / "L2-重名二/同名.md").write_text("# 同名 B\n\n歧义目标 B。\n", encoding="utf-8")
+    (vault / "L2-独立图表.mmd").write_text(
+        "flowchart LR\n  A[Start] --> B[Analyze]\n  B --> C[Synthesize]\n  C --> D[Review]\n",
+        encoding="utf-8",
+    )
 
 
 def supervise(cmd, env, label: str, timeout: float = 180.0):
@@ -937,8 +941,10 @@ def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: d
     )
 
     wide = layout_wide["report"]["after"]
+    wide_edit = layout_wide["report"].get("edit_after") or {}
     wide_widgets = wide.get("diagram_widget_widths") or []
     wide_scenes = wide.get("diagram_scene_widths") or []
+    wide_diag_bounds = wide.get("diagram_box_bounds") or []
     wide_content = wide.get("content_width_measured", 0)
     wide_text_widths = wide.get("text_view_widths") or []
     wide_left_x = wide.get("first_text_scrolled_x", 0.0)
@@ -948,26 +954,43 @@ def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: d
         wide_left_x >= 20.0,
         f"1440px 阅读区左留白不足（实测 {wide_left_x}px）：{wide}",
     )
-    check(wide_scenes and wide_scenes[0] >= 1200, f"宽屏图表未铺满宽容器：{wide}")
     check(
-        wide_widgets and wide_widgets[0] >= 1200,
-        f"宽屏图表控件未铺满宽容器：{wide}",
-    )
-    check(
-        wide_text_widths and max(wide_text_widths) <= 960,
-        f"宽屏正文段未收窄在 920px~960px 栏内：{wide}",
+        wide_text_widths and all(abs(w - 920) <= 4 for w in wide_text_widths),
+        f"1440px 收起侧栏后正文未统一居中在 920px 列内：{wide_text_widths}",
     )
     check(
         wide.get("text_view_centered") is True,
         f"宽屏正文段未居中排版：{wide}",
     )
     check(
-        wide_scenes[0] - base_scenes[0] >= 200,
-        f"侧栏收起后图表未明显变宽：base={base_scenes[0]} wide={wide_scenes[0]}",
+        wide_diag_bounds and abs(wide_diag_bounds[0]["width"] - 920) <= 4,
+        f"1440px 收起侧栏后 Mermaid 外框未对齐 920px 列宽：{wide_diag_bounds}",
     )
     check(
-        wide_scenes[0] <= wide_content + 24,
+        abs(wide_diag_bounds[0]["x"] - wide_left_x) <= 3.0,
+        f"1440px Mermaid 左边线未对齐正文：diag_x={wide_diag_bounds[0]['x']} text_x={wide_left_x}",
+    )
+    check(
+        not any(wide.get("diagram_horizontal_overflows") or []),
+        f"1440px Mermaid 出现多余内部横向滚动条：{wide.get('diagram_horizontal_overflows')}",
+    )
+    check(
+        wide_scenes and wide_scenes[0] >= 890,
+        f"1440px Mermaid 场景宽未扩展至 ~910px：{wide_scenes}",
+    )
+    check(
+        wide_scenes[0] - base_scenes[0] >= 200,
+        f"侧栏收起后图表未比双边栏态明显变宽 >=200px：base={base_scenes[0]} wide={wide_scenes[0]}",
+    )
+    check(
+        wide_scenes[0] <= wide_content + 4,
         f"宽屏图表横向溢出：scene={wide_scenes[0]} content={wide_content}",
+    )
+    check(
+        layout_wide["report"].get("edit_ready") is True
+        and abs(wide_edit.get("edit_column_width", 0) - 920) <= 4
+        and abs(wide_edit.get("edit_left_margin", 0) - wide_left_x) <= 4.0,
+        f"1440px 编辑视图未对齐 920px 居中列：{wide_edit}",
     )
 
     narrow = layout_narrow["report"]["after"]
@@ -993,9 +1016,11 @@ def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: d
         },
         "wide": {
             "widget": wide_widgets[0],
+            "outer_width": wide_diag_bounds[0]["width"],
             "scene": wide_scenes[0],
             "content": wide_content,
             "left_margin_x": wide_left_x,
+            "edit_column_width": wide_edit.get("edit_column_width"),
         },
         "narrow_994": {
             "widget": narrow_widgets[0],
@@ -1003,6 +1028,101 @@ def verify_diagram_widths(layout_1280: dict, layout_wide: dict, layout_narrow: d
             "content": narrow_content,
             "left_margin_x": narrow_left_x,
         },
+    }
+
+
+def verify_wide_all_elements(layout_field_guide_wide: dict):
+    """1440px 收起侧栏打开 Markdown field guide.md：全元素与编辑视图统一对齐 <= 920px 居中列。"""
+    report = layout_field_guide_wide["report"]
+    after = report["after"]
+    edit_after = report.get("edit_after") or {}
+    col_left = after.get("first_text_scrolled_x", 0.0)
+    col_width = after.get("text_view_width", 0)
+    col_right = col_left + col_width
+    check(after.get("left_show") is False and after.get("right_show") is False, f"侧栏未收起：{after}")
+    check(abs(col_width - 920) <= 4, f"Markdown field guide 正文列宽应为 920px，实测 {col_width}")
+
+    for field, label in (
+        ("text_box_bounds", "正文段"),
+        ("diagram_box_bounds", "Mermaid 图表"),
+        ("table_box_bounds", "GFM 表格"),
+        ("embed_box_bounds", "嵌入卡片"),
+        ("math_box_bounds", "块级公式"),
+        ("hr_box_bounds", "分隔线"),
+    ):
+        items = after.get(field) or []
+        check(items, f"Markdown field guide 缺少 {label} 边界数据 ({field})")
+        for idx, b in enumerate(items):
+            check(
+                abs(b["x"] - col_left) <= 4.0 and abs(b["right"] - col_right) <= 4.0,
+                f"{label}[{idx}] 未对齐 920px 左右边线：item={b} expected=[{col_left}, {col_right}]",
+            )
+
+    images = after.get("image_box_bounds") or []
+    check(images, "Markdown field guide 缺少图片边界数据 (image_box_bounds)")
+    for idx, b in enumerate(images):
+        check(
+            b["width"] <= 920 + 4 and b["x"] >= col_left - 4.0 and b["right"] <= col_right + 4.0,
+            f"图片[{idx}] 超出 920px 居中列：item={b} col=[{col_left}, {col_right}]",
+        )
+
+    check(
+        not any(after.get("diagram_horizontal_overflows") or []),
+        f"Markdown field guide Mermaid 出现多余横向滚动条：{after.get('diagram_horizontal_overflows')}",
+    )
+    check(
+        abs(after.get("edit_column_width", 0) - col_width) <= 4,
+        f"阅读态预同步编辑列宽未对齐：edit={after.get('edit_column_width')} read={col_width}",
+    )
+    check(report.get("edit_ready") is True, f"切换编辑视图失败：{report}")
+    check(
+        edit_after.get("edit_allocated_width", 0) > 240
+        and abs(edit_after.get("edit_column_width", 0) - col_width) <= 4
+        and abs(edit_after.get("edit_left_margin", 0) - col_left) <= 4.0
+        and abs(edit_after.get("edit_right_margin", 0) - col_left) <= 4.0
+        and edit_after.get("edit_top_margin") == 24,
+        f"真实编辑视图未与阅读列宽对齐：{edit_after}",
+    )
+    return {
+        "column_left_x": col_left,
+        "column_width": col_width,
+        "text_count": len(after.get("text_box_bounds") or []),
+        "diagram_bounds": after.get("diagram_box_bounds"),
+        "table_bounds": after.get("table_box_bounds"),
+        "embed_bounds": after.get("embed_box_bounds"),
+        "math_bounds": after.get("math_box_bounds"),
+        "hr_bounds": after.get("hr_box_bounds"),
+        "image_bounds": images,
+        "edit_column_width": edit_after.get("edit_column_width"),
+        "edit_left_margin": edit_after.get("edit_left_margin"),
+        "edit_right_margin": edit_after.get("edit_right_margin"),
+        "edit_top_margin": edit_after.get("edit_top_margin"),
+    }
+
+
+def verify_mmd_full_width(layout_mmd_wide: dict):
+    """独立 .mmd 纯图表文件保持 set_max_content_width(None)，铺满窗口宽度。"""
+    after = layout_mmd_wide["report"]["after"]
+    diag_bounds = after.get("diagram_box_bounds") or []
+    scenes = after.get("diagram_scene_widths") or []
+    check(after.get("max_content_width") is None, f".mmd 应保持无列宽封顶：{after}")
+    check(
+        diag_bounds and diag_bounds[0]["width"] >= 1200,
+        f"1440px 收起侧栏后独立 .mmd 外框未铺满窗口：{diag_bounds}",
+    )
+    check(
+        scenes and scenes[0] >= 1200,
+        f"1440px 收起侧栏后独立 .mmd 场景宽未铺满窗口：{scenes}",
+    )
+    check(
+        not any(after.get("diagram_horizontal_overflows") or []),
+        f"独立 .mmd 出现多余横向滚动条：{after.get('diagram_horizontal_overflows')}",
+    )
+    return {
+        "max_content_width": after.get("max_content_width"),
+        "diagram_outer_width": diag_bounds[0]["width"],
+        "diagram_scene_width": scenes[0],
+        "scrolled_width": after.get("scrolled_width"),
     }
 
 
@@ -1552,8 +1672,34 @@ def main():
             860,
             screenshot=media_dir / "l2-typography-markdown-guide.png",
         )
+        layout_field_guide_wide = run_layout_width(
+            gui_bin,
+            wikilink_vault,
+            tmp_path,
+            output_dir,
+            "field-guide-wide",
+            "Markdown field guide.md",
+            1440,
+            860,
+            hide_sidebars=True,
+            screenshot=media_dir / "l2-typography-wide-field-guide.png",
+        )
+        layout_mmd_wide = run_layout_width(
+            gui_bin,
+            wikilink_vault,
+            tmp_path,
+            output_dir,
+            "standalone-mmd-wide",
+            "L2-独立图表.mmd",
+            1440,
+            860,
+            hide_sidebars=True,
+            screenshot=media_dir / "l2-standalone-mmd-wide.png",
+        )
         layout_verified = verify_diagram_widths(layout_1280, layout_wide, layout_narrow)
         media_widths = verify_media_widths(layout_media)
+        all_elements_wide = verify_wide_all_elements(layout_field_guide_wide)
+        mmd_wide = verify_mmd_full_width(layout_mmd_wide)
         live_resize = run_live_resize_regression(gui_bin, wikilink_vault, tmp_path, output_dir, media_dir)
 
     if display is not None:
@@ -1583,18 +1729,24 @@ def main():
         "layout_width": {
             "learning_map": layout_verified,
             "media": media_widths,
+            "field_guide_wide_all_elements": all_elements_wide,
+            "standalone_mmd_wide": mmd_wide,
             "live_resize": live_resize,
             "reports": {
                 "default_1280": layout_1280["report_path"],
                 "wide": layout_wide["report_path"],
                 "narrow_994": layout_narrow["report_path"],
                 "media_1280": layout_media["report_path"],
+                "field_guide_wide": layout_field_guide_wide["report_path"],
+                "standalone_mmd_wide": layout_mmd_wide["report_path"],
             },
             "screenshots": {
                 "default_1280": layout_1280["screenshot"],
                 "wide": layout_wide["screenshot"],
                 "narrow_994": layout_narrow["screenshot"],
                 "markdown_guide": layout_media["screenshot"],
+                "field_guide_wide": layout_field_guide_wide["screenshot"],
+                "standalone_mmd_wide": layout_mmd_wide["screenshot"],
             },
         },
         "vault_unchanged_except": sorted(allowed_changes),

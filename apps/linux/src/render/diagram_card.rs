@@ -47,10 +47,20 @@ struct DiagramCardState {
     callbacks: DiagramCallbacks,
 }
 
+/// `.hortus-diagram-card` CSS 水平 chrome（`4px padding + 1px border` × 2 = `10px`）。
+pub const DIAGRAM_CARD_HORIZONTAL_CHROME: f64 = 10.0;
+
+/// 计算传入图引擎的内容宽度：扣除外框 padding/border，避免多余 10px 横向滚动条。
+pub fn diagram_render_width(avail_w: f64) -> f64 {
+    (avail_w - DIAGRAM_CARD_HORIZONTAL_CHROME).max(240.0)
+}
+
 /// 原生块级 Mermaid 图表卡片句柄，支持原地宽度重排而不销毁重建控件。
 #[derive(Clone)]
 pub struct DiagramCard {
     root: gtk4::Widget,
+    #[cfg_attr(not(feature = "automation"), allow(dead_code))]
+    canvas: Option<gtk4::ScrolledWindow>,
     state: Option<Rc<DiagramCardState>>,
 }
 
@@ -66,11 +76,19 @@ impl DiagramCard {
             .is_some_and(|st| st.pending_relayouts.get() > 0)
     }
 
+    #[cfg(feature = "automation")]
+    pub fn has_horizontal_overflow(&self) -> bool {
+        self.canvas.as_ref().is_some_and(|scroll| {
+            let adj = scroll.hadjustment();
+            adj.upper() > adj.page_size() + 1.0
+        })
+    }
+
     pub fn relayout_to_width(&self, avail_w: f64) {
         let Some(ref st) = self.state else {
             return;
         };
-        let target_w = avail_w.max(240.0);
+        let target_w = diagram_render_width(avail_w);
         if (target_w - st.last_width.get()).abs() < 4.0 {
             return;
         }
@@ -152,6 +170,7 @@ pub fn build_diagram_card(
                 &reason,
                 content_width,
             ),
+            canvas: None,
             state: None,
         };
     }
@@ -164,6 +183,7 @@ pub fn build_diagram_card(
                 crate::i18n::tr(crate::i18n::Key::DiagramEmptyScene),
                 content_width,
             ),
+            canvas: None,
             state: None,
         };
     };
@@ -184,7 +204,7 @@ pub fn build_diagram_card(
         collapsed: RefCell::new(initial.collapsed),
         previous: RefCell::new(initial.previous),
         hovered: RefCell::new(None),
-        last_width: Cell::new(content_width.max(240.0)),
+        last_width: Cell::new(diagram_render_width(content_width)),
         rerender_gen: Cell::new(0),
         pending_relayouts: Cell::new(0),
         drawing: drawing.clone(),
@@ -461,6 +481,7 @@ pub fn build_diagram_card(
 
     DiagramCard {
         root: overlay.upcast(),
+        canvas: Some(canvas),
         state: Some(state),
     }
 }

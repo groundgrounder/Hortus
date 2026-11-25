@@ -2,7 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 分段块级 Reading View 表面组装：合并连续文本段（超宽屏 920px Clamp 居中）+ 原生块级控件，
+//! 分段块级 Reading View 表面组装：合并连续文本段（随 `HortusReadingViewport` 统一居中列宽）+ 原生块级控件，
 //! 支持原地宽度重排（零销毁重建）、精准跨段滚动锚点与双链坐标命中。
 
 use crate::platform::style::{MaskTagSet, apply_mask_tags_cached, create_tag_table};
@@ -30,7 +30,6 @@ use gtk4::prelude::*;
 use hortus_ffi::{
     DiagramEngine, EmbedContentInfo, KnowledgeMarkupInfo, VaultHandle, WorkspaceCore,
 };
-use libadwaita as adw;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -434,6 +433,39 @@ impl ReadingSurfaceHandle {
             .iter()
             .filter_map(|seg| match seg {
                 ReadingSegment::Embed { embed, .. } => Some(embed.widget().clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn math_widgets(&self) -> Vec<gtk4::Widget> {
+        self.segments
+            .iter()
+            .filter_map(|seg| match seg {
+                ReadingSegment::DisplayMath { math, .. } => Some(math.widget().clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn hr_widgets(&self) -> Vec<gtk4::Widget> {
+        self.segments
+            .iter()
+            .filter_map(|seg| match seg {
+                ReadingSegment::Hr { separator, .. } => Some(separator.clone().upcast()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn diagram_horizontal_overflows(&self) -> Vec<bool> {
+        self.segments
+            .iter()
+            .filter_map(|seg| match seg {
+                ReadingSegment::Diagram { card, .. } => Some(card.has_horizontal_overflow()),
                 _ => None,
             })
             .collect()
@@ -918,21 +950,8 @@ fn install_text_segment(
         link_dispatcher = Some(dispatcher);
     }
 
-    let outer: gtk4::Widget = if embedded {
-        text_view.clone().upcast()
-    } else {
-        adw::Clamp::builder()
-            .maximum_size(920)
-            .tightening_threshold(920)
-            .halign(gtk4::Align::Fill)
-            .hexpand(true)
-            .child(&text_view)
-            .build()
-            .upcast()
-    };
-
     let seg = TextSegment {
-        view: text_view,
+        view: text_view.clone(),
         buffer,
         source_anchors: data.source_anchors,
         source_start: data.source_start,
@@ -940,5 +959,5 @@ fn install_text_segment(
         link_spans: spans,
         link_dispatcher,
     };
-    (outer, seg)
+    (text_view.upcast(), seg)
 }

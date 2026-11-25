@@ -7,10 +7,13 @@
 use crate::core::model::HeadingItem;
 use crate::editor::{EditState, FindBar, LinkCompletion};
 use crate::knowledge::clear_box;
-use crate::platform::HortusReadingViewport;
 use crate::platform::style::{apply_source_styles, create_tag_table};
+use crate::platform::{
+    HortusEditHost, HortusReadingViewport, READING_COLUMN_MAX_WIDTH, effective_reading_column_width,
+};
 use crate::reading::{PrepareReadingRequest, build_reading_surface, prepare_reading_note_bg};
 use crate::window::commands::WindowCommand;
+use crate::window::reading_layout::is_mmd_path;
 use crate::window::shell::WindowInner;
 use crate::window::state::OpenNoteTab;
 use gtk4::gio;
@@ -70,7 +73,9 @@ impl WindowInner {
         loading_lbl.set_margin_top(36);
         reading_slot.append(&loading_lbl);
 
+        let is_mmd = is_mmd_path(relpath);
         let reading_viewport = HortusReadingViewport::new();
+        reading_viewport.set_max_content_width((!is_mmd).then_some(READING_COLUMN_MAX_WIDTH));
         reading_viewport.set_child(Some(&reading_slot));
         {
             let weak = Rc::downgrade(self);
@@ -96,14 +101,17 @@ impl WindowInner {
         let edit_buffer = gtk4::TextBuffer::new(Some(&tag_table));
         edit_buffer.set_enable_undo(true);
         edit_buffer.set_text(crate::i18n::tr(crate::i18n::Key::RenderingReading));
+        let initial_vp_w = self.reading_viewport_width_hint();
+        let (_, initial_side_offset) =
+            effective_reading_column_width(initial_vp_w, Some(READING_COLUMN_MAX_WIDTH));
         let edit_view = gtk4::TextView::builder()
             .buffer(&edit_buffer)
             .editable(true)
             .cursor_visible(true)
             .wrap_mode(gtk4::WrapMode::WordChar)
-            .left_margin(44)
-            .right_margin(44)
-            .top_margin(28)
+            .left_margin(initial_side_offset)
+            .right_margin(initial_side_offset)
+            .top_margin(24)
             .bottom_margin(48)
             .pixels_above_lines(0)
             .pixels_below_lines(2)
@@ -119,7 +127,18 @@ impl WindowInner {
             .hexpand(true)
             .child(&edit_view)
             .build();
-        content_stack.add_named(&edit_scrolled, Some("edit"));
+        let edit_host = HortusEditHost::new();
+        edit_host.set_child(Some(&edit_scrolled));
+        edit_host.set_edit_view(Some(&edit_view));
+        {
+            let host_weak = edit_host.downgrade();
+            reading_viewport.connect_viewport_width(move |vp_w| {
+                if let Some(host) = host_weak.upgrade() {
+                    host.sync_margins_for_width(vp_w);
+                }
+            });
+        }
+        content_stack.add_named(&edit_host, Some("edit"));
         content_stack.set_visible_child_name("reading");
 
         let notice_label = gtk4::Label::new(None);
@@ -177,6 +196,7 @@ impl WindowInner {
                 reading_revision: 0,
                 surface_rebuilds: 0,
                 in_place_relayouts: 0,
+                edit_host,
                 edit_scrolled,
                 edit_view,
                 edit_buffer,
@@ -200,7 +220,7 @@ impl WindowInner {
         self.center_stack.set_visible_child_name("tabs");
         self.sync_active_tab_ui();
 
-        let content_width = self.reading_content_width();
+        let content_width = self.reading_content_width_for(is_mmd);
         let font_size = services.config.snapshot().font_size;
         let dark = adw::StyleManager::default().is_dark();
         let main_thread = std::thread::current().id();
@@ -446,6 +466,18 @@ impl WindowInner {
         drop(old);
 
         let alloc_w = viewport.last_allocated_width();
+        let vp_w = viewport.width();
+        if vp_w > 0 {
+            let host = self
+                .state
+                .borrow()
+                .tabs
+                .get(rel)
+                .map(|tab| tab.edit_host.clone());
+            if let Some(host) = host {
+                host.sync_margins_for_width(vp_w);
+            }
+        }
         if alloc_w > 240 {
             let clamped = f64::from(alloc_w).max(260.0);
             if (clamped - content_width).abs() < 16.0 {
@@ -494,6 +526,7 @@ impl WindowInner {
         if let Some(tab) = removed {
             tab.edit_state.borrow_mut().cancel_timers();
             tab.reading_viewport.clear_timers();
+            tab.edit_host.clear_timers();
             tab.find.teardown();
             tab.completion.teardown();
             if self.state.borrow().tabs.is_empty() {

@@ -76,16 +76,18 @@ async fn run_layout_width_checks(win: &Rc<WindowInner>) -> serde_json::Value {
                 return false;
             };
             let target = f64::from(tab.reading_viewport.last_allocated_width()).max(260.0);
-            let scene_grew = tab
-                .prepared_diagrams
-                .iter()
-                .filter_map(|diagram| diagram.scene.as_ref())
-                .any(|scene| scene.width > before_scene + 200.0);
+            let has_diagrams = !tab.prepared_diagrams.is_empty();
+            let scene_grew = !has_diagrams
+                || tab
+                    .prepared_diagrams
+                    .iter()
+                    .filter_map(|diagram| diagram.scene.as_ref())
+                    .any(|scene| scene.width > before_scene + 80.0);
             let pending = tab
                 .reading
                 .as_ref()
                 .is_some_and(crate::reading::ReadingSurfaceHandle::has_pending_diagram_relayout);
-            tab.layout_width > before_layout + 200.0
+            tab.layout_width > before_layout + 80.0
                 && scene_grew
                 && !pending
                 && (tab.layout_width - target).abs() < 24.0
@@ -99,6 +101,19 @@ async fn run_layout_width_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     {
         eprintln!("screenshot failed: {err}");
     }
+    win.toggle_active_tab_edit_mode();
+    let edit_ready = wait_for(4000, || {
+        let st = win.state.borrow();
+        st.tabs.get(&note).is_some_and(|tab| {
+            tab.editing
+                && tab.edit_view.is_mapped()
+                && tab.edit_view.width() > 240
+                && tab.edit_view.left_margin() > 0
+        })
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(120)).await;
+    let edit_after = win.layout_snapshot(&note);
     serde_json::json!({
         "note": note,
         "ready": ready,
@@ -109,6 +124,8 @@ async fn run_layout_width_checks(win: &Rc<WindowInner>) -> serde_json::Value {
         "left_margin_ok": after["first_text_scrolled_x"].as_f64().is_some_and(|x| x >= 20.0),
         "before": before,
         "after": after,
+        "edit_ready": edit_ready,
+        "edit_after": edit_after,
     })
 }
 

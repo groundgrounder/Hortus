@@ -655,6 +655,7 @@ impl WindowInner {
         for (_, tab) in tabs {
             tab.edit_state.borrow_mut().cancel_timers();
             tab.reading_viewport.clear_timers();
+            tab.edit_host.clear_timers();
             tab.find.teardown();
             tab.completion.teardown();
         }
