@@ -7,10 +7,23 @@ cd "$ROOT"
 OUT_DIR="${ROOT}/build/linux"
 mkdir -p "${OUT_DIR}/bin"
 
-if [[ "${1:-}" == "--nix" ]]; then
+WITH_AUTOMATION=0
+USE_NIX=0
+for arg in "$@"; do
+  case "$arg" in
+    --nix) USE_NIX=1 ;;
+    --automation) WITH_AUTOMATION=1 ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$USE_NIX" == "1" ]]; then
   nix build .#hortus-cli -o "${OUT_DIR}/result-cli"
   nix build .#hortus-linux -o "${OUT_DIR}/result-linux"
-  echo "Nix 构建完成："
+  echo "Nix 构建完成（无 automation 生产包）："
   echo "  CLI: ${OUT_DIR}/result-cli/bin/hortus"
   echo "  GUI: ${OUT_DIR}/result-linux/bin/hortus-gtk"
   exit 0
@@ -85,7 +98,11 @@ sanitize_rpath "${OUT_DIR}/bin/hortus"
 
 (
   cd "${ROOT}/apps/linux"
-  cargo build --release --locked
+  if [[ "$WITH_AUTOMATION" == "1" ]]; then
+    cargo build --release --locked --features automation
+  else
+    cargo build --release --locked --no-default-features
+  fi
 )
 cp -f "${ROOT}/apps/linux/target/release/hortus-gtk" "${OUT_DIR}/bin/hortus-gtk"
 sanitize_rpath "${OUT_DIR}/bin/hortus-gtk"

@@ -98,15 +98,21 @@ def discover_gui_bin(explicit: Path | None) -> Path:
     if explicit is not None:
         check(explicit.is_file(), f"指定的 GUI 二进制不存在: {explicit}")
         return explicit.resolve()
-    for candidate in (
-        ROOT / "result/bin/hortus-gtk",
-        ROOT / "build/linux/result-linux/bin/hortus-gtk",
-        ROOT / "build/linux/bin/hortus-gtk",
-        ROOT / "apps/linux/target/release/hortus-gtk",
-    ):
-        if candidate.is_file():
-            return candidate.resolve()
-    raise AssertionError("未找到 hortus-gtk 二进制，请先构建或传入 --gui-bin")
+    cmd = [
+        "cargo",
+        "build",
+        "--manifest-path",
+        str(ROOT / "apps/linux/Cargo.toml"),
+        "--features",
+        "automation",
+        "--offline",
+    ]
+    if shutil.which("cargo") is None:
+        cmd = ["nix", "develop", "--command"] + cmd
+    subprocess.run(cmd, cwd=ROOT, check=True)
+    built = ROOT / "apps/linux/target/debug/hortus-gtk"
+    check(built.is_file(), f"构建 automation GUI 二进制后未找到输出: {built}")
+    return built.resolve()
 
 
 def snapshot_tree(root: Path):

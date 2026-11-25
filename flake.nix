@@ -152,10 +152,14 @@
             postInstall = ''
               install -Dm644 apps/linux/data/io.github.groundgrounder.Hortus.desktop \
                 "$out/share/applications/io.github.groundgrounder.Hortus.desktop"
+              install -Dm644 apps/linux/data/io.github.groundgrounder.Hortus.metainfo.xml \
+                "$out/share/metainfo/io.github.groundgrounder.Hortus.metainfo.xml"
               install -Dm644 apps/linux/data/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg \
                 "$out/share/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg"
               install -Dm644 apps/LICENSE \
                 "$out/share/licenses/hortus-linux/LICENSE"
+              install -Dm644 apps/linux/data/THIRD_PARTY_NOTICES.txt \
+                "$out/share/licenses/hortus-linux/THIRD_PARTY_NOTICES.txt"
               install -d "$out/share/hortus/fonts/KaTeX"
               install -Dm644 apps/macos/Resources/Fonts/KaTeX/KaTeX_*.ttf \
                 apps/macos/Resources/Fonts/KaTeX/OFL.txt \
@@ -265,7 +269,9 @@
             postCheck = ''
               pushd apps/linux
               cargo fmt --check
-              cargo clippy --all-targets --offline -- -D warnings
+              cargo clippy --no-default-features --all-targets --offline -- -D warnings
+              cargo clippy --features automation --all-targets --offline -- -D warnings
+              cargo test --features automation --offline
               popd
             '';
 

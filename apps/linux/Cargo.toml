@@ -5,9 +5,12 @@ name = "hortus-linux"
 version = "0.5.0"
 edition = "2024"
 license = "GPL-3.0-only"
+description = "Native GTK4 and libadwaita Markdown reader and editor with local diagrams, math, and Agent review"
+homepage = "https://github.com/groundgrounder/Hortus"
+repository = "https://github.com/groundgrounder/Hortus"
 
 [features]
-default = ["automation"]
+default = []
 automation = []
 
 [[bin]]
@@ -35,3 +38,29 @@ hortus-vault = { path = "../../crates/hortus-vault" }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
+
+[package.metadata.deb]
+maintainer = "groundgrounder"
+copyright = "2026, groundgrounder"
+license-file = ["../LICENSE", "0"]
+depends = "$auto, gsettings-desktop-schemas, adwaita-icon-theme, hicolor-icon-theme"
+section = "editors"
+priority = "optional"
+assets = [
+    ["target/release/hortus-gtk", "usr/bin/hortus-gtk", "755"],
+    ["data/io.github.groundgrounder.Hortus.desktop", "usr/share/applications/io.github.groundgrounder.Hortus.desktop", "644"],
+    ["data/io.github.groundgrounder.Hortus.metainfo.xml", "usr/share/metainfo/io.github.groundgrounder.Hortus.metainfo.xml", "644"],
+    ["data/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg", "usr/share/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg", "644"],
+    ["data/THIRD_PARTY_NOTICES.txt", "usr/share/licenses/hortus-linux/THIRD_PARTY_NOTICES.txt", "644"],
+    ["../macos/Resources/Fonts/KaTeX/*", "usr/share/hortus/fonts/KaTeX/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/hortus-gtk", dest = "/usr/bin/hortus-gtk", mode = "755" },
+    { source = "data/io.github.groundgrounder.Hortus.desktop", dest = "/usr/share/applications/io.github.groundgrounder.Hortus.desktop", mode = "644" },
+    { source = "data/io.github.groundgrounder.Hortus.metainfo.xml", dest = "/usr/share/metainfo/io.github.groundgrounder.Hortus.metainfo.xml", mode = "644" },
+    { source = "data/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg", mode = "644" },
+    { source = "data/THIRD_PARTY_NOTICES.txt", dest = "/usr/share/licenses/hortus-linux/THIRD_PARTY_NOTICES.txt", mode = "644" },
+    { source = "../macos/Resources/Fonts/KaTeX/*", dest = "/usr/share/hortus/fonts/KaTeX/", mode = "644" },
+]

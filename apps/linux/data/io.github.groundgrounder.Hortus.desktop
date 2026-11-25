@@ -1,12 +1,15 @@
 [Desktop Entry]
 Type=Application
 Name=Hortus
-GenericName=Markdown Knowledge Base
-Comment=Native Markdown knowledge viewer built for reading alongside AI agents
+GenericName=Markdown Notes
+GenericName[zh_CN]=Markdown 笔记
+Comment=Read and write Markdown notes alongside terminal Agents
+Comment[zh_CN]=面向阅读与 Agent 协作的原生 Markdown 应用
 Exec=hortus-gtk %F
 Icon=io.github.groundgrounder.Hortus
 Terminal=false
 Categories=Office;Utility;TextEditor;
-Keywords=Markdown;Notes;Knowledge;Mermaid;
+Keywords=Markdown;Notes;Mermaid;Terminal;Agent;
+Keywords[zh_CN]=Markdown;笔记;流程图;终端;Agent;
 StartupNotify=true
 StartupWMClass=io.github.groundgrounder.Hortus

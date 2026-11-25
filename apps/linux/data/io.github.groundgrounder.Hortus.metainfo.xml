@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.groundgrounder.Hortus</id>
+  <name>Hortus</name>
+  <summary>Native Markdown reader and editor built with GTK4</summary>
+  <summary xml:lang="zh-Hans">使用 GTK4 构建的原生 Markdown 阅读与编辑应用</summary>
+  <metadata_license>FSFAP</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="io.github.groundgrounder">
+    <name>groundgrounder</name>
+  </developer>
+  <description>
+    <p>
+      Hortus is a native Linux Markdown application with local Mermaid diagram rendering,
+      TeX math typesetting, an integrated terminal, and Agent change review tools.
+    </p>
+    <p xml:lang="zh-Hans">
+      Hortus 是原生 Linux Markdown 应用，内置本地 Mermaid 图表渲染、TeX 数学公式排版、集成终端与 Agent 会话改动审阅。
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.groundgrounder.Hortus.desktop</launchable>
+  <url type="homepage">https://github.com/groundgrounder/Hortus</url>
+  <provides>
+    <binary>hortus-gtk</binary>
+  </provides>
+  <releases>
+    <release version="0.5.0" date="2026-11-25"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

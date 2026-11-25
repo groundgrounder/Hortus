@@ -244,15 +244,23 @@ def main() -> int:
     media_dir = (args.media if args.media is not None else output_dir / "media").resolve()
     media_dir.mkdir(parents=True, exist_ok=True)
 
-    gui_bin = discover_binary(
-        args.gui_bin,
-        [
-            ROOT / "build/linux/result-linux/bin/hortus-gtk",
-            ROOT / "apps/linux/target/debug/hortus-gtk",
-            ROOT / "apps/linux/target/release/hortus-gtk",
-        ],
-        "hortus-gtk",
-    )
+    if args.gui_bin is not None:
+        gui_bin = discover_binary(args.gui_bin, [], "hortus-gtk")
+    else:
+        cmd = [
+            "cargo",
+            "build",
+            "--manifest-path",
+            str(ROOT / "apps/linux/Cargo.toml"),
+            "--features",
+            "automation",
+            "--offline",
+        ]
+        if shutil.which("cargo") is None:
+            cmd = ["nix", "develop", "--command"] + cmd
+        subprocess.run(cmd, cwd=ROOT, check=True)
+        gui_bin = (ROOT / "apps/linux/target/debug/hortus-gtk").resolve()
+        check(gui_bin.exists(), f"未找到 automation 构建输出: {gui_bin}")
     cli_bin = discover_binary(
         args.cli_bin,
         [
@@ -319,8 +327,9 @@ def main() -> int:
                 f"空格路径 shell 引用异常: {data['terminal']['quoted_space_path']}",
             )
             check(
-                "本次会话改动" in data["agent_changes"]["changes_title"],
-                f"改动面板文案未使用「本次会话改动」: {data['agent_changes']['changes_title']}",
+                ("Session Changes" in data["agent_changes"]["changes_title"])
+                or ("本次会话改动" in data["agent_changes"]["changes_title"]),
+                f"改动面板文案未使用 Session Changes / 本次会话改动: {data['agent_changes']['changes_title']}",
             )
 
             # 检查 session.toml 含 windows 且不含任何动态终端 PTY 字段，并注入缺失路径验证恢复跳过
