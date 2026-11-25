@@ -69,22 +69,38 @@ public struct NoteDiagram: Sendable {
 
 /// 应用存活期间复用单个引擎。Task 创建即在后台预热，不占用主线程。
 public actor DiagramService {
+    private struct DocumentCache {
+        var source: String
+        var sourceHash: Int
+        var sourceOffsets: DiagramSourceOffsets
+        var lineCache: [DiagramLineKey: CTLine]
+        var previousBlocks: [UInt32: NoteDiagram]
+    }
+
+    private static let maxCachedDocuments = 8
+    private static let maxCachedLinesPerDocument = 2048
+
     /// 调用栈只在首次渲染时取一次；每次重排都符号化会把验收计时拖慢。
     private lazy var renderThreadEvidence: [String] = Self.threadEvidence()
-    private var lineCache: [DiagramLineKey: CTLine] = [:]
-    private var cachedSource: String?
-    private var sourceOffsets: DiagramSourceOffsets?
-    private var activeDocument = ""
-    private var previousBlocks: [UInt32: NoteDiagram] = [:]
+    private var documentCaches: [String: DocumentCache] = [:]
+    private var documentOrder: [String] = []
     private let engine = Task.detached(priority: .userInitiated) { try PlatformGraphics.makeDiagramEngine() }
 
     public init() {}
 
+    public var cachedDocumentCount: Int { documentCaches.count }
+
+    public func cachedLineCount(for documentIdentity: String) -> Int {
+        documentCaches[documentIdentity]?.lineCache.count ?? 0
+    }
+
+    public func cachedPreviousCount(for documentIdentity: String) -> Int {
+        documentCaches[documentIdentity]?.previousBlocks.count ?? 0
+    }
+
     public func clearCache() {
-        lineCache.removeAll(keepingCapacity: false)
-        previousBlocks.removeAll(keepingCapacity: false)
-        cachedSource = nil
-        sourceOffsets = nil
+        documentCaches.removeAll(keepingCapacity: false)
+        documentOrder.removeAll(keepingCapacity: false)
     }
 
     public func blocks(snapshot: DocumentSnapshot, vault: String, note: String, core: WorkspaceCore?, documentIdentity: String? = nil) throws -> [NoteDiagram] {
@@ -115,7 +131,7 @@ public actor DiagramService {
     }
 
     /// 在实际编辑区间上搬移块身份；前插失败块不能占用原 ordinal 的旧图。
-    private func remapPrevious(from oldSource: String, to source: String, mmd: Bool, blocks: [NoteDiagram]) {
+    private func remapPrevious(from oldSource: String, to source: String, mmd: Bool, blocks: [NoteDiagram], previousBlocks: inout [UInt32: NoteDiagram]) {
         guard !mmd else { return }
         let old = Array(oldSource.utf8), new = Array(source.utf8)
         var prefix = 0
@@ -161,32 +177,59 @@ public actor DiagramService {
         previousBlocks = moved
     }
 
+    private func touchDocument(_ document: String) {
+        documentOrder.removeAll { $0 == document }
+        documentOrder.append(document)
+        while documentOrder.count > Self.maxCachedDocuments {
+            let evicted = documentOrder.removeFirst()
+            documentCaches.removeValue(forKey: evicted)
+        }
+    }
+
     /// 仅验收使用：丢弃旧图锚点，下一次 render 从初排开始。
     public func discardPrevious() {
-        previousBlocks = [:]
+        for key in documentCaches.keys {
+            documentCaches[key]?.previousBlocks = [:]
+        }
     }
 
     public func render(source: String, mmd: Bool, blocks: [NoteDiagram], width: Double, dark: Bool, requestGeneration: UInt64 = 0, fontGeneration: UInt64 = 0) async -> [NoteDiagram] {
-        // 空正文无需排版；保留最后一篇图文档的有界行缓存，重新打开时复用 CoreText 对象。
+        // 空正文无需排版；按文档身份保留最近 8 篇的有界行缓存与锚点状态，避免嵌入卡片交替清空主文档缓存。
         guard !blocks.isEmpty else { return blocks }
         var result = blocks
         do {
             let engine = try await engine.value
             return autoreleasepool {
-                if let oldSource = cachedSource, oldSource != source {
-                    remapPrevious(from: oldSource, to: source, mmd: mmd, blocks: blocks)
-                }
-                if cachedSource != source {
-                    lineCache = [:]; cachedSource = source
-                    sourceOffsets = DiagramSourceOffsets(source)
-                }
-                guard let sourceOffsets else { return blocks }
-                let original = source as NSString
                 let document = result[0].documentIdentity
-                if activeDocument != document { previousBlocks = [:]; activeDocument = document }
+                let sourceHash = source.hashValue
+                var cache: DocumentCache
+                if var existing = documentCaches[document] {
+                    if existing.sourceHash != sourceHash || existing.source != source {
+                        remapPrevious(from: existing.source, to: source, mmd: mmd, blocks: blocks, previousBlocks: &existing.previousBlocks)
+                        existing.source = source
+                        existing.sourceHash = sourceHash
+                        existing.sourceOffsets = DiagramSourceOffsets(source)
+                    }
+                    cache = existing
+                } else {
+                    cache = DocumentCache(
+                        source: source,
+                        sourceHash: sourceHash,
+                        sourceOffsets: DiagramSourceOffsets(source),
+                        lineCache: [:],
+                        previousBlocks: [:]
+                    )
+                }
+                touchDocument(document)
+                defer {
+                    cache.previousBlocks = cache.previousBlocks.filter { key, _ in result.contains { $0.ordinal == key } }
+                    documentCaches[document] = cache
+                }
+                let sourceOffsets = cache.sourceOffsets
+                let original = source as NSString
                 for index in result.indices {
                     result[index].prepared = nil; result[index].previous = nil; result[index].sceneVersion = 0
-                    if let old = previousBlocks[result[index].ordinal], old.revision <= result[index].revision {
+                    if let old = cache.previousBlocks[result[index].ordinal], old.revision <= result[index].revision {
                         let viewport = result[index].viewport
                         let collapsed = result[index].collapsed
                         result[index].inherit(old)
@@ -222,13 +265,18 @@ public actor DiagramService {
                         let transferred = ProcessInfo.processInfo.systemUptime
                         result[index].heavyWorkThreadChecks["scene_decode_and_coretext_prepare"] = Thread.isMainThread
                         result[index].heavyWorkThreadEvidence["scene_decode_and_coretext_prepare"] = renderThreadEvidence
+                        var lineCache = cache.lineCache
                         result[index].prepared = PreparedScene(scene: try DiagramScene(scene), payloadBytes: Int(scene.wireBytes), sourceRanges: ranges, edgeRanges: edgeRanges, edgeLabels: edgeLabels) { span in
                             let key = DiagramLineKey(span)
                             if let line = lineCache[key] { return line }
                             let line = SceneRenderer.line(for: span)
+                            if lineCache.count >= Self.maxCachedLinesPerDocument {
+                                lineCache.removeAll(keepingCapacity: true)
+                            }
                             lineCache[key] = line
                             return line
                         }
+                        cache.lineCache = lineCache
                         result[index].renderMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1000
                         result[index].transferMilliseconds = (transferred - started) * 1000
                         result[index].layoutMilliseconds = scene.layoutMs
@@ -236,7 +284,7 @@ public actor DiagramService {
                         result[index].sceneVersion = scene.schemaVersion
                         result[index].reason = nil
                         result[index].diagnostic = nil
-                        previousBlocks[result[index].ordinal] = result[index]
+                        cache.previousBlocks[result[index].ordinal] = result[index]
                     } catch {
                         // 上一张有效图继续显示；过期的命中范围不会提交到当前原文。
                         result[index].prepared = result[index].prepared?.withoutSourceInteraction()
@@ -244,7 +292,6 @@ public actor DiagramService {
                         result[index].diagnostic = String(describing: error)
                     }
                 }
-                previousBlocks = previousBlocks.filter { key, _ in result.contains { $0.ordinal == key } }
                 return result
             }
         } catch {

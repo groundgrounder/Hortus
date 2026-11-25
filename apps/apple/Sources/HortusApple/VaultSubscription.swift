@@ -7,7 +7,14 @@ public final class VaultSubscription: Sendable {
     private final class Closing: @unchecked Sendable {
         private let lock = NSLock()
         private var value = false
-        func set() { lock.lock(); value = true; lock.unlock() }
+        @discardableResult
+        func set() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            let first = !value
+            value = true
+            return first
+        }
         var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
 
@@ -34,12 +41,18 @@ public final class VaultSubscription: Sendable {
             }
         }
         thread.name = "hortus-batches"
+        thread.qualityOfService = .userInitiated
         thread.start()
     }
 
+    deinit {
+        close()
+    }
+
     public func close() {
-        closing.set()
-        handle.close()
+        if closing.set() {
+            handle.close()
+        }
         finished.wait()
     }
 }

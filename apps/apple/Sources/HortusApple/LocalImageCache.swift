@@ -2,6 +2,9 @@ import CoreGraphics
 import Foundation
 import HortusCore
 import ImageIO
+#if canImport(UIKit)
+import UIKit
+#endif
 
 public struct PreparedMedia: Sendable {
     public let block: MediaBlock
@@ -33,8 +36,45 @@ public actor LocalImageCache {
     private var pixelBytes = 0
     public private(set) var decodes = 0
     public private(set) var mainThreadDecodes = 0
+    public var cachedPixelBytes: Int { pixelBytes }
+    #if canImport(UIKit)
+    private final class MemoryWarningToken: @unchecked Sendable {
+        private let token: any NSObjectProtocol
+        init(handler: @escaping @Sendable () -> Void) {
+            token = NotificationCenter.default.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil,
+                queue: nil
+            ) { _ in handler() }
+        }
+        deinit {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+    private var memoryWarningToken: MemoryWarningToken?
+    #endif
 
-    public init() {}
+    public init() {
+        #if canImport(UIKit)
+        Task { await installMemoryWarningObserver() }
+        #endif
+    }
+
+    #if canImport(UIKit)
+    private func installMemoryWarningObserver() {
+        guard memoryWarningToken == nil else { return }
+        memoryWarningToken = MemoryWarningToken { [weak self] in
+            Task { await self?.evictPixels() }
+        }
+    }
+    #endif
+
+    public func evictPixels() {
+        for key in entries.keys {
+            entries[key]?.image = nil
+        }
+        pixelBytes = 0
+    }
 
     public func clear() {
         entries.removeAll(keepingCapacity: false)
