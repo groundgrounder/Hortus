@@ -108,6 +108,32 @@ impl SystemFonts {
         if db.faces().next().is_none() {
             db.load_fonts_dir("/system/fonts");
         }
+        #[cfg(target_os = "ios")]
+        if db.faces().next().is_none() {
+            let roots = [
+                std::env::var_os("SIMULATOR_RUNTIME_ROOT"),
+                std::env::var_os("SIMULATOR_ROOT"),
+                std::env::var_os("DYLD_ROOT_PATH"),
+            ];
+            for root in roots.into_iter().flatten().map(PathBuf::from).chain(std::iter::once(PathBuf::from("/"))) {
+                for rel in [
+                    "System/Library/Fonts/Core",
+                    "System/Library/Fonts/CoreUI",
+                    "System/Library/Fonts/CoreAddition",
+                    "System/Library/Fonts/LanguageSupport",
+                    "System/Library/Fonts/AppFonts",
+                    "System/Library/Fonts",
+                ] {
+                    let dir = root.join(rel);
+                    if dir.is_dir() {
+                        db.load_fonts_dir(&dir);
+                    }
+                }
+                if db.faces().next().is_some() {
+                    break;
+                }
+            }
+        }
         Self::from_database(db)
     }
 

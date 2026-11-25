@@ -157,8 +157,8 @@ public enum PlatformGraphics {
         for name in ["PingFang SC", "PingFangSC-Regular", "Menlo", "Menlo-Regular", "Apple Color Emoji"] {
             append(CTFontDescriptorCreateWithNameAndSize(name as CFString, 15))
         }
-        if let collection = CTFontCollectionCreateFromAvailableFonts(nil),
-           let descriptors = CTFontCollectionCreateMatchingFontDescriptors(collection) as? [CTFontDescriptor] {
+        let collection = CTFontCollectionCreateFromAvailableFonts(nil)
+        if let descriptors = CTFontCollectionCreateMatchingFontDescriptors(collection) as? [CTFontDescriptor] {
             for descriptor in descriptors {
                 append(descriptor)
             }
