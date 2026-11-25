@@ -15,6 +15,9 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+pub const FONT_SIZE_MIN: f64 = 9.0;
+pub const FONT_SIZE_MAX: f64 = 40.0;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigSnapshot {
     pub config_path: String,
@@ -44,7 +47,9 @@ impl From<&EditableConfigInfo> for ConfigSnapshot {
     fn from(info: &EditableConfigInfo) -> Self {
         Self {
             config_path: info.config_path.clone(),
-            font_size: if info.font_size.is_finite() && (9.0..=40.0).contains(&info.font_size) {
+            font_size: if info.font_size.is_finite()
+                && (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&info.font_size)
+            {
                 info.font_size
             } else {
                 15.0

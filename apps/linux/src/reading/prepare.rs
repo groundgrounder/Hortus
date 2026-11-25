@@ -4,6 +4,7 @@
 
 //! 后台阅读模型解码与全量媒体/公式/Mermaid/嵌入准备（完全在工作线程执行）。
 
+use crate::core::Utf16Mapper;
 use crate::core::model::HeadingItem;
 use crate::render::diagram::{RenderedDiagram, format_diagram_failure, render_block_with_engine};
 use crate::render::diagram_card::diagram_render_width;
@@ -298,16 +299,21 @@ pub fn prepare_reading_note_bg(req: &PrepareReadingRequest) -> Result<PreparedRe
             }),
         }
     } else {
-        for (idx, blk) in model.blocks.iter().enumerate() {
+        let src_mapper = Utf16Mapper::new(&source_text);
+        for blk in &model.blocks {
             if !blk.diagram {
                 continue;
             }
             ordinal += 1;
-            let (s_start, s_end) = snapshot
+            let (u16_start, u16_end) = snapshot
                 .blocks
-                .get(idx)
+                .iter()
+                .find(|sb| sb.ordinal == ordinal)
+                .or_else(|| snapshot.blocks.get((ordinal - 1) as usize))
                 .map(|sb| (sb.start, sb.start + sb.length))
                 .unwrap_or((blk.source_start, blk.source_start + blk.source_length));
+            let s_start = src_mapper.utf16_to_byte(u16_start as usize) as u64;
+            let s_end = src_mapper.utf16_to_byte(u16_end as usize) as u64;
             let collapsed = req
                 .core
                 .collapsed_nodes(req.vault_root.clone(), req.note_path.clone(), ordinal)
@@ -470,5 +476,52 @@ mod tests {
         assert!(kinds.contains(&"note"));
         assert!(kinds.contains(&"diagram"));
         assert!(prep.math.iter().any(|m| m.failure.is_some()));
+    }
+
+    #[test]
+    fn multi_mermaid_with_cjk_maps_exact_failing_block_utf8_slice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let block1 = "flowchart LR\nA-->B";
+        let block2 = "invalidChart\n    中文节点 --> 失败";
+        let note = format!(
+            "# 中文与图标 🎉\n\n```mermaid\n{block1}\n```\n\n正文 emoji 🚀 后继续。\n\n```mermaid\n{block2}\n```\n"
+        );
+        std::fs::write(vault.join("Multi.md"), &note).unwrap();
+
+        let core = WorkspaceCore::in_directories(
+            tmp.path().join("cfg").to_string_lossy().into_owned(),
+            tmp.path().join("cache").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let handle = core
+            .open_vault(vault.to_string_lossy().into_owned())
+            .unwrap();
+        handle.update_search_index(vec!["Multi.md".into()], vec![]);
+        let session = core
+            .open_document(vault.to_string_lossy().into_owned(), "Multi.md".into())
+            .unwrap();
+        let prep = prepare_reading_note_bg(&PrepareReadingRequest {
+            note_path: "Multi.md".into(),
+            vault_root: vault.to_string_lossy().into_owned(),
+            session,
+            core,
+            handle: Some(handle),
+            diagram_engine: DiagramEngine::new().unwrap(),
+            math_service: Arc::new(MathRenderService::new()),
+            content_width: 680.0,
+            font_size: 15.0,
+            dark: false,
+            main_thread: std::thread::current().id(),
+        })
+        .unwrap();
+        assert_eq!(prep.diagrams.len(), 2);
+        assert!(prep.diagrams[0].failure.is_none());
+        assert!(prep.diagrams[1].failure.is_some());
+        let slice = &prep.source_text
+            [prep.diagrams[1].source_start as usize..prep.diagrams[1].source_end as usize];
+        assert!(slice.contains(block2));
+        assert!(!slice.contains(block1));
     }
 }

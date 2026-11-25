@@ -691,20 +691,29 @@ pub fn make_diagram_callbacks(
     let export_cb = env.callbacks.on_export_diagram.clone();
     let focus_cb = env.callbacks.on_open_focus.clone();
     let open_src = env.on_open_source.clone();
-    let src_note = note_path.clone();
-    let note_focus = note_path;
+    let shared_path = if note_path == env.note_path {
+        Rc::clone(&env.shared_note_path)
+    } else {
+        Rc::new(std::cell::RefCell::new(note_path))
+    };
+    let shared_link = Rc::clone(&shared_path);
+    let shared_focus = Rc::clone(&shared_path);
 
     DiagramCallbacks {
         on_collapse_changed,
         on_scene_updated,
         on_open_link: Rc::new(move |target, heading| {
-            let res = handle.resolve_link(src_note.clone(), target);
+            let src = shared_link.borrow().clone();
+            let res = handle.resolve_link(src, target);
             if let Some(resolved) = res.resolved_path {
                 (open_note)(resolved, heading);
             }
         }),
         on_open_source: open_src,
-        on_focus: Rc::new(move |ordinal| (focus_cb)(note_focus.clone(), ordinal)),
+        on_focus: Rc::new(move |ordinal| {
+            let path = shared_focus.borrow().clone();
+            (focus_cb)(path, ordinal);
+        }),
         on_export: Rc::new(move |kind: DiagramExportKind, meta: DiagramExportMeta| {
             (export_cb)(kind, meta);
         }),

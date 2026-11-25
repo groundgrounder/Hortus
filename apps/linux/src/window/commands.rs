@@ -62,4 +62,5 @@ pub enum WindowCommand {
     SendSelectionToTerminal,
     ConfigChanged(ConfigSnapshot),
     ExternalVaultRefresh(Vec<String>),
+    ExternalVaultRename(Vec<(String, String)>),
 }

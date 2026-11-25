@@ -20,6 +20,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use hortus_ffi::{DiagramEngine, VaultHandle, WorkspaceCore};
 use libadwaita as adw;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +45,14 @@ impl WindowInner {
         diagram_engine: Arc<DiagramEngine>,
         math_service: Arc<MathRenderService>,
     ) -> ReadingEnv {
-        let src_note = note_path.to_string();
+        let shared_path = self
+            .state
+            .borrow()
+            .tabs
+            .get(note_path)
+            .map(|tab| Rc::clone(&tab.shared_path))
+            .unwrap_or_else(|| Rc::new(RefCell::new(note_path.to_string())));
+        let shared_open = Rc::clone(&shared_path);
         let weak_open = Rc::downgrade(self);
         let weak_ext = Rc::downgrade(self);
         let weak_tag = Rc::downgrade(self);
@@ -56,8 +64,9 @@ impl WindowInner {
         let callbacks = EmbedCallbacks {
             on_open_note: Rc::new(move |target, heading| {
                 if let Some(win) = weak_open.upgrade() {
+                    let src = shared_open.borrow().clone();
                     win.send_command(WindowCommand::ResolveWikilink {
-                        source_note: src_note.clone(),
+                        source_note: src,
                         raw_target: target,
                         heading,
                     });
@@ -91,7 +100,7 @@ impl WindowInner {
             }),
         };
 
-        let rel_src = note_path.to_string();
+        let shared_src = Rc::clone(&shared_path);
         let scrolled = self
             .state
             .borrow()
@@ -107,6 +116,7 @@ impl WindowInner {
             .unwrap_or(15.0);
         ReadingEnv {
             note_path: note_path.to_string(),
+            shared_note_path: shared_path,
             vault_root,
             core,
             handle,
@@ -121,8 +131,9 @@ impl WindowInner {
             callbacks,
             on_open_source: Rc::new(move |byte_start, _| {
                 if let Some(win) = weak_src.upgrade() {
+                    let p = shared_src.borrow().clone();
                     win.send_command(WindowCommand::SwitchToSourceAtByte {
-                        note_path: rel_src.clone(),
+                        note_path: p,
                         byte_start,
                     });
                 }
@@ -185,10 +196,27 @@ impl WindowInner {
 
     pub fn refresh_all_reading_tabs(self: &Rc<Self>) {
         self.terminal_host.apply_theme();
-        let paths: Vec<String> = self.state.borrow().tabs.keys().cloned().collect();
+        let dark = adw::StyleManager::default().is_dark();
+        let paths: Vec<String> = {
+            #[cfg(feature = "automation")]
+            let st = self.state.borrow_mut();
+            #[cfg(not(feature = "automation"))]
+            let st = self.state.borrow();
+            #[cfg(feature = "automation")]
+            let mut st = st;
+            #[cfg(feature = "automation")]
+            {
+                st.theme_refreshes = st.theme_refreshes.saturating_add(1);
+            }
+            for tab in st.tabs.values() {
+                crate::platform::style::apply_tag_table_theme(&tab.edit_buffer.tag_table(), dark);
+            }
+            st.tabs.keys().cloned().collect()
+        };
         for p in paths {
             self.refresh_reading_tab(&p, None);
         }
+        self.focus.refresh_theme();
     }
 
     pub fn refresh_reading_tab(
@@ -274,24 +302,32 @@ impl WindowInner {
                     Arc::clone(&services.diagram_engine),
                     Arc::clone(&services.math_service),
                 );
+                let shared_path = win
+                    .state
+                    .borrow()
+                    .tabs
+                    .get(&rel)
+                    .map(|tab| Rc::clone(&tab.shared_path))
+                    .unwrap_or_else(|| Rc::new(RefCell::new(rel.clone())));
                 let weak_c = Rc::downgrade(&win);
-                let rel_c = rel.clone();
+                let path_c = Rc::clone(&shared_path);
                 let vault_c = vault_root;
                 let core_c = Arc::clone(&services.core);
                 let weak_scene = Rc::downgrade(&win);
-                let rel_scene = rel.clone();
+                let path_scene = Rc::clone(&shared_path);
                 let surface = build_reading_surface(
                     &prepared,
                     &env,
                     Rc::new(move |ordinal, collapsed, new_scene| {
+                        let rel_now = path_c.borrow().clone();
                         let _ = core_c.remember_diagram(
                             vault_c.clone(),
-                            rel_c.clone(),
+                            rel_now.clone(),
                             ordinal,
                             collapsed.clone(),
                         );
                         if let Some(win_c) = weak_c.upgrade()
-                            && let Some(tab) = win_c.state.borrow_mut().tabs.get_mut(&rel_c)
+                            && let Some(tab) = win_c.state.borrow_mut().tabs.get_mut(&rel_now)
                             && let Some(d) = tab
                                 .prepared_diagrams
                                 .iter_mut()
@@ -303,8 +339,9 @@ impl WindowInner {
                         }
                     }),
                     Rc::new(move |ordinal, new_scene| {
+                        let rel_now = path_scene.borrow().clone();
                         if let Some(win_s) = weak_scene.upgrade()
-                            && let Some(tab) = win_s.state.borrow_mut().tabs.get_mut(&rel_scene)
+                            && let Some(tab) = win_s.state.borrow_mut().tabs.get_mut(&rel_now)
                             && let Some(d) = tab
                                 .prepared_diagrams
                                 .iter_mut()
@@ -315,11 +352,12 @@ impl WindowInner {
                         }
                     }),
                 );
+                let rel_latest = shared_path.borrow().clone();
                 let reading_slot = win
                     .state
                     .borrow()
                     .tabs
-                    .get(&rel)
+                    .get(&rel_latest)
                     .map(|tab| tab.reading_slot.clone());
                 let Some(reading_slot) = reading_slot else {
                     return;
@@ -329,7 +367,7 @@ impl WindowInner {
                 let updated_headings = prepared.headings.clone();
                 let (find_bar, editing_now, old) = {
                     let mut st = win.state.borrow_mut();
-                    let Some(tab) = st.tabs.get_mut(&rel) else {
+                    let Some(tab) = st.tabs.get_mut(&rel_latest) else {
                         return;
                     };
                     let old_reading = tab.reading.replace(surface.clone());

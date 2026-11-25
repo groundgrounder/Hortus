@@ -85,6 +85,7 @@ struct FocusInner {
     root: gtk4::Box,
     drawing: gtk4::DrawingArea,
     percent_label: gtk4::Label,
+    open_gen_counter: Cell<u64>,
     session: RefCell<Option<FocusState>>,
 }
 
@@ -198,6 +199,7 @@ impl FocusController {
             root,
             drawing,
             percent_label,
+            open_gen_counter: Cell::new(0),
             session: RefCell::new(None),
         });
         Self::bind_controllers(
@@ -574,11 +576,9 @@ impl FocusController {
         let ordinal_bg = req.ordinal;
 
         let open_gen = {
+            let next_gen = self.inner.open_gen_counter.get().wrapping_add(1).max(1);
+            self.inner.open_gen_counter.set(next_gen);
             let mut guard = self.inner.session.borrow_mut();
-            let next_gen = guard
-                .as_ref()
-                .map(|s| s.open_gen.wrapping_add(1))
-                .unwrap_or(1);
             if let Some(old) = guard.take()
                 && let Some(id) = old.persist_source
             {
@@ -629,15 +629,33 @@ impl FocusController {
             .flatten();
             let Some(saved) = saved else { return };
             let Some(inner) = weak.upgrade() else { return };
+            let cur_vw = if inner.drawing.width() > 10 {
+                f64::from(inner.drawing.width())
+            } else {
+                vw
+            };
+            let cur_vh = if inner.drawing.height() > 10 {
+                f64::from(inner.drawing.height())
+            } else {
+                vh
+            };
             let applied = {
                 let mut guard = inner.session.borrow_mut();
                 if let Some(st) = guard.as_mut()
                     && st.open_gen == open_gen
                     && !st.user_interacted
                 {
-                    st.scale = saved.scale.clamp(MIN_SCALE, MAX_SCALE);
-                    st.offset_x = saved.offset_x;
-                    st.offset_y = saved.offset_y;
+                    let (scale, ox, oy) = clamp_or_fit_restored_viewport(
+                        &st.scene,
+                        cur_vw,
+                        cur_vh,
+                        saved.scale,
+                        saved.offset_x,
+                        saved.offset_y,
+                    );
+                    st.scale = scale;
+                    st.offset_x = ox;
+                    st.offset_y = oy;
                     st.fit_on_resize = false;
                     true
                 } else {
@@ -647,6 +665,73 @@ impl FocusController {
             if applied {
                 Self::update_percent_label(&inner);
                 inner.drawing.queue_draw();
+            }
+        });
+    }
+
+    pub fn refresh_theme(&self) {
+        let params = {
+            let mut guard = self.inner.session.borrow_mut();
+            let Some(st) = guard.as_mut() else {
+                return;
+            };
+            if !self.inner.root.is_visible() {
+                return;
+            }
+            st.rerender_gen = st.rerender_gen.wrapping_add(1);
+            (
+                st.note_path.clone(),
+                st.ordinal,
+                st.source.clone(),
+                st.mmd,
+                st.collapsed.clone(),
+                st.previous.clone(),
+                Arc::clone(&st.engine),
+                st.rerender_gen,
+                st.scene.width.max(700.0),
+            )
+        };
+        let (note_path, ordinal, source, mmd, collapsed, previous, engine, gen_token, render_w) =
+            params;
+        let dark = adw::StyleManager::default().is_dark();
+        let weak = Rc::downgrade(&self.inner);
+        glib::MainContext::default().spawn_local(async move {
+            let res = gio::spawn_blocking(move || {
+                render_block_with_engine(
+                    &engine,
+                    &source,
+                    mmd,
+                    render_w,
+                    &collapsed,
+                    DiagramIdentity {
+                        document: note_path,
+                        block: ordinal,
+                        revision: 1,
+                        dark,
+                        font_generation: 0,
+                        request_generation: gen_token,
+                    },
+                    previous,
+                )
+            })
+            .await;
+            let Some(inner) = weak.upgrade() else { return };
+            if let Ok(Ok(new_scene)) = res {
+                let updated = {
+                    let mut guard = inner.session.borrow_mut();
+                    if let Some(st) = guard.as_mut()
+                        && st.rerender_gen == gen_token
+                    {
+                        st.previous = new_scene.previous.clone();
+                        st.scene = new_scene;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if updated {
+                    inner.drawing.queue_draw();
+                }
             }
         });
     }
@@ -1003,6 +1088,34 @@ struct PersistParams {
     scale: f64,
     offset_x: f64,
     offset_y: f64,
+}
+
+fn clamp_or_fit_restored_viewport(
+    scene: &SceneData,
+    vw: f64,
+    vh: f64,
+    saved_scale: f64,
+    saved_ox: f64,
+    saved_oy: f64,
+) -> (f64, f64, f64) {
+    let scale = if saved_scale.is_finite() {
+        saved_scale.clamp(MIN_SCALE, MAX_SCALE)
+    } else {
+        return compute_fit(scene, vw, vh);
+    };
+    if !saved_ox.is_finite() || !saved_oy.is_finite() {
+        return compute_fit(scene, vw, vh);
+    }
+    let sw = scene.width.max(1.0) * scale;
+    let sh = scene.height.max(1.0) * scale;
+    let margin = 40.0_f64.min(vw * 0.25).min(vh * 0.25);
+    let visible_x = saved_ox + sw > margin && saved_ox < vw - margin;
+    let visible_y = saved_oy + sh > margin && saved_oy < vh - margin;
+    if visible_x && visible_y {
+        (scale, saved_ox, saved_oy)
+    } else {
+        compute_fit(scene, vw, vh)
+    }
 }
 
 fn compute_fit(scene: &SceneData, vw: f64, vh: f64) -> (f64, f64, f64) {

@@ -30,6 +30,7 @@ use gtk4::prelude::*;
 use hortus_ffi::{
     DiagramEngine, EmbedContentInfo, KnowledgeMarkupInfo, VaultHandle, WorkspaceCore,
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -37,6 +38,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ReadingEnv {
     pub note_path: String,
+    pub shared_note_path: Rc<RefCell<String>>,
     pub vault_root: String,
     pub core: Arc<WorkspaceCore>,
     pub handle: Arc<VaultHandle>,
@@ -156,7 +158,7 @@ pub struct LinkDispatcher {
     spans: Rc<Vec<LinkSpan>>,
     callbacks: EmbedCallbacks,
     handle: Arc<VaultHandle>,
-    src_note: String,
+    src_note: Rc<RefCell<String>>,
     open_tag: Rc<dyn Fn(String)>,
 }
 
@@ -184,9 +186,8 @@ impl LinkDispatcher {
                 if let Some(p) = resolved_path {
                     (self.callbacks.on_open_note)(p.clone(), heading.clone());
                 } else {
-                    let res = self
-                        .handle
-                        .resolve_link(self.src_note.clone(), target.clone());
+                    let src = self.src_note.borrow().clone();
+                    let res = self.handle.resolve_link(src, target.clone());
                     if let Some(p) = res.resolved_path {
                         (self.callbacks.on_open_note)(p, heading.clone());
                     } else {
@@ -539,7 +540,8 @@ fn make_embed_body_builder() -> EmbedBodyBuilder {
             .clone()
             .unwrap_or_else(|| req.target.clone());
         let env = ReadingEnv {
-            note_path: note_rel,
+            note_path: note_rel.clone(),
+            shared_note_path: Rc::new(RefCell::new(note_rel)),
             vault_root: req.vault_root.clone(),
             core: Arc::clone(&req.core),
             handle: Arc::clone(&req.handle),
@@ -931,7 +933,7 @@ fn install_text_segment(
             spans: spans.clone(),
             callbacks: env.callbacks.clone(),
             handle: Arc::clone(&env.handle),
-            src_note: env.note_path.clone(),
+            src_note: Rc::clone(&env.shared_note_path),
             open_tag: env.on_open_tag.clone(),
         });
 

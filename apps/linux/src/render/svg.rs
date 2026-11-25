@@ -81,6 +81,8 @@ fn escape_xml_attr(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+const MAX_SVG_DEPTH: usize = 256;
+
 /// 在内存中解析并清洗本地 SVG：删除脚本、事件处理器与外部 URL，确保零联网加载。
 pub fn sanitize_svg_bytes(raw: &[u8]) -> Result<SvgSanitizeOutcome, String> {
     let text = std::str::from_utf8(raw)
@@ -98,10 +100,14 @@ pub fn sanitize_svg_bytes(raw: &[u8]) -> Result<SvgSanitizeOutcome, String> {
 
     fn emit_node(
         node: roxmltree::Node<'_, '_>,
+        depth: usize,
         out: &mut String,
         stripped_ext: &mut usize,
         stripped_scripts: &mut usize,
-    ) {
+    ) -> Result<(), String> {
+        if depth > MAX_SVG_DEPTH {
+            return Err("SVG nesting depth exceeds limit".into());
+        }
         match node.node_type() {
             roxmltree::NodeType::Element => {
                 let tag = node.tag_name().name();
@@ -110,24 +116,69 @@ pub fn sanitize_svg_bytes(raw: &[u8]) -> Result<SvgSanitizeOutcome, String> {
                     "script" | "foreignobject" | "iframe" | "embed" | "object" | "audio" | "video"
                 ) {
                     *stripped_scripts += 1;
-                    return;
+                    return Ok(());
                 }
                 let _ = write!(out, "<{tag}");
+                let mut emitted_xmlns = false;
+                let mut emitted_xlink = false;
                 if let Some(ns) = node.tag_name().namespace()
-                    && node.is_root()
+                    && (node.is_root() || tag == "svg")
                 {
                     let _ = write!(out, " xmlns=\"{}\"", escape_xml_attr(ns));
-                } else if tag == "svg" && !node.attributes().any(|a| a.name() == "xmlns") {
+                    emitted_xmlns = true;
+                } else if tag == "svg" {
                     out.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
+                    emitted_xmlns = true;
+                }
+
+                if tag == "svg" || node.is_root() {
+                    for ns in node.namespaces() {
+                        match ns.name() {
+                            Some("xml") | Some("xmlns") => {}
+                            Some(prefix) => {
+                                if prefix == "xlink" {
+                                    emitted_xlink = true;
+                                }
+                                let _ = write!(
+                                    out,
+                                    " xmlns:{prefix}=\"{}\"",
+                                    escape_xml_attr(ns.uri())
+                                );
+                            }
+                            None if !emitted_xmlns => {
+                                emitted_xmlns = true;
+                                let _ = write!(out, " xmlns=\"{}\"", escape_xml_attr(ns.uri()));
+                            }
+                            None => {}
+                        }
+                    }
                 }
 
                 for attr in node.attributes() {
-                    let name = attr.name();
-                    let lower = name.to_ascii_lowercase();
-                    if lower.starts_with("on") {
+                    let local = attr.name();
+                    let local_lower = local.to_ascii_lowercase();
+                    if local_lower.starts_with("on") {
                         *stripped_scripts += 1;
                         continue;
                     }
+                    let qname = match attr.namespace() {
+                        Some("http://www.w3.org/1999/xlink") => format!("xlink:{local}"),
+                        Some("http://www.w3.org/XML/1998/namespace") => format!("xml:{local}"),
+                        Some(uri) => {
+                            if let Some(prefix) = node
+                                .namespaces()
+                                .find(|ns| ns.uri() == uri)
+                                .and_then(|ns| ns.name())
+                                .filter(|p| !p.is_empty())
+                            {
+                                format!("{prefix}:{local}")
+                            } else {
+                                local.to_string()
+                            }
+                        }
+                        None => local.to_string(),
+                    };
+                    let lower = qname.to_ascii_lowercase();
                     let val = attr.value();
                     if matches!(
                         lower.as_str(),
@@ -145,9 +196,9 @@ pub fn sanitize_svg_bytes(raw: &[u8]) -> Result<SvgSanitizeOutcome, String> {
                         }
                         continue;
                     }
-                    let _ = write!(out, " {name}=\"{}\"", escape_xml_attr(val));
+                    let _ = write!(out, " {qname}=\"{}\"", escape_xml_attr(val));
                 }
-                if tag == "svg" && text_uses_xlink(node) && !out.contains("xmlns:xlink=") {
+                if tag == "svg" && !emitted_xlink && text_uses_xlink(node) {
                     out.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
                 }
                 out.push('>');
@@ -166,7 +217,7 @@ pub fn sanitize_svg_bytes(raw: &[u8]) -> Result<SvgSanitizeOutcome, String> {
                             out.push_str(&escape_xml_text(raw_css));
                         }
                     } else {
-                        emit_node(child, out, stripped_ext, stripped_scripts);
+                        emit_node(child, depth + 1, out, stripped_ext, stripped_scripts)?;
                     }
                 }
                 let _ = write!(out, "</{tag}>");
@@ -178,14 +229,18 @@ pub fn sanitize_svg_bytes(raw: &[u8]) -> Result<SvgSanitizeOutcome, String> {
             }
             _ => {}
         }
+        Ok(())
     }
 
     emit_node(
         root,
+        0,
         &mut out,
         &mut stripped_external_refs,
         &mut stripped_scripts,
-    );
+    )?;
+    roxmltree::Document::parse(&out)
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::SvgXmlParseFailed, e))?;
     Ok(SvgSanitizeOutcome {
         bytes: out.into_bytes(),
         stripped_external_refs,
@@ -194,8 +249,10 @@ pub fn sanitize_svg_bytes(raw: &[u8]) -> Result<SvgSanitizeOutcome, String> {
 }
 
 fn text_uses_xlink(node: roxmltree::Node<'_, '_>) -> bool {
-    node.descendants()
-        .any(|d| d.attributes().any(|a| a.name().starts_with("xlink:")))
+    node.descendants().any(|d| {
+        d.attributes()
+            .any(|a| a.namespace() == Some("http://www.w3.org/1999/xlink"))
+    })
 }
 
 #[cfg(test)]
@@ -237,5 +294,35 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn sanitize_svg_rejects_excessive_nesting_depth() {
+        let mut raw = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg">"#);
+        for _ in 0..300 {
+            raw.push_str("<g>");
+        }
+        raw.push_str("<rect width=\"1\" height=\"1\"/>");
+        for _ in 0..300 {
+            raw.push_str("</g>");
+        }
+        raw.push_str("</svg>");
+        assert!(sanitize_svg_bytes(raw.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn sanitize_svg_preserves_xlink_prefix_and_strips_external_xlink_href() {
+        let raw = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="40" height="40">
+  <defs><rect id="box" width="10" height="10"/></defs>
+  <use xlink:href="#box"/>
+  <a xlink:href="https://evil.example/jump"><rect width="5" height="5"/></a>
+</svg>"##;
+        let out = sanitize_svg_bytes(raw).expect("valid SVG with xlink prefix");
+        let text = String::from_utf8(out.bytes).unwrap();
+        assert!(text.contains(r#"xmlns:xlink="http://www.w3.org/1999/xlink""#));
+        assert!(text.contains(r##"xlink:href="#box""##));
+        assert!(!text.contains("https://evil.example"));
+        assert!(out.stripped_external_refs >= 1);
+        roxmltree::Document::parse(&text).expect("sanitized SVG stays well-formed XML");
     }
 }

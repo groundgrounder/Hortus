@@ -22,6 +22,8 @@ use std::time::Instant;
 
 pub struct OpenNoteTab {
     pub path: String,
+    pub shared_path: Rc<RefCell<String>>,
+    pub vault_root: String,
     pub page: adw::TabPage,
     pub content_stack: gtk4::Stack,
     pub reading_scrolled: gtk4::ScrolledWindow,
@@ -110,10 +112,13 @@ pub struct WindowState {
     pub close_approved: bool,
     pub last_alert: Option<String>,
     pub last_alert_dialog: glib::WeakRef<adw::AlertDialog>,
+    pub settings_dialog: Option<crate::settings::SettingsDialog>,
     /// 窗口销毁期间不再拦截 close-page，避免对已关闭页面调用 close_page_finish。
     pub disposing: bool,
     #[cfg(feature = "automation")]
     pub last_stage: String,
+    #[cfg(feature = "automation")]
+    pub theme_refreshes: u32,
     pub close_requests: u32,
     pub close_unsaved: u32,
     /// 回收站等已确认删除的路径：绕过关闭保护直接关闭对应标签页。

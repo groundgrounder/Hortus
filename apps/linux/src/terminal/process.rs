@@ -5,6 +5,7 @@
 //! 终端环境构造、`hortus` CLI 路径发现与子进程组安全清理。
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -73,7 +74,28 @@ pub fn build_terminal_env(
     agent_session_id: Option<&str>,
     effective_path: Option<&str>,
 ) -> Vec<String> {
-    let mut env_map: BTreeMap<String, String> = std::env::vars().collect();
+    build_terminal_env_from_vars(
+        std::env::vars_os(),
+        vault_root,
+        agent_session_id,
+        effective_path,
+    )
+}
+
+pub fn build_terminal_env_from_vars(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    vault_root: Option<&str>,
+    agent_session_id: Option<&str>,
+    effective_path: Option<&str>,
+) -> Vec<String> {
+    let mut env_map: BTreeMap<String, String> = vars
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let key = k.into_string().ok()?;
+            let val = v.to_string_lossy().into_owned();
+            Some((key, val))
+        })
+        .collect();
 
     // 剥离父进程遗留的多余隔离变量
     env_map.remove("HORTUS_AGENT_SESSION");
@@ -181,5 +203,39 @@ pub fn terminate_pids_sync(pids: &[i32]) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn build_terminal_env_tolerates_non_utf8_os_strings() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let vars = vec![
+            (
+                OsString::from_vec(vec![0xff, b'B', b'A', b'D']),
+                OsString::from("ignored"),
+            ),
+            (
+                OsString::from("BAD_VAL"),
+                OsString::from_vec(vec![b'a', b'/', 0xfe, b'b']),
+            ),
+            (OsString::from("OK_VAR"), OsString::from("value")),
+        ];
+        let env = build_terminal_env_from_vars(
+            vars,
+            Some("/tmp/vault"),
+            Some("sess-1"),
+            Some("/usr/bin:/bin"),
+        );
+        assert!(env.iter().any(|item| item == "OK_VAR=value"));
+        assert!(env.iter().any(|item| item.starts_with("BAD_VAL=a/")));
+        assert!(env.iter().any(|item| item == "HORTUS_VAULT=/tmp/vault"));
+        assert!(env.iter().any(|item| item == "HORTUS_AGENT_SESSION=sess-1"));
+        assert!(!env.iter().any(|item| item.contains("ignored")));
     }
 }

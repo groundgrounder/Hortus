@@ -323,6 +323,7 @@ pub enum Key {
     ToastMovedToTrash,
     ToastTrashCancelledUnsaved,
     ErrRenameFailed,
+    ErrRenameLinksFailed,
     ErrTrashFailed,
     NoticeConflict,
     BtnKeepMine,
@@ -337,6 +338,7 @@ pub enum Key {
     SaveErrWrite,
     SaveErrPermission,
     SaveErrUtf8,
+    SaveErrMountRoot,
     SaveErrUnknown,
     NoticeSaveFailed,
     BtnRetry,
@@ -873,6 +875,10 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "有未保存修改，已取消移入回收站",
         ),
         Key::ErrRenameFailed => ("Rename failed", "重命名失败"),
+        Key::ErrRenameLinksFailed => (
+            "Renamed, but updating links failed",
+            "已重命名，但更新链接失败",
+        ),
         Key::ErrTrashFailed => ("Move to Trash failed", "移到回收站失败"),
         Key::NoticeConflict => (
             "“{0}” changed on disk. Your edits are still in memory.",
@@ -896,6 +902,10 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::SaveErrWrite => ("disk write failed", "磁盘写入失败"),
         Key::SaveErrPermission => ("no write permission", "没有写权限"),
         Key::SaveErrUtf8 => ("invalid UTF-8 text", "不是有效的 UTF-8 文本"),
+        Key::SaveErrMountRoot => (
+            "cannot save directly at a disk mount root; open a subfolder on that disk instead",
+            "不支持直接把独立磁盘挂载根作为文件夹保存，请在盘内建一个子文件夹后打开",
+        ),
         Key::SaveErrUnknown => ("unknown error", "未知原因"),
         Key::NoticeSaveFailed => (
             "Couldn’t save “{0}” ({1}). Your edits are still in memory.",
@@ -1466,6 +1476,7 @@ mod tests {
         Key::ToastMovedToTrash,
         Key::ToastTrashCancelledUnsaved,
         Key::ErrRenameFailed,
+        Key::ErrRenameLinksFailed,
         Key::ErrTrashFailed,
         Key::NoticeConflict,
         Key::BtnKeepMine,
@@ -1480,6 +1491,7 @@ mod tests {
         Key::SaveErrWrite,
         Key::SaveErrPermission,
         Key::SaveErrUtf8,
+        Key::SaveErrMountRoot,
         Key::SaveErrUnknown,
         Key::NoticeSaveFailed,
         Key::BtnRetry,

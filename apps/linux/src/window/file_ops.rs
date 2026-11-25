@@ -328,7 +328,8 @@ impl WindowInner {
         if new_path == old_path {
             return;
         }
-        let affected = self.affected_open_tabs(old_path);
+        let mut affected = self.affected_open_tabs(old_path);
+        affected.sort();
         let sessions: Vec<(String, Arc<hortus_ffi::DocumentSession>, String)> = {
             let st = self.state.borrow();
             affected
@@ -374,32 +375,58 @@ impl WindowInner {
                     .map_err(|e| e.to_string())?;
                 let mut rewrites = 0u64;
                 let mut updated_notes = 0usize;
+                let mut link_error: Option<String> = None;
                 if update_links {
-                    let _ = if is_dir {
+                    let plan = if is_dir {
                         handle_bg.plan_folder_rename_links(old_bg.clone(), entry.path.clone())
                     } else {
                         handle_bg.plan_rename_links(old_bg.clone(), entry.path.clone())
                     };
-                    let applied = if is_dir {
-                        handle_bg.apply_folder_rename_links_in(
-                            old_bg.clone(),
-                            entry.path.clone(),
-                            Vec::new(),
-                            temp_bg,
-                        )
-                    } else {
-                        handle_bg.apply_rename_links_in(
-                            old_bg.clone(),
-                            entry.path.clone(),
-                            Vec::new(),
-                            temp_bg,
-                        )
+                    if plan.total_rewrites > 0 || !plan.files.is_empty() {
+                        let applied = if is_dir {
+                            handle_bg.apply_folder_rename_links_in(
+                                old_bg.clone(),
+                                entry.path.clone(),
+                                Vec::new(),
+                                temp_bg,
+                            )
+                        } else {
+                            handle_bg.apply_rename_links_in(
+                                old_bg.clone(),
+                                entry.path.clone(),
+                                Vec::new(),
+                                temp_bg,
+                            )
+                        };
+                        match applied {
+                            Ok(res) => {
+                                rewrites = res.total_rewrites;
+                                updated_notes = res.updated.len();
+                            }
+                            Err(err) => link_error = Some(err.to_string()),
+                        }
                     }
-                    .map_err(|e| e.to_string())?;
-                    rewrites = applied.total_rewrites;
-                    updated_notes = applied.updated.len();
                 }
-                handle_bg.update_search_index(vec![entry.path.clone()], vec![old_bg.clone()]);
+                let (added_index, removed_index) = if is_dir {
+                    let new_notes =
+                        collect_note_relpaths(Path::new(&root_bg), &entry.path);
+                    let old_notes: Vec<String> = new_notes
+                        .iter()
+                        .map(|n| remap_renamed_prefix(n, &entry.path, &old_bg))
+                        .collect();
+                    (new_notes, old_notes)
+                } else {
+                    let added = is_note_file_name(&entry.path)
+                        .then(|| entry.path.clone())
+                        .into_iter()
+                        .collect();
+                    let removed = is_note_file_name(&old_bg)
+                        .then(|| old_bg.clone())
+                        .into_iter()
+                        .collect();
+                    (added, removed)
+                };
+                handle_bg.update_search_index(added_index.clone(), removed_index.clone());
                 let _ = core_bg.rename_diagram_state(
                     root_bg,
                     old_bg.clone(),
@@ -408,45 +435,36 @@ impl WindowInner {
                 );
                 let mut moved = Vec::new();
                 for (path, session, _) in &sessions {
-                    let new_rel = if *path == old_bg {
-                        new_bg.clone()
-                    } else {
-                        let suffix = path.strip_prefix(&old_bg).unwrap_or("");
-                        format!("{new_bg}{suffix}")
-                    };
+                    let new_rel = remap_renamed_prefix(path, &old_bg, &new_bg);
                     let _ = session.relocate(new_rel.clone());
                     moved.push((path.clone(), new_rel));
                 }
-                Ok::<_, String>((entry, rewrites, updated_notes, moved))
+                Ok::<_, String>((
+                    entry,
+                    rewrites,
+                    updated_notes,
+                    moved,
+                    added_index,
+                    removed_index,
+                    link_error,
+                ))
             })
             .await;
             let Some(win) = weak.upgrade() else { return };
             win.state.borrow_mut().files_busy = false;
             match result {
-                Ok(Ok((entry, rewrites, updated_notes, moved))) => {
-                    let mut moved_tabs = Vec::new();
-                    {
-                        let mut st = win.state.borrow_mut();
-                        for (old, new) in &moved {
-                            if let Some(mut tab) = st.tabs.remove(old) {
-                                tab.path = new.clone();
-                                tab.edit_state.borrow_mut().path = new.clone();
-                                tab.page.set_tooltip(new);
-                                st.tabs.insert(new.clone(), tab);
-                                moved_tabs.push((old.clone(), new.clone()));
-                            }
-                        }
-                    }
-                    for (_, new) in &moved_tabs {
-                        win.update_tab_title(new);
-                        win.refresh_document_tab(new);
-                    }
+                Ok(Ok((
+                    entry,
+                    rewrites,
+                    updated_notes,
+                    moved,
+                    added_index,
+                    removed_index,
+                    link_error,
+                ))) => {
+                    let moved_tabs = win.apply_renamed_tab_mappings(&moved);
                     if let Some(h) = win.state.borrow().vault_handle() {
-                        let removed: Vec<String> =
-                            moved_tabs.iter().map(|(old, _)| old.clone()).collect();
-                        let added: Vec<String> =
-                            moved_tabs.iter().map(|(_, new)| new.clone()).collect();
-                        h.update_search_index(added, removed);
+                        h.update_search_index(added_index, removed_index);
                     }
                     win.state.borrow_mut().last_file_op = Some(serde_json::json!({
                         "op": "rename",
@@ -456,9 +474,15 @@ impl WindowInner {
                         "update_links": update_links,
                         "updated_notes": updated_notes,
                         "rewrites": rewrites,
+                        "link_error": link_error,
                         "moved_tabs": moved_tabs.iter().map(|(_, new)| new.clone()).collect::<Vec<_>>(),
                     }));
-                    if update_links {
+                    if let Some(ref err) = link_error {
+                        win.show_toast(&short_error(
+                            crate::i18n::tr(crate::i18n::Key::ErrRenameLinksFailed),
+                            err,
+                        ));
+                    } else if update_links {
                         win.show_toast(&crate::i18n::fmt2(
                             crate::i18n::Key::ToastRenamedWithLinks,
                             updated_notes,
@@ -468,13 +492,17 @@ impl WindowInner {
                         win.show_toast(crate::i18n::tr(crate::i18n::Key::ToastRenamed));
                     }
                     win.refresh_knowledge_after_write();
-                    let mut changed_paths: Vec<String> = moved_tabs
+                    let mut renames: Vec<(String, String)> = moved_tabs;
+                    renames.push((old_path.clone(), entry.path.clone()));
+                    win.notify_sibling_windows_renamed(&renames);
+                    let mut changed_paths: Vec<String> = renames
                         .iter()
                         .flat_map(|(old, new)| [old.clone(), new.clone()])
                         .collect();
-                    changed_paths.push(old_path);
-                    changed_paths.push(entry.path);
-                    win.notify_sibling_windows_written(&changed_paths);
+                    changed_paths.retain(|p| is_note_file_name(p));
+                    if !changed_paths.is_empty() {
+                        win.notify_sibling_windows_written(&changed_paths);
+                    }
                 }
                 Ok(Err(err)) => {
                     win.state.borrow_mut().last_file_op = Some(serde_json::json!({
@@ -658,4 +686,93 @@ impl WindowInner {
             .unwrap_or_else(|_| format!("file://{}", dir.display()));
         gtk4::UriLauncher::new(&uri).launch(Some(&self.window), gio::Cancellable::NONE, |_| {});
     }
+
+    fn apply_renamed_tab_mappings(
+        self: &Rc<Self>,
+        moved: &[(String, String)],
+    ) -> Vec<(String, String)> {
+        let mut moved_tabs = Vec::new();
+        {
+            let mut st = self.state.borrow_mut();
+            for (old, new) in moved {
+                if let Some(mut tab) = st.tabs.remove(old) {
+                    tab.path = new.clone();
+                    *tab.shared_path.borrow_mut() = new.clone();
+                    tab.edit_state.borrow_mut().path = new.clone();
+                    tab.page.set_tooltip(new);
+                    st.tabs.insert(new.clone(), tab);
+                    moved_tabs.push((old.clone(), new.clone()));
+                }
+            }
+        }
+        for (_, new) in &moved_tabs {
+            self.update_tab_title(new);
+            self.refresh_document_tab(new);
+        }
+        moved_tabs
+    }
+
+    pub fn migrate_renamed_tabs(self: &Rc<Self>, renames: &[(String, String)]) {
+        let mut to_move = Vec::new();
+        {
+            let st = self.state.borrow();
+            for (old, new) in renames {
+                if st.tabs.contains_key(old) {
+                    if let Some(tab) = st.tabs.get(old)
+                        && let Some(ref session) = tab.session
+                    {
+                        let _ = session.relocate(new.clone());
+                    }
+                    to_move.push((old.clone(), new.clone()));
+                }
+            }
+        }
+        if !to_move.is_empty() {
+            let _ = self.apply_renamed_tab_mappings(&to_move);
+        }
+    }
+}
+
+fn remap_renamed_prefix(path: &str, old_prefix: &str, new_prefix: &str) -> String {
+    if path == old_prefix {
+        new_prefix.to_string()
+    } else if let Some(suffix) = path.strip_prefix(&format!("{old_prefix}/")) {
+        format!("{new_prefix}/{suffix}")
+    } else {
+        path.to_string()
+    }
+}
+
+fn collect_note_relpaths(vault_root: &Path, rel_dir: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let start_abs = vault_root.join(rel_dir);
+    let mut stack = vec![(start_abs, rel_dir.to_string())];
+    while let Some((abs, rel)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&abs) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let child_rel = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if ft.is_dir() {
+                stack.push((entry.path(), child_rel));
+            } else if ft.is_file() && is_note_file_name(&name) {
+                out.push(child_rel);
+            }
+        }
+    }
+    out
 }

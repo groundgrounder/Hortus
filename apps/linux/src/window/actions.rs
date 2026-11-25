@@ -630,6 +630,24 @@ impl WindowInner {
         }
     }
 
+    pub fn sync_color_scheme_action(&self, choice: ColorSchemeChoice) {
+        if let Some(action) = self
+            .window
+            .lookup_action("color-scheme")
+            .and_then(|a| a.downcast::<gio::SimpleAction>().ok())
+        {
+            action.set_state(&choice.as_str().to_variant());
+        }
+        if let Some(dlg) = self.state.borrow().settings_dialog.clone() {
+            dlg.sync_color_scheme(choice);
+        }
+    }
+
+    pub fn apply_color_scheme_and_sync(&self, choice: ColorSchemeChoice) {
+        apply_color_scheme(choice);
+        self.sync_color_scheme_action(choice);
+    }
+
     fn show_about_dialog(&self) {
         let dialog = adw::AboutDialog::builder()
             .application_name("Hortus")

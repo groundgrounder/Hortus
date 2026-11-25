@@ -5,7 +5,7 @@
 //! 每标签独立文档会话状态：增量编辑同步、世代防竞态与定时器生命周期管理。
 
 use gtk4::glib;
-use hortus_ffi::DocumentIssue;
+use hortus_ffi::{DocumentIssue, SaveChoice};
 use std::time::Instant;
 
 /// 每个编辑标签页与内核同步的状态；拆出后避免信号回调重入窗口状态借用。
@@ -18,7 +18,9 @@ pub struct EditState {
     pub revision: u64,
     pub issue: Option<DocumentIssue>,
     pub message: String,
+    pub read_only_reason: Option<String>,
     pub save_inflight: bool,
+    pub save_queued: Option<(SaveChoice, bool)>,
     pub last_save_micros: u64,
     pub restyle_gen: u64,
     pub autosave_gen: u64,
@@ -51,7 +53,9 @@ impl EditState {
             revision: 0,
             issue: None,
             message: String::new(),
+            read_only_reason: None,
             save_inflight: false,
+            save_queued: None,
             last_save_micros: 0,
             restyle_gen: 0,
             autosave_gen: 0,

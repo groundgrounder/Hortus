@@ -21,6 +21,7 @@ struct CompletionState {
     handle: Option<Arc<VaultHandle>>,
     generation: u64,
     link_start: Option<u64>,
+    is_embed: bool,
     items: Vec<LinkCompletionInfo>,
     selected: usize,
     accepted: u32,
@@ -42,6 +43,7 @@ struct CompletionInner {
     state: RefCell<CompletionState>,
     view: glib::WeakRef<gtk4::TextView>,
     overlay: glib::WeakRef<gtk4::Overlay>,
+    preedit_active: Cell<bool>,
     queries: Cell<u32>,
 }
 
@@ -93,6 +95,7 @@ impl LinkCompletion {
                 state: RefCell::new(CompletionState::default()),
                 view: glib::WeakRef::new(),
                 overlay: glib::WeakRef::new(),
+                preedit_active: Cell::new(false),
                 queries: Cell::new(0),
             }),
         }
@@ -169,16 +172,29 @@ impl LinkCompletion {
             });
         }
 
+        {
+            let weak = Rc::downgrade(&self.inner);
+            view.connect_preedit_changed(move |_, preedit| {
+                if let Some(inner) = weak.upgrade() {
+                    inner.preedit_active.set(!preedit.is_empty());
+                }
+            });
+        }
+
         let key = gtk4::EventControllerKey::new();
         key.set_propagation_phase(gtk4::PropagationPhase::Capture);
         {
             let weak = Rc::downgrade(&self.inner);
-            key.connect_key_pressed(move |_, keyval, _, _| {
+            key.connect_key_pressed(move |_, keyval, _, state| {
                 use gtk4::gdk::Key;
                 let Some(inner) = weak.upgrade() else {
                     return glib::Propagation::Proceed;
                 };
-                if !inner.panel.is_visible() {
+                if !should_handle_completion_key(
+                    inner.panel.is_visible(),
+                    inner.preedit_active.get(),
+                    state,
+                ) {
                     return glib::Propagation::Proceed;
                 }
                 match keyval {
@@ -210,6 +226,7 @@ impl LinkCompletion {
         let mut st = inner.state.borrow_mut();
         st.items.clear();
         st.link_start = None;
+        st.is_embed = false;
     }
 
     fn move_selection(inner: &Rc<CompletionInner>, down: bool) {
@@ -278,6 +295,7 @@ impl LinkCompletion {
             }
             st.generation += 1;
             st.link_start = Some(link_start_u16);
+            st.is_embed = embed;
             st.last_query = query.clone();
             st.generation
         };
@@ -342,26 +360,44 @@ impl LinkCompletion {
         let buffer = view.buffer();
         let iter = buffer.iter_at_mark(&buffer.get_insert());
         let rect = view.iter_location(&iter);
-        let (x, y) = view.buffer_to_window_coords(
+        let (x, y_bottom) = view.buffer_to_window_coords(
             gtk4::TextWindowType::Widget,
             rect.x(),
             rect.y() + rect.height(),
         );
-        let origin = gtk4::graphene::Point::new(x as f32, y as f32);
-        let Some(point) = view.compute_point(&overlay, &origin) else {
+        let (_, y_top) =
+            view.buffer_to_window_coords(gtk4::TextWindowType::Widget, rect.x(), rect.y());
+        let Some(point_bottom) = view.compute_point(
+            &overlay,
+            &gtk4::graphene::Point::new(x as f32, y_bottom as f32),
+        ) else {
             return;
         };
-        let margin_start = (point.x().max(0.0) as i32).min((overlay.width() - 340).max(0));
+        let point_top = view
+            .compute_point(
+                &overlay,
+                &gtk4::graphene::Point::new(x as f32, y_top as f32),
+            )
+            .unwrap_or(point_bottom);
+        let item_count = inner.state.borrow().items.len().clamp(1, 8) as i32;
+        let est_height = (36 + item_count * 42).clamp(78, 240);
+        let overlay_h = overlay.height().max(est_height);
+        let margin_start = (point_bottom.x().max(0.0) as i32).min((overlay.width() - 340).max(0));
+        let below_y = point_bottom.y().max(0.0) as i32;
+        let top_y = point_top.y().max(0.0) as i32;
+        let margin_top = if below_y + est_height > overlay_h && top_y >= est_height {
+            (top_y - est_height).max(0)
+        } else {
+            below_y.clamp(0, (overlay_h - est_height).max(0))
+        };
         inner.panel.set_margin_start(margin_start);
-        inner
-            .panel
-            .set_margin_top((point.y().max(0.0) as i32).min(overlay.height()));
+        inner.panel.set_margin_top(margin_top);
         inner.panel.set_visible(true);
         inner.panel.queue_resize();
     }
 
     fn accept_impl(inner: &Rc<CompletionInner>) {
-        let (target, link_start) = {
+        let (target, link_start, is_embed) = {
             let st = inner.state.borrow();
             let Some(item) = st.items.get(st.selected) else {
                 return;
@@ -369,7 +405,7 @@ impl LinkCompletion {
             let Some(link_start) = st.link_start else {
                 return;
             };
-            (item.insert_target.clone(), link_start)
+            (item.insert_target.clone(), link_start, st.is_embed)
         };
         let Some(view) = inner.view.upgrade() else {
             return;
@@ -380,11 +416,17 @@ impl LinkCompletion {
             .to_string();
         let mapper = Utf16Mapper::new(&text);
         let start_char = mapper.utf16_to_char(link_start as usize);
+        let start_byte = mapper.char_to_byte(start_char);
+        let embed = is_embed || text.get(start_byte..).is_some_and(|s| s.starts_with("![["));
         let cursor_char = buffer.iter_at_mark(&buffer.get_insert()).offset().max(0) as usize;
         let has_closer = buffer.iter_at_offset(cursor_char as i32).char() == ']'
             && buffer.iter_at_offset(cursor_char as i32 + 1).char() == ']';
         let delete_end = cursor_char + if has_closer { 2 } else { 0 };
-        let insert = format!("[[{target}]]");
+        let insert = if embed {
+            format!("![[{target}]]")
+        } else {
+            format!("[[{target}]]")
+        };
         let insert_len = insert.chars().count();
         buffer.begin_user_action();
         {
@@ -404,6 +446,20 @@ impl LinkCompletion {
         buffer.place_cursor(&cursor);
         view.grab_focus();
     }
+}
+
+fn should_handle_completion_key(
+    visible: bool,
+    preedit_active: bool,
+    state: gtk4::gdk::ModifierType,
+) -> bool {
+    use gtk4::gdk::ModifierType;
+    if !visible || preedit_active {
+        return false;
+    }
+    let mods =
+        state & (ModifierType::SHIFT_MASK | ModifierType::CONTROL_MASK | ModifierType::ALT_MASK);
+    mods.is_empty()
 }
 
 fn render_completion_items(list: &gtk4::ListBox, state: &CompletionState) {
@@ -446,5 +502,89 @@ mod tests {
         completion.teardown();
         drop(completion);
         assert_eq!(weak.strong_count(), 0);
+    }
+
+    #[test]
+    fn embed_completion_preserves_exclamation_prefix() {
+        if !crate::platform::style::ensure_gtk_test_thread() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::write(vault.join("Target.md"), "# Target\n").unwrap();
+
+        let core = hortus_ffi::WorkspaceCore::in_directories(
+            tmp.path().join("cfg").to_string_lossy().into_owned(),
+            tmp.path().join("cache").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let handle = core
+            .open_vault(vault.to_string_lossy().into_owned())
+            .unwrap();
+        handle.update_search_index(vec!["Target.md".into()], vec![]);
+
+        let overlay = gtk4::Overlay::new();
+        let buffer = gtk4::TextBuffer::new(None);
+        let view = gtk4::TextView::with_buffer(&buffer);
+        overlay.set_child(Some(&view));
+
+        let completion = LinkCompletion::new();
+        completion.set_handle(handle);
+        completion.bind(&view, &buffer, &overlay);
+        buffer.set_text("见 ![[Tar");
+        let end = buffer.end_iter();
+        buffer.place_cursor(&end);
+        LinkCompletion::refresh_for_cursor(&completion.inner, &buffer);
+
+        let ctx = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if !completion.inner.state.borrow().items.is_empty() {
+                break;
+            }
+            ctx.iteration(false);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !completion.inner.state.borrow().items.is_empty(),
+            "completion items should load for ![[Tar"
+        );
+        LinkCompletion::accept_impl(&completion.inner);
+        let out = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string();
+        assert_eq!(out, "见 ![[Target]]");
+        completion.teardown();
+    }
+
+    #[test]
+    fn completion_key_filter_ignores_modified_and_preedit_keys() {
+        use gtk4::gdk::ModifierType;
+        assert!(should_handle_completion_key(
+            true,
+            false,
+            ModifierType::empty()
+        ));
+        assert!(!should_handle_completion_key(
+            false,
+            false,
+            ModifierType::empty()
+        ));
+        assert!(!should_handle_completion_key(
+            true,
+            true,
+            ModifierType::empty()
+        ));
+        assert!(!should_handle_completion_key(
+            true,
+            false,
+            ModifierType::SHIFT_MASK
+        ));
+        assert!(!should_handle_completion_key(
+            true,
+            false,
+            ModifierType::CONTROL_MASK
+        ));
     }
 }

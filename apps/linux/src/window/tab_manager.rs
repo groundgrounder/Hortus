@@ -19,7 +19,7 @@ use crate::window::state::OpenNoteTab;
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
-use hortus_ffi::DocumentSession;
+use hortus_ffi::{DocumentIssue, DocumentSession};
 use libadwaita as adw;
 use std::cell::RefCell;
 use std::path::Path;
@@ -73,16 +73,17 @@ impl WindowInner {
         loading_lbl.set_margin_top(36);
         reading_slot.append(&loading_lbl);
 
+        let shared_path = Rc::new(RefCell::new(relpath.to_string()));
         let is_mmd = is_mmd_path(relpath);
         let reading_viewport = HortusReadingViewport::new();
         reading_viewport.set_max_content_width((!is_mmd).then_some(READING_COLUMN_MAX_WIDTH));
         reading_viewport.set_child(Some(&reading_slot));
         {
             let weak = Rc::downgrade(self);
-            let rel_vp = relpath.to_string();
+            let shared_vp = Rc::clone(&shared_path);
             reading_viewport.connect_relayout_width(move |avail_w| {
                 if let Some(win) = weak.upgrade()
-                    && win.active_tab_path().as_deref() == Some(rel_vp.as_str())
+                    && win.active_tab_path().as_deref() == Some(shared_vp.borrow().as_str())
                 {
                     win.send_command(WindowCommand::RelayoutActiveTab(avail_w));
                 }
@@ -184,6 +185,8 @@ impl WindowInner {
             relpath.to_string(),
             OpenNoteTab {
                 path: relpath.to_string(),
+                shared_path,
+                vault_root: vault_root.clone(),
                 page: page.clone(),
                 content_stack,
                 reading_scrolled,
@@ -239,6 +242,12 @@ impl WindowInner {
                     .map_err(|e| e.to_string())?;
                 let initial = session.initial().map_err(|e| e.to_string())?;
                 let text = initial.text.unwrap_or_default();
+                let initial_meta = (
+                    initial.issue,
+                    initial.message,
+                    initial.read_only_reason,
+                    initial.dirty,
+                );
                 let outline = session.outline().map_err(|e| e.to_string())?;
                 let headings: Vec<HeadingItem> = outline
                     .headings
@@ -262,7 +271,14 @@ impl WindowInner {
                     dark,
                     main_thread,
                 })?;
-                Ok::<_, String>((session, text, headings, styles.packed_runs, prepared))
+                Ok::<_, String>((
+                    session,
+                    text,
+                    initial_meta,
+                    headings,
+                    styles.packed_runs,
+                    prepared,
+                ))
             })
             .await
             .unwrap_or_else(|_| Err(crate::i18n::tr(crate::i18n::Key::ErrThread).into()));
@@ -272,11 +288,12 @@ impl WindowInner {
                 return;
             }
             match load_result {
-                Ok((session, text, headings, packed_runs, prepared)) => {
+                Ok((session, text, initial_meta, headings, packed_runs, prepared)) => {
                     win.install_loaded_tab(
                         &rel,
                         session,
                         text,
+                        initial_meta,
                         headings,
                         &packed_runs,
                         prepared,
@@ -317,11 +334,13 @@ impl WindowInner {
         rel: &str,
         session: Arc<DocumentSession>,
         text: String,
+        initial_meta: (DocumentIssue, String, Option<String>, bool),
         headings: Vec<HeadingItem>,
         packed_runs: &[u8],
         prepared: crate::reading::PreparedReadingNote,
         content_width: f64,
     ) {
+        let (initial_issue, initial_message, initial_read_only, initial_dirty) = initial_meta;
         let (services, vault_root, vault_handle) = {
             let st = self.state.borrow();
             (st.services.clone(), st.vault_root(), st.vault_handle())
@@ -339,25 +358,27 @@ impl WindowInner {
             Arc::clone(&services.diagram_engine),
             Arc::clone(&services.math_service),
         );
+        let shared_path = Rc::clone(&env.shared_note_path);
         let weak_collapse = Rc::downgrade(self);
-        let rel_collapse = rel.to_string();
+        let path_collapse = Rc::clone(&shared_path);
         let vault_collapse = vault_root;
         let core_collapse = Arc::clone(&services.core);
         let weak_scene = Rc::downgrade(self);
-        let rel_scene = rel.to_string();
+        let path_scene = Rc::clone(&shared_path);
 
         let surface = build_reading_surface(
             &prepared,
             &env,
             Rc::new(move |ordinal, collapsed, new_scene| {
+                let rel_now = path_collapse.borrow().clone();
                 let _ = core_collapse.remember_diagram(
                     vault_collapse.clone(),
-                    rel_collapse.clone(),
+                    rel_now.clone(),
                     ordinal,
                     collapsed.clone(),
                 );
                 if let Some(win) = weak_collapse.upgrade()
-                    && let Some(tab) = win.state.borrow_mut().tabs.get_mut(&rel_collapse)
+                    && let Some(tab) = win.state.borrow_mut().tabs.get_mut(&rel_now)
                     && let Some(item) = tab
                         .prepared_diagrams
                         .iter_mut()
@@ -369,8 +390,9 @@ impl WindowInner {
                 }
             }),
             Rc::new(move |ordinal, new_scene| {
+                let rel_now = path_scene.borrow().clone();
                 if let Some(win) = weak_scene.upgrade()
-                    && let Some(tab) = win.state.borrow_mut().tabs.get_mut(&rel_scene)
+                    && let Some(tab) = win.state.borrow_mut().tabs.get_mut(&rel_now)
                     && let Some(item) = tab
                         .prepared_diagrams
                         .iter_mut()
@@ -400,8 +422,18 @@ impl WindowInner {
             edit.suppress = true;
             edit.text = text.clone();
             edit.revision = revision;
-            edit.dirty = false;
-            edit.issue = None;
+            edit.dirty = initial_dirty;
+            edit.read_only_reason = initial_read_only.clone();
+            if initial_issue == DocumentIssue::Recovery {
+                edit.issue = Some(DocumentIssue::Recovery);
+                edit.message = initial_message;
+            } else if let Some(reason) = initial_read_only {
+                edit.issue = Some(DocumentIssue::SaveFailed);
+                edit.message = reason;
+            } else {
+                edit.issue = Some(initial_issue);
+                edit.message = initial_message;
+            }
         }
         let detach_for_load = text.chars().count() > 262_144;
         if detach_for_load {

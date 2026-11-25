@@ -47,7 +47,7 @@ pub struct TerminalHostCallbacks {
     pub on_tab_updated: Rc<dyn Fn(u64, String, &'static str)>,
     pub on_request_select_tab: Rc<dyn Fn(u64)>,
     pub on_request_close_tab: Rc<dyn Fn(u64)>,
-    pub on_agent_exited: Rc<dyn Fn(String, i32)>,
+    pub on_agent_ended: Rc<dyn Fn(String, &'static str, Option<i32>)>,
 }
 
 struct TerminalTab {
@@ -360,17 +360,25 @@ impl TerminalHost {
     }
 
     pub fn close_tab_from_dock(&self, tab_id: u64) {
-        let removed = {
+        let (removed, callbacks) = {
             let mut st = self.inner.state.borrow_mut();
             if st.last_active_id == Some(tab_id) {
                 st.last_active_id = None;
             }
-            st.tabs.remove(&tab_id)
+            (st.tabs.remove(&tab_id), st.callbacks.clone())
         };
         if let Some(tab) = removed {
             tab.cancel_flag.store(true, Ordering::Release);
             if let Some(pid) = tab.child_pid {
                 terminate_async_with_kill_fallback(pid);
+            }
+            if matches!(tab.phase, TerminalPhase::Preparing | TerminalPhase::Running)
+                && let TerminalKind::Agent {
+                    session_id: Some(sid),
+                } = tab.kind
+                && let Some(ref cbs) = callbacks
+            {
+                (cbs.on_agent_ended)(sid, "interrupted", None);
             }
         }
     }
@@ -387,20 +395,33 @@ impl TerminalHost {
 
     pub fn close_all_tabs(&self) {
         let pids = self.all_child_pids();
-        let (ids, callbacks, disposing) = {
+        let (ids, interrupted_sids, callbacks, disposing) = {
             let mut st = self.inner.state.borrow_mut();
             let mut collected = Vec::new();
+            let mut sids = Vec::new();
             for tab in st.tabs.values_mut() {
                 tab.cancel_flag.store(true, Ordering::Release);
                 collected.push(tab.id);
+                if matches!(tab.phase, TerminalPhase::Preparing | TerminalPhase::Running)
+                    && let TerminalKind::Agent {
+                        session_id: Some(ref sid),
+                    } = tab.kind
+                {
+                    sids.push(sid.clone());
+                }
             }
             st.tabs.clear();
             st.last_active_id = None;
-            (collected, st.callbacks.clone(), st.disposing)
+            (collected, sids, st.callbacks.clone(), st.disposing)
         };
-        if !disposing && let Some(ref cbs) = callbacks {
-            for id in ids {
-                (cbs.on_request_close_tab)(id);
+        if let Some(ref cbs) = callbacks {
+            for sid in interrupted_sids {
+                (cbs.on_agent_ended)(sid, "interrupted", None);
+            }
+            if !disposing {
+                for id in ids {
+                    (cbs.on_request_close_tab)(id);
+                }
             }
         }
         terminate_pids_sync(&pids);
@@ -655,7 +676,7 @@ impl TerminalHost {
             move |res| {
                 let Some(this) = weak.upgrade() else {
                     if let Ok(pid) = res {
-                        signal_process_group(pid.0, false);
+                        terminate_async_with_kill_fallback(pid.0);
                     }
                     return;
                 };
@@ -666,7 +687,7 @@ impl TerminalHost {
                             let mut st = this.state.borrow_mut();
                             let Some(tab) = st.tabs.get_mut(&tab_id) else {
                                 drop(st);
-                                signal_process_group(pid_i32, false);
+                                terminate_async_with_kill_fallback(pid_i32);
                                 return;
                             };
                             tab.child_pid = Some(pid_i32);
@@ -682,8 +703,12 @@ impl TerminalHost {
                     }
                     Err(err) => {
                         let msg = err.message().to_string();
-                        let mut st = this.state.borrow_mut();
-                        if let Some(tab) = st.tabs.get_mut(&tab_id) {
+                        let agent_cb = {
+                            let mut st = this.state.borrow_mut();
+                            let callbacks = st.callbacks.clone();
+                            let Some(tab) = st.tabs.get_mut(&tab_id) else {
+                                return;
+                            };
                             tab.phase = TerminalPhase::Failed(msg.clone());
                             tab.status_label.set_text(&crate::i18n::fmt1(
                                 crate::i18n::Key::TermStartFailed,
@@ -692,6 +717,15 @@ impl TerminalHost {
                             tab.status_bar.set_visible(true);
                             tab.restart_btn
                                 .set_visible(matches!(tab.kind, TerminalKind::Shell));
+                            match &tab.kind {
+                                TerminalKind::Agent {
+                                    session_id: Some(sid),
+                                } => Some((sid.clone(), callbacks.map(|c| c.on_agent_ended))),
+                                _ => None,
+                            }
+                        };
+                        if let Some((sid, Some(cb))) = agent_cb {
+                            cb(sid, "failed", None);
                         }
                     }
                 }
@@ -718,12 +752,12 @@ impl TerminalHost {
             match &tab.kind {
                 TerminalKind::Agent {
                     session_id: Some(sid),
-                } => Some((sid.clone(), callbacks.map(|c| c.on_agent_exited))),
+                } => Some((sid.clone(), callbacks.map(|c| c.on_agent_ended))),
                 _ => None,
             }
         };
         if let Some((sid, Some(cb))) = agent_cb {
-            cb(sid, code);
+            cb(sid, "exited", Some(code));
         }
     }
 

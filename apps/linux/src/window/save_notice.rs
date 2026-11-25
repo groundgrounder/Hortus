@@ -7,7 +7,9 @@
 use crate::core::Utf16Mapper;
 use crate::core::model::HeadingItem;
 use crate::editor::save_sync::read_disk_stamp;
-use crate::files::operations::{save_temp_for as resolve_save_temp_for, short_error};
+use crate::files::operations::{
+    resolve_save_temp, save_temp_for as resolve_save_temp_for, short_error,
+};
 use crate::knowledge::clear_box;
 use crate::platform::style::apply_source_styles_with;
 use crate::window::shell::WindowInner;
@@ -51,7 +53,7 @@ impl WindowInner {
     }
 
     pub fn update_tab_notice(self: &Rc<Self>, path: &str) {
-        let (notice, label, actions, issue, message) = {
+        let (notice, label, actions, issue, message, edit_state) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(path) else {
                 return;
@@ -63,6 +65,7 @@ impl WindowInner {
                 tab.notice_actions.clone(),
                 edit.issue,
                 edit.message.clone(),
+                tab.edit_state.clone(),
             )
         };
         clear_box(&actions);
@@ -94,34 +97,37 @@ impl WindowInner {
                 label.set_text(&crate::i18n::fmt1(crate::i18n::Key::NoticeConflict, path));
                 row.add_css_class("hortus-notice-warning");
                 let weak = Rc::downgrade(self);
-                let p = path.to_string();
+                let es = edit_state.clone();
                 add_button(
                     crate::i18n::tr(crate::i18n::Key::BtnKeepMine),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
+                            let p = es.borrow().path.clone();
                             win.request_save(&p, SaveChoice::KeepMine, true);
                         }
                     }),
                 );
                 let weak = Rc::downgrade(self);
-                let p = path.to_string();
+                let es = edit_state.clone();
                 add_button(
                     crate::i18n::tr(crate::i18n::Key::BtnUseDisk),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
+                            let p = es.borrow().path.clone();
                             win.conflict_use_disk(&p);
                         }
                     }),
                 );
                 let weak = Rc::downgrade(self);
-                let p = path.to_string();
+                let es = edit_state.clone();
                 add_button(
                     crate::i18n::tr(crate::i18n::Key::BtnConflictCopy),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
+                            let p = es.borrow().path.clone();
                             win.request_save(&p, SaveChoice::ConflictCopy, true);
                         }
                     }),
@@ -131,23 +137,25 @@ impl WindowInner {
                 label.set_text(&crate::i18n::fmt1(crate::i18n::Key::NoticeMissing, path));
                 row.add_css_class("hortus-notice-error");
                 let weak = Rc::downgrade(self);
-                let p = path.to_string();
+                let es = edit_state.clone();
                 add_button(
                     crate::i18n::tr(crate::i18n::Key::BtnRecreate),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
+                            let p = es.borrow().path.clone();
                             win.request_save(&p, SaveChoice::Recreate, true);
                         }
                     }),
                 );
                 let weak = Rc::downgrade(self);
-                let p = path.to_string();
+                let es = edit_state.clone();
                 add_button(
                     crate::i18n::tr(crate::i18n::Key::BtnCloseTab),
                     true,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
+                            let p = es.borrow().path.clone();
                             win.close_tab_by_path(&p);
                         }
                     }),
@@ -157,23 +165,25 @@ impl WindowInner {
                 label.set_text(&crate::i18n::fmt1(crate::i18n::Key::NoticeRecovery, path));
                 row.add_css_class("hortus-notice-warning");
                 let weak = Rc::downgrade(self);
-                let p = path.to_string();
+                let es = edit_state.clone();
                 add_button(
                     crate::i18n::tr(crate::i18n::Key::BtnRestoreDraft),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
+                            let p = es.borrow().path.clone();
                             win.recover_draft(&p, true);
                         }
                     }),
                 );
                 let weak = Rc::downgrade(self);
-                let p = path.to_string();
+                let es = edit_state.clone();
                 add_button(
                     crate::i18n::tr(crate::i18n::Key::BtnDiscardDraft),
                     true,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
+                            let p = es.borrow().path.clone();
                             win.recover_draft(&p, false);
                         }
                     }),
@@ -182,10 +192,11 @@ impl WindowInner {
             DocumentIssue::SaveFailed => {
                 let detail = match message.as_str() {
                     "document.save_failed" => crate::i18n::tr(crate::i18n::Key::SaveErrWrite),
-                    "readonly.no_write_permission" => {
+                    "readonly.no_write_permission" | "document.read_only" => {
                         crate::i18n::tr(crate::i18n::Key::SaveErrPermission)
                     }
                     "readonly.invalid_utf8" => crate::i18n::tr(crate::i18n::Key::SaveErrUtf8),
+                    "note.different_volume" => crate::i18n::tr(crate::i18n::Key::SaveErrMountRoot),
                     "" => crate::i18n::tr(crate::i18n::Key::SaveErrUnknown),
                     other => other,
                 };
@@ -196,12 +207,13 @@ impl WindowInner {
                 ));
                 row.add_css_class("hortus-notice-error");
                 let weak = Rc::downgrade(self);
-                let p = path.to_string();
+                let es = edit_state;
                 add_button(
                     crate::i18n::tr(crate::i18n::Key::BtnRetry),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
+                            let p = es.borrow().path.clone();
                             win.request_save(&p, SaveChoice::Normal, true);
                         }
                     }),
@@ -217,6 +229,10 @@ impl WindowInner {
         resolve_save_temp_for(&self.state.borrow().temp_dir, vault_root, rel)
     }
 
+    pub fn save_temp_info(&self, vault_root: &str, rel: &str) -> (PathBuf, bool) {
+        resolve_save_temp(&self.state.borrow().temp_dir, vault_root, rel)
+    }
+
     pub fn request_save(self: &Rc<Self>, path: &str, choice: SaveChoice, announce: bool) {
         let (session, edit_state, vault_root) = {
             let st = self.state.borrow();
@@ -226,44 +242,75 @@ impl WindowInner {
             let Some(session) = tab.session.clone() else {
                 return;
             };
-            let Some(vault_root) = st.vault_root() else {
-                return;
+            let vault_root = if !tab.vault_root.is_empty() {
+                tab.vault_root.clone()
+            } else {
+                let Some(root) = st.vault_root() else {
+                    return;
+                };
+                root
             };
             (session, tab.edit_state.clone(), vault_root)
         };
-        let save_temp = self.save_temp_for(&vault_root, path);
-        let saved_text = {
+        let (save_temp, same_volume) = self.save_temp_info(&vault_root, path);
+        let (saved_text, saved_seq) = {
             let mut edit = edit_state.borrow_mut();
             if edit.save_inflight {
+                edit.save_queued = Some((choice, announce));
                 return;
             }
             edit.save_inflight = true;
-            edit.text.clone()
+            edit.save_queued = None;
+            (edit.text.clone(), edit.edit_seq)
         };
         let weak = Rc::downgrade(self);
-        let path = path.to_string();
         glib::MainContext::default().spawn_local(async move {
             let temp = save_temp.to_string_lossy().into_owned();
             let update = gio::spawn_blocking(move || session.save(temp, choice)).await;
             let Some(win) = weak.upgrade() else { return };
-            let mut edit = edit_state.borrow_mut();
-            edit.save_inflight = false;
+            let path_now = edit_state.borrow().path.clone();
+            let queued = {
+                let mut edit = edit_state.borrow_mut();
+                edit.save_inflight = false;
+                edit.save_queued.take()
+            };
             match update {
-                Ok(Ok(update)) => {
-                    drop(edit);
-                    win.apply_save_update(&path, update, saved_text, announce);
+                Ok(Ok(mut update)) => {
+                    if !same_volume
+                        && update.issue == DocumentIssue::SaveFailed
+                        && update.message == "document.save_failed"
+                    {
+                        update.message = "note.different_volume".into();
+                    }
+                    let seq_matches = edit_state.borrow().edit_seq == saved_seq;
+                    win.apply_save_update(&path_now, update, saved_text, saved_seq, announce);
+                    if let Some((q_choice, q_announce)) = queued {
+                        win.request_save(&path_now, q_choice, q_announce);
+                    } else if !seq_matches {
+                        win.request_save(&path_now, SaveChoice::Normal, false);
+                    }
                 }
                 Ok(Err(err)) => {
-                    edit.issue = Some(DocumentIssue::SaveFailed);
-                    edit.message = err.to_string();
-                    drop(edit);
-                    win.update_tab_notice(&path);
+                    {
+                        let mut edit = edit_state.borrow_mut();
+                        edit.issue = Some(DocumentIssue::SaveFailed);
+                        edit.message = err.to_string();
+                    }
+                    win.update_tab_notice(&path_now);
+                    if let Some((q_choice, q_announce)) = queued {
+                        win.request_save(&path_now, q_choice, q_announce);
+                    }
                 }
                 Err(_) => {
-                    edit.issue = Some(DocumentIssue::SaveFailed);
-                    edit.message = "document.save_failed".into();
-                    drop(edit);
-                    win.update_tab_notice(&path);
+                    {
+                        let mut edit = edit_state.borrow_mut();
+                        edit.issue = Some(DocumentIssue::SaveFailed);
+                        edit.message = "document.save_failed".into();
+                    }
+                    win.update_tab_notice(&path_now);
+                    if let Some((q_choice, q_announce)) = queued {
+                        win.request_save(&path_now, q_choice, q_announce);
+                    }
                 }
             }
         });
@@ -274,6 +321,7 @@ impl WindowInner {
         path: &str,
         update: DocumentUpdate,
         saved_text: String,
+        saved_seq: u64,
         announce: bool,
     ) {
         let Some(edit_state) = self
@@ -285,17 +333,23 @@ impl WindowInner {
         else {
             return;
         };
-        {
+        let seq_matches = {
             let mut edit = edit_state.borrow_mut();
-            edit.dirty = update.dirty;
+            let seq_matches = edit.edit_seq == saved_seq;
+            if seq_matches {
+                edit.dirty = update.dirty;
+                edit.revision = update.revision;
+            } else {
+                edit.dirty = true;
+            }
             edit.issue = Some(update.issue);
             edit.message = update.message.clone();
-            edit.revision = update.revision;
             edit.last_save_micros = update.save_micros;
             edit.saves += 1;
             edit.last_saved_at = Some(Instant::now());
-        }
-        let saved_clean = update.issue == DocumentIssue::None && !update.dirty;
+            seq_matches
+        };
+        let saved_clean = seq_matches && update.issue == DocumentIssue::None && !update.dirty;
         if saved_clean && let Some(handle) = self.state.borrow().vault_handle() {
             handle.upsert_note_content(path.to_string(), saved_text);
         }
@@ -304,6 +358,10 @@ impl WindowInner {
                 crate::i18n::Key::ToastConflictCopySaved,
                 copy,
             ));
+        } else if update.issue == DocumentIssue::SaveFailed
+            && update.message == "note.different_volume"
+        {
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::SaveErrMountRoot));
         } else if announce && saved_clean {
             self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSaved));
         }
@@ -346,13 +404,18 @@ impl WindowInner {
             self.tab_view.close_page_finish(&page, true);
             return;
         }
-        let (session, edit_state) = {
+        let (session, edit_state, tab_vault_root) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(&path) else {
                 self.tab_view.close_page_finish(&page, true);
                 return;
             };
-            (tab.session.clone(), tab.edit_state.clone())
+            let root = if !tab.vault_root.is_empty() {
+                tab.vault_root.clone()
+            } else {
+                st.vault_root().unwrap_or_default()
+            };
+            (tab.session.clone(), tab.edit_state.clone(), root)
         };
         let needs_protection = session
             .as_ref()
@@ -369,7 +432,11 @@ impl WindowInner {
         glib::MainContext::default().spawn_local(async move {
             let Some(win) = weak.upgrade() else { return };
             let persisted = if let Some(session) = session {
-                let vault_root = win.state.borrow().vault_root().unwrap_or_default();
+                let vault_root = if !tab_vault_root.is_empty() {
+                    tab_vault_root
+                } else {
+                    win.state.borrow().vault_root().unwrap_or_default()
+                };
                 let temp = if vault_root.is_empty() {
                     std::env::temp_dir()
                 } else {
@@ -464,7 +531,7 @@ impl WindowInner {
         });
     }
 
-    fn recover_draft(self: &Rc<Self>, path: &str, restore: bool) {
+    pub fn recover_draft(self: &Rc<Self>, path: &str, restore: bool) {
         let session = {
             let st = self.state.borrow();
             st.tabs.get(path).and_then(|tab| tab.session.clone())
@@ -476,7 +543,12 @@ impl WindowInner {
             let update = gio::spawn_blocking(move || session.recover(restore)).await;
             let Some(win) = weak.upgrade() else { return };
             match update {
-                Ok(Ok(_)) => {
+                Ok(Ok(update)) => {
+                    let ro = update.read_only_reason.clone();
+                    if let Some(tab) = win.state.borrow().tabs.get(&path) {
+                        tab.edit_state.borrow_mut().read_only_reason = ro.clone();
+                        tab.edit_view.set_editable(ro.is_none());
+                    }
                     win.reload_tab_from_session(&path, false);
                     win.show_toast(if restore {
                         crate::i18n::tr(crate::i18n::Key::ToastDraftRestored)
@@ -552,13 +624,26 @@ impl WindowInner {
                 edit.suppress = true;
                 edit.text = text.clone();
                 edit.revision = revision;
-                edit.issue = None;
+                if let Some(reason) = edit.read_only_reason.clone() {
+                    edit.issue = Some(DocumentIssue::SaveFailed);
+                    edit.message = reason;
+                } else {
+                    edit.issue = None;
+                    edit.message.clear();
+                }
                 edit.dirty = false;
             }
             buffer.set_text(&text);
             let mapper = Utf16Mapper::new(&text);
             apply_source_styles_with(&buffer, &mapper, &styles.packed_runs);
             edit_state.borrow_mut().suppress = false;
+            let locked = {
+                let edit = edit_state.borrow();
+                edit.issue == Some(DocumentIssue::Recovery) || edit.read_only_reason.is_some()
+            };
+            if let Some(tab) = win.state.borrow().tabs.get(&path) {
+                tab.edit_view.set_editable(!locked);
+            }
             if let Some(find) = win
                 .state
                 .borrow()
@@ -616,7 +701,8 @@ impl WindowInner {
             let issue = update.issue;
             let external_text = update.text.clone();
             let revision = update.revision;
-            {
+            let read_only_reason = update.read_only_reason.clone();
+            let (locked, effective_issue) = {
                 let st = win.state.borrow();
                 let Some(tab) = st.tabs.get(&path) else {
                     return;
@@ -628,15 +714,35 @@ impl WindowInner {
                 if dirty_before && !edit.dirty && issue == DocumentIssue::Conflict {
                     return;
                 }
-                edit.issue = Some(issue);
-                edit.message = update.message.clone();
+                edit.read_only_reason = read_only_reason.clone();
+                let effective_issue = if issue == DocumentIssue::None {
+                    if let Some(ref reason) = read_only_reason {
+                        edit.message = reason.clone();
+                        DocumentIssue::SaveFailed
+                    } else {
+                        edit.message = update.message.clone();
+                        DocumentIssue::None
+                    }
+                } else {
+                    edit.message = update.message.clone();
+                    issue
+                };
+                edit.issue = Some(effective_issue);
                 edit.dirty = update.dirty;
                 edit.revision = revision;
                 edit.refreshes += 1;
-                edit.last_refresh_issue = Some(issue);
-            }
-            match issue {
-                DocumentIssue::Conflict | DocumentIssue::Missing | DocumentIssue::SaveFailed => {
+                edit.last_refresh_issue = Some(effective_issue);
+                let locked =
+                    effective_issue == DocumentIssue::Recovery || read_only_reason.is_some();
+                tab.edit_view.set_editable(!locked);
+                (locked, effective_issue)
+            };
+            let _ = locked;
+            match effective_issue {
+                DocumentIssue::Conflict
+                | DocumentIssue::Missing
+                | DocumentIssue::Recovery
+                | DocumentIssue::SaveFailed => {
                     win.update_tab_notice(&path);
                     win.update_tab_title(&path);
                 }
@@ -671,6 +777,7 @@ impl WindowInner {
                         }
                     } else {
                         win.update_tab_notice(&path);
+                        win.update_tab_title(&path);
                     }
                 }
             }

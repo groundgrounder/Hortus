@@ -2,8 +2,11 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
+use crate::services::config_service::{FONT_SIZE_MAX, FONT_SIZE_MIN};
 use gtk4::gdk;
 use gtk4::pango;
+use gtk4::prelude::*;
+use libadwaita as adw;
 use std::cell::RefCell;
 use std::sync::Once;
 
@@ -334,14 +337,14 @@ const BASE_CSS: &str = r#"
 }
 
 .hortus-diff-add {
-    background-color: alpha(#2ec27e, 0.16);
+    background-color: alpha(@success_color, 0.16);
     color: @view_fg_color;
     font-family: monospace;
     font-size: 0.88em;
 }
 
 .hortus-diff-del {
-    background-color: alpha(#e01b24, 0.16);
+    background-color: alpha(@error_color, 0.16);
     color: @view_fg_color;
     font-family: monospace;
     font-size: 0.88em;
@@ -356,16 +359,16 @@ const BASE_CSS: &str = r#"
 .hortus-agent-badge-ok {
     padding: 2px 8px;
     border-radius: 999px;
-    background-color: alpha(#2ec27e, 0.18);
-    color: #26a269;
+    background-color: alpha(@success_color, 0.16);
+    color: @success_color;
     font-size: 0.84em;
 }
 
 .hortus-agent-badge-err {
     padding: 2px 8px;
     border-radius: 999px;
-    background-color: alpha(#e01b24, 0.16);
-    color: #c01c28;
+    background-color: alpha(@error_color, 0.16);
+    color: @error_color;
     font-size: 0.84em;
 }
 "#;
@@ -377,7 +380,7 @@ thread_local! {
 }
 
 fn format_font_css(font_size_px: f64) -> String {
-    let px = font_size_px.clamp(10.0, 32.0);
+    let px = font_size_px.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
     format!(
         ".hortus-note-view, .hortus-reading-view, .hortus-embedded-reading-view {{ font-size: {px:.1}px; }}\n"
     )
@@ -419,7 +422,89 @@ pub fn update_editor_font_size_css(font_size_px: f64) {
     });
 }
 
-pub fn create_tag_table() -> gtk4::TextTagTable {
+struct TagThemePalette {
+    marker: gdk::RGBA,
+    code_bg: gdk::RGBA,
+    quote: gdk::RGBA,
+    link: gdk::RGBA,
+    tag: gdk::RGBA,
+    highlight_bg: gdk::RGBA,
+    comment: gdk::RGBA,
+    frontmatter: gdk::RGBA,
+    unresolved_link: gdk::RGBA,
+    callout_bg: gdk::RGBA,
+    task: gdk::RGBA,
+    find_match_bg: gdk::RGBA,
+    find_current_bg: gdk::RGBA,
+}
+
+fn palette_for_theme(is_dark: bool) -> TagThemePalette {
+    if is_dark {
+        TagThemePalette {
+            marker: gdk::RGBA::new(0.66, 0.69, 0.75, 0.78),
+            code_bg: gdk::RGBA::new(0.70, 0.75, 0.82, 0.18),
+            quote: gdk::RGBA::new(0.72, 0.76, 0.82, 0.94),
+            link: gdk::RGBA::new(0.47, 0.73, 1.0, 1.0),
+            tag: gdk::RGBA::new(0.45, 0.76, 0.96, 1.0),
+            highlight_bg: gdk::RGBA::new(0.88, 0.68, 0.12, 0.32),
+            comment: gdk::RGBA::new(0.64, 0.68, 0.74, 0.78),
+            frontmatter: gdk::RGBA::new(0.67, 0.70, 0.76, 0.85),
+            unresolved_link: gdk::RGBA::new(0.66, 0.70, 0.77, 0.92),
+            callout_bg: gdk::RGBA::new(0.38, 0.66, 0.98, 0.14),
+            task: gdk::RGBA::new(0.47, 0.73, 1.0, 1.0),
+            find_match_bg: gdk::RGBA::new(0.78, 0.62, 0.10, 0.42),
+            find_current_bg: gdk::RGBA::new(0.90, 0.48, 0.10, 0.62),
+        }
+    } else {
+        TagThemePalette {
+            marker: gdk::RGBA::new(0.42, 0.45, 0.50, 0.72),
+            code_bg: gdk::RGBA::new(0.50, 0.54, 0.60, 0.14),
+            quote: gdk::RGBA::new(0.36, 0.40, 0.45, 0.95),
+            link: gdk::RGBA::new(0.11, 0.44, 0.84, 1.0),
+            tag: gdk::RGBA::new(0.12, 0.45, 0.76, 1.0),
+            highlight_bg: gdk::RGBA::new(0.96, 0.83, 0.18, 0.34),
+            comment: gdk::RGBA::new(0.43, 0.46, 0.51, 0.76),
+            frontmatter: gdk::RGBA::new(0.42, 0.45, 0.50, 0.82),
+            unresolved_link: gdk::RGBA::new(0.48, 0.51, 0.57, 0.92),
+            callout_bg: gdk::RGBA::new(0.21, 0.52, 0.89, 0.08),
+            task: gdk::RGBA::new(0.11, 0.44, 0.84, 1.0),
+            find_match_bg: gdk::RGBA::new(0.98, 0.86, 0.30, 0.42),
+            find_current_bg: gdk::RGBA::new(0.98, 0.62, 0.16, 0.62),
+        }
+    }
+}
+
+pub fn apply_tag_table_theme(table: &gtk4::TextTagTable, is_dark: bool) {
+    let p = palette_for_theme(is_dark);
+    let set_fg = |name: &str, rgba: &gdk::RGBA| {
+        if let Some(tag) = table.lookup(name) {
+            tag.set_foreground_rgba(Some(rgba));
+        }
+    };
+    let set_bg = |name: &str, rgba: &gdk::RGBA| {
+        if let Some(tag) = table.lookup(name) {
+            tag.set_background_rgba(Some(rgba));
+        }
+    };
+    set_fg("marker", &p.marker);
+    set_bg("code", &p.code_bg);
+    set_fg("quote", &p.quote);
+    set_fg("quote_block", &p.quote);
+    set_fg("link", &p.link);
+    set_fg("tag", &p.tag);
+    set_bg("highlight", &p.highlight_bg);
+    set_fg("comment", &p.comment);
+    set_fg("frontmatter", &p.frontmatter);
+    set_fg("unresolved_link", &p.unresolved_link);
+    if let Some(tag) = table.lookup("callout_block") {
+        tag.set_paragraph_background_rgba(Some(&p.callout_bg));
+    }
+    set_fg("task", &p.task);
+    set_bg("find_match", &p.find_match_bg);
+    set_bg("find_current", &p.find_current_bg);
+}
+
+pub fn create_tag_table_for_theme(is_dark: bool) -> gtk4::TextTagTable {
     let table = gtk4::TextTagTable::new();
 
     for level in 1u8..=6 {
@@ -441,12 +526,7 @@ pub fn create_tag_table() -> gtk4::TextTagTable {
         table.add(&tag);
     }
 
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("marker")
-            .foreground_rgba(&gdk::RGBA::new(0.50, 0.52, 0.56, 0.60))
-            .build(),
-    );
+    table.add(&gtk4::TextTag::builder().name("marker").build());
     table.add(&gtk4::TextTag::builder().name("strong").weight(700).build());
     table.add(
         &gtk4::TextTag::builder()
@@ -464,7 +544,6 @@ pub fn create_tag_table() -> gtk4::TextTagTable {
         &gtk4::TextTag::builder()
             .name("code")
             .family("monospace")
-            .background_rgba(&gdk::RGBA::new(0.50, 0.54, 0.60, 0.14))
             .build(),
     );
     table.add(
@@ -473,36 +552,18 @@ pub fn create_tag_table() -> gtk4::TextTagTable {
             .family("monospace")
             .build(),
     );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("quote")
-            .foreground_rgba(&gdk::RGBA::new(0.45, 0.48, 0.52, 0.90))
-            .build(),
-    );
+    table.add(&gtk4::TextTag::builder().name("quote").build());
     table.add(
         &gtk4::TextTag::builder()
             .name("link")
-            .foreground_rgba(&gdk::RGBA::new(0.21, 0.52, 0.89, 1.0))
             .underline(pango::Underline::Single)
             .build(),
     );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("tag")
-            .foreground_rgba(&gdk::RGBA::new(0.18, 0.52, 0.82, 1.0))
-            .weight(500)
-            .build(),
-    );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("highlight")
-            .background_rgba(&gdk::RGBA::new(0.96, 0.83, 0.18, 0.30))
-            .build(),
-    );
+    table.add(&gtk4::TextTag::builder().name("tag").weight(500).build());
+    table.add(&gtk4::TextTag::builder().name("highlight").build());
     table.add(
         &gtk4::TextTag::builder()
             .name("comment")
-            .foreground_rgba(&gdk::RGBA::new(0.50, 0.52, 0.56, 0.55))
             .style(pango::Style::Italic)
             .build(),
     );
@@ -511,21 +572,18 @@ pub fn create_tag_table() -> gtk4::TextTagTable {
         &gtk4::TextTag::builder()
             .name("frontmatter")
             .family("monospace")
-            .foreground_rgba(&gdk::RGBA::new(0.50, 0.52, 0.56, 0.65))
             .scale(0.92)
             .build(),
     );
     table.add(
         &gtk4::TextTag::builder()
             .name("unresolved_link")
-            .foreground_rgba(&gdk::RGBA::new(0.55, 0.57, 0.62, 0.85))
             .underline(pango::Underline::Single)
             .build(),
     );
     table.add(
         &gtk4::TextTag::builder()
             .name("callout_block")
-            .paragraph_background_rgba(&gdk::RGBA::new(0.21, 0.52, 0.89, 0.08))
             .left_margin(10)
             .right_margin(10)
             .build(),
@@ -534,28 +592,11 @@ pub fn create_tag_table() -> gtk4::TextTagTable {
         &gtk4::TextTag::builder()
             .name("quote_block")
             .left_margin(16)
-            .foreground_rgba(&gdk::RGBA::new(0.45, 0.48, 0.52, 0.90))
             .build(),
     );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("task")
-            .foreground_rgba(&gdk::RGBA::new(0.21, 0.52, 0.89, 1.0))
-            .weight(600)
-            .build(),
-    );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("find_match")
-            .background_rgba(&gdk::RGBA::new(0.98, 0.86, 0.30, 0.38))
-            .build(),
-    );
-    table.add(
-        &gtk4::TextTag::builder()
-            .name("find_current")
-            .background_rgba(&gdk::RGBA::new(0.98, 0.62, 0.16, 0.62))
-            .build(),
-    );
+    table.add(&gtk4::TextTag::builder().name("task").weight(600).build());
+    table.add(&gtk4::TextTag::builder().name("find_match").build());
+    table.add(&gtk4::TextTag::builder().name("find_current").build());
     table.add(
         &gtk4::TextTag::builder()
             .name("blank_line")
@@ -565,26 +606,58 @@ pub fn create_tag_table() -> gtk4::TextTagTable {
             .build(),
     );
 
+    apply_tag_table_theme(&table, is_dark);
     table
+}
+
+pub fn create_tag_table() -> gtk4::TextTagTable {
+    let is_dark = adw::is_initialized() && adw::StyleManager::default().is_dark();
+    create_tag_table_for_theme(is_dark)
 }
 
 #[cfg(test)]
 static GTK_INIT_RESULT: std::sync::OnceLock<(bool, std::thread::ThreadId)> =
     std::sync::OnceLock::new();
 
-/// 确保多线程 `cargo test` 下 GTK 仅尝试初始化一次，避免无显示环境或跨线程重复调用 `gtk_init_check`。
+/// 确保多线程 `cargo test` 下 GTK/libadwaita 仅尝试初始化一次，避免无显示环境或跨线程重复调用 `gtk_init_check`。
 #[cfg(test)]
 pub fn ensure_gtk_test_thread() -> bool {
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return false;
     }
     let (ok, tid) = *GTK_INIT_RESULT.get_or_init(|| {
-        let ok = if gtk4::is_initialized() {
-            true
-        } else {
-            gtk4::init().is_ok()
-        };
-        (ok, std::thread::current().id())
+        let gtk_ok = gtk4::is_initialized() || gtk4::init().is_ok();
+        let adw_ok = gtk_ok && (adw::is_initialized() || adw::init().is_ok());
+        (adw_ok, std::thread::current().id())
     });
     ok && (gtk4::is_initialized_main_thread() || tid == std::thread::current().id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_table_switches_between_light_and_dark_themes() {
+        if !ensure_gtk_test_thread() {
+            return;
+        }
+        let table = create_tag_table_for_theme(false);
+        let light_link = table.lookup("link").unwrap().foreground_rgba().unwrap();
+        let light_callout = table
+            .lookup("callout_block")
+            .unwrap()
+            .paragraph_background_rgba()
+            .unwrap();
+        apply_tag_table_theme(&table, true);
+        let dark_link = table.lookup("link").unwrap().foreground_rgba().unwrap();
+        let dark_callout = table
+            .lookup("callout_block")
+            .unwrap()
+            .paragraph_background_rgba()
+            .unwrap();
+        assert_ne!(light_link, dark_link);
+        assert_ne!(light_callout, dark_callout);
+        assert_eq!(dark_link, palette_for_theme(true).link);
+    }
 }
