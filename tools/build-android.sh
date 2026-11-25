@@ -178,7 +178,7 @@ if [[ -f apps/macos/Resources/Fonts/KaTeX/FONT_NOTICE.txt ]]; then
   cp apps/macos/Resources/Fonts/KaTeX/FONT_NOTICE.txt "$assets_out/Fonts/KaTeX/"
 fi
 cp apps/LICENSE "$assets_out/LICENSE.txt"
-python3 -B tools/third-party-notices.py --rust-only --output "$assets_out/ThirdPartyNotices.txt"
+python3 -B tools/third-party-notices.py --rust-only --target aarch64-linux-android --android-deps --output "$assets_out/ThirdPartyNotices.txt"
 
 # 6. 通过 Gradle Wrapper 组装 APK
 build_number="$(git rev-list --count HEAD)"
