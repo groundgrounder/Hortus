@@ -320,15 +320,18 @@ private final class BlockMathCanvasUIView: UIView {
 final class DiagramBlockAttachment: HortusBaseAttachment {
     let diagram: NoteDiagram
     let width: Double
+    let showFocusButton: Bool
     let onFocus: (UInt32) -> Void
     let onToggle: (UInt32, String) -> Void
     let onOpenLink: (String, String?) -> Void
 
-    init(_ diagram: NoteDiagram, width: Double, onFocus: @escaping (UInt32) -> Void,
+    init(_ diagram: NoteDiagram, width: Double, showFocusButton: Bool = true,
+         onFocus: @escaping (UInt32) -> Void,
          onToggle: @escaping (UInt32, String) -> Void, onOpenLink: @escaping (String, String?) -> Void) {
         let clampedWidth = max(120, width)
         self.diagram = diagram
         self.width = clampedWidth
+        self.showFocusButton = showFocusButton
         self.onFocus = onFocus
         self.onToggle = onToggle
         self.onOpenLink = onOpenLink
@@ -373,22 +376,25 @@ private final class InlineDiagramUIView: UIView {
         isOpaque = false
         backgroundColor = .clear
         contentMode = .redraw
+        clipsToBounds = true
 
-        var config = UIButton.Configuration.tinted()
-        config.title = L10n.string("Focus")
-        config.buttonSize = .mini
-        config.cornerStyle = .capsule
-        focusButton.configuration = config
-        focusButton.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            self.attachment.onFocus(self.attachment.diagram.ordinal)
-        }, for: .touchUpInside)
-        focusButton.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(focusButton)
-        NSLayoutConstraint.activate([
-            focusButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            focusButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-        ])
+        if attachment.showFocusButton {
+            var config = UIButton.Configuration.tinted()
+            config.title = L10n.string("Focus")
+            config.buttonSize = .mini
+            config.cornerStyle = .capsule
+            focusButton.configuration = config
+            focusButton.addAction(UIAction { [weak self] _ in
+                guard let self else { return }
+                self.attachment.onFocus(self.attachment.diagram.ordinal)
+            }, for: .touchUpInside)
+            focusButton.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(focusButton)
+            NSLayoutConstraint.activate([
+                focusButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+                focusButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            ])
+        }
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         addGestureRecognizer(tap)
@@ -435,12 +441,23 @@ final class MediaBlockAttachment: HortusBaseAttachment {
     let dark: Bool
     let handle: VaultHandle?
     let diagramService: DiagramService
+    let embedTarget: String
+    let embedHeading: String?
+    let embedAlias: String?
+    let ancestors: [String]
+    let depth: Int
     let onOpenLink: (String, String?) -> Void
-    let preferredSize: CGSize
+    let onShowTag: (String) -> Void
+    var onSizeChange: ((MediaBlockAttachment) -> Void)?
+    private(set) var preferredSize: CGSize
 
     init(_ media: NoteMediaItem, width: Double, fontSize: Double, vault: String, notePath: String,
          dark: Bool, handle: VaultHandle?, diagramService: DiagramService,
-         onOpenLink: @escaping (String, String?) -> Void) {
+         embedTarget: String? = nil, embedHeading: String? = nil, embedAlias: String? = nil,
+         ancestors: [String] = [], depth: Int = 0,
+         onOpenLink: @escaping (String, String?) -> Void,
+         onShowTag: @escaping (String) -> Void = { _ in },
+         onSizeChange: ((MediaBlockAttachment) -> Void)? = nil) {
         self.media = media
         self.width = max(120, width)
         self.fontSize = fontSize
@@ -449,14 +466,22 @@ final class MediaBlockAttachment: HortusBaseAttachment {
         self.dark = dark
         self.handle = handle
         self.diagramService = diagramService
+        let fallbackTarget = media.prepared.block.imageTarget.isEmpty ? media.prepared.block.imageAlt : media.prepared.block.imageTarget
+        self.embedTarget = embedTarget ?? fallbackTarget
+        self.embedHeading = embedHeading
+        self.embedAlias = embedAlias
+        self.ancestors = ancestors.isEmpty ? [notePath] : ancestors
+        self.depth = depth
         self.onOpenLink = onOpenLink
+        self.onShowTag = onShowTag
+        self.onSizeChange = onSizeChange
 
         let block = media.prepared.block
         if !block.columns.isEmpty {
             let tableHeight = TableLayoutMetrics.measure(block: block, size: fontSize, math: media.prepared.math).totalHeight
             self.preferredSize = CGSize(width: self.width, height: max(44, tableHeight + 8))
         } else if media.prepared.block.imageWiki && media.prepared.reason.hasPrefix("embed.") {
-            self.preferredSize = CGSize(width: self.width, height: 112)
+            self.preferredSize = CGSize(width: self.width, height: 68)
         } else if media.prepared.imageSize.width > 0 && media.prepared.imageSize.height > 0 {
             let requestedWidth = block.imageWidth.flatMap { $0 > 0 ? Double($0) : nil } ?? Double(media.prepared.imageSize.width)
             let maxW = min(self.width, requestedWidth)
@@ -470,6 +495,15 @@ final class MediaBlockAttachment: HortusBaseAttachment {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    @MainActor
+    func updatePreferredHeight(_ height: Double) {
+        let clamped = max(44.0, height)
+        guard abs(preferredSize.height - clamped) > 0.5 else { return }
+        preferredSize = CGSize(width: width, height: clamped)
+        bounds = CGRect(origin: .zero, size: preferredSize)
+        onSizeChange?(self)
+    }
 
     @MainActor
     override func makeHostView() -> UIView {
@@ -578,19 +612,28 @@ private final class TableCanvasUIView: UIView {
     }
 }
 
-private final class MediaBlockHostUIView: UIView {
+final class MediaBlockHostUIView: UIView {
+    private static let titleAreaHeight: CGFloat = 34
+    private static let maxEmbeddedNoteHeight: CGFloat = 1400
+
     private let attachment: MediaBlockAttachment
     private var imageView: UIImageView?
-    private var embedLabel: UILabel?
+    private let accentBar = UIView()
+    private var embedMessageLabel: UILabel?
     private var embedTitleButton: UIButton?
-    private var resolvedEmbedPath: String?
-    private var resolvedEmbedHeading: String?
+    private var embedBodyView: UIView?
+    private var embedTask: Task<Void, Never>?
+
+    private(set) var embedKind: String?
+    private(set) var resolvedEmbedPath: String?
+    private(set) var resolvedEmbedHeading: String?
 
     init(attachment: MediaBlockAttachment) {
         self.attachment = attachment
         super.init(frame: CGRect(origin: .zero, size: attachment.preferredSize))
         isOpaque = false
         backgroundColor = .clear
+        clipsToBounds = true
 
         let block = attachment.media.prepared.block
         if !block.columns.isEmpty {
@@ -626,6 +669,28 @@ private final class MediaBlockHostUIView: UIView {
 
     required init?(coder: NSCoder) { nil }
 
+    deinit {
+        embedTask?.cancel()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let titleButton = embedTitleButton else { return }
+        let w = bounds.width
+        let h = bounds.height
+        accentBar.frame = CGRect(x: 2, y: 6, width: 3, height: max(0, h - 12))
+        titleButton.frame = CGRect(x: 12, y: 6, width: max(0, w - 24), height: 24)
+        let bodyY = Self.titleAreaHeight
+        let bodyW = max(0, w - 16)
+        let bodyH = max(0, h - bodyY - 8)
+        if let body = embedBodyView {
+            body.frame = CGRect(x: 8, y: bodyY, width: bodyW, height: bodyH)
+        }
+        if let msg = embedMessageLabel {
+            msg.frame = CGRect(x: 14, y: bodyY, width: max(0, w - 28), height: max(20, bodyH))
+        }
+    }
+
     private func setupNotice(text: String) {
         backgroundColor = UIColor.secondarySystemBackground
         layer.cornerRadius = 8
@@ -647,60 +712,718 @@ private final class MediaBlockHostUIView: UIView {
         backgroundColor = UIColor.secondarySystemBackground
         layer.cornerRadius = 10
         layer.borderWidth = 0.5
-        layer.borderColor = UIColor.separator.cgColor
+        layer.borderColor = UIColor.separator.resolvedColor(with: traitCollection).cgColor
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in
+            self.layer.borderColor = UIColor.separator.resolvedColor(with: self.traitCollection).cgColor
+        }
+
+        accentBar.backgroundColor = tintColor.withAlphaComponent(0.42)
+        accentBar.layer.cornerRadius = 1.5
+        addSubview(accentBar)
 
         let button = UIButton(type: .system)
         button.contentHorizontalAlignment = .leading
-        button.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
-        button.setTitle(attachment.media.prepared.block.imageAlt, for: .normal)
+        var config = UIButton.Configuration.plain()
+        config.title = initialEmbedTitle()
+        config.image = UIImage(systemName: attachment.embedTarget.lowercased().hasSuffix(".mmd") ? "chart.xyaxis.line" : "doc.text")?
+            .withConfiguration(UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
+        config.imagePadding = 6
+        config.contentInsets = .zero
+        config.titleLineBreakMode = .byTruncatingTail
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+            var outgoing = incoming
+            outgoing.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+            return outgoing
+        }
+        button.configuration = config
+        button.isEnabled = false
+        button.accessibilityIdentifier = "embed-title-\(attachment.embedTarget)"
         button.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            if let path = self.resolvedEmbedPath {
-                self.attachment.onOpenLink(path, self.resolvedEmbedHeading)
-            }
+            guard let self, let path = self.resolvedEmbedPath else { return }
+            self.attachment.onOpenLink(path, self.resolvedEmbedHeading)
         }, for: .touchUpInside)
-        button.translatesAutoresizingMaskIntoConstraints = false
-
-        let preview = UILabel()
-        preview.font = .systemFont(ofSize: 13)
-        preview.textColor = .secondaryLabel
-        preview.numberOfLines = 3
-        preview.text = L10n.string("Loading notes")
-        preview.translatesAutoresizingMaskIntoConstraints = false
-
         addSubview(button)
-        addSubview(preview)
-        NSLayoutConstraint.activate([
-            button.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            button.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            preview.topAnchor.constraint(equalTo: button.bottomAnchor, constant: 4),
-            preview.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            preview.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            preview.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -8),
-        ])
         self.embedTitleButton = button
-        self.embedLabel = preview
 
-        guard let handle = attachment.handle else { return }
+        let msg = UILabel()
+        msg.font = .systemFont(ofSize: 13)
+        msg.textColor = .secondaryLabel
+        msg.numberOfLines = 0
+        msg.text = L10n.string("Loading notes")
+        addSubview(msg)
+        self.embedMessageLabel = msg
+
+        guard let handle = attachment.handle else {
+            showEmbedMessage(L10n.string("Embedded note could not be read"))
+            return
+        }
+
         let sourcePath = attachment.notePath
-        let target = attachment.media.prepared.block.imageAlt
-        let width = attachment.width
-        let size = attachment.fontSize
-        Task.detached(priority: .userInitiated) { [weak self] in
+        let target = attachment.embedTarget
+        let heading = attachment.embedHeading
+        let alias = attachment.embedAlias
+        let ancestors = attachment.ancestors
+        let vault = attachment.vault
+        let fontSize = attachment.fontSize
+        let dark = attachment.dark
+        let cardWidth = attachment.width
+        let noteContentWidth = max(120.0, cardWidth - 44.0)
+        let diagramWidth = max(120.0, cardWidth - 16.0)
+        let diagramService = attachment.diagramService
+
+        embedTask = Task.detached(priority: .userInitiated) { [weak self] in
             let info = try? handle.resolveEmbed(
-                sourcePath: sourcePath, rawTarget: target, heading: nil, alias: nil,
-                ancestors: [sourcePath], maxDepth: 3, width: width, size: size
+                sourcePath: sourcePath,
+                rawTarget: target,
+                heading: heading,
+                alias: alias,
+                ancestors: ancestors,
+                maxDepth: 3,
+                width: noteContentWidth,
+                size: fontSize
             )
-            await MainActor.run {
-                guard let self, let info else { return }
-                self.resolvedEmbedPath = info.resolvedPath
-                self.resolvedEmbedHeading = info.heading
-                let title = info.displayTitle.isEmpty ? target : info.displayTitle
-                self.embedTitleButton?.setTitle(title, for: .normal)
-                let body = info.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.embedLabel?.text = body.isEmpty ? (info.resolvedPath ?? target) : body
+            guard !Task.isCancelled else { return }
+            guard let info else {
+                await MainActor.run {
+                    self?.showEmbedMessage(L10n.string("Embedded note could not be read"))
+                }
+                return
             }
+
+            if info.kind == "diagram" {
+                let block = NoteDiagram(
+                    ordinal: 1,
+                    sourceStart: 0,
+                    range: NSRange(location: 0, length: (info.content as NSString).length),
+                    collapsed: [],
+                    tailStart: 0,
+                    documentIdentity: "embed:" + (info.resolvedPath ?? target),
+                    revision: 1
+                )
+                let rendered = await diagramService.render(
+                    source: info.content,
+                    mmd: info.isMmd,
+                    blocks: [block],
+                    width: diagramWidth,
+                    dark: dark,
+                    fontGeneration: fontSize.bitPattern
+                )
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self?.applyResolvedEmbed(info: info, media: [], math: [], diagrams: rendered)
+                }
+            } else if info.kind == "note" {
+                let media = await LocalImageCache.shared.prepare(
+                    info.media, vault: vault, size: fontSize, mathService: MathService.shared
+                )
+                guard !Task.isCancelled else { return }
+                let math: [PreparedMathBlock] = info.math.isEmpty ? [] : await MathService.shared.prepare(
+                    info.math, source: info.content, size: fontSize, width: noteContentWidth, displayText: info.text
+                )
+                guard !Task.isCancelled else { return }
+                var diagrams: [NoteDiagram] = []
+                if !info.diagrams.isEmpty {
+                    let blocks = info.diagrams.map { item in
+                        NoteDiagram(
+                            ordinal: item.ordinal,
+                            sourceStart: item.startUtf16,
+                            range: NSRange(location: Int(item.startUtf16), length: Int(item.lengthUtf16)),
+                            collapsed: [],
+                            tailStart: 0,
+                            documentIdentity: "embed:" + (info.resolvedPath ?? target),
+                            revision: 1
+                        )
+                    }
+                    diagrams = await diagramService.render(
+                        source: info.content,
+                        mmd: info.isMmd,
+                        blocks: blocks,
+                        width: noteContentWidth,
+                        dark: dark,
+                        fontGeneration: fontSize.bitPattern
+                    )
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self?.applyResolvedEmbed(info: info, media: media, math: math, diagrams: diagrams)
+                }
+            } else {
+                await MainActor.run {
+                    self?.applyResolvedEmbed(info: info, media: [], math: [], diagrams: [])
+                }
+            }
+        }
+    }
+
+    private func initialEmbedTitle() -> String {
+        let base = attachment.embedAlias?.isEmpty == false ? (attachment.embedAlias ?? attachment.embedTarget) : attachment.embedTarget
+        if let heading = attachment.embedHeading, !heading.isEmpty {
+            return "\(base) #\(heading)"
+        }
+        return base
+    }
+
+    private func formattedEmbedTitle(for info: EmbedContentInfo) -> String {
+        let base = info.displayTitle.isEmpty ? attachment.embedTarget : info.displayTitle
+        if let heading = info.heading, !heading.isEmpty {
+            return "\(base) #\(heading)"
+        }
+        return base
+    }
+
+    private func applyResolvedEmbed(info: EmbedContentInfo, media: [PreparedMedia], math: [PreparedMathBlock], diagrams: [NoteDiagram]) {
+        embedKind = info.kind
+        resolvedEmbedPath = info.resolvedPath
+        resolvedEmbedHeading = info.heading
+
+        if var config = embedTitleButton?.configuration {
+            config.title = formattedEmbedTitle(for: info)
+            config.image = UIImage(systemName: info.isMmd ? "chart.xyaxis.line" : "doc.text")?
+                .withConfiguration(UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
+            embedTitleButton?.configuration = config
+        }
+        embedTitleButton?.isEnabled = info.resolvedPath != nil
+
+        switch info.kind {
+        case "diagram":
+            if let diagram = diagrams.first, diagram.prepared != nil {
+                let canvas = EmbedDiagramCanvasUIView(
+                    info: info,
+                    initialDiagram: diagram,
+                    width: max(120, attachment.width - 16),
+                    dark: attachment.dark,
+                    fontSize: attachment.fontSize,
+                    handle: attachment.handle,
+                    fallbackSourcePath: attachment.notePath,
+                    diagramService: attachment.diagramService,
+                    onOpenLink: attachment.onOpenLink,
+                    onHeightChange: { [weak self] diagramHeight in
+                        self?.setEmbedBodyHeight(diagramHeight)
+                    }
+                )
+                installEmbedBody(canvas, height: diagram.prepared?.scene.height ?? 120)
+            } else {
+                installEmbedFallbackSource(info.content, reason: diagrams.first?.reason ?? "")
+            }
+
+        case "note":
+            let bodyWidth = max(120.0, attachment.width - 16.0)
+            let reading = EmbeddedNoteReadingUIView(
+                info: info,
+                media: media,
+                math: math,
+                diagrams: diagrams,
+                attachment: attachment,
+                bodyWidth: bodyWidth,
+                onHeightChange: { [weak self] measuredHeight in
+                    let clamped = min(Self.maxEmbeddedNoteHeight, max(32.0, measuredHeight))
+                    self?.updateScrollStateForNote(measuredHeight: measuredHeight, maxHeight: Self.maxEmbeddedNoteHeight)
+                    self?.setEmbedBodyHeight(clamped)
+                }
+            )
+            let measured = reading.measureHeight(forWidth: bodyWidth)
+            reading.setScrollable(measured > Self.maxEmbeddedNoteHeight)
+            installEmbedBody(reading, height: min(Self.maxEmbeddedNoteHeight, max(32.0, measured)))
+
+        case "cycle":
+            let name = info.displayTitle.isEmpty ? attachment.embedTarget : info.displayTitle
+            showEmbedMessage(L10n.string("Circular embed: %@", name))
+        case "depth_exceeded":
+            let name = info.displayTitle.isEmpty ? attachment.embedTarget : info.displayTitle
+            showEmbedMessage(L10n.string("Embedding is too deep: %@", name))
+        case "heading_missing":
+            showEmbedMessage(L10n.string("Heading not found: %@", info.heading ?? attachment.embedHeading ?? ""))
+        case "ambiguous":
+            showEmbedMessage(L10n.string("Several notes match “%@”: %@", attachment.embedTarget,
+                                         info.candidates.prefix(3).joined(separator: ", ")))
+        case "broken":
+            showEmbedMessage(L10n.string("No note found for “%@”", attachment.embedTarget))
+        default:
+            showEmbedMessage(L10n.string("Embedding is unavailable: %@", attachment.embedTarget))
+        }
+    }
+
+    private func updateScrollStateForNote(measuredHeight: Double, maxHeight: CGFloat) {
+        (embedBodyView as? EmbeddedNoteReadingUIView)?.setScrollable(measuredHeight > Double(maxHeight))
+    }
+
+    private func installEmbedBody(_ view: UIView, height: Double) {
+        embedBodyView?.removeFromSuperview()
+        embedBodyView = view
+        embedMessageLabel?.isHidden = true
+        addSubview(view)
+        setEmbedBodyHeight(height)
+    }
+
+    private func installEmbedFallbackSource(_ source: String, reason: String) {
+        let tv = UITextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.backgroundColor = .clear
+        tv.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        tv.textColor = .secondaryLabel
+        tv.text = reason.isEmpty ? source : L10n.string("Diagram could not be rendered") + "\n" + reason + "\n\n" + source
+        tv.textContainerInset = UIEdgeInsets(top: 4, left: 6, bottom: 4, right: 6)
+        let measured = Double(ceil(tv.sizeThatFits(CGSize(width: max(120, attachment.width - 16), height: .greatestFiniteMagnitude)).height))
+        tv.isScrollEnabled = measured > 260
+        installEmbedBody(tv, height: min(260, max(44, measured)))
+    }
+
+    private func showEmbedMessage(_ text: String) {
+        embedBodyView?.removeFromSuperview()
+        embedBodyView = nil
+        embedMessageLabel?.text = text
+        embedMessageLabel?.isHidden = false
+        let width = max(120, attachment.width - 28)
+        let measured = embedMessageLabel?.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height ?? 20
+        setEmbedBodyHeight(Double(max(24, ceil(measured))))
+    }
+
+    private func setEmbedBodyHeight(_ bodyHeight: Double) {
+        let total = Double(Self.titleAreaHeight) + max(24.0, bodyHeight) + 8.0
+        attachment.updatePreferredHeight(total)
+        setNeedsLayout()
+        layoutIfNeeded()
+    }
+}
+
+private final class EmbedDiagramCanvasUIView: UIView {
+    private let info: EmbedContentInfo
+    private var diagram: NoteDiagram
+    private let width: Double
+    private let dark: Bool
+    private let fontSize: Double
+    private let handle: VaultHandle?
+    private let fallbackSourcePath: String
+    private let diagramService: DiagramService
+    private let onOpenLink: (String, String?) -> Void
+    private let onHeightChange: (Double) -> Void
+    private var collapsed: Set<String> = []
+    private var rerenderTask: Task<Void, Never>?
+
+    init(info: EmbedContentInfo, initialDiagram: NoteDiagram, width: Double, dark: Bool, fontSize: Double,
+         handle: VaultHandle?, fallbackSourcePath: String, diagramService: DiagramService,
+         onOpenLink: @escaping (String, String?) -> Void, onHeightChange: @escaping (Double) -> Void) {
+        self.info = info
+        self.diagram = initialDiagram
+        self.width = width
+        self.dark = dark
+        self.fontSize = fontSize
+        self.handle = handle
+        self.fallbackSourcePath = fallbackSourcePath
+        self.diagramService = diagramService
+        self.onOpenLink = onOpenLink
+        self.onHeightChange = onHeightChange
+        let height = initialDiagram.prepared?.scene.height ?? 120
+        super.init(frame: CGRect(x: 0, y: 0, width: width, height: height))
+        isOpaque = false
+        backgroundColor = .clear
+        contentMode = .redraw
+        clipsToBounds = true
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        addGestureRecognizer(tap)
+        accessibilityIdentifier = "embed-diagram-canvas"
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    deinit {
+        rerenderTask?.cancel()
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext(), let prepared = diagram.prepared else { return }
+        SceneRenderer.draw(prepared, in: context)
+    }
+
+    @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
+        let point = recognizer.location(in: self)
+        guard let prepared = diagram.prepared else { return }
+        guard let hit = prepared.scene.hitRegions.last(where: { $0.rect.cgRect.contains(point) }) else {
+            if let path = info.resolvedPath {
+                onOpenLink(path, info.heading)
+            }
+            return
+        }
+        if let target = hit.linkTarget, !target.isEmpty {
+            let source = info.resolvedPath ?? fallbackSourcePath
+            if let handle {
+                Task { [onOpenLink] in
+                    let resolved = await Task.detached {
+                        handle.resolveLink(sourcePath: source, rawTarget: target).resolvedPath
+                    }.value
+                    onOpenLink(resolved ?? target, hit.linkHeading)
+                }
+            } else {
+                onOpenLink(target, hit.linkHeading)
+            }
+            return
+        }
+        if hit.canCollapse {
+            if collapsed.contains(hit.nodeId) { collapsed.remove(hit.nodeId) } else { collapsed.insert(hit.nodeId) }
+            rerender()
+        }
+    }
+
+    private func rerender() {
+        var block = diagram
+        block.collapsed = collapsed
+        rerenderTask?.cancel()
+        rerenderTask = Task.detached(priority: .userInitiated) { [weak self, info, width, dark, fontSize, diagramService] in
+            let rendered = await diagramService.render(
+                source: info.content, mmd: info.isMmd, blocks: [block],
+                width: width, dark: dark, fontGeneration: fontSize.bitPattern
+            )
+            guard !Task.isCancelled, let updated = rendered.first, let scene = updated.prepared else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.diagram = updated
+                self.setNeedsDisplay()
+                self.onHeightChange(scene.scene.height)
+            }
+        }
+    }
+}
+
+private final class EmbeddedNoteReadingUIView: UIView {
+    private let info: EmbedContentInfo
+    private var diagrams: [NoteDiagram]
+    private let media: [PreparedMedia]
+    private let math: [PreparedMathBlock]
+    private let outerAttachment: MediaBlockAttachment
+    private let onHeightChange: (Double) -> Void
+
+    private let textView = HortusReadingUITextView()
+    private let layoutDelegate = ReadingLayoutDelegate()
+    private var displayRanges: [NSRange] = []
+    private var fallbackBlocks: Set<Int> = []
+    private var runs: [SourceStyleRun] = []
+    private var displayedNS: NSString = ""
+    private var diagramTasks: [UInt32: Task<Void, Never>] = [:]
+    private var bodyWidth: Double
+
+    init(info: EmbedContentInfo, media: [PreparedMedia], math: [PreparedMathBlock], diagrams: [NoteDiagram],
+         attachment: MediaBlockAttachment, bodyWidth: Double, onHeightChange: @escaping (Double) -> Void) {
+        self.info = info
+        self.media = media
+        self.math = math
+        self.diagrams = diagrams
+        self.outerAttachment = attachment
+        self.bodyWidth = bodyWidth
+        self.onHeightChange = onHeightChange
+        super.init(frame: CGRect(x: 0, y: 0, width: bodyWidth, height: 40))
+
+        textView.frame = bounds
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = false
+        textView.backgroundColor = .clear
+        textView.textContainerInset = UIEdgeInsets(top: 4, left: 14, bottom: 6, right: 12)
+        textView.textContainer.lineFragmentPadding = 0
+        layoutDelegate.view = textView
+        layoutDelegate.baseDelegate = textView.textLayoutManager?.delegate
+        textView.textLayoutManager?.delegate = layoutDelegate
+        textView.onTapAtOffset = { [weak self] offset in
+            self?.handleTap(at: offset) ?? false
+        }
+        textView.onAttachmentLayoutChanged = { [weak self] in
+            guard let self else { return }
+            let h = Double(self.textView.measureContentHeight(forWidth: CGFloat(self.bodyWidth)))
+            self.onHeightChange(h)
+        }
+        textView.accessibilityIdentifier = "embed-reading-text"
+        addSubview(textView)
+
+        buildContent()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    deinit {
+        diagramTasks.values.forEach { $0.cancel() }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        bodyWidth = max(120, Double(bounds.width))
+        if textView.frame != bounds {
+            textView.frame = bounds
+            textView.setNeedsLayout()
+        }
+    }
+
+    func setScrollable(_ scrollable: Bool) {
+        textView.isScrollEnabled = scrollable
+    }
+
+    func measureHeight(forWidth width: Double) -> Double {
+        bodyWidth = max(120, width)
+        return Double(textView.measureContentHeight(forWidth: CGFloat(bodyWidth)))
+    }
+
+    private func buildContent() {
+        let source = info.content as NSString
+        let display = NSMutableString(string: info.text)
+        let unresolved = info.links.compactMap { link -> Range<Int>? in
+            guard !link.inDiagram, !link.attachment, link.resolvedPath == nil else { return nil }
+            return Int(link.startUtf16)..<(Int(link.startUtf16) + Int(link.lengthUtf16))
+        }
+
+        var nextRanges: [NSRange] = []
+        var nextFallbacks: Set<Int> = []
+        var nextRuns: [SourceStyleRun] = []
+        var diagramByLocation: [Int: NoteDiagram] = [:]
+        var shift = 0
+        var ordinal: UInt32 = 0
+
+        for (index, block) in info.blocks.enumerated() {
+            let original = NSRange(location: Int(block.displayStart) + shift, length: Int(block.displayLength))
+            var range = original
+            if block.diagram {
+                ordinal += 1
+                if let diagram = diagrams.first(where: { $0.ordinal == ordinal }), diagram.prepared != nil,
+                   NSMaxRange(original) <= display.length {
+                    let slice = display.substring(with: original)
+                    let fffcOffset = slice.utf16.firstIndex(of: 0xfffc).map { slice.utf16.distance(from: slice.utf16.startIndex, to: $0) } ?? 0
+                    diagramByLocation[original.location + fffcOffset] = diagram
+                } else if NSMaxRange(original) <= display.length {
+                    let srcRange = NSRange(location: Int(block.sourceStartUtf16), length: Int(block.sourceLengthUtf16))
+                    let replacement = NSMaxRange(srcRange) <= source.length ? source.substring(with: srcRange) : ""
+                    display.replaceCharacters(in: original, with: replacement)
+                    range.length = (replacement as NSString).length
+                    shift += range.length - original.length
+                    nextFallbacks.insert(index)
+                }
+            }
+            nextRanges.append(range)
+            if nextFallbacks.contains(index) {
+                nextRuns.append(SourceStyleRun(start: UInt64(range.location), length: UInt64(range.length), mask: 32))
+            } else {
+                for run in block.runs {
+                    let srcStart = Int(block.sourceStartUtf16 + run.sourceStartUtf16)
+                    var mask = run.mask
+                    if mask & (1 << 18) != 0, unresolved.contains(where: { $0.contains(srcStart) }) {
+                        mask |= 1 << 19
+                    }
+                    nextRuns.append(SourceStyleRun(start: UInt64(range.location) + run.start, length: run.length, mask: mask))
+                }
+            }
+        }
+
+        self.displayRanges = nextRanges
+        self.fallbackBlocks = nextFallbacks
+        self.runs = nextRuns
+        self.displayedNS = (display as String) as NSString
+        layoutDelegate.runs = nextRuns
+        layoutDelegate.displayedNS = self.displayedNS
+
+        let fontSize = outerAttachment.fontSize
+        let attributed = NSMutableAttributedString(
+            string: display as String,
+            attributes: SourceStylePalette.attributes(for: 0, fontSize: fontSize, contrast: false)
+        )
+        for run in nextRuns {
+            let range = NSRange(location: Int(run.start), length: Int(run.length))
+            if NSMaxRange(range) <= attributed.length {
+                attributed.setAttributes(SourceStylePalette.attributes(for: run.mask, fontSize: fontSize, contrast: false), range: range)
+            }
+        }
+
+        let contentWidth = max(120.0, bodyWidth - Double(textView.textContainerInset.left + textView.textContainerInset.right))
+        var copyItems: [(range: NSRange, source: String)] = []
+        for item in math {
+            guard let range = displayRange(start: item.block.displayStart, length: item.block.displayLength),
+                  NSMaxRange(range) <= attributed.length else { continue }
+            let noteMath = NoteMath(range: range, prepared: item, offset: range.location)
+            copyItems.append((range: range, source: item.block.displaySource))
+            if item.block.block {
+                attributed.addAttribute(.attachment, value: BlockMathAttachment(noteMath, width: contentWidth, size: fontSize), range: range)
+            } else {
+                let color = (attributed.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? UIColor) ?? .label
+                attributed.addAttribute(.attachment, value: InlineMathAttachment(noteMath, width: contentWidth, size: fontSize, foreground: color), range: range)
+            }
+        }
+
+        let notePath = info.resolvedPath ?? outerAttachment.notePath
+        for (location, diagram) in diagramByLocation {
+            let range = NSRange(location: location, length: 1)
+            guard NSMaxRange(range) <= attributed.length else { continue }
+            let att = DiagramBlockAttachment(
+                diagram,
+                width: contentWidth,
+                showFocusButton: false,
+                onFocus: { [weak self] _ in
+                    guard let self, let path = self.info.resolvedPath else { return }
+                    self.outerAttachment.onOpenLink(path, self.info.heading)
+                },
+                onToggle: { [weak self] ord, nodeId in
+                    self?.toggleDiagram(ordinal: ord, nodeId: nodeId)
+                },
+                onOpenLink: { [weak self] target, heading in
+                    self?.resolveAndOpenLink(target: target, heading: heading, from: notePath)
+                }
+            )
+            attributed.addAttribute(.attachment, value: att, range: range)
+        }
+
+        let nestedEmbeds = info.links.filter { $0.embed && !$0.attachment && !$0.inDiagram }
+        for item in media {
+            guard let range = displayRange(start: item.block.displayStart, length: item.block.displayLength),
+                  NSMaxRange(range) <= attributed.length else { continue }
+            if item.block.imageWiki && item.reason.hasPrefix("embed.") && outerAttachment.depth >= 3 {
+                continue
+            }
+            var embedTarget = item.block.imageTarget.isEmpty ? item.block.imageAlt : item.block.imageTarget
+            var embedHeading: String?
+            var embedAlias: String? = item.block.imageAlt.isEmpty ? nil : item.block.imageAlt
+            if item.block.imageWiki, item.reason.hasPrefix("embed."),
+               let offset = sourceUTF16(byte: Int(item.block.sourceStart)),
+               let link = nestedEmbeds.first(where: {
+                   UInt64(offset) >= $0.startUtf16 && UInt64(offset) < $0.startUtf16 + $0.lengthUtf16
+               }) {
+                embedTarget = link.target
+                embedHeading = link.heading
+                embedAlias = link.alias
+            }
+            var nextAncestors = outerAttachment.ancestors
+            if let path = info.resolvedPath { nextAncestors.append(path) }
+            let att = MediaBlockAttachment(
+                NoteMediaItem(range: range, prepared: item),
+                width: contentWidth,
+                fontSize: fontSize,
+                vault: outerAttachment.vault,
+                notePath: notePath,
+                dark: outerAttachment.dark,
+                handle: outerAttachment.handle,
+                diagramService: outerAttachment.diagramService,
+                embedTarget: embedTarget,
+                embedHeading: embedHeading,
+                embedAlias: embedAlias,
+                ancestors: nextAncestors,
+                depth: outerAttachment.depth + 1,
+                onOpenLink: outerAttachment.onOpenLink,
+                onShowTag: outerAttachment.onShowTag,
+                onSizeChange: { [weak self] mediaAtt in
+                    self?.textView.invalidateAttachmentLayout(for: mediaAtt)
+                }
+            )
+            let slice = (display as NSString).substring(with: range)
+            if let fffcOffset = slice.utf16.firstIndex(of: 0xfffc).map({ slice.utf16.distance(from: slice.utf16.startIndex, to: $0) }) {
+                attributed.addAttribute(.attachment, value: att, range: NSRange(location: range.location + fffcOffset, length: 1))
+            }
+        }
+
+        textView.mathCopyItems = copyItems
+        textView.attributedText = attributed
+        textView.setNeedsLayout()
+    }
+
+    private func toggleDiagram(ordinal: UInt32, nodeId: String) {
+        guard let idx = diagrams.firstIndex(where: { $0.ordinal == ordinal }) else { return }
+        var block = diagrams[idx]
+        if block.collapsed.contains(nodeId) { block.collapsed.remove(nodeId) } else { block.collapsed.insert(nodeId) }
+        diagrams[idx] = block
+        let width = max(120.0, bodyWidth - Double(textView.textContainerInset.left + textView.textContainerInset.right))
+        let service = outerAttachment.diagramService
+        let fontSize = outerAttachment.fontSize
+        let dark = outerAttachment.dark
+        diagramTasks[ordinal]?.cancel()
+        diagramTasks[ordinal] = Task.detached(priority: .userInitiated) { [weak self, info, block] in
+            let rendered = await service.render(
+                source: info.content, mmd: info.isMmd, blocks: [block],
+                width: width, dark: dark, fontGeneration: fontSize.bitPattern
+            )
+            guard !Task.isCancelled, let updated = rendered.first, updated.prepared != nil else { return }
+            await MainActor.run {
+                guard let self, let currentIdx = self.diagrams.firstIndex(where: { $0.ordinal == ordinal }) else { return }
+                self.diagrams[currentIdx] = updated
+                self.buildContent()
+                let measured = Double(self.textView.measureContentHeight(forWidth: CGFloat(self.bodyWidth)))
+                self.onHeightChange(measured)
+            }
+        }
+    }
+
+    private func displayRange(start: UInt64, length: UInt64) -> NSRange? {
+        guard let index = info.blocks.firstIndex(where: {
+            start >= $0.displayStart && start < $0.displayStart + $0.displayLength
+        }), !fallbackBlocks.contains(index), index < displayRanges.count else { return nil }
+        let location = displayRanges[index].location + Int(start - info.blocks[index].displayStart)
+        guard location + Int(length) <= displayedNS.length else { return nil }
+        return NSRange(location: location, length: Int(length))
+    }
+
+    private func sourceUTF16(byte: Int) -> Int? {
+        guard byte >= 0, byte <= info.content.utf8.count else { return nil }
+        let utf8 = info.content.utf8
+        guard let end = utf8.index(utf8.startIndex, offsetBy: byte, limitedBy: utf8.endIndex) else { return nil }
+        return String(decoding: utf8[utf8.startIndex..<end], as: UTF8.self).utf16.count
+    }
+
+    private func sourcePosition(at position: Int) -> Int? {
+        guard position >= 0, position <= displayedNS.length,
+              let index = displayRanges.firstIndex(where: { NSLocationInRange(position, $0) }) else { return nil }
+        let block = info.blocks[index]
+        let local = position - displayRanges[index].location
+        if fallbackBlocks.contains(index) { return Int(block.sourceStartUtf16) + local }
+        guard let run = block.runs.first(where: {
+            local >= Int($0.start) && local < Int($0.start + $0.length)
+        }) else { return Int(block.sourceStartUtf16) }
+        let base = Int(block.sourceStartUtf16 + run.sourceStartUtf16)
+        if run.sourceLengthUtf16 == run.length {
+            return base + (local - Int(run.start))
+        }
+        return base
+    }
+
+    private func handleTap(at position: Int) -> Bool {
+        guard let sourcePos = sourcePosition(at: position) else { return false }
+        let mask = layoutDelegate.maskAt(position: position)
+        if mask & (1 << 18) != 0, let link = info.links.first(where: {
+            !$0.inDiagram && !$0.attachment && UInt64(sourcePos) >= $0.startUtf16
+                && UInt64(sourcePos) < $0.startUtf16 + $0.lengthUtf16
+        }) {
+            if let path = link.resolvedPath {
+                outerAttachment.onOpenLink(path, link.heading)
+            } else {
+                resolveAndOpenLink(target: link.target, heading: link.heading, from: info.resolvedPath ?? outerAttachment.notePath)
+            }
+            return true
+        }
+        if mask & (1 << 18) != 0 {
+            let ns = info.content as NSString
+            let line = ns.lineRange(for: NSRange(location: min(sourcePos, ns.length), length: 0))
+            let lineText = ns.substring(with: line)
+            if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+                let matches = detector.matches(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length))
+                for m in matches {
+                    let global = NSRange(location: line.location + m.range.location, length: m.range.length)
+                    if NSLocationInRange(sourcePos, global), let url = m.url {
+                        UIApplication.shared.open(url)
+                        return true
+                    }
+                }
+            }
+        }
+        if mask & 512 != 0, let tag = info.tags.first(where: {
+            UInt64(sourcePos) >= $0.startUtf16 && UInt64(sourcePos) < $0.startUtf16 + $0.lengthUtf16
+        }) {
+            outerAttachment.onShowTag(tag.tag)
+            return true
+        }
+        return false
+    }
+
+    private func resolveAndOpenLink(target: String, heading: String?, from sourcePath: String) {
+        guard let handle = outerAttachment.handle else {
+            outerAttachment.onOpenLink(target, heading)
+            return
+        }
+        Task { [onOpenLink = outerAttachment.onOpenLink] in
+            let resolved = await Task.detached {
+                handle.resolveLink(sourcePath: sourcePath, rawTarget: target).resolvedPath
+            }.value
+            onOpenLink(resolved ?? target, heading)
         }
     }
 }

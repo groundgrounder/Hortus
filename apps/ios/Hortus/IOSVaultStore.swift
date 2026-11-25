@@ -254,8 +254,10 @@ final class IOSAppModel {
             if let editing { doc.reading = !editing }
             if let sourceOffset {
                 doc.pendingReveal = (sourceOffset, selectionLength)
+                refreshToken &+= 1
             } else if let heading {
                 revealHeadingTitle(heading, in: doc)
+                refreshToken &+= 1
             }
             knowledgeSheetPresented = false
             return
@@ -324,8 +326,14 @@ final class IOSAppModel {
             document.pendingReveal = (Int(found.start), 0)
             return
         }
-        // 大纲可能尚未落盘返回，用正文简单匹配兜底标题锚点。
+        // 大纲可能尚未落盘返回，优先匹配标题行再兜底正文锚点。
         let ns = document.text as NSString
+        let escaped = NSRegularExpression.escapedPattern(for: normalized)
+        if let regex = try? NSRegularExpression(pattern: "(?m)^#{1,6}\\s+\(escaped)\\s*$", options: [.caseInsensitive]),
+           let match = regex.firstMatch(in: document.text, range: NSRange(location: 0, length: ns.length)) {
+            document.pendingReveal = (match.range.location, match.range.length)
+            return
+        }
         let range = ns.range(of: normalized, options: [.caseInsensitive])
         if range.location != NSNotFound {
             document.pendingReveal = (range.location, range.length)
@@ -335,10 +343,20 @@ final class IOSAppModel {
     func revealHeading(_ heading: DocumentHeading) {
         guard let doc = currentDocument else { return }
         doc.pendingReveal = (Int(heading.start), 0)
+        refreshToken &+= 1
         knowledgeSheetPresented = false
     }
 
     func openLink(target: String, heading: String?) {
+        let trimmedTarget = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedTarget.isEmpty, let heading,
+           !heading.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let doc = currentDocument {
+            revealHeadingTitle(heading, in: doc)
+            refreshToken &+= 1
+            knowledgeSheetPresented = false
+            return
+        }
         guard let vaultHandle, let currentPath else { return }
         Task {
             let resolved = await Task.detached {

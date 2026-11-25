@@ -40,9 +40,63 @@ final class IOSLayoutFragment: NSTextLayoutFragment {
     }
 }
 
+@MainActor
+final class ReadingLayoutDelegate: NSObject, @preconcurrency NSTextLayoutManagerDelegate {
+    weak var view: UITextView?
+    nonisolated(unsafe) weak var baseDelegate: (any NSTextLayoutManagerDelegate)?
+    var runs: [SourceStyleRun] = []
+    var displayedNS: NSString = ""
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if super.responds(to: aSelector) { return true }
+        return (baseDelegate as AnyObject?)?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if !super.responds(to: aSelector),
+           let base = baseDelegate as AnyObject?,
+           base.responds(to: aSelector) {
+            return base
+        }
+        return super.forwardingTarget(for: aSelector)
+    }
+
+    func maskAt(position: Int) -> UInt32 {
+        var low = 0, high = runs.count
+        while low < high {
+            let mid = (low + high) / 2
+            if runs[mid].start + runs[mid].length <= UInt64(position) { low = mid + 1 } else { high = mid }
+        }
+        guard low < runs.count, runs[low].start <= UInt64(position) else { return 0 }
+        return runs[low].mask
+    }
+
+    func textLayoutManager(_ textLayoutManager: NSTextLayoutManager,
+                           textLayoutFragmentFor location: any NSTextLocation,
+                           in textElement: NSTextElement) -> NSTextLayoutFragment {
+        let fragment = IOSLayoutFragment(textElement: textElement, range: nil)
+        if let content = textLayoutManager.textContentManager, let view {
+            let offset = content.offset(from: content.documentRange.location, to: location)
+            fragment.noticeWidth = max(200, view.bounds.width - view.textContainerInset.left - view.textContainerInset.right)
+            var mask: UInt32 = maskAt(position: offset)
+            let ns = displayedNS
+            if offset < ns.length {
+                let line = ns.lineRange(for: NSRange(location: offset, length: 0))
+                for run in runs where run.start < UInt64(NSMaxRange(line)) && run.start + run.length > UInt64(line.location) {
+                    mask |= run.mask & (32 | 64 | 4096 | 32768)
+                }
+            }
+            fragment.sourceMask = mask
+        }
+        return fragment
+    }
+}
+
 final class HortusReadingUITextView: UITextView {
     var mathCopyItems: [(range: NSRange, source: String)] = []
     var onTapAtOffset: ((Int) -> Bool)?
+    var onAttachmentLayoutChanged: (() -> Void)?
+    var lastRevealRange: NSRange?
     private var mountedAttachmentViews: [ObjectIdentifier: UIView] = [:]
     private var isSyncingAttachments = false
 
@@ -55,13 +109,68 @@ final class HortusReadingUITextView: UITextView {
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         tap.cancelsTouchesInView = false
         addGestureRecognizer(tap)
+        panGestureRecognizer.addTarget(self, action: #selector(handleUserScroll))
     }
 
     required init?(coder: NSCoder) { nil }
 
+    @objc private func handleUserScroll() {
+        if panGestureRecognizer.state == .began {
+            lastRevealRange = nil
+        }
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         syncAttachmentViews()
+    }
+
+    func invalidateAttachmentLayout(for attachment: HortusBaseAttachment) {
+        guard let tlm = textLayoutManager, let content = tlm.textContentManager,
+              let attr = attributedText, attr.length > 0 else { return }
+        var targetRange: NSRange?
+        attr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attr.length)) { value, range, stop in
+            if (value as AnyObject) === attachment {
+                targetRange = range
+                stop.pointee = true
+            }
+        }
+        if let targetRange,
+           let start = content.location(content.documentRange.location, offsetBy: targetRange.location),
+           let end = content.location(start, offsetBy: targetRange.length),
+           let textRange = NSTextRange(location: start, end: end) {
+            tlm.invalidateLayout(for: textRange)
+        } else {
+            tlm.invalidateLayout(for: content.documentRange)
+        }
+        invalidateIntrinsicContentSize()
+        setNeedsLayout()
+        layoutIfNeeded()
+        syncAttachmentViews()
+        if let range = lastRevealRange {
+            scrollRangeToVisible(range)
+        }
+        onAttachmentLayoutChanged?()
+    }
+
+    func measureContentHeight(forWidth width: CGFloat) -> CGFloat {
+        bounds.size.width = width
+        textContainer.size = CGSize(
+            width: max(1, width - textContainerInset.left - textContainerInset.right),
+            height: .greatestFiniteMagnitude
+        )
+        if let tlm = textLayoutManager, let content = tlm.textContentManager {
+            tlm.ensureLayout(for: content.documentRange)
+            var maxY: CGFloat = 0
+            tlm.enumerateTextLayoutFragments(from: content.documentRange.endLocation, options: [.reverse, .ensuresLayout]) { frag in
+                maxY = frag.layoutFragmentFrame.maxY
+                return false
+            }
+            if maxY > 0 {
+                return ceil(maxY + textContainerInset.top + textContainerInset.bottom)
+            }
+        }
+        return ceil(sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height)
     }
 
     func syncAttachmentViews() {
@@ -205,8 +314,9 @@ struct IOSReadingTextView: UIViewRepresentable {
         view.alwaysBounceVertical = true
         view.textContainerInset = UIEdgeInsets(top: 16, left: 18, bottom: 28, right: 18)
         view.textContainer.lineFragmentPadding = 0
-        context.coordinator.baseDelegate = view.textLayoutManager?.delegate
-        view.textLayoutManager?.delegate = context.coordinator
+        context.coordinator.layoutDelegate.view = view
+        context.coordinator.layoutDelegate.baseDelegate = view.textLayoutManager?.delegate
+        view.textLayoutManager?.delegate = context.coordinator.layoutDelegate
         view.accessibilityIdentifier = "ios-reading-text"
         context.coordinator.view = view
         return view
@@ -217,24 +327,10 @@ struct IOSReadingTextView: UIViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, @preconcurrency NSTextLayoutManagerDelegate {
+    final class Coordinator: NSObject {
         weak var view: HortusReadingUITextView?
-        nonisolated(unsafe) weak var baseDelegate: (any NSTextLayoutManagerDelegate)?
+        let layoutDelegate = ReadingLayoutDelegate()
         private var input: IOSReadingTextView?
-
-        override func responds(to aSelector: Selector!) -> Bool {
-            if super.responds(to: aSelector) { return true }
-            return (baseDelegate as AnyObject?)?.responds(to: aSelector) ?? false
-        }
-
-        override func forwardingTarget(for aSelector: Selector!) -> Any? {
-            if !super.responds(to: aSelector),
-               let base = baseDelegate as AnyObject?,
-               base.responds(to: aSelector) {
-                return base
-            }
-            return super.forwardingTarget(for: aSelector)
-        }
         private var model: ReadingViewModel?
         private var ranges: [NSRange] = []
         private var runs: [SourceStyleRun] = []
@@ -261,6 +357,7 @@ struct IOSReadingTextView: UIViewRepresentable {
                 renderedDiagrams = []
                 preparedMath = []
                 lastRevision = .max
+                view?.lastRevealRange = nil
             }
             self.input = next
             guard let view else { return }
@@ -273,10 +370,19 @@ struct IOSReadingTextView: UIViewRepresentable {
             let boundsWidth = Double(view.bounds.width)
             let contentWidth = max(200.0, (boundsWidth > 40 ? boundsWidth : 360.0) - Double(view.textContainerInset.left + view.textContainerInset.right))
 
-            if docChanged || lastRevision != next.document.revision || abs(lastWidth - contentWidth) > 1.0
+            let structuralChange = docChanged || lastRevision != next.document.revision || abs(lastWidth - contentWidth) > 1.0
                 || lastDark != dark || lastSize != next.fontSize
-                || lastKnowledgeVersion != next.knowledgeVersion || lastRefreshToken != next.refreshToken {
+                || lastKnowledgeVersion != next.knowledgeVersion
+            if structuralChange {
                 refresh(width: contentWidth, dark: dark)
+            } else if lastRefreshToken != next.refreshToken {
+                if let pending = next.document.pendingReveal {
+                    lastRefreshToken = next.refreshToken
+                    next.document.pendingReveal = nil
+                    reveal(source: pending.source, length: pending.length)
+                } else {
+                    refresh(width: contentWidth, dark: dark)
+                }
             } else if let pending = next.document.pendingReveal {
                 next.document.pendingReveal = nil
                 reveal(source: pending.source, length: pending.length)
@@ -486,6 +592,9 @@ struct IOSReadingTextView: UIViewRepresentable {
                 attributed.addAttribute(.attachment, value: attachment, range: range)
             }
 
+            let embeds = (knowledge?.links ?? []).filter {
+                $0.embed && !$0.attachment && !$0.inDiagram
+            }
             for item in media {
                 guard let index = blockIndices[item.block.blockId], index < nextRanges.count else { continue }
                 let block = next.blocks[index]
@@ -493,10 +602,37 @@ struct IOSReadingTextView: UIViewRepresentable {
                 let range = NSRange(location: nextRanges[index].location + local, length: Int(item.block.displayLength))
                 guard NSMaxRange(range) <= attributed.length else { continue }
                 let noteMedia = NoteMediaItem(range: range, prepared: item)
+                var embedTarget = item.block.imageTarget.isEmpty ? item.block.imageAlt : item.block.imageTarget
+                var embedHeading: String?
+                var embedAlias: String? = item.block.imageAlt.isEmpty ? nil : item.block.imageAlt
+                if item.block.imageWiki, item.reason.hasPrefix("embed."),
+                   let offset = Self.utf16Offset(byte: Int(item.block.sourceStart), in: sourceText),
+                   let link = embeds.first(where: {
+                       UInt64(offset) >= $0.startUtf16 && UInt64(offset) < $0.startUtf16 + $0.lengthUtf16
+                   }) {
+                    embedTarget = link.target
+                    embedHeading = link.heading
+                    embedAlias = link.alias
+                }
                 let attachment = MediaBlockAttachment(
-                    noteMedia, width: width, fontSize: size, vault: input.vault,
-                    notePath: input.path, dark: dark, handle: input.vaultHandle,
-                    diagramService: input.diagramService, onOpenLink: input.onOpenLink
+                    noteMedia,
+                    width: width,
+                    fontSize: size,
+                    vault: input.vault,
+                    notePath: input.path,
+                    dark: dark,
+                    handle: input.vaultHandle,
+                    diagramService: input.diagramService,
+                    embedTarget: embedTarget,
+                    embedHeading: embedHeading,
+                    embedAlias: embedAlias,
+                    ancestors: [input.path],
+                    depth: 0,
+                    onOpenLink: input.onOpenLink,
+                    onShowTag: input.onShowTag,
+                    onSizeChange: { [weak view] att in
+                        view?.invalidateAttachmentLayout(for: att)
+                    }
                 )
                 // MediaBlock 对应的 `\u{fffc}` 可能在 `displayStart`（表格）或 `displayStart + 1`（`\n\u{fffc}\n`）
                 let slice = (displayed as NSString).substring(with: range)
@@ -510,6 +646,8 @@ struct IOSReadingTextView: UIViewRepresentable {
             self.ranges = nextRanges
             self.runs = nextRuns
             self.displayedNS = displayed as NSString
+            layoutDelegate.runs = nextRuns
+            layoutDelegate.displayedNS = self.displayedNS
             view.mathCopyItems = copyItems
             view.attributedText = attributed
             view.setNeedsLayout()
@@ -520,12 +658,20 @@ struct IOSReadingTextView: UIViewRepresentable {
             }
         }
 
+        private static func utf16Offset(byte: Int, in text: String) -> Int? {
+            guard byte >= 0, byte <= text.utf8.count else { return nil }
+            let utf8 = text.utf8
+            guard let end = utf8.index(utf8.startIndex, offsetBy: byte, limitedBy: utf8.endIndex) else { return nil }
+            return String(decoding: utf8[utf8.startIndex..<end], as: UTF8.self).utf16.count
+        }
+
         private func reveal(source: Int, length: Int) {
             guard let view, let model, !ranges.isEmpty else { return }
             let target = displayPosition(source: source, model: model)
             let totalLength = displayedNS.length
             let clamped = min(max(0, target), totalLength)
             let range = NSRange(location: clamped, length: min(max(0, length), max(0, totalLength - clamped)))
+            view.lastRevealRange = range
             view.scrollRangeToVisible(range)
         }
 
@@ -610,33 +756,7 @@ struct IOSReadingTextView: UIViewRepresentable {
         }
 
         private func maskAt(position: Int) -> UInt32 {
-            var low = 0, high = runs.count
-            while low < high {
-                let mid = (low + high) / 2
-                if runs[mid].start + runs[mid].length <= UInt64(position) { low = mid + 1 } else { high = mid }
-            }
-            guard low < runs.count, runs[low].start <= UInt64(position) else { return 0 }
-            return runs[low].mask
-        }
-
-        func textLayoutManager(_ textLayoutManager: NSTextLayoutManager,
-                               textLayoutFragmentFor location: any NSTextLocation,
-                               in textElement: NSTextElement) -> NSTextLayoutFragment {
-            let fragment = IOSLayoutFragment(textElement: textElement, range: nil)
-            if let content = textLayoutManager.textContentManager, let view {
-                let offset = content.offset(from: content.documentRange.location, to: location)
-                fragment.noticeWidth = max(200, view.bounds.width - view.textContainerInset.left - view.textContainerInset.right)
-                var mask: UInt32 = maskAt(position: offset)
-                let ns = displayedNS
-                if offset < ns.length {
-                    let line = ns.lineRange(for: NSRange(location: offset, length: 0))
-                    for run in runs where run.start < UInt64(NSMaxRange(line)) && run.start + run.length > UInt64(line.location) {
-                        mask |= run.mask & (32 | 64 | 4096 | 32768)
-                    }
-                }
-                fragment.sourceMask = mask
-            }
-            return fragment
+            layoutDelegate.maskAt(position: position)
         }
     }
 }

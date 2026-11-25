@@ -15,27 +15,58 @@ struct IOSDiagramFocusView: View {
     @State private var collapsed: Set<String> = []
     @State private var scale: Double = 1.0
     @State private var offset: CGSize = .zero
+    @State private var viewportSize: CGSize = .zero
+    @State private var loadedWidth: Double = 0
+    @State private var renderGeneration: UInt64 = 0
+    @State private var widthDebounceTask: Task<Void, Never>?
     @State private var shareURL: URL?
     @State private var exportError: String?
 
+    static func renderWidth(for viewportSize: CGSize) -> Double {
+        max(240.0, Double(viewportSize.width) - 32.0)
+    }
+
+    static func fitMetrics(sceneSize: CGSize, viewportSize: CGSize) -> (scale: Double, offset: CGSize) {
+        let availW = max(240.0, Double(viewportSize.width) - 32.0)
+        let availH = max(240.0, Double(viewportSize.height) - 48.0)
+        let fitted = min(1.5, max(0.2, min(availW / max(1.0, Double(sceneSize.width)),
+                                           availH / max(1.0, Double(sceneSize.height)))))
+        let nextOffset = CGSize(
+            width: (Double(viewportSize.width) - Double(sceneSize.width) * fitted) / 2.0,
+            height: (Double(viewportSize.height) - Double(sceneSize.height) * fitted) / 2.0
+        )
+        return (fitted, nextOffset)
+    }
+
     var body: some View {
         NavigationStack {
-            ZStack {
-                Color(uiColor: .systemBackground).ignoresSafeArea()
-                if let prepared {
-                    FocusCanvasRepresentable(
-                        prepared: prepared,
-                        scale: $scale,
-                        offset: $offset,
-                        onToggleNode: toggleNode,
-                        onOpenLink: { target, heading in
-                            dismiss()
-                            appModel.openLink(target: target, heading: heading)
-                        }
-                    )
-                    .ignoresSafeArea(edges: .bottom)
-                } else {
-                    ProgressView()
+            GeometryReader { proxy in
+                let size = proxy.size
+                ZStack {
+                    Color(uiColor: .systemBackground).ignoresSafeArea()
+                    if let prepared {
+                        FocusCanvasRepresentable(
+                            prepared: prepared,
+                            scale: $scale,
+                            offset: $offset,
+                            onToggleNode: toggleNode,
+                            onOpenLink: { target, heading in
+                                dismiss()
+                                appModel.openLink(target: target, heading: heading)
+                            },
+                            onGestureEnded: {
+                                persistViewport()
+                            }
+                        )
+                    } else {
+                        ProgressView()
+                    }
+                }
+                .onAppear {
+                    handleViewportSizeChange(size)
+                }
+                .onChange(of: size) { _, newSize in
+                    handleViewportSizeChange(newSize)
                 }
             }
             .navigationTitle("\(Int((scale * 100).rounded()))%")
@@ -50,12 +81,19 @@ struct IOSDiagramFocusView: View {
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button(L10n.string("Fit")) {
-                        fitToViewport()
+                        fitToViewport(in: viewportSize)
                     }
                     .accessibilityIdentifier("focus-fit")
                     Button("100%") {
                         scale = 1.0
-                        offset = .zero
+                        if let prepared, viewportSize.width > 1 {
+                            offset = CGSize(
+                                width: (Double(viewportSize.width) - prepared.scene.width) / 2.0,
+                                height: (Double(viewportSize.height) - prepared.scene.height) / 2.0
+                            )
+                        } else {
+                            offset = .zero
+                        }
                         persistViewport()
                     }
                     .accessibilityIdentifier("focus-100")
@@ -70,8 +108,13 @@ struct IOSDiagramFocusView: View {
                     .accessibilityIdentifier("focus-export")
                 }
             }
-            .task(id: "\(colorScheme == .dark)-\(session.document.revision)") {
-                await loadScene(preserveTransform: prepared != nil)
+            .task(id: "\(colorScheme == .dark)-\(session.document.revision)-\(viewportSize.width > 1)") {
+                guard viewportSize.width > 1, viewportSize.height > 1 else { return }
+                widthDebounceTask?.cancel()
+                await loadScene(preserveTransform: prepared != nil, viewportSize: viewportSize)
+            }
+            .onDisappear {
+                widthDebounceTask?.cancel()
             }
             .sheet(item: Binding(
                 get: { shareURL.map { ShareFileItem(url: $0) } },
@@ -90,7 +133,29 @@ struct IOSDiagramFocusView: View {
         }
     }
 
-    private func loadScene(preserveTransform: Bool) async {
+    private func handleViewportSizeChange(_ newSize: CGSize) {
+        guard newSize.width > 1, newSize.height > 1 else { return }
+        let previousSize = viewportSize
+        viewportSize = newSize
+        guard prepared != nil else { return }
+        let nextWidth = Self.renderWidth(for: newSize)
+        guard abs(nextWidth - loadedWidth) > 1.0 else { return }
+        let centerScene = previousSize.width > 1
+            ? CGPoint(
+                x: (Double(previousSize.width) / 2.0 - offset.width) / max(0.01, scale),
+                y: (Double(previousSize.height) / 2.0 - offset.height) / max(0.01, scale)
+            )
+            : nil
+        widthDebounceTask?.cancel()
+        widthDebounceTask = Task {
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            await loadScene(preserveTransform: true, viewportSize: newSize, preserveCenter: centerScene)
+        }
+    }
+
+    private func loadScene(preserveTransform: Bool, viewportSize: CGSize, preserveCenter: CGPoint? = nil) async {
+        guard viewportSize.width > 1 else { return }
         let dark = colorScheme == .dark
         let source = session.document.text
         let mmd = session.note.lowercased().hasSuffix(".mmd")
@@ -98,6 +163,9 @@ struct IOSDiagramFocusView: View {
         if !preserveTransform {
             collapsed = Set(initialCollapsed)
         }
+        let targetWidth = Self.renderWidth(for: viewportSize)
+        renderGeneration &+= 1
+        let requestGen = renderGeneration
         let block = NoteDiagram(
             ordinal: session.ordinal,
             sourceStart: 0,
@@ -107,38 +175,42 @@ struct IOSDiagramFocusView: View {
             revision: session.document.revision
         )
         let rendered = await appModel.diagramService.render(
-            source: source, mmd: mmd, blocks: [block], width: 1200, dark: dark,
-            requestGeneration: 1, fontGeneration: appModel.settings.bodyFontSize.bitPattern
+            source: source, mmd: mmd, blocks: [block], width: targetWidth, dark: dark,
+            requestGeneration: requestGen, fontGeneration: appModel.settings.bodyFontSize.bitPattern
         )
+        guard !Task.isCancelled, requestGen == renderGeneration else { return }
+        loadedWidth = targetWidth
         prepared = rendered.first?.prepared
         if !preserveTransform {
             if let initial = session.initial {
                 scale = max(0.15, min(6.0, initial.scale))
                 offset = CGSize(width: initial.offsetX, height: initial.offsetY)
             } else {
-                fitToViewport()
+                fitToViewport(in: viewportSize)
             }
+        } else if let preserveCenter {
+            offset = CGSize(
+                width: Double(viewportSize.width) / 2.0 - preserveCenter.x * scale,
+                height: Double(viewportSize.height) / 2.0 - preserveCenter.y * scale
+            )
         }
     }
 
-    private func fitToViewport() {
-        guard let prepared else { return }
-        let bounds = UIScreen.main.bounds
-        let availW = max(240.0, Double(bounds.width) - 32.0)
-        let availH = max(240.0, Double(bounds.height) - 140.0)
-        let fitted = min(1.5, max(0.2, min(availW / max(1, prepared.scene.width), availH / max(1, prepared.scene.height))))
-        scale = fitted
-        offset = CGSize(
-            width: (availW - prepared.scene.width * fitted) / 2 + 16,
-            height: max(24, (availH - prepared.scene.height * fitted) / 2)
+    private func fitToViewport(in size: CGSize) {
+        guard let prepared, size.width > 1, size.height > 1 else { return }
+        let metrics = Self.fitMetrics(
+            sceneSize: CGSize(width: prepared.scene.width, height: prepared.scene.height),
+            viewportSize: size
         )
+        scale = metrics.scale
+        offset = metrics.offset
         persistViewport()
     }
 
     private func toggleNode(_ nodeId: String) {
         if collapsed.contains(nodeId) { collapsed.remove(nodeId) } else { collapsed.insert(nodeId) }
         appModel.rememberDiagramCollapsed(ordinal: session.ordinal, collapsed: collapsed.sorted())
-        Task { await loadScene(preserveTransform: true) }
+        Task { await loadScene(preserveTransform: true, viewportSize: viewportSize) }
     }
 
     private func persistViewport() {
@@ -189,6 +261,7 @@ private struct FocusCanvasRepresentable: UIViewRepresentable {
     @Binding var offset: CGSize
     let onToggleNode: (String) -> Void
     let onOpenLink: (String, String?) -> Void
+    let onGestureEnded: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -239,6 +312,8 @@ private struct FocusCanvasRepresentable: UIViewRepresentable {
                     width: Double(anchor.x) - (Double(anchor.x) - startOffset.width) * ratio,
                     height: Double(anchor.y) - (Double(anchor.y) - startOffset.height) * ratio
                 )
+            case .ended, .cancelled:
+                parent.onGestureEnded()
             default: break
             }
         }
@@ -250,6 +325,8 @@ private struct FocusCanvasRepresentable: UIViewRepresentable {
             case .changed:
                 let delta = recognizer.translation(in: recognizer.view)
                 parent.offset = CGSize(width: startOffset.width + Double(delta.x), height: startOffset.height + Double(delta.y))
+            case .ended, .cancelled:
+                parent.onGestureEnded()
             default: break
             }
         }
