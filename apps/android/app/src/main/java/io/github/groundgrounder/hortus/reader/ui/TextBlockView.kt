@@ -31,6 +31,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -322,14 +323,16 @@ internal fun TextBlockView(
     onTag: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val density = LocalDensity.current.density
+    val context = LocalContext.current
+    val composeDensity = LocalDensity.current
+    val density = composeDensity.density
     val blockScale = headingScale(item.headingLevel)
     val blockSize = bodySizePx * blockScale
     val mathResults = remember(item.key, blockSize) { mutableStateMapOf<String, MathRenderResult>() }
     val images = remember(item.key) { mutableStateMapOf<String, LoadedImage>() }
     val hasInlineMedia = item.inlineMath.isNotEmpty() || item.inlineImages.isNotEmpty()
     if (hasInlineMedia) {
-        LaunchedEffect(item.key, item.text, item.inlineMath, item.inlineImages, blockSize, contentWidth) {
+        LaunchedEffect(item.key, item.text, item.inlineMath, item.inlineImages, blockSize, contentWidth, density) {
             val pending = item.inlineMath.filter { mathKey(it) !in mathResults }
             if (pending.isNotEmpty()) {
                 val values = renderBridge.prepareMath(pending, blockSize)
@@ -341,10 +344,13 @@ internal fun TextBlockView(
             for (media in item.inlineImages) {
                 val key = mediaKey(media)
                 if (key in images) continue
+                val requestedWidthPx = media.imageWidth?.takeIf { it > 0u }?.let { points ->
+                    with(composeDensity) { points.toFloat().dp.roundToPx() }.coerceAtLeast(1)
+                }
                 images[key] = renderBridge.loadImage(
                     media.imagePath,
                     imageTarget,
-                    media.imageWidth?.toInt(),
+                    requestedWidthPx,
                 )
             }
         }
@@ -400,6 +406,7 @@ internal fun TextBlockView(
             palette = palette,
             math = preparedMath,
             images = images,
+            context = context,
         )
     }
     var textView by remember(item.key) { mutableStateOf<ReaderTextView?>(null) }
@@ -456,7 +463,7 @@ internal fun TextBlockView(
         )
         for ((formula, reason) in failures) {
             Text(
-                "${formula.displaySource}: $reason",
+                "${formula.displaySource}: ${localizedRenderError(context, reason)}",
                 style = MaterialTheme.typography.labelSmall,
                 color = palette.error,
                 modifier = Modifier.padding(start = 8.dp),

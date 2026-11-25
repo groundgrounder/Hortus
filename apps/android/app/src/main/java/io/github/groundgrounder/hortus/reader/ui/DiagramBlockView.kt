@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -194,7 +195,7 @@ internal fun DiagramBlock(
                 )
                 if (failure != null) {
                     Text(
-                        failure,
+                        localizedRenderError(LocalContext.current, failure),
                         style = MaterialTheme.typography.labelSmall,
                         color = palette.error,
                     )

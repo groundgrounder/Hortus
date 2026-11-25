@@ -49,6 +49,7 @@ internal fun ReaderItemView(
     vaultPath: String,
     notePath: String,
     revision: Long,
+    embedVersion: Long,
     ancestors: List<String>,
     callbacks: ReaderCallbacks,
     modifier: Modifier = Modifier,
@@ -86,6 +87,7 @@ internal fun ReaderItemView(
             itemKey = item.key,
             blockId = item.blockId,
             notePath = notePath,
+            contentWidth = contentWidth,
             bodySizePx = bodySizePx,
             palette = palette,
             renderBridge = renderBridge,
@@ -110,6 +112,7 @@ internal fun ReaderItemView(
             vaultPath = vaultPath,
             notePath = notePath,
             revision = revision,
+            embedVersion = embedVersion,
             ancestors = ancestors,
             contentWidth = contentWidth,
             bodySizePx = bodySizePx,
@@ -128,6 +131,7 @@ internal fun EmbedBlockView(
     vaultPath: String,
     notePath: String,
     revision: Long,
+    embedVersion: Long,
     ancestors: List<String>,
     contentWidth: Int,
     bodySizePx: Float,
@@ -140,7 +144,7 @@ internal fun EmbedBlockView(
     var embedded by remember(vaultPath, item.key, notePath, contentWidth, revision) {
         mutableStateOf<EmbeddedContent?>(null)
     }
-    LaunchedEffect(vaultPath, item.key, notePath, ancestors, contentWidth, bodySizePx, revision) {
+    LaunchedEffect(vaultPath, item.key, notePath, ancestors, contentWidth, bodySizePx, revision, embedVersion) {
         embedded = renderBridge.resolveEmbed(
             sourcePath = notePath,
             target = item.target,
@@ -217,7 +221,8 @@ internal fun EmbedBlockView(
                             renderBridge = renderBridge,
                             vaultPath = vaultPath,
                             notePath = info.resolvedPath ?: notePath,
-                            revision = revision,
+                            revision = revision + embedVersion,
+                            embedVersion = embedVersion,
                             ancestors = nextAncestors,
                             callbacks = callbacks,
                         )
@@ -251,7 +256,7 @@ internal fun EmbedBlockView(
                     renderBridge = renderBridge,
                     vaultPath = vaultPath,
                     notePath = info.resolvedPath ?: notePath,
-                    revision = revision,
+                    revision = revision + embedVersion,
                     onFocus = callbacks.onFocus,
                 )
             }

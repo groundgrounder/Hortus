@@ -61,6 +61,7 @@ import io.github.groundgrounder.hortus.core.settings.MAX_READER_BODY_SP
 import io.github.groundgrounder.hortus.core.settings.MIN_READER_BODY_SP
 import io.github.groundgrounder.hortus.core.settings.ThemeMode
 import io.github.groundgrounder.hortus.reader.state.ReaderViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -234,6 +235,12 @@ private fun FontSizeSection(
     var pendingSp by remember(currentSp) { mutableIntStateOf(currentSp.coerceIn(minSp, maxSp)) }
     val decreaseDesc = stringResource(R.string.settings_font_decrease)
     val increaseDesc = stringResource(R.string.settings_font_increase)
+    LaunchedEffect(pendingSp) {
+        if (pendingSp != currentSp) {
+            delay(180)
+            onChangeSp(pendingSp)
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
@@ -275,7 +282,11 @@ private fun FontSizeSection(
                     val rounded = raw.roundToInt().coerceIn(minSp, maxSp)
                     if (rounded != pendingSp) {
                         pendingSp = rounded
-                        onChangeSp(rounded)
+                    }
+                },
+                onValueChangeFinished = {
+                    if (pendingSp != currentSp) {
+                        onChangeSp(pendingSp)
                     }
                 },
                 valueRange = minSp.toFloat()..maxSp.toFloat(),

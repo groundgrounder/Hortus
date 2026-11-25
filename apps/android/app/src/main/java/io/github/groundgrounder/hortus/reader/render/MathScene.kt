@@ -140,11 +140,11 @@ internal class PreparedMath(
 }
 
 private fun mathFailureDetail(error: MathFailure): String = when (error) {
-    is MathFailure.Parse -> error.detail
-    is MathFailure.ResourceLimit -> error.detail
-    is MathFailure.Panic -> error.detail
-    is MathFailure.InvalidLayout -> error.detail
-}.ifBlank { "formula could not be rendered" }
+    is MathFailure.Parse -> if (error.detail.isBlank()) "math.parse" else "math.parse: ${error.detail}"
+    is MathFailure.ResourceLimit -> if (error.detail.isBlank()) "math.resource_limit" else "math.resource_limit: ${error.detail}"
+    is MathFailure.Panic -> if (error.detail.isBlank()) "math.panic" else "math.panic: ${error.detail}"
+    is MathFailure.InvalidLayout -> if (error.detail.isBlank()) "math.invalid_layout" else "math.invalid_layout: ${error.detail}"
+}
 
 private data class MathCacheKey(val latex: String, val style: MathStyle, val emBits: Long)
 private data class Metrik(val codepoint: Int, val width: Double, val height: Double, val depth: Double)
@@ -279,7 +279,8 @@ internal class MathSceneRenderer(
                 synchronized(lock) { failed[key] = reason }
                 MathRenderResult(null, reason, 0)
             } catch (error: Exception) {
-                val reason = error.message?.takeIf { it.isNotBlank() } ?: "formula could not be rendered"
+                val detail = error.message?.takeIf { it.isNotBlank() }
+                val reason = if (detail != null) "math.render_failed: $detail" else "math.render_failed"
                 synchronized(lock) { failed[key] = reason }
                 MathRenderResult(null, reason, 0)
             }

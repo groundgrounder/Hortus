@@ -73,6 +73,7 @@ import io.github.groundgrounder.hortus.reader.model.readerPalette
 import io.github.groundgrounder.hortus.reader.render.DiagramExportFormat
 import io.github.groundgrounder.hortus.reader.render.DiagramExporter
 import io.github.groundgrounder.hortus.reader.render.SceneRenderer
+import io.github.groundgrounder.hortus.reader.ui.localizedRenderError
 import io.github.groundgrounder.hortus.ui.HortusTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -107,6 +108,10 @@ internal class DiagramFocusActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         payloadToken = intent.getIntExtra(EXTRA_TOKEN, -1)
         payload = FocusPayloads.get(payloadToken)
+        if (payload == null) {
+            finish()
+            return
+        }
         setContent {
             val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
             val dark = when (appSettings.themeMode) {
@@ -154,7 +159,10 @@ private fun FocusScreen(
     dark: Boolean,
     onClose: () -> Unit,
 ) {
-    if (payload == null) return
+    if (payload == null) {
+        LaunchedEffect(Unit) { onClose() }
+        return
+    }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val palette = readerPalette()
@@ -206,8 +214,11 @@ private fun FocusScreen(
 
     fun fitScale(): Float {
         val value = scene ?: return 1f
-        if (viewport.width == 0 || value.width <= 0.0) return 1f
-        return min(1f, viewport.width / (value.width.toFloat() * unitScale))
+        if (viewport.width == 0 || viewport.height == 0 || value.width <= 0.0 || value.height <= 0.0) return 1f
+        val availableHeight = (viewport.height - topBarBottomPx).coerceAtLeast(1f)
+        val scaleX = viewport.width / (value.width.toFloat() * unitScale)
+        val scaleY = availableHeight / (value.height.toFloat() * unitScale)
+        return min(1f, min(scaleX, scaleY))
     }
 
     fun clampOffsets(newScale: Float, x: Float, y: Float): Pair<Float, Float> {
@@ -463,7 +474,10 @@ private fun FocusScreen(
             }
         } else {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(failure ?: stringResource(R.string.reader_loading), color = palette.muted)
+                Text(
+                    failure?.let { localizedRenderError(context, it) } ?: stringResource(R.string.reader_loading),
+                    color = palette.muted,
+                )
             }
         }
         Row(
