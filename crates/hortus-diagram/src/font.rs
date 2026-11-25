@@ -115,7 +115,12 @@ impl SystemFonts {
                 std::env::var_os("SIMULATOR_ROOT"),
                 std::env::var_os("DYLD_ROOT_PATH"),
             ];
-            for root in roots.into_iter().flatten().map(PathBuf::from).chain(std::iter::once(PathBuf::from("/"))) {
+            for root in roots
+                .into_iter()
+                .flatten()
+                .map(PathBuf::from)
+                .chain(std::iter::once(PathBuf::from("/")))
+            {
                 for rel in [
                     "System/Library/Fonts/Core",
                     "System/Library/Fonts/CoreUI",

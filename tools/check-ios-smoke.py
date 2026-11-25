@@ -335,8 +335,8 @@ def main() -> None:
     parser.add_argument("--app", default=str(ROOT / "build" / "ios" / "Hortus-sim.app"), help="Simulator .app path.")
     parser.add_argument("--iphone-udid", help="Explicit iPhone simulator UDID.")
     parser.add_argument("--ipad-udid", help="Explicit iPad simulator UDID.")
-    parser.add_argument("--media", default=str(Path.home() / "syncD/media/evidence/hortus/codex/reports/M3"), help="Screenshot directory.")
-    parser.add_argument("--output", default=str(Path.home() / "syncL/dev/hortus/codex/reports/M3"), help="JSON output directory.")
+    parser.add_argument("--media", default=str(ROOT / "build" / "ios" / "smoke-media"), help="Screenshot directory.")
+    parser.add_argument("--output", default=str(ROOT / "build" / "ios" / "smoke-output"), help="JSON output directory.")
     parser.add_argument("--skip-tests", action="store_true", help="Skip xcodebuild test during simulator check.")
     args = parser.parse_args()
 
