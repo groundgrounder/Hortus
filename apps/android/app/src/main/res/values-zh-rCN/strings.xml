@@ -154,4 +154,18 @@
     <string name="settings_repository_url">https://github.com/groundgrounder/Hortus</string>
     <string name="settings_copy_link">复制</string>
     <string name="settings_link_copied">已复制链接</string>
+
+    <string name="vault_root_forbidden">不能将存储根目录作为文件夹，请选择具体子文件夹。</string>
+    <string name="error_permission_denied">需要文件访问权限。</string>
+    <string name="render_error_diagram_not_tree">图表未能按树形结构排版。</string>
+    <string name="render_error_diagram_unsupported">暂不支持此类图表。</string>
+    <string name="render_error_diagram_syntax">无法解析图表语法。</string>
+    <string name="render_error_diagram_failed">无法显示图表。</string>
+    <string name="render_error_image_missing">找不到图片文件。</string>
+    <string name="render_error_image_outside">图片路径超出当前文件夹范围。</string>
+    <string name="render_error_image_remote">不加载网络图片。</string>
+    <string name="render_error_image_unsupported">暂不支持此图片格式。</string>
+    <string name="render_error_image_too_large">图片尺寸过大，无法显示。</string>
+    <string name="render_error_image_decode">无法解析图片。</string>
+    <string name="render_error_math_failed">无法渲染公式。</string>
 </resources>

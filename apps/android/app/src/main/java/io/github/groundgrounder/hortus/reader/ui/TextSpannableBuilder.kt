@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package io.github.groundgrounder.hortus.reader.ui
 
+import android.content.Context
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Paint
 import android.graphics.RectF
@@ -194,6 +195,7 @@ internal fun buildTextSpannable(
     palette: ReaderPalette,
     math: Map<String, PreparedMath?>,
     images: Map<String, LoadedImage?>,
+    context: Context? = null,
 ): SpannableString {
     val bodyBaseSize = if (item.headingLevel > 0) blockSize / headingScale(item.headingLevel) else blockSize
     val spannable = SpannableString(item.text.replace('\uE000', '\u200B'))
@@ -386,7 +388,13 @@ internal fun buildTextSpannable(
         val local = (media.displayStart.toLong() - item.displayStart).toInt()
         if (local !in 0 until item.text.length) continue
         val image = images[mediaKey(media)]
-        val fallback = media.imageReason.ifBlank { media.imageAlt.ifBlank { "[image]" } }
+        val rawReason = image?.reason?.takeIf { it.isNotBlank() } ?: media.imageReason
+        val localizedReason = if (rawReason.isNotBlank() && context != null) {
+            localizedRenderError(context, rawReason)
+        } else {
+            rawReason
+        }
+        val fallback = localizedReason.ifBlank { media.imageAlt.ifBlank { "[image]" } }
         spannable.setSpan(
             ImageReplacementSpan(image, fallback, palette.errorArgb),
             local,

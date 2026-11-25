@@ -33,9 +33,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 独占 VaultHandle 生命周期、后台扫描、索引查询与知识图谱查询。
+ * 统一串行持有 VaultHandle，负责目录扫描、全文检索与反链标签索引。
  * 使用自身独立锁，与 DocumentSession / 图表渲染 / 公式渲染彻底解耦。
  */
 internal class VaultRepository(
@@ -57,6 +58,7 @@ internal class VaultRepository(
 
     private var scanJob: Job? = null
     private var scanReady = CompletableDeferred<Unit>()
+    private val vaultGeneration = AtomicLong(0L)
     private val entries = ConcurrentHashMap<String, TreeEntry>()
 
     private val _tree = MutableStateFlow<List<TreeEntry>>(emptyList())
@@ -72,6 +74,7 @@ internal class VaultRepository(
             if (vaultPath == path && vault != null) return@withLock
             queryMutex.withLock {
                 vaultPath?.let(unregisterActiveVault)
+                vaultGeneration.incrementAndGet()
                 stopScan()
                 vault?.stopWatching()
                 vault?.close()
@@ -81,24 +84,27 @@ internal class VaultRepository(
                 _tree.value = emptyList()
                 onVaultReset()
                 val handle = openVaultHandle(path)
+                val generation = vaultGeneration.incrementAndGet()
                 vault = handle
                 vaultPath = path
                 registerActiveVault(path) { source, target -> resolveLink(source, target) }
                 scanReady = CompletableDeferred()
-                scanJob = scope.launch { scan(handle) }
+                scanJob = scope.launch { scan(handle, generation) }
             }
         }
     }
 
-    private fun scan(handle: VaultHandle) {
+    private fun scan(handle: VaultHandle, generation: Long) {
         try {
-            while (true) {
+            while (vaultGeneration.get() == generation && vault === handle) {
                 val batches: List<TreeBatch> = DebugProbes.traceMainThread("vaultScan") {
                     handle.waitForBatches()
                 }
-                if (batches.isEmpty()) continue
+                if (batches.isEmpty()) break
+                if (vaultGeneration.get() != generation || vault !== handle) break
                 var changed = false
                 for (batch in batches) {
+                    if (vaultGeneration.get() != generation || vault !== handle) break
                     if (batch.upserted.isNotEmpty() || batch.removed.isNotEmpty()) {
                         handle.updateSearchIndex(
                             batch.upserted.map { it.path },
@@ -118,7 +124,7 @@ internal class VaultRepository(
                     }
                     if (batch.scanComplete) scanReady.complete(Unit)
                 }
-                if (changed) {
+                if (changed && vaultGeneration.get() == generation && vault === handle) {
                     _tree.value = entries.values.sortedWith(
                         compareBy<TreeEntry> { !it.directory }
                             .thenBy { it.path.lowercase() },
@@ -296,6 +302,7 @@ internal class VaultRepository(
 
     override fun close() {
         vaultPath?.let(unregisterActiveVault)
+        vaultGeneration.incrementAndGet()
         stopScan()
         try {
             vault?.stopWatching()

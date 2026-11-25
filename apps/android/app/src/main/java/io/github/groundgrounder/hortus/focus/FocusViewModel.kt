@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.app.HortusServices
+import io.github.groundgrounder.hortus.core.DiagramFailure
 import io.github.groundgrounder.hortus.core.SceneData
 import io.github.groundgrounder.hortus.core.settings.AppSettings
 import io.github.groundgrounder.hortus.reader.render.DiagramExportFormat
@@ -119,10 +120,23 @@ internal class FocusViewModel(application: Application) : AndroidViewModel(appli
                         DebugProbes.recordFocusScene(rendered, payload.documentKey, payload.ordinal)
                     }
                 }
+            } catch (failure: DiagramFailure) {
+                val code = when (failure) {
+                    is DiagramFailure.NotATree -> "diagram.not_a_tree"
+                    is DiagramFailure.Unsupported,
+                    is DiagramFailure.UnsupportedConstruct -> "diagram.unsupported"
+                    is DiagramFailure.Syntax -> "diagram.syntax"
+                    is DiagramFailure.Engine -> "diagram.engine"
+                    else -> "diagram.engine"
+                }
+                _uiState.value = _uiState.value.copy(
+                    scene = null,
+                    failure = code,
+                )
             } catch (error: Exception) {
                 _uiState.value = _uiState.value.copy(
                     scene = null,
-                    failure = error.message ?: error.javaClass.simpleName,
+                    failure = error.message ?: "diagram.engine",
                 )
             }
         }

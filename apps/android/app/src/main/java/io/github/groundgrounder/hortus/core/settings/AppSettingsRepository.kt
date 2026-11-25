@@ -55,6 +55,8 @@ internal class AppSettingsRepository(context: Context) {
     @Volatile
     private var preloaded = false
 
+    val isPreloaded: Boolean get() = preloaded
+
     suspend fun preload() = withContext(Dispatchers.IO) {
         synchronized(ioLock) {
             if (preloaded) return@withContext
@@ -64,14 +66,7 @@ internal class AppSettingsRepository(context: Context) {
         }
     }
 
-    fun currentReaderState(): ReaderPreferenceState = synchronized(ioLock) {
-        if (!preloaded) {
-            _readerState.value = readReaderStateLocked()
-            _settings.value = readSettingsLocked()
-            preloaded = true
-        }
-        _readerState.value
-    }
+    fun currentReaderState(): ReaderPreferenceState = _readerState.value
 
     suspend fun loadReaderState(): ReaderPreferenceState = withContext(Dispatchers.IO) {
         synchronized(ioLock) {

@@ -6,6 +6,9 @@ import io.github.groundgrounder.hortus.core.EmbedContentInfo
 import io.github.groundgrounder.hortus.core.model.EmbeddedContent
 import io.github.groundgrounder.hortus.core.model.buildEmbeddedItems
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -19,13 +22,16 @@ internal class EmbedRepository(
 ) {
     private val mutex = Mutex()
     private val version = AtomicLong(1L)
+    private val _mutationVersion = MutableStateFlow(1L)
+    val mutationVersion: StateFlow<Long> = _mutationVersion.asStateFlow()
     private val cache = object : LinkedHashMap<String, EmbeddedContent>(24, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, EmbeddedContent>): Boolean =
             size > 16
     }
 
     fun invalidate() {
-        version.incrementAndGet()
+        val next = version.incrementAndGet()
+        _mutationVersion.value = next
         synchronized(cache) { cache.clear() }
     }
 
@@ -54,7 +60,7 @@ internal class EmbedRepository(
                     size = size,
                 )
             } ?: return@withLock brokenEmbed(target, heading)
-            val content = buildEmbeddedItems(info, "$sourcePath->$target")
+            val content = buildEmbeddedItems(info, info.resolvedPath ?: target)
             synchronized(cache) { cache[key] = content }
             content
         }

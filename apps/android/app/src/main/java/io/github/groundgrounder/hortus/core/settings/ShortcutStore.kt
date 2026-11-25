@@ -68,22 +68,27 @@ internal class ShortcutStore(context: Context) {
     suspend fun requestPin(note: RecentNote): Boolean = withContext(Dispatchers.IO) {
         synchronized(lock) {
             val existing = loadLocked().filterNot { it.vault == note.vault && it.path == note.path }
-            val updated = (listOf(
-                RecentNote(
-                    note.vault,
-                    note.path,
-                    note.title.ifBlank { note.path.substringAfterLast('/') },
-                    System.currentTimeMillis(),
-                ),
-            ) + existing).take(MAX_SHORTCUTS)
+            val safeTitle = note.title.trim().ifBlank {
+                note.path.substringAfterLast('/').ifBlank { "Hortus" }
+            }
+            val pinnedNote = RecentNote(
+                note.vault,
+                note.path,
+                safeTitle,
+                System.currentTimeMillis(),
+            )
+            val updated = (listOf(pinnedNote) + existing).take(MAX_SHORTCUTS)
             saveLocked(updated)
             cachedNotes = updated
             publishLocked(updated)
+            val label = updated.first().title.ifBlank {
+                note.path.substringAfterLast('/').ifBlank { "Hortus" }
+            }
             val shortcut = ShortcutInfoCompat.Builder(appContext, shortcutId(note.vault, note.path))
-                .setShortLabel(note.title.take(40))
-                .setLongLabel(note.title.take(80))
+                .setShortLabel(label.take(40))
+                .setLongLabel(label.take(80))
                 .setIcon(IconCompat.createWithResource(appContext, R.drawable.ic_launcher_foreground))
-                .setIntent(intentFor(note))
+                .setIntent(intentFor(pinnedNote))
                 .build()
             try {
                 ShortcutManagerCompat.requestPinShortcut(appContext, shortcut, null)
@@ -128,9 +133,12 @@ internal class ShortcutStore(context: Context) {
             return emptyList()
         }
         val shortcuts = notes.map { note ->
+            val label = note.title.trim().ifBlank {
+                note.path.substringAfterLast('/').ifBlank { "Hortus" }
+            }
             ShortcutInfoCompat.Builder(appContext, shortcutId(note.vault, note.path))
-                .setShortLabel(note.title.take(40))
-                .setLongLabel(note.title.take(80))
+                .setShortLabel(label.take(40))
+                .setLongLabel(label.take(80))
                 .setIcon(IconCompat.createWithResource(appContext, R.drawable.ic_launcher_foreground))
                 .setIntent(intentFor(note))
                 .build()

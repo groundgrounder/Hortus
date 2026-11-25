@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = 'aarch64-apple-darwin'
@@ -35,7 +36,10 @@ SIGNATURES = {
 SEPARATOR = '=' * 78
 LICENSE_FILE = re.compile(r'(?i)^(licen[cs]e|copying|copyright|unlicense)')
 NOTICE_FILE = re.compile(r'(?i)^notice')
-BUNDLED = {'MPL-2.0': ROOT / 'tools/licenses/MPL-2.0.txt'}
+BUNDLED = {
+    'MPL-2.0': ROOT / 'tools/licenses/MPL-2.0.txt',
+    'Apache-2.0': ROOT / 'tools/licenses/Apache-2.0.txt',
+}
 
 
 def choose(expression):
@@ -86,9 +90,9 @@ def notices(directory):
             if path.is_file() and NOTICE_FILE.match(path.name)]
 
 
-def rust_crates():
+def rust_crates(target=TARGET):
     metadata = json.loads(subprocess.run(
-        ['cargo', 'metadata', '--format-version', '1', '--locked', '--offline', '--filter-platform', TARGET],
+        ['cargo', 'metadata', '--format-version', '1', '--locked', '--offline', '--filter-platform', target],
         cwd=ROOT, check=True, capture_output=True, text=True).stdout)
     nodes = {node['id']: node for node in metadata['resolve']['nodes']}
     packages = {package['id']: package for package in metadata['packages']}
@@ -152,6 +156,62 @@ def swift_packages(resolved, checkouts):
     return packages
 
 
+def android_dependencies(catalog_path=ROOT / 'apps/android/gradle/libs.versions.toml'):
+    if not catalog_path.is_file():
+        raise SystemExit(f'没有 {catalog_path}')
+    catalog = tomllib.loads(catalog_path.read_text(encoding='utf-8'))
+    versions = catalog.get('versions', {})
+    libraries = catalog.get('libraries', {})
+    apache_text = BUNDLED['Apache-2.0'].read_text(encoding='utf-8')
+    specs = [
+        ('kotlin-stdlib', 'org.jetbrains.kotlin:kotlin-stdlib', versions['kotlin'], 'Apache-2.0', 'https://github.com/JetBrains/kotlin'),
+        ('kotlinx-coroutines-android', None, None, 'Apache-2.0', 'https://github.com/Kotlin/kotlinx.coroutines'),
+        ('androidx-core-ktx', None, None, 'Apache-2.0', 'https://developer.android.com/jetpack/androidx'),
+        ('androidx-activity-compose', None, None, 'Apache-2.0', 'https://developer.android.com/jetpack/androidx'),
+        ('androidx-lifecycle-runtime-ktx', None, None, 'Apache-2.0', 'https://developer.android.com/jetpack/androidx'),
+        ('androidx-lifecycle-runtime-compose', None, None, 'Apache-2.0', 'https://developer.android.com/jetpack/androidx'),
+        ('androidx-lifecycle-viewmodel-compose', None, None, 'Apache-2.0', 'https://developer.android.com/jetpack/androidx'),
+        ('androidx-compose-bom', None, None, 'Apache-2.0', 'https://developer.android.com/jetpack/androidx/compose'),
+        ('androidx-compose-foundation', None, versions.get('composeBom', ''), 'Apache-2.0', 'https://developer.android.com/jetpack/androidx/compose'),
+        ('androidx-compose-ui', None, versions.get('composeBom', ''), 'Apache-2.0', 'https://developer.android.com/jetpack/androidx/compose'),
+        ('androidx-compose-material3', None, versions.get('composeBom', ''), 'Apache-2.0', 'https://developer.android.com/jetpack/androidx/compose'),
+        ('androidx-compose-material-icons-core', None, versions.get('composeBom', ''), 'Apache-2.0', 'https://developer.android.com/jetpack/androidx/compose'),
+        ('androidx-profileinstaller', None, None, 'Apache-2.0', 'https://developer.android.com/jetpack/androidx'),
+        ('androidsvg', None, None, 'Apache-2.0', 'https://github.com/BigBadaboom/androidsvg'),
+        ('jna', None, None, 'LGPL-2.1-or-later OR Apache-2.0', 'https://github.com/java-native-access/jna'),
+    ]
+    items = []
+    for key, override_name, override_version, expression, source in specs:
+        if override_name is not None:
+            coord = override_name
+            version = override_version
+        else:
+            entry = libraries.get(key)
+            if not entry:
+                raise SystemExit(f'{catalog_path} 缺少 Android 依赖条目：{key}')
+            coord = f'{entry["group"]}:{entry["name"]}'
+            ref = entry.get('version', {})
+            if isinstance(ref, dict) and 'ref' in ref:
+                version = versions[ref['ref']]
+            elif 'version' in entry and isinstance(entry['version'], str):
+                version = entry['version']
+            else:
+                version = override_version or ''
+        for spdx in choose(expression):
+            if spdx != 'Apache-2.0':
+                raise SystemExit(f'{coord}：暂未内置 {spdx} 原文')
+            items.append({
+                'name': coord,
+                'version': version,
+                'license': spdx,
+                'expression': expression,
+                'source': source,
+                'text': apache_text,
+                'notices': [],
+            })
+    return items
+
+
 def render(groups):
     lines = ['Hortus third-party licenses', '=' * 27, '',
              'Hortus.app includes the following open source software. The Hortus application is licensed',
@@ -180,13 +240,17 @@ def render(groups):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--target', default=TARGET, help='Rust target triple (default: aarch64-apple-darwin)')
     parser.add_argument('--package-resolved', type=Path, default=ROOT / 'apps/macos/Package.resolved')
     parser.add_argument('--checkouts', type=Path, default=ROOT / 'apps/macos/.build/checkouts')
     parser.add_argument('--rust-only', action='store_true', help='skip Swift packages (for checking the Rust part)')
+    parser.add_argument('--android-deps', action='store_true', help='include Android Gradle runtime dependencies')
     args = parser.parse_args()
-    items = rust_crates() + [rust_std(), katex_fonts()]
+    items = rust_crates(args.target) + [rust_std(), katex_fonts()]
     if not args.rust_only:
         items += swift_packages(args.package_resolved, args.checkouts)
+    if args.android_deps:
+        items += android_dependencies()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(render(items))
     print(f'{args.output}: {len(items)} components', file=sys.stderr)

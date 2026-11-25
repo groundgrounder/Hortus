@@ -1038,6 +1038,29 @@ def assert_a7(device: Device, results: Results) -> None:
                   {'launch': launch, 'stored': stored[:4], 'note': launched.get('note'),
                    'vault': launched.get('vault')})
 
+    # 外部入口进入前自动保存未落盘编辑（M4-10）
+    flushed_text = '# Conflict target\n\nFLUSHED BEFORE EXTERNAL VIEW 自动落盘\n'
+    edit_local(device, flushed_text, 'a7-flush.txt')
+    device.view(content_uri, 'text/markdown', 'a7-flush-preview.json', wait_ms=1600)
+    flushed_preview = device.wait_dump('a7-flush-preview.json')
+    flushed_disk = device.read_remote(f'{DEVICE_VAULT}/M2a/Conflict target.md')
+    results.check('A7', 'ACTION_VIEW flushes dirty edits before switching to external preview',
+                  flushed_preview.get('externalOpenMode') == 'readonly_stream' and
+                  flushed_disk == flushed_text.encode('utf-8'),
+                  {'mode': flushed_preview.get('externalOpenMode'),
+                   'diskMatch': flushed_disk == flushed_text.encode('utf-8')})
+
+    # 无 H1 标题笔记固定快捷方式不崩溃（M4-17）
+    no_h1_note = 'NoHeading.md'
+    external_write(device, f'{DEVICE_VAULT}/{no_h1_note}', 'Body without level-one heading.\n')
+    device.dump('a7-no-h1-open.json', note=no_h1_note, wait_ms=1400)
+    pinned = device.dump('a7-no-h1-pin.json', action='pin', wait_ms=1200)
+    pinned_stored = pinned.get('shortcuts', {}).get('stored', [])
+    no_h1_entry = next((item for item in pinned_stored if item.get('path') == no_h1_note), None)
+    results.check('A7', 'pinning note without H1 succeeds with non-empty shortcut label',
+                  device.pid() > 0 and no_h1_entry is not None and bool(no_h1_entry.get('title')),
+                  {'pid': device.pid(), 'entry': no_h1_entry})
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='M2a Android 知识导航与编辑验收（A2–A7）')

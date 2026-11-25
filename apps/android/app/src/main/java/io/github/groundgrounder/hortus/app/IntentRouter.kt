@@ -67,6 +67,18 @@ internal object IntentRouter {
         return dir.isAbsolute && dir.isDirectory && !isStorageRoot(dir)
     }
 
+    private fun isAppPrivatePath(context: Context, file: File): Boolean {
+        val canonical = runCatching { file.canonicalPath }.getOrNull() ?: return true
+        val privateRoots = listOfNotNull(
+            context.filesDir,
+            context.cacheDir,
+            context.dataDir,
+        ).mapNotNull { runCatching { it.canonicalPath }.getOrNull() }
+        return privateRoots.any { root ->
+            canonical == root || canonical.startsWith(root + File.separator)
+        }
+    }
+
     fun handleExternalIntent(
         context: Context,
         scope: CoroutineScope,
@@ -76,60 +88,66 @@ internal object IntentRouter {
     ): Job? {
         val uri = intent.data ?: return null
         val physical = resolvePhysicalPath(context, uri)
-        if (physical != null && File(physical).isFile) {
-            if (!hasAccess) {
-                target.showNotice(context.getString(R.string.reader_open_failed, "io.permission_denied"))
+        if (physical != null) {
+            val file = File(physical)
+            if (isAppPrivatePath(context, file)) {
+                target.showNotice(context.getString(R.string.error_permission_denied))
                 return null
             }
-            val file = File(physical)
-            val canonical = runCatching { file.canonicalPath }.getOrNull() ?: return null
-            val known = target.currentVaultPath ?: target.savedVaultPath
-            val knownRoot = known?.let { runCatching { File(it).canonicalPath }.getOrNull() }
-            val vault: String
-            val note: String
-            val mode: String
-            val persistPreference: Boolean
-            if (knownRoot != null && canonical.startsWith(knownRoot + File.separator)) {
-                vault = knownRoot
-                note = canonical.removePrefix(knownRoot + File.separator)
-                mode = "vault"
-                persistPreference = true
-            } else {
-                val parent = file.parentFile ?: return null
-                if (isStorageRoot(parent)) {
-                    return scope.launch {
-                        val loaded = withContext(Dispatchers.IO) {
-                            runCatching {
-                                if (file.length() > MAX_PREVIEW_BYTES.toLong()) {
-                                    throw IllegalStateException("preview.too_large")
-                                }
-                                file.name to file.readText(Charsets.UTF_8)
-                            }.getOrNull()
-                        }
-                        if (loaded == null) {
-                            target.showNotice(context.getString(R.string.preview_error))
-                        } else {
-                            target.openExternalPreview(loaded.first, loaded.second)
+            if (file.isFile && (hasAccess || uri.scheme != "content")) {
+                if (!hasAccess) {
+                    target.showNotice(context.getString(R.string.error_permission_denied))
+                    return null
+                }
+                val canonical = runCatching { file.canonicalPath }.getOrNull() ?: return null
+                val known = target.currentVaultPath ?: target.savedVaultPath
+                val knownRoot = known?.let { runCatching { File(it).canonicalPath }.getOrNull() }
+                val vault: String
+                val note: String
+                val mode: String
+                val persistPreference: Boolean
+                if (knownRoot != null && canonical.startsWith(knownRoot + File.separator)) {
+                    vault = knownRoot
+                    note = canonical.removePrefix(knownRoot + File.separator)
+                    mode = "vault"
+                    persistPreference = true
+                } else {
+                    val parent = file.parentFile ?: return null
+                    if (isStorageRoot(parent)) {
+                        return scope.launch {
+                            val loaded = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    if (file.length() > MAX_PREVIEW_BYTES.toLong()) {
+                                        throw IllegalStateException("preview.too_large")
+                                    }
+                                    file.name to file.readText(Charsets.UTF_8)
+                                }.getOrNull()
+                            }
+                            if (loaded == null) {
+                                target.showNotice(context.getString(R.string.preview_error))
+                            } else {
+                                target.openExternalPreview(loaded.first, loaded.second)
+                            }
                         }
                     }
+                    vault = parent.absolutePath
+                    note = file.name
+                    mode = "parent_vault"
+                    persistPreference = false
                 }
-                vault = parent.absolutePath
-                note = file.name
-                mode = "parent_vault"
-                persistPreference = false
-            }
-            return if (target.currentVaultPath == vault) {
-                DebugProbes.recordExternalMode(mode)
-                target.openNote(note.replace(File.separatorChar, '/'))
-            } else {
-                if (persistPreference) target.onPersistedVault(vault)
-                val job = target.startVault(
-                    vault,
-                    note.replace(File.separatorChar, '/'),
-                    persistPreference = persistPreference,
-                )
-                DebugProbes.recordExternalMode(mode)
-                job
+                return if (target.currentVaultPath == vault) {
+                    DebugProbes.recordExternalMode(mode)
+                    target.openNote(note.replace(File.separatorChar, '/'))
+                } else {
+                    if (persistPreference) target.onPersistedVault(vault)
+                    val job = target.startVault(
+                        vault,
+                        note.replace(File.separatorChar, '/'),
+                        persistPreference = persistPreference,
+                    )
+                    DebugProbes.recordExternalMode(mode)
+                    job
+                }
             }
         }
         return scope.launch {
@@ -154,7 +172,12 @@ internal object IntentRouter {
                 }.getOrNull()
             }
             if (loaded == null) {
-                target.showNotice(context.getString(R.string.preview_error))
+                target.showNotice(
+                    context.getString(
+                        if (!hasAccess && uri.scheme != "content") R.string.error_permission_denied
+                        else R.string.preview_error,
+                    ),
+                )
             } else {
                 target.openExternalPreview(loaded.first, loaded.second)
             }

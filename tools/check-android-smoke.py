@@ -145,20 +145,54 @@ def static_audit_apk(
 
         dex_entries = [n for n in names if re.fullmatch(r'classes\d*\.dex', n)]
         dex_webview_hits = []
-        dex_smoke_hits = []
+        dex_debug_hits = []
+        dex_path_leaks = []
+        forbidden_prefixes = [b'/Users/', b'/var/folders/', b'/private/tmp/', bytes(Path.home())]
+        debug_dex_markers = (
+            b'Lio/github/groundgrounder/hortus/DebugSmokeActivity;',
+            b'Lio/github/groundgrounder/hortus/DebugExportActivity;',
+            b'Lio/github/groundgrounder/hortus/DebugPreviewProvider;',
+        )
         for dex in dex_entries:
             dex_bytes = zf.read(dex)
-            if b'Landroid/webkit/WebView;' in dex_bytes or b'android.webkit.WebView' in dex_bytes:
-                dex_webview_hits.append(dex)
-            if b'Lio/github/groundgrounder/hortus/DebugSmokeActivity;' in dex_bytes:
-                dex_smoke_hits.append(dex)
+            webkit_matches = re.findall(
+                rb'(?:Landroid/webkit/|android/webkit/|android\.webkit\.)[A-Za-z0-9_$.]+',
+                dex_bytes,
+            )
+            forbidden_webkit = [
+                m.decode('utf-8', errors='replace')
+                for m in webkit_matches
+                if m not in (b'Landroid/webkit/MimeTypeMap', b'android/webkit/MimeTypeMap', b'android.webkit.MimeTypeMap')
+            ]
+            if forbidden_webkit:
+                dex_webview_hits.append(f'{dex}: {sorted(set(forbidden_webkit))}')
+            if any(marker in dex_bytes for marker in debug_dex_markers):
+                dex_debug_hits.append(dex)
+            leaked = [p.decode('utf-8', errors='replace') for p in forbidden_prefixes if p in dex_bytes]
+            if leaked:
+                dex_path_leaks.append(f'{dex}: {leaked}')
         details['dexCount'] = len(dex_entries)
         details['dexWebViewHits'] = dex_webview_hits
         if dex_webview_hits:
-            violations.append(f'DEX 包含 android.webkit.WebView 引用: {dex_webview_hits}')
-        details['dexSmokeActivityHits'] = dex_smoke_hits
-        if not dex_entries or bool(dex_smoke_hits) == release:
-            violations.append('DEX 中的 DebugSmokeActivity 与构建类型不符')
+            violations.append(f'DEX 包含 android/webkit/ 引用: {dex_webview_hits}')
+        details['dexDebugComponentHits'] = dex_debug_hits
+        if not dex_entries or bool(dex_debug_hits) == release:
+            violations.append('DEX 中的 Debug 组件与构建类型不符')
+        details['dexLeakedPrefixes'] = dex_path_leaks
+        if dex_path_leaks:
+            violations.append(f'DEX 包含本机或临时路径前缀: {dex_path_leaks}')
+
+        asset_path_leaks = []
+        for entry_name in names:
+            if not entry_name.startswith('assets/'):
+                continue
+            entry_bytes = zf.read(entry_name)
+            leaked = [p.decode('utf-8', errors='replace') for p in forbidden_prefixes if p in entry_bytes]
+            if leaked:
+                asset_path_leaks.append(f'{entry_name}: {leaked}')
+        details['assetLeakedPrefixes'] = asset_path_leaks
+        if asset_path_leaks:
+            violations.append(f'assets 包含本机或临时路径前缀: {asset_path_leaks}')
 
         katex_prefix = 'assets/Fonts/KaTeX/'
         found_katex_fonts = {
@@ -188,6 +222,9 @@ def static_audit_apk(
             for component in (
                 'uniffi ', 'pulldown-cmark ', 'Rust standard library',
                 'ratex-layout ', 'KaTeX fonts', 'SIL OPEN FONT LICENSE',
+                'org.jetbrains.kotlin:kotlin-stdlib', 'androidx.compose.ui:ui',
+                'androidx.core:core-ktx', 'com.caverock:androidsvg-aar',
+                'net.java.dev.jna:jna', 'Apache License, Version 2.0',
             ):
                 if component not in notices_text:
                     violations.append(f'ThirdPartyNotices.txt 缺少声明: {component.strip()}')
@@ -205,16 +242,18 @@ def static_audit_apk(
     permissions = re.findall(r"uses-permission: name='([^']+)'", badging)
     details['permissions'] = permissions
     details['debuggable'] = 'application-debuggable' in badging
-    if details['debuggable'] == release or ('DebugSmokeActivity' in xmltree) == release:
-        violations.append('Manifest 的调试属性或 DebugSmokeActivity 与构建类型不符')
+    debug_manifest_markers = ('DebugSmokeActivity', 'DebugExportActivity', 'DebugPreviewProvider')
+    has_debug_manifest = any(marker in xmltree for marker in debug_manifest_markers)
+    if details['debuggable'] == release or has_debug_manifest == release:
+        violations.append('Manifest 的调试属性或 Debug 组件与构建类型不符')
     if not release and 'android.permission.DUMP' not in xmltree:
         violations.append('DebugSmokeActivity 缺少系统调试权限保护')
     if 'android.permission.INTERNET' in permissions or 'android.permission.INTERNET' in xmltree:
         violations.append('AndroidManifest.xml 声明了禁止的 android.permission.INTERNET 权限')
     if 'android.permission.MANAGE_EXTERNAL_STORAGE' not in permissions:
         violations.append('AndroidManifest.xml 缺少 MANAGE_EXTERNAL_STORAGE 权限')
-    if 'android.webkit.WebView' in xmltree:
-        violations.append('AndroidManifest.xml 包含 android.webkit.WebView')
+    if 'android.webkit.' in xmltree:
+        violations.append('AndroidManifest.xml 包含 android.webkit.')
     if not badging.startswith(f"package: name='{PACKAGE_NAME}'"):
         violations.append(f'APK 包名与预期 {PACKAGE_NAME} 不一致')
     if not re.search(r"(?m)^(?:minSdkVersion|sdkVersion):'29'$", badging) or "targetSdkVersion:'36'" not in badging:

@@ -71,6 +71,7 @@ internal fun ReaderDetail(
                 loading = state.loading,
                 scrollTarget = state.scrollTarget,
                 openSequence = state.openSequence,
+                embedVersion = state.embedVersion,
                 bodySizePx = bodySizePx,
                 dark = dark,
                 palette = palette,
@@ -113,6 +114,7 @@ private fun ReaderContent(
     loading: Boolean,
     scrollTarget: ScrollTarget?,
     openSequence: Long,
+    embedVersion: Long,
     bodySizePx: Float,
     dark: Boolean,
     palette: ReaderPalette,
@@ -133,14 +135,14 @@ private fun ReaderContent(
         val target = scrollTarget ?: return@LaunchedEffect
         val last = content.items.lastIndex.coerceAtLeast(0)
         val index = target.itemIndex.coerceIn(0, last)
-        repeat(8) {
+        for (attempt in 0 until 8) {
             delay(80)
             if (index > 0) {
                 snapshotFlow { listState.layoutInfo.totalItemsCount }
                     .first { it > index }
             }
             listState.scrollToItem(index, target.offsetPx)
-            if (listState.firstVisibleItemIndex == index) return@repeat
+            if (listState.firstVisibleItemIndex == index) break
         }
         viewModel.consumeScrollTarget()
     }
@@ -203,6 +205,7 @@ private fun ReaderContent(
                     vaultPath = content.vaultPath,
                     notePath = content.path,
                     revision = content.revision,
+                    embedVersion = embedVersion,
                     ancestors = ancestors,
                     callbacks = callbacks,
                     modifier = Modifier

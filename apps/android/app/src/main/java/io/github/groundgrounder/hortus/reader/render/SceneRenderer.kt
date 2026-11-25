@@ -19,6 +19,7 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.min
+import kotlin.math.round
 
 internal object DiagramFonts {
     private val cache = java.util.concurrent.ConcurrentHashMap<String, Typeface>()
@@ -71,19 +72,23 @@ internal object SceneTextMetrics {
             size > MAX_PAINTS
     }
 
+    private fun quantizedZoom(zoom: Float): Float =
+        if (zoom > 0f && zoom.isFinite()) (round(zoom * 1000f) / 1000f).coerceAtLeast(0.001f) else zoom
+
     fun scaleX(span: SceneText, zoom: Float): Float {
+        val zoomKey = quantizedZoom(zoom)
         val key = SceneTextKey(
             span.text,
             span.fontFamily,
             span.fontWeight.toInt(),
             span.fontSize.toFloat(),
-            zoom,
+            zoomKey,
         )
         synchronized(scalesLock) {
             scales[key]?.let { return it }
         }
-        val paint = Paint(templatePaint(span, zoom))
-        val target = (span.width * zoom * 16.0).toFloat()
+        val paint = Paint(templatePaint(span, zoomKey))
+        val target = (span.width * zoomKey * 16.0).toFloat()
         repeat(5) {
             val raw = paint.measureText(span.text)
             if (raw <= 0f) return@repeat
@@ -112,7 +117,7 @@ internal object SceneTextMetrics {
             span.fontFamily,
             span.fontWeight.toInt(),
             span.fontSize.toFloat(),
-            zoom,
+            quantizedZoom(zoom),
         )
         synchronized(scalesLock) {
             scales[key] = value
@@ -122,8 +127,9 @@ internal object SceneTextMetrics {
     /** 返回独立 Paint 副本，避免主线程与后台线程竞争修改同一个共享 Paint。 */
     fun paint(span: SceneText, zoom: Float, color: Int): Paint {
         val scale = scaleX(span, zoom)
-        val template = templatePaint(span, zoom)
+        val template = templatePaint(span, quantizedZoom(zoom))
         return Paint(template).apply {
+            textSize = span.fontSize.toFloat() * zoom * 16f
             textScaleX = scale
             this.color = color
         }
@@ -132,19 +138,21 @@ internal object SceneTextMetrics {
     /** 复用调用方局部 Paint（仅单次 draw 内部线程局部使用），消除逐文本图元分配。 */
     fun configurePaint(target: Paint, span: SceneText, zoom: Float, color: Int) {
         val scale = scaleX(span, zoom)
-        target.set(templatePaint(span, zoom))
+        target.set(templatePaint(span, quantizedZoom(zoom)))
+        target.textSize = span.fontSize.toFloat() * zoom * 16f
         target.textScaleX = scale
         target.color = color
     }
 
     private fun templatePaint(span: SceneText, zoom: Float): Paint {
-        val key = "${span.fontFamily}|${span.fontWeight}|${span.fontSize}|$zoom"
+        val zoomKey = quantizedZoom(zoom)
+        val key = "${span.fontFamily}|${span.fontWeight}|${span.fontSize}|$zoomKey"
         synchronized(paintsLock) {
             paints[key]?.let { return it }
         }
         val created = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG).apply {
             typeface = DiagramFonts.typeface(span.fontFamily, span.fontWeight.toInt())
-            textSize = span.fontSize.toFloat() * zoom * 16f
+            textSize = span.fontSize.toFloat() * zoomKey * 16f
             isLinearText = true
             isSubpixelText = true
             hinting = Paint.HINTING_OFF
@@ -163,8 +171,8 @@ internal object SceneTextMetrics {
 }
 
 internal object SceneRenderer {
-    private class DrawScratch(clip: android.graphics.Rect) {
-        val clipF = RectF(clip)
+    private class DrawScratch {
+        val clipF = RectF()
         val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
         val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
         val pathPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -184,6 +192,10 @@ internal object SceneRenderer {
         var lastDashZoom = -1f
         var lastDashEffect: DashPathEffect? = null
 
+        fun reset(clip: android.graphics.Rect) {
+            clipF.set(clip)
+        }
+
         fun dashEffect(zoom: Float): DashPathEffect {
             if (lastDashZoom != zoom || lastDashEffect == null) {
                 val dash = 4f * zoom
@@ -193,6 +205,8 @@ internal object SceneRenderer {
             return lastDashEffect!!
         }
     }
+
+    private val threadScratch = ThreadLocal.withInitial { DrawScratch() }
 
     fun alpha(color: SceneColor): Int = (color.a * 255).toInt().coerceIn(0, 255)
 
@@ -217,7 +231,7 @@ internal object SceneRenderer {
         includeText: Boolean = true,
     ) {
         val clip = canvas.clipBounds
-        val scratch = DrawScratch(clip)
+        val scratch = threadScratch.get()!!.apply { reset(clip) }
         canvas.save()
         canvas.translate(translateX, translateY)
         for (primitive in scene.primitives) {

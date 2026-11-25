@@ -38,6 +38,7 @@ internal class ReaderSyncController(
     private val diagramService: DiagramRenderService,
     private val vaultRepository: VaultRepository,
     private val documentRepository: DocumentRepository,
+    private val embedVersion: StateFlow<Long>,
     private val loadMutex: Mutex,
     private val readerState: MutableStateFlow<ReaderUiState>,
     private val onClearCaches: suspend () -> Unit,
@@ -45,8 +46,10 @@ internal class ReaderSyncController(
     private val onHandleExternalRefreshWhileEditing: suspend () -> Boolean,
 ) {
     private var treeJob: Job? = null
+    private var embedJob: Job? = null
     private var externalJob: Job? = null
     private var widthJob: Job? = null
+    private var fontSizeJob: Job? = null
     private var noticeJob: Job? = null
     private var refreshJob: Job? = null
 
@@ -82,22 +85,27 @@ internal class ReaderSyncController(
         settingsRepository.setThemeMode(mode)
     }
 
-    fun setFontSizeSp(fontSizeSp: Float): Job = scope.launch {
+    fun setFontSizeSp(fontSizeSp: Float): Job {
         val clamped = fontSizeSp.coerceIn(MIN_READER_BODY_SP, MAX_READER_BODY_SP)
-        settingsRepository.setFontSizeSp(clamped)
-        DiagramPreviewCache.reset()
-        diagramService.clearCache()
-        val sizePx = spToPx(clamped)
-        val width = resolvedWidthPx()
-        loadMutex.withLock {
-            val content = readerState.value.content ?: return@withLock
-            val updated = withContext(Dispatchers.IO) {
-                documentRepository.rebuildForWidth(content, width, sizePx)
-            }
-            if (readerState.value.content?.path == updated.path) {
-                readerState.value = readerState.value.copy(content = updated)
+        fontSizeJob?.cancel()
+        val job = scope.launch {
+            settingsRepository.setFontSizeSp(clamped)
+            DiagramPreviewCache.reset()
+            diagramService.clearCache()
+            val sizePx = spToPx(clamped)
+            val width = resolvedWidthPx()
+            loadMutex.withLock {
+                val content = readerState.value.content ?: return@withLock
+                val updated = withContext(Dispatchers.IO) {
+                    documentRepository.rebuildForWidth(content, width, sizePx)
+                }
+                if (readerState.value.content?.path == updated.path) {
+                    readerState.value = readerState.value.copy(content = updated)
+                }
             }
         }
+        fontSizeJob = job
+        return job
     }
 
     fun clearCaches(): Job = scope.launch {
@@ -110,6 +118,12 @@ internal class ReaderSyncController(
         treeJob = scope.launch {
             vaultRepository.tree.collect { tree ->
                 readerState.value = readerState.value.copy(tree = tree)
+            }
+        }
+        embedJob?.cancel()
+        embedJob = scope.launch {
+            embedVersion.collect { version ->
+                readerState.value = readerState.value.copy(embedVersion = version)
             }
         }
         externalJob?.cancel()
@@ -186,9 +200,11 @@ internal class ReaderSyncController(
 
     fun cancelAll() {
         treeJob?.cancel()
+        embedJob?.cancel()
         externalJob?.cancel()
         refreshJob?.cancel()
         widthJob?.cancel()
+        fontSizeJob?.cancel()
         noticeJob?.cancel()
     }
 }

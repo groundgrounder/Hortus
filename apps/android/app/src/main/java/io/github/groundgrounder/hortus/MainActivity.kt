@@ -28,6 +28,7 @@ import io.github.groundgrounder.hortus.reader.state.ReaderViewModel
 import io.github.groundgrounder.hortus.reader.ui.ReaderApp
 import io.github.groundgrounder.hortus.ui.HortusTheme
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /**
  * 主入口瘦宿主：持有 ViewModel 并在配置变更期间保持原生库与文档会话不丢失、不泄漏。
@@ -118,7 +119,14 @@ class MainActivity : ComponentActivity() {
             val handledDebug = DebugHooks.handlesLaunch(intent)
             if (!handledExternal && !handledDebug) {
                 if (intent.getStringExtra(EXTRA_OPEN_NOTE) != null) {
-                    pendingIntentJob = IntentRouter.handleOpenIntent(intent, path, dispatchTarget)
+                    if (intent.getStringExtra(EXTRA_OPEN_VAULT) != null || viewModel.isPreferencesLoaded) {
+                        pendingIntentJob = IntentRouter.handleOpenIntent(intent, path, dispatchTarget)
+                    } else {
+                        pendingIntentJob = lifecycleScope.launch {
+                            viewModel.awaitPreferences()
+                            IntentRouter.handleOpenIntent(intent, path, dispatchTarget)?.join()
+                        }
+                    }
                 } else {
                     openSavedOrRequested()
                 }
@@ -171,11 +179,15 @@ class MainActivity : ComponentActivity() {
         if (!hasAccess) return
         val current = viewModel.readerState.value
         if (current.vaultPath != null || current.loading) return
-        val saved = viewModel.preferencesState
         val requested = intent?.getStringExtra(EXTRA_OPEN_NOTE)
-        if (saved.vaultPath != null) {
-            path = saved.vaultPath
-            viewModel.start(saved.vaultPath, requested ?: saved.notePath)
+        lifecycleScope.launch {
+            val saved = viewModel.awaitPreferences()
+            if (!hasAccess) return@launch
+            val latest = viewModel.readerState.value
+            if (latest.vaultPath != null || latest.loading) return@launch
+            val vault = saved.vaultPath?.takeIf(IntentRouter::isValidVaultDirectory) ?: return@launch
+            path = vault
+            viewModel.start(vault, requested ?: saved.notePath)
         }
     }
 

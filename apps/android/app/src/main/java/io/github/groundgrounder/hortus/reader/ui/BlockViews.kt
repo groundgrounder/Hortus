@@ -19,11 +19,15 @@ import android.text.style.TypefaceSpan
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -41,6 +45,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -125,12 +130,14 @@ internal fun TableBlockView(
     notePath: String,
     modifier: Modifier = Modifier,
 ) {
-    val density = LocalDensity.current.density
+    val context = LocalContext.current
+    val composeDensity = LocalDensity.current
+    val density = composeDensity.density
     val tableFontSize = bodySizePx * 0.94f
     val mathResults = remember(media.blockId, media.displayStart, tableFontSize) {
         mutableStateMapOf<String, MathRenderResult>()
     }
-    LaunchedEffect(media.blockId, media.columns, tableFontSize) {
+    LaunchedEffect(media.blockId, media.columns, media.cells, tableFontSize) {
         val formulas = media.cells.flatMap { it.math }
         val pending = formulas.filter { cellMathKey(it) !in mathResults }
         if (pending.isNotEmpty()) {
@@ -161,55 +168,68 @@ internal fun TableBlockView(
             )
         }
     }
+    val columns = remember(media.columns) { media.columns.map { it.toFloat() } }
+    val totalTableWidthPx = remember(columns) { columns.sum() }
+    val needsHorizontalScroll = totalTableWidthPx > contentWidth.toFloat()
+    val tableWidthDp = with(composeDensity) { max(contentWidth.toFloat(), totalTableWidthPx).toDp() }
+    val tableHeightDp = with(composeDensity) { prepared.totalHeight.toDp() }
+    val scrollContainerModifier = if (needsHorizontalScroll) {
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+    } else {
+        Modifier.fillMaxWidth()
+    }
     Column(modifier.fillMaxWidth()) {
-        Canvas(
-            Modifier
-                .fillMaxWidth()
-                .height(with(LocalDensity.current) { prepared.totalHeight.toDp() }),
-        ) {
-            var y = 0f
-            val columns = media.columns.map { it.toFloat() }
-            val headerRows = 1
-            var row = 0
-            for (heightPx in prepared.rowHeights) {
-                if (row < headerRows) {
-                    drawRect(
-                        color = palette.codeBackground.copy(alpha = 0.55f),
-                        topLeft = Offset(0f, y),
-                        size = Size(this.size.width, heightPx),
-                    )
-                }
-                var x = 0f
-                for (column in columns.indices) {
-                    val index = row * columns.size + column
-                    val layout = prepared.layouts.getOrNull(index) ?: continue
-                    drawIntoCanvas { canvas ->
-                        canvas.nativeCanvas.save()
-                        val alignment = media.alignments.getOrNull(column)?.toInt() ?: 0
-                        val available = max(0f, columns[column] - 20f * density)
-                        val offset = when (alignment) {
-                            1 -> (available - layout.width) / 2f
-                            2 -> available - layout.width
-                            else -> 0f
-                        }
-                        canvas.nativeCanvas.translate(x + 10f * density + offset, y + 8f * density)
-                        layout.draw(canvas.nativeCanvas)
-                        canvas.nativeCanvas.restore()
+        Box(scrollContainerModifier) {
+            Canvas(
+                if (needsHorizontalScroll) {
+                    Modifier.requiredWidth(tableWidthDp).height(tableHeightDp)
+                } else {
+                    Modifier.fillMaxWidth().height(tableHeightDp)
+                },
+            ) {
+                var y = 0f
+                val headerRows = 1
+                var row = 0
+                for (heightPx in prepared.rowHeights) {
+                    if (row < headerRows) {
+                        drawRect(
+                            color = palette.codeBackground.copy(alpha = 0.55f),
+                            topLeft = Offset(0f, y),
+                            size = Size(this.size.width, heightPx),
+                        )
                     }
-                    x += columns[column]
+                    var x = 0f
+                    for (column in columns.indices) {
+                        val index = row * columns.size + column
+                        val layout = prepared.layouts.getOrNull(index) ?: continue
+                        drawIntoCanvas { canvas ->
+                            canvas.nativeCanvas.save()
+                            val alignment = media.alignments.getOrNull(column)?.toInt() ?: 0
+                            val available = max(0f, columns[column] - 20f * density)
+                            val offset = when (alignment) {
+                                1 -> (available - layout.width) / 2f
+                                2 -> available - layout.width
+                                else -> 0f
+                            }
+                            canvas.nativeCanvas.translate(x + 10f * density + offset, y + 8f * density)
+                            layout.draw(canvas.nativeCanvas)
+                            canvas.nativeCanvas.restore()
+                        }
+                        x += columns[column]
+                    }
+                    y += heightPx
+                    drawRect(
+                        color = palette.rule,
+                        topLeft = Offset(0f, y - max(0.5f, density / 2)),
+                        size = Size(this.size.width, max(0.5f, density / 2)),
+                    )
+                    row += 1
                 }
-                y += heightPx
-                drawRect(
-                    color = palette.rule,
-                    topLeft = Offset(0f, y - max(0.5f, density / 2)),
-                    size = Size(this.size.width, max(0.5f, density / 2)),
-                )
-                row += 1
             }
         }
         for ((formula, reason) in failures) {
             Text(
-                "${formula.displaySource}: $reason",
+                "${formula.displaySource}: ${localizedRenderError(context, reason)}",
                 style = MaterialTheme.typography.labelSmall,
                 color = palette.error,
             )
@@ -337,18 +357,23 @@ internal fun ImageBlockView(
     renderBridge: ItemRenderBridge,
     modifier: Modifier = Modifier,
 ) {
-    var image by remember(media.blockId, media.imagePath, contentWidth) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val requestedWidthPx = media.imageWidth?.takeIf { it > 0u }?.let { points ->
+        with(density) { points.toFloat().dp.roundToPx() }.coerceAtLeast(1)
+    }
+    var image by remember(media.blockId, media.imagePath, contentWidth, requestedWidthPx) {
         mutableStateOf<LoadedImage?>(null)
     }
-    LaunchedEffect(media.blockId, media.imagePath, contentWidth, media.imageWidth) {
+    LaunchedEffect(media.blockId, media.imagePath, contentWidth, requestedWidthPx) {
         image = renderBridge.loadImage(
             media.imagePath,
             contentWidth,
-            media.imageWidth?.toInt(),
+            requestedWidthPx,
         )
     }
     val loaded = image
-    val maximum = min(contentWidth.toFloat(), (media.imageWidth?.toFloat() ?: contentWidth.toFloat()))
+    val maximum = min(contentWidth.toFloat(), requestedWidthPx?.toFloat() ?: contentWidth.toFloat())
     if (loaded?.bitmap != null) {
         val width = min(maximum, loaded.widthPx.toFloat()).toInt().coerceAtLeast(1)
         val height = (loaded.heightPx.toFloat() * width / loaded.widthPx).toInt().coerceAtLeast(1)
@@ -357,8 +382,8 @@ internal fun ImageBlockView(
             contentDescription = media.imageAlt.ifBlank { null },
             contentScale = ContentScale.FillWidth,
             modifier = modifier
-                .width(with(LocalDensity.current) { width.toDp() })
-                .height(with(LocalDensity.current) { height.toDp() })
+                .width(with(density) { width.toDp() })
+                .height(with(density) { height.toDp() })
                 .padding(vertical = 4.dp),
         )
     } else {
@@ -378,7 +403,7 @@ internal fun ImageBlockView(
             )
             if (reason.isNotEmpty()) {
                 Text(
-                    reason,
+                    localizedRenderError(context, reason),
                     style = MaterialTheme.typography.labelSmall,
                     color = palette.error,
                 )
@@ -393,11 +418,14 @@ internal fun MathBlockView(
     itemKey: String,
     blockId: Long,
     notePath: String,
+    contentWidth: Int,
     bodySizePx: Float,
     palette: ReaderPalette,
     renderBridge: ItemRenderBridge,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
     val verticalPadding = bodySizePx * 0.5f
     val results = remember(formulas, bodySizePx) { mutableStateMapOf<MathBlock, MathRenderResult>() }
     LaunchedEffect(formulas, bodySizePx, results.size, notePath, itemKey) {
@@ -419,30 +447,50 @@ internal fun MathBlockView(
             )
         }
     }
+    val availableWidth = contentWidth.toFloat().coerceAtLeast(1f)
     Column(modifier.fillMaxWidth()) {
         for (formula in formulas) {
             val result = results[formula]
             val prepared = result?.prepared
             if (prepared != null) {
                 val blockHeight = verticalPadding * 2f + prepared.height
-                Canvas(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(with(LocalDensity.current) { blockHeight.toDp() }),
-                ) {
-                    val x = max(0f, (size.width - prepared.width) / 2f)
-                    prepared.draw(
-                        drawContext.canvas.nativeCanvas,
-                        x,
-                        verticalPadding,
-                        palette.textArgb,
-                    )
+                val heightDp = with(density) { blockHeight.toDp() }
+                if (prepared.width > availableWidth) {
+                    val widthDp = with(density) { prepared.width.toDp() }
+                    Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                        Canvas(
+                            Modifier
+                                .requiredWidth(widthDp)
+                                .height(heightDp),
+                        ) {
+                            prepared.draw(
+                                drawContext.canvas.nativeCanvas,
+                                0f,
+                                verticalPadding,
+                                palette.textArgb,
+                            )
+                        }
+                    }
+                } else {
+                    Canvas(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(heightDp),
+                    ) {
+                        val x = max(0f, (size.width - prepared.width) / 2f)
+                        prepared.draw(
+                            drawContext.canvas.nativeCanvas,
+                            x,
+                            verticalPadding,
+                            palette.textArgb,
+                        )
+                    }
                 }
             } else if (result != null && result.reason != null) {
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .padding(vertical = with(LocalDensity.current) { verticalPadding.toDp() })
+                        .padding(vertical = with(density) { verticalPadding.toDp() })
                         .background(palette.codeBackground, RoundedCornerShape(6.dp))
                         .padding(10.dp),
                 ) {
@@ -452,7 +500,7 @@ internal fun MathBlockView(
                         color = palette.error,
                     )
                     Text(
-                        result.reason,
+                        localizedRenderError(context, result.reason),
                         style = MaterialTheme.typography.labelSmall,
                         color = palette.error,
                     )
@@ -462,7 +510,7 @@ internal fun MathBlockView(
                     formula.displaySource.ifBlank { formula.latex },
                     style = MaterialTheme.typography.bodyMedium,
                     color = palette.muted,
-                    modifier = Modifier.padding(vertical = with(LocalDensity.current) { verticalPadding.toDp() }),
+                    modifier = Modifier.padding(vertical = with(density) { verticalPadding.toDp() }),
                 )
             }
         }

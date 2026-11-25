@@ -11,6 +11,9 @@ LEGACY_TITLE = 'Mark' + 'Note'
 PRIVATE_PREFIXES = ('arch' + 'ive/', 'co' + 'dex/', 'mock' + 'ups/')
 PRIVATE_PLAN = 'plan' + '.yaml'
 FORBIDDEN_PATHS = (PRIVATE_PLAN, *PRIVATE_PREFIXES)
+SYNC_PRIVATE_PATH = re.compile(r'(?:\$(?:\{HOME\}|HOME)|~)/sync[DL]\b')
+LOCAL_USERS_PATH = re.compile(r'/Users/[A-Za-z0-9._-]+')
+ALLOWED_USERS_PATHS = ('/Users/tester', '/Users/Shared')
 ATTRIBUTION = 'Co-' + 'Authored-By'
 # 只允许迁移实现和隔离迁移测试中的旧目录、旧环境变量字面量。
 MIGRATION_EXCEPTIONS = {
@@ -49,8 +52,8 @@ def private_segments(root):
     directory = root / 'fixtures/mermaid/tree'
     samples = sorted(path for path in directory.rglob('*') if path.is_file()) if directory.exists() else []
     if not samples:
-        print('SKIP: private sample text check: local fixtures/mermaid/tree files are absent')
-        return set()
+        print('SKIPPED (private samples absent): local fixtures/mermaid/tree files are absent')
+        return None
     segments = set()
     for path in samples:
         # 也检查文件名；只在运行时提取，日志不打印任何私人文字。
@@ -65,6 +68,7 @@ def private_segments(root):
 def scan_text(name, text, segments):
     violations = []
     legacy = re.compile(LEGACY_NAME, re.IGNORECASE)
+    active_segments = segments or ()
     for number, line in enumerate(text.splitlines(), 1):
         allowed = line
         for literal in MIGRATION_EXCEPTIONS.get(name, ()):
@@ -72,11 +76,16 @@ def scan_text(name, text, segments):
             allowed = allowed.replace('"' + literal + '"', '"<legacy>"')
         if legacy.search(allowed):
             violations.append((name, number, 'legacy product name outside migration allowlist'))
-        if any(path in line for path in FORBIDDEN_PATHS):
+        if any(path in line for path in FORBIDDEN_PATHS) or SYNC_PRIVATE_PATH.search(line):
             violations.append((name, number, 'private workflow path'))
+        users_cleaned = line
+        for ok in ALLOWED_USERS_PATHS:
+            users_cleaned = users_cleaned.replace(ok, '/Users/<allowed>')
+        if LOCAL_USERS_PATH.search(users_cleaned):
+            violations.append((name, number, 'local user home path'))
         if ATTRIBUTION.casefold() in line.casefold():
             violations.append((name, number, 'commit attribution trailer'))
-        if any(segment in line for segment in segments):
+        if any(segment in line for segment in active_segments):
             violations.append((name, number, 'private sample text'))
     return violations
 
@@ -125,7 +134,7 @@ def check_bundle(bundle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--app', type=Path, default=ROOT / 'build/Hortus.app')
+    parser.add_argument('--app', type=Path, default=None)
     args = parser.parse_args()
     names = tracked_public_files(ROOT)
     segments = private_segments(ROOT)
@@ -138,15 +147,23 @@ def main():
             violations.append((name, 1, f'cannot read tracked file: {error}'))
             continue
         violations.extend(scan_text(name, text, segments))
-    violations.extend(check_bundle(args.app))
+    bundle = args.app if args.app is not None else ROOT / 'build/Hortus.app'
+    bundle_checked = False
+    if args.app is not None or bundle.exists():
+        violations.extend(check_bundle(bundle))
+        bundle_checked = True
+    else:
+        print(f'SKIPPED (macOS bundle absent): {bundle}')
     for name, number, reason in violations:
         print(f'{name}:{number}: {reason}')
     if violations:
         print(f'FAIL: {len(violations)} violations in public tree/application bundle')
         return 1
-    print(f'PASS: {len(names)} tracked public files; legacy names, private paths, attribution and private text checked')
-    print('PASS: Hortus.app has no WebKit/JavaScriptCore dependencies and no HTML/JavaScript assets')
-    print('PASS: Hortus executable has no local user or temporary paths')
+    private_status = 'private text checked' if segments is not None else 'private text SKIPPED (private samples absent)'
+    print(f'PASS: {len(names)} tracked public files; legacy names, private paths and attribution checked; {private_status}')
+    if bundle_checked:
+        print('PASS: Hortus.app has no WebKit/JavaScriptCore dependencies and no HTML/JavaScript assets')
+        print('PASS: Hortus executable has no local user or temporary paths')
     return 0
 
 
