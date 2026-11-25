@@ -157,6 +157,56 @@ private data class Replacement(
     val build: (Int) -> ReaderItem,
 )
 
+private data class SpanEntry<T>(val value: T, val start: Int, val end: Int)
+
+private fun <T> assignToBlocks(
+    blocks: List<ReadingBlock>,
+    items: List<T>,
+    startOf: (T) -> Int,
+    lengthOf: (T) -> Int,
+): List<List<T>> {
+    if (blocks.isEmpty() || items.isEmpty()) return List(blocks.size) { emptyList() }
+    val sorted = items.map { item ->
+        val start = startOf(item)
+        SpanEntry(item, start, start + maxOf(1, lengthOf(item)))
+    }.sortedBy { it.start }
+    val blockStarts = IntArray(blocks.size)
+    val blockEnds = IntArray(blocks.size)
+    for (i in blocks.indices) {
+        val block = blocks[i]
+        var minStart = block.sourceStart
+        var maxEnd = block.sourceStart + block.sourceLength
+        for (run in block.runs) {
+            minStart = minOf(minStart, block.sourceStart + run.sourceStart)
+            maxEnd = maxOf(maxEnd, block.sourceStart + run.sourceEnd)
+        }
+        blockStarts[i] = minStart
+        blockEnds[i] = maxEnd
+    }
+    val order = blocks.indices.sortedBy { blockStarts[it] }
+    val buckets = Array<ArrayList<T>?>(blocks.size) { null }
+    val active = ArrayList<SpanEntry<T>>()
+    var cursor = 0
+    for (blockIndex in order) {
+        val bStart = blockStarts[blockIndex]
+        val bEnd = blockEnds[blockIndex]
+        active.removeAll { it.end <= bStart }
+        while (cursor < sorted.size && sorted[cursor].start < bEnd) {
+            val entry = sorted[cursor]
+            cursor += 1
+            if (entry.end > bStart) active.add(entry)
+        }
+        if (active.isNotEmpty()) {
+            val list = ArrayList<T>(active.size)
+            for (entry in active) {
+                if (entry.start < bEnd && entry.end > bStart) list.add(entry.value)
+            }
+            if (list.isNotEmpty()) buckets[blockIndex] = list
+        }
+    }
+    return List(blocks.size) { buckets[it] ?: emptyList() }
+}
+
 /**
  * 单个阅读块拆成平台条目：文本、表格、图片、块级公式、图与嵌入卡片。
  * 所有偏移先转成块内 UTF-16 下标，切分后文本块保留原始 run 以复用样式。
@@ -174,12 +224,18 @@ internal fun buildReaderItems(
     val mediaByBlock = media.groupBy { it.blockId.toLong() }
     val mathByBlock = math.groupBy { it.blockId.toLong() }
     val embedLinks = knowledge.links.filter { it.embed && !it.attachment && !it.inDiagram }
+    val embedLinksByBlock = assignToBlocks(model.blocks, embedLinks, { it.startUtf16.toInt() }, { it.lengthUtf16.toInt() })
+    val linksByBlock = assignToBlocks(model.blocks, knowledge.links, { it.startUtf16.toInt() }, { it.lengthUtf16.toInt() })
+    val tagsByBlock = assignToBlocks(model.blocks, knowledge.tags, { it.startUtf16.toInt() }, { it.lengthUtf16.toInt() })
     val items = ArrayList<ReaderItem>(model.blocks.size)
     var diagramOrdinal = 0
-    for (block in model.blocks) {
+    for ((blockIndex, block) in model.blocks.withIndex()) {
         val blockText = model.blockText(block)
         val blockMedia = mediaByBlock[block.id].orEmpty()
         val blockMath = mathByBlock[block.id].orEmpty()
+        val blockEmbedLinks = embedLinksByBlock[blockIndex]
+        val blockLinks = linksByBlock[blockIndex]
+        val blockTags = tagsByBlock[blockIndex]
         val source = if (block.sourceStart in 0..sourceText.length &&
             block.sourceStart + block.sourceLength <= sourceText.length
         ) {
@@ -267,7 +323,7 @@ internal fun buildReaderItems(
                 )
             }
         }
-        for (link in embedLinks) {
+        for (link in blockEmbedLinks) {
             val range = displayRangeForSource(
                 block,
                 link.startUtf16.toInt(),
@@ -312,7 +368,7 @@ internal fun buildReaderItems(
                 }
             val heading = block.runs.firstOrNull()?.mask?.let { (it ushr 24) and 7 } ?: 0
             val mask = block.runs.fold(0) { acc, run -> acc or run.mask }
-            val links = knowledge.links.mapNotNull { link ->
+            val links = blockLinks.mapNotNull { link ->
                 val range = displayRangeForSource(
                     block,
                     link.startUtf16.toInt(),
@@ -331,7 +387,7 @@ internal fun buildReaderItems(
                     embed = link.embed,
                 )
             }
-            val tags = knowledge.tags.mapNotNull { tag ->
+            val tags = blockTags.mapNotNull { tag ->
                 val range = displayRangeForSource(
                     block,
                     tag.startUtf16.toInt(),

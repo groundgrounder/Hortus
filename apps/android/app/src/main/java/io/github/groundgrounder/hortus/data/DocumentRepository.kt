@@ -15,13 +15,15 @@ import io.github.groundgrounder.hortus.core.model.OutlineRow
 import io.github.groundgrounder.hortus.core.model.ReadingModelDecoder
 import io.github.groundgrounder.hortus.core.model.buildReaderItems
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 /**
- * 独占 DocumentSession 生命周期与文档打开、改宽重建、增量刷新、保存和外部预览读写。
+ * 统一串行持有 DocumentSession，负责开关文档、按宽度重排、增量更新、落盘与只读预览。
  */
 internal class DocumentRepository(
     context: Context,
@@ -311,7 +313,13 @@ internal class DocumentRepository(
     }
 
     override fun close() {
-        closeDocumentLocked()
+        runBlocking {
+            withTimeoutOrNull(3_000L) {
+                sessionMutex.withLock {
+                    closeDocumentLocked()
+                }
+            } ?: closeDocumentLocked()
+        }
         cleanupExternalPreview()
     }
 }

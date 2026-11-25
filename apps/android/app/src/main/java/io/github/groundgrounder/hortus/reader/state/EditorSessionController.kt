@@ -34,10 +34,13 @@ internal class EditorSessionController(
     private val loadMutex: Mutex,
     private val onNotice: (String) -> Unit,
     private val onRefreshLocked: suspend () -> Unit,
+    private val onOpenConflictCopyLocked: suspend (String) -> Unit,
 ) {
     private val appContext = context.applicationContext
     private val saveMutex = Mutex()
     private var activeSaveJob: Job? = null
+    @Volatile
+    private var pendingAutoSaveAfterComposition = false
 
     private val _editState = MutableStateFlow(EditState())
     val editState: StateFlow<EditState> = _editState.asStateFlow()
@@ -46,6 +49,7 @@ internal class EditorSessionController(
     val isDirty: Boolean get() = _editState.value.dirty
 
     fun reset() {
+        pendingAutoSaveAfterComposition = false
         _editState.value = EditState()
     }
 
@@ -59,6 +63,7 @@ internal class EditorSessionController(
             )
             return
         }
+        pendingAutoSaveAfterComposition = false
         _editState.value = EditState(
             active = true,
             field = TextFieldValue(content.sourceText),
@@ -72,21 +77,26 @@ internal class EditorSessionController(
     fun updateEditText(value: TextFieldValue) {
         val current = _editState.value
         if (!current.active) return
+        val dirty = value.text != current.savedText
         _editState.value = current.copy(
             field = value,
-            dirty = value.text != current.savedText,
+            dirty = dirty,
         )
+        if (pendingAutoSaveAfterComposition && value.composition == null) {
+            pendingAutoSaveAfterComposition = false
+            if (dirty) autoSaveEdit()
+        }
     }
 
     fun finishEditing(): Job? {
         val current = _editState.value
         if (!current.active) return null
         val job = scope.launch {
-            if (!_editState.value.dirty) {
-                _editState.value = _editState.value.copy(active = false)
-                return@launch
+            while (_editState.value.active && (_editState.value.dirty || _editState.value.issue != null)) {
+                if (!saveEditSuspending(SaveChoice.NORMAL)) return@launch
             }
-            if (saveEditSuspending(SaveChoice.NORMAL)) {
+            if (_editState.value.active && !_editState.value.dirty && _editState.value.issue == null) {
+                pendingAutoSaveAfterComposition = false
                 _editState.value = _editState.value.copy(active = false)
                 onNotice(appContext.getString(R.string.editor_saved))
             }
@@ -169,28 +179,67 @@ internal class EditorSessionController(
     fun autoSaveEdit(): Job? {
         val current = _editState.value
         if (!current.active || !current.dirty || current.saving) return null
-        val job = scope.launch { saveEditSuspending(SaveChoice.NORMAL) }
+        if (current.field.composition != null) {
+            pendingAutoSaveAfterComposition = true
+            return null
+        }
+        val job = scope.launch { saveEditSuspending(SaveChoice.NORMAL, skipIfComposing = true) }
         activeSaveJob = job
         return job
     }
 
     suspend fun flushBeforeNavigation(): Boolean {
-        val current = _editState.value
-        if (!current.active) return true
-        if (current.dirty && !saveEditSuspending(SaveChoice.NORMAL)) {
-            return false
+        val ok = saveMutex.withLock {
+            var attempts = 0
+            while (_editState.value.active && (_editState.value.dirty || _editState.value.issue != null)) {
+                if (attempts >= 3) return@withLock false
+                attempts += 1
+                if (!saveEditLocked(SaveChoice.NORMAL, skipIfComposing = false)) {
+                    return@withLock false
+                }
+            }
+            if (!_editState.value.active || (!_editState.value.dirty && _editState.value.issue == null)) {
+                pendingAutoSaveAfterComposition = false
+                _editState.value = EditState()
+                true
+            } else {
+                false
+            }
         }
-        _editState.value = EditState()
-        return true
+        return ok
     }
 
-    suspend fun saveEditSuspending(choice: SaveChoice): Boolean = saveMutex.withLock {
+    suspend fun saveEditSuspending(
+        choice: SaveChoice,
+        skipIfComposing: Boolean = false,
+    ): Boolean {
+        var needsResave = false
+        val result = saveMutex.withLock {
+            val ok = saveEditLocked(choice, skipIfComposing)
+            val latest = _editState.value
+            if (ok && latest.active && latest.dirty && latest.issue == null) {
+                needsResave = true
+            }
+            ok
+        }
+        if (needsResave) {
+            autoSaveEdit()
+        }
+        return result
+    }
+
+    private suspend fun saveEditLocked(choice: SaveChoice, skipIfComposing: Boolean): Boolean {
         val current = _editState.value
-        if (!current.active) return@withLock true
+        if (!current.active) return true
+        if (skipIfComposing && current.field.composition != null) {
+            pendingAutoSaveAfterComposition = true
+            return false
+        }
         if (choice == SaveChoice.NORMAL && !current.dirty && current.issue == null) {
-            return@withLock true
+            return true
         }
         val text = current.field.text
+        val sessionId = current.sessionId
         _editState.value = current.copy(saving = true, issue = null, choice = choice.name)
         val temporary = (appContext.externalCacheDir ?: appContext.cacheDir).path
         val update: DocumentUpdate? = try {
@@ -209,30 +258,47 @@ internal class EditorSessionController(
         if (update == null) {
             DebugProbes.recordSaveIssue("io.failure")
             _editState.value = _editState.value.copy(saving = false, issue = "save_failed", lastSaveOk = false)
-            return@withLock false
+            return false
         }
         DebugProbes.recordSaveIssue(update.issue.name)
-        if (update.copyPath != null) {
-            val copy = update.copyPath
-            try {
-                loadMutex.withLock {
-                    withContext(Dispatchers.IO) { documentRepository.useDiskVersion() }
+        val copy = update.copyPath
+        if (copy != null) {
+            val diskUpdate = if (update.issue == DocumentIssue.MISSING) {
+                null
+            } else {
+                try {
+                    loadMutex.withLock {
+                        withContext(Dispatchers.IO) { documentRepository.useDiskVersion() }
+                    }
+                } catch (_: Exception) {
+                    null
                 }
-            } catch (_: Exception) {
-                Unit
             }
-            _editState.value = _editState.value.copy(
-                saving = false,
-                dirty = false,
-                copyPath = copy,
-                lastSaveOk = true,
-                issue = null,
-            )
-            loadMutex.withLock { onRefreshLocked() }
+            if (diskUpdate?.text == null) {
+                pendingAutoSaveAfterComposition = false
+                _editState.value = _editState.value.copy(
+                    active = false,
+                    saving = false,
+                    dirty = false,
+                    copyPath = copy,
+                    lastSaveOk = true,
+                    issue = null,
+                )
+                loadMutex.withLock { onOpenConflictCopyLocked(copy) }
+            } else {
+                _editState.value = _editState.value.copy(
+                    saving = false,
+                    dirty = false,
+                    copyPath = copy,
+                    lastSaveOk = true,
+                    issue = null,
+                )
+                loadMutex.withLock { onRefreshLocked() }
+            }
             onNotice(appContext.getString(R.string.editor_copy_saved, copy))
-            return@withLock true
+            return true
         }
-        return@withLock when (update.issue) {
+        return when (update.issue) {
             DocumentIssue.CONFLICT -> {
                 _editState.value = _editState.value.copy(saving = false, issue = "conflict", lastSaveOk = false)
                 false
@@ -246,9 +312,11 @@ internal class EditorSessionController(
                 false
             }
             DocumentIssue.NONE -> {
-                _editState.value = _editState.value.copy(
+                val latest = _editState.value
+                val changedDuringSave = latest.active && latest.sessionId == sessionId && latest.field.text != text
+                _editState.value = latest.copy(
                     savedText = text,
-                    dirty = false,
+                    dirty = changedDuringSave,
                     saving = false,
                     issue = null,
                     lastSaveOk = true,

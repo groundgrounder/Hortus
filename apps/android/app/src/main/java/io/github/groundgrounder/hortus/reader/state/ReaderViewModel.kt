@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.groundgrounder.hortus.DebugProbes
 import io.github.groundgrounder.hortus.R
 import io.github.groundgrounder.hortus.app.HortusServices
+import io.github.groundgrounder.hortus.app.IntentRouter
 import io.github.groundgrounder.hortus.core.model.BacklinkRow
 import io.github.groundgrounder.hortus.core.model.NoteContent
 import io.github.groundgrounder.hortus.core.model.RecentNote
@@ -91,6 +92,7 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
         diagramService = diagramService,
         vaultRepository = vaultRepository,
         documentRepository = documentRepository,
+        embedVersion = embedRepository.mutationVersion,
         loadMutex = loadMutex,
         readerState = _readerState,
         onClearCaches = { services.clearCaches() },
@@ -110,6 +112,9 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
             loadMutex = loadMutex,
             onNotice = ::notice,
             onRefreshLocked = { syncController.refreshInternal() },
+            onOpenConflictCopyLocked = { copyPath ->
+                openInternal(copyPath, null, push = true, restoreAnchor = false)
+            },
         )
     }
 
@@ -150,6 +155,13 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
     val lastVisibleOffsetPx: Int get() = navigation.lastVisibleOffsetPx
 
     val preferencesState: ReaderPreferenceState get() = settingsRepository.currentReaderState()
+    val preferencesFlow: StateFlow<ReaderPreferenceState> = settingsRepository.readerState
+    val isPreferencesLoaded: Boolean get() = settingsRepository.isPreloaded
+
+    suspend fun awaitPreferences(): ReaderPreferenceState {
+        settingsRepository.preload()
+        return settingsRepository.readerState.value
+    }
 
     val canEdit: Boolean
         get() = _readerState.value.content?.let {
@@ -258,6 +270,11 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
         val requestToken = openRequestSeq.incrementAndGet()
         return viewModelScope.launch {
             settingsRepository.preload()
+            if (openRequestSeq.get() != requestToken) return@launch
+            if (!editorController.flushBeforeNavigation()) {
+                clearPendingNavigation()
+                return@launch
+            }
             loadMutex.withLock {
                 if (openRequestSeq.get() != requestToken) return@withLock
                 val previous = _readerState.value.content
@@ -275,7 +292,6 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
                     notice(error.message ?: "preview.failed")
                     return@withLock
                 }
-                editorController.reset()
                 DebugProbes.recordExternalMode("readonly_stream")
                 val current = _readerState.value
                 _readerState.value = current.copy(
@@ -301,8 +317,17 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
         persistPreference: Boolean = true,
     ): Job? {
         if (vaultPath == null) return null
+        if (!IntentRouter.isValidVaultDirectory(vaultPath)) {
+            notice(appContext.getString(R.string.vault_root_forbidden))
+            return null
+        }
         val requestToken = openRequestSeq.incrementAndGet()
         return viewModelScope.launch {
+            if (openRequestSeq.get() != requestToken) return@launch
+            if (!editorController.flushBeforeNavigation()) {
+                clearPendingNavigation()
+                return@launch
+            }
             loadMutex.withLock {
                 if (openRequestSeq.get() != requestToken) return@withLock
                 startLocked(vaultPath, notePath, persistPreference = persistPreference)
@@ -316,8 +341,17 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
         heading: String? = null,
         persistPreference: Boolean = true,
     ): Job {
+        if (!IntentRouter.isValidVaultDirectory(vaultPath)) {
+            notice(appContext.getString(R.string.vault_root_forbidden))
+            return viewModelScope.launch { }
+        }
         val requestToken = openRequestSeq.incrementAndGet()
         return viewModelScope.launch {
+            if (openRequestSeq.get() != requestToken) return@launch
+            if (!editorController.flushBeforeNavigation()) {
+                clearPendingNavigation()
+                return@launch
+            }
             loadMutex.withLock {
                 if (openRequestSeq.get() != requestToken) return@withLock
                 if (_readerState.value.vaultPath != vaultPath) {
@@ -340,10 +374,16 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
         notePath: String?,
         persistPreference: Boolean,
     ) {
+        if (!IntentRouter.isValidVaultDirectory(vaultPath)) {
+            _readerState.value = _readerState.value.copy(
+                loading = false,
+                error = appContext.getString(R.string.vault_root_forbidden),
+            )
+            return
+        }
         settingsRepository.preload()
         DebugProbes.incrementOpenCount()
         persistSessionPreference = persistPreference
-        editorController.reset()
         searchKnowledgeController.reset()
         newNoteShortcuts.reset()
         _sideMode.value = SideMode.FILES
@@ -408,6 +448,11 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
         val requestToken = openRequestSeq.incrementAndGet()
         if (content == null) {
             return viewModelScope.launch {
+                if (openRequestSeq.get() != requestToken) return@launch
+                if (!editorController.flushBeforeNavigation()) {
+                    clearPendingNavigation()
+                    return@launch
+                }
                 loadMutex.withLock {
                     if (openRequestSeq.get() != requestToken) return@withLock
                     val resolved = vaultRepository.resolveLink("", path) ?: path
@@ -527,21 +572,25 @@ internal class ReaderViewModel(application: Application) : AndroidViewModel(appl
         }
         val current = _readerState.value.content
         if (current?.externalPreview == true) {
-            documentRepository.cleanupExternalPreview()
-            val previous = previewReturn ?: return false
-            previewReturn = null
+            if (previewReturn == null) return false
             val requestToken = openRequestSeq.incrementAndGet()
             viewModelScope.launch {
                 loadMutex.withLock {
                     if (openRequestSeq.get() != requestToken) return@withLock
+                    val previous = previewReturn ?: return@withLock
+                    previewReturn = null
+                    documentRepository.cleanupExternalPreview()
                     openInternal(previous.path, null, push = false, restoreAnchor = true)
                 }
             }
             return true
         }
-        val previous = navigation.popPrevious(current) ?: return false
+        if (!navigation.canPop()) return false
+        val requestToken = openRequestSeq.incrementAndGet()
         viewModelScope.launch {
             loadMutex.withLock {
+                if (openRequestSeq.get() != requestToken) return@withLock
+                val previous = navigation.popPrevious(_readerState.value.content) ?: return@withLock
                 openInternal(previous.path, null, push = false, restoreAnchor = true)
             }
         }

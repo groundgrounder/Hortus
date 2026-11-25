@@ -204,7 +204,7 @@ internal class HortusServices(context: Context) : AutoCloseable {
                 val deadline = android.os.SystemClock.uptimeMillis() + 10_000L
                 while (android.os.SystemClock.uptimeMillis() < deadline) {
                     val batches = handle.waitForBatches()
-                    if (batches.any { it.scanComplete }) break
+                    if (batches.isEmpty() || batches.any { it.scanComplete }) break
                 }
                 handle.resolveLink(sourcePath, rawTarget).resolvedPath
             } catch (_: Exception) {

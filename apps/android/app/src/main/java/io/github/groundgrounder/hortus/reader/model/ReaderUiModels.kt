@@ -32,6 +32,7 @@ internal data class ReaderUiState(
     val scrollTarget: ScrollTarget? = null,
     val notice: String? = null,
     val openSequence: Long = 0,
+    val embedVersion: Long = 1L,
 )
 
 internal enum class KnowledgeTab { OUTLINE, BACKLINKS, TAGS }
