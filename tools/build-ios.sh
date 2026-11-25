@@ -6,14 +6,39 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 export PATH="/opt/homebrew/opt/rustup/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:${PATH}"
 
-MODE="${1:---simulator}"
-case "$MODE" in
-  --simulator|--ipa|--all) ;;
-  *)
-    echo "Usage: $0 [--simulator|--ipa|--all]" >&2
-    exit 2
-    ;;
-esac
+MODE=""
+ARCHIVE_DIR="${HOME}/syncD/media/release/hortus/ios-m3"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --simulator|--ipa|--all)
+      if [[ -n "$MODE" && "$MODE" != "$1" ]]; then
+        echo "Usage: $0 [--simulator|--ipa|--all] [--archive-dir <dir>]" >&2
+        exit 2
+      fi
+      MODE="$1"
+      shift
+      ;;
+    --archive-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --archive-dir" >&2
+        exit 2
+      fi
+      ARCHIVE_DIR="$2"
+      shift 2
+      ;;
+    --archive-dir=*)
+      ARCHIVE_DIR="${1#*=}"
+      shift
+      ;;
+    *)
+      echo "Usage: $0 [--simulator|--ipa|--all] [--archive-dir <dir>]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+MODE="${MODE:---simulator}"
 
 build_rust_ffi() {
   local target="$1"
@@ -83,11 +108,12 @@ build_ipa() {
     rm -rf Payload
   )
 
-  local archive_dir="${HOME}/syncD/media/release/hortus/ios-m3"
-  mkdir -p "$archive_dir"
-  cp -f build/ios/Hortus-unsigned.ipa "$archive_dir/Hortus-unsigned.ipa"
-  cp -f build/ios/Hortus-unsigned.ipa.sha256 "$archive_dir/Hortus-unsigned.ipa.sha256"
-  (cd "$archive_dir" && shasum -a 256 -c Hortus-unsigned.ipa.sha256)
+  if [[ -n "$ARCHIVE_DIR" ]]; then
+    mkdir -p "$ARCHIVE_DIR"
+    cp -f build/ios/Hortus-unsigned.ipa "$ARCHIVE_DIR/Hortus-unsigned.ipa"
+    cp -f build/ios/Hortus-unsigned.ipa.sha256 "$ARCHIVE_DIR/Hortus-unsigned.ipa.sha256"
+    (cd "$ARCHIVE_DIR" && shasum -a 256 -c Hortus-unsigned.ipa.sha256)
+  fi
   echo "Built unsigned IPA: $ROOT/build/ios/Hortus-unsigned.ipa"
 }
 

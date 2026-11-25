@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUNDLE_ID = "io.github.groundgrounder.Hortus"
 FORBIDDEN_LINK_TOKENS = ("WebKit", "JavaScriptCore", "CoreServices", "SwiftTerm")
-FORBIDDEN_TEXT_TOKENS = (b"WKWebView", b"JSContext", b"/Users/", b"/private/var/folders/")
+FORBIDDEN_TEXT_TOKENS = (b"WKWebView", b"JSContext", b"/Users/", b"/private/var/folders/", bytes(Path.home()))
 DEFAULT_IPHONE_NAME = "iPhone 18 Pro"
 DEFAULT_IPAD_NAME = "iPad Pro 13-inch (M5)"
 DEFAULT_TEST_DEVICE_NAME = DEFAULT_IPHONE_NAME
@@ -344,9 +344,13 @@ def main() -> None:
         parser.error("Specify --ipa and/or --simulator")
 
     report: dict = {}
-    if args.ipa:
-        report["ipa"] = audit_ipa(Path(args.ipa).resolve())
+    default_ipa = ROOT / "build" / "ios" / "Hortus-unsigned.ipa"
+    ipa_target = Path(args.ipa).resolve() if args.ipa else (default_ipa if args.simulator and default_ipa.is_file() else None)
+    if ipa_target is not None:
+        report["ipa"] = audit_ipa(ipa_target)
     if args.simulator:
+        if ipa_target is None:
+            report["app_audit"] = audit_app_bundle(Path(args.app).resolve())
         report["simulator"] = run_simulator_smoke(args)
 
     out_dir = Path(args.output).expanduser().resolve()
