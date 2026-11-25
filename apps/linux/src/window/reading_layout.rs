@@ -381,13 +381,12 @@ impl WindowInner {
             return (tab_view_width - pad).max(260.0);
         }
         let window_w = f64::from(self.window.width()).max(720.0);
-        let sidebar_width = |w: f64| (w * 0.24).clamp(220.0, 480.0);
         let mut content = window_w;
         if self.left_split.shows_sidebar() && !self.left_split.is_collapsed() {
-            content -= sidebar_width(window_w);
+            content -= self.current_sidebar_width(crate::core::PanelRegion::Left);
         }
         if self.right_split.shows_sidebar() && !self.right_split.is_collapsed() {
-            content -= sidebar_width(window_w);
+            content -= self.current_sidebar_width(crate::core::PanelRegion::Right);
         }
         let pad = f64::from(crate::platform::viewport::responsive_horizontal_padding(
             content as i32,

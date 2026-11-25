@@ -296,6 +296,8 @@ impl ToolDock {
         let empty_lbl = gtk4::Label::new(Some(tr(Key::DockEmptyLabel)));
         empty_lbl.add_css_class("dim-label");
         empty_lbl.add_css_class("caption");
+        empty_lbl.set_wrap(true);
+        empty_lbl.set_justify(gtk4::Justification::Center);
         let empty_actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         empty_actions.set_halign(gtk4::Align::Center);
         let new_shell_btn = gtk4::Button::builder()
@@ -318,6 +320,7 @@ impl ToolDock {
         empty_box.append(&empty_actions);
 
         let content_stack = gtk4::Stack::new();
+        content_stack.set_hhomogeneous(false);
         content_stack.set_vexpand(true);
         content_stack.set_hexpand(true);
         content_stack.add_named(&tab_view, Some("tabs"));
@@ -974,12 +977,12 @@ impl ToolDock {
             .regions
             .get("left")
             .map(|r| r.size.clamp(180.0, 480.0))
-            .unwrap_or(290.0);
+            .unwrap_or(280.0);
         let right_size = layout
             .regions
             .get("right")
             .map(|r| r.size.clamp(180.0, 480.0))
-            .unwrap_or(290.0);
+            .unwrap_or(280.0);
         let bottom_size = layout
             .regions
             .get("bottom")

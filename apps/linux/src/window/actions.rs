@@ -560,7 +560,7 @@ impl WindowInner {
         });
     }
 
-    pub fn load_saved_layout(&self) {
+    pub fn load_saved_layout(self: &Rc<Self>) {
         let core = self
             .state
             .borrow()
@@ -575,12 +575,13 @@ impl WindowInner {
             return;
         };
         self.state.borrow_mut().suppressing_layout_save = true;
-        let (_left_w, _right_w, bottom_h) = self.tool_dock.apply_layout_state(&layout);
+        let (left_w, right_w, bottom_h) = self.tool_dock.apply_layout_state(&layout);
         self.state.borrow_mut().bottom_height = bottom_h.clamp(120.0, 520.0);
         self.left_split
             .set_show_sidebar(self.tool_dock.tab_count(PanelRegion::Left) > 0);
         self.right_split
             .set_show_sidebar(self.tool_dock.tab_count(PanelRegion::Right) > 0);
+        self.apply_sidebar_widths(left_w, right_w);
         self.state.borrow_mut().suppressing_layout_save = false;
     }
 
@@ -605,10 +606,12 @@ impl WindowInner {
     }
 
     pub fn persist_layout_now(&self) {
-        let (core, bottom_height, suppressing) = {
+        let (core, left_w, right_w, bottom_height, suppressing) = {
             let st = self.state.borrow();
             (
                 st.services.as_ref().map(|s| Arc::clone(&s.core)),
+                st.left_sidebar_width,
+                st.right_sidebar_width,
                 st.bottom_height,
                 st.disposing || st.suppressing_layout_save,
             )
@@ -617,11 +620,9 @@ impl WindowInner {
             return;
         }
         let Some(core) = core else { return };
-        let win_w = f64::from(self.window.width()).max(1000.0);
-        let side_w = (win_w * 0.24).clamp(220.0, 480.0);
         let layout = self
             .tool_dock
-            .export_layout_state(side_w, side_w, bottom_height);
+            .export_layout_state(left_w, right_w, bottom_height);
         if let Ok(json) = serde_json::to_string(&layout) {
             gio::spawn_blocking(move || {
                 let _ = core.save_layout(json);

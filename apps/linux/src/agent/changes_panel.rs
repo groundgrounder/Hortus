@@ -87,6 +87,7 @@ impl ChangesPanel {
         title_lbl.add_css_class("dim-label");
         title_lbl.set_xalign(0.0);
         title_lbl.set_hexpand(true);
+        title_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
 
         let refresh_btn = gtk4::Button::builder()
             .icon_name("view-refresh-symbolic")
@@ -119,6 +120,9 @@ impl ChangesPanel {
         rollback_all_btn.add_css_class("destructive-action");
         rollback_all_btn.add_css_class("caption");
         rollback_all_btn.set_sensitive(false);
+        if let Some(lbl) = rollback_all_btn.child().and_downcast::<gtk4::Label>() {
+            lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        }
 
         session_row.append(&session_combo);
         session_row.append(&session_meta);
@@ -330,6 +334,7 @@ impl ChangesPanel {
     }
 
     fn render_no_sessions(inner: &Rc<ChangesPanelInner>, msg: &str) {
+        inner.title_lbl.set_text(tr(Key::ChangesTitle));
         inner.state.borrow_mut().suppress_combo = true;
         inner
             .session_combo

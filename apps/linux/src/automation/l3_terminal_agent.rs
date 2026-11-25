@@ -189,7 +189,9 @@ async fn run_suite(
         .iter()
         .all(|r| win.tool_dock.region_has_add_button(*r));
     let sidebar_max_480_ok = (win.left_split.max_sidebar_width() - 480.0).abs() < 0.1
-        && (win.right_split.max_sidebar_width() - 480.0).abs() < 0.1;
+        && (win.right_split.max_sidebar_width() - 480.0).abs() < 0.1
+        && (win.left_split.min_sidebar_width() - 180.0).abs() < 0.1
+        && (win.right_split.min_sidebar_width() - 180.0).abs() < 0.1;
 
     // -------------------------------------------------------------------------
     // Part 1: VTE4 原生终端 + 单层底栏 + 跨三区无损迁移 + 发送安全 + 退出/回收
@@ -349,7 +351,7 @@ async fn run_suite(
                     && !t.has_close_button
                     && !t.has_motion_controller
                     && t.width > 24.0
-                    && t.width < 140.0
+                    && t.width < 220.0
             })
     });
     let bottom_tab_compact = bottom_strip_1.as_ref().is_some_and(|m| {
@@ -617,16 +619,32 @@ async fn run_suite(
 
     // 弹出右侧栏 + 菜单截图展示工具添加与关闭效果
     win.tool_dock.popup_add_menu(PanelRegion::Right);
-    glib::timeout_future(Duration::from_millis(250)).await;
+    if let Some(btn) = win.tool_dock.add_button_widget(PanelRegion::Right) {
+        let _ = wait_for(1500, || {
+            btn.popover()
+                .is_some_and(|p| p.is_visible() && p.width() > 0 && p.height() > 0)
+        })
+        .await;
+    }
+    glib::timeout_future(Duration::from_millis(150)).await;
     let shot_tool_add_menu = if let Some(dir) = media_dir {
         let p = dir.join("l3-v3-tool-add-menu-and-close.png");
         let btn = win.tool_dock.add_button_widget(PanelRegion::Right);
-        let ok = if let Some(btn) = btn {
-            capture_window_with_menu_button_popover(&win.window, &btn, &p).is_ok()
-        } else {
-            capture_widget_png(&win.window, &p).is_ok()
-        };
-        ok && p.exists()
+        let mut ok = false;
+        for _ in 0..3 {
+            let res = if let Some(ref btn) = btn {
+                capture_window_with_menu_button_popover(&win.window, btn, &p)
+            } else {
+                capture_widget_png(&win.window, &p)
+            };
+            if res.is_ok() && p.exists() {
+                ok = true;
+                break;
+            }
+            win.window.queue_draw();
+            glib::timeout_future(Duration::from_millis(80)).await;
+        }
+        ok
     } else {
         false
     };
@@ -1154,6 +1172,154 @@ async fn run_suite(
         win.terminal_host.close_tab_by_id(id);
     }
 
+    // -------------------------------------------------------------------------
+    // Part 6 (L4c): 左右边栏平滑拖拽调宽、互不挤压、ToolDock/阅读区自适应与持久化恢复
+    // -------------------------------------------------------------------------
+    win.left_split.set_show_sidebar(true);
+    win.right_split.set_show_sidebar(true);
+    win.activate_static_tool(StaticToolKind::Outline);
+    win.open_note_at("alpha.md", None);
+    let _ = wait_for(2000, || {
+        win.state
+            .borrow()
+            .tabs
+            .get("alpha.md")
+            .is_some_and(|t| t.reading_loaded && !t.editing)
+    })
+    .await;
+
+    let handles_ready = win.left_resize_handle.width_request() == 6
+        && win.right_resize_handle.width_request() == 6
+        && win.left_resize_handle.halign() == gtk4::Align::End
+        && win.right_resize_handle.halign() == gtk4::Align::Start
+        && win.left_resize_handle.cursor().is_some()
+        && win.right_resize_handle.cursor().is_some();
+
+    win.apply_sidebar_widths(260.0, 220.0);
+    let _ = wait_for(2000, || {
+        (win.current_sidebar_width(PanelRegion::Left) - 260.0).abs() <= 4.0
+            && (win.current_sidebar_width(PanelRegion::Right) - 220.0).abs() <= 4.0
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(220)).await;
+    let left_w_before = win.current_sidebar_width(PanelRegion::Left);
+    let right_w_before = win.current_sidebar_width(PanelRegion::Right);
+    let center_w_before = win
+        .state
+        .borrow()
+        .tabs
+        .get("alpha.md")
+        .map(|t| t.reading_viewport.last_allocated_width())
+        .unwrap_or(0);
+    let right_strip_narrow = win.tool_dock.measure_strip_tab_bounds(PanelRegion::Right);
+    let right_narrow_icon_only_ok = right_strip_narrow.as_ref().is_some_and(|m| {
+        m.tabs.len() == 3
+            && m.tabs.iter().any(|t| t.selected && t.label_visible)
+            && m.tabs.iter().any(|t| !t.selected && !t.label_visible)
+    });
+
+    // 拖拽左侧栏 260px -> 380px，验证左侧变宽且右侧不跟着缩水
+    let left_drag_ok = win.simulate_sidebar_drag_window_delta(PanelRegion::Left, 120.0);
+    let _ = wait_for(2000, || {
+        (win.current_sidebar_width(PanelRegion::Left) - 380.0).abs() <= 4.0
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(180)).await;
+    let left_w_after_left_drag = win.current_sidebar_width(PanelRegion::Left);
+    let right_w_after_left_drag = win.current_sidebar_width(PanelRegion::Right);
+    let left_drag_no_right_drift = left_drag_ok
+        && (left_w_after_left_drag - 380.0).abs() <= 4.0
+        && (right_w_after_left_drag - right_w_before).abs() <= 4.0;
+
+    // 拖拽右侧栏 220px -> 360px（左边缘向左拖 -140px），验证非激活标签自动恢复全文字且正文宽度自适应
+    let right_drag_ok = win.simulate_sidebar_drag_window_delta(PanelRegion::Right, -140.0);
+    let _ = wait_for(3000, || {
+        let rw_ok = (win.current_sidebar_width(PanelRegion::Right) - 360.0).abs() <= 4.0;
+        let vp_ok = win.state.borrow().tabs.get("alpha.md").is_some_and(|t| {
+            let vp_w = f64::from(t.reading_viewport.last_allocated_width()).max(260.0);
+            t.reading_viewport.last_allocated_width() < center_w_before - 180
+                && (t.layout_width - vp_w).abs() < 24.0
+        });
+        rw_ok && vp_ok
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(220)).await;
+    let left_w_after_right_drag = win.current_sidebar_width(PanelRegion::Left);
+    let right_w_after_right_drag = win.current_sidebar_width(PanelRegion::Right);
+    let center_w_after_right_drag = win
+        .state
+        .borrow()
+        .tabs
+        .get("alpha.md")
+        .map(|t| t.reading_viewport.last_allocated_width())
+        .unwrap_or(0);
+    let right_strip_wide = win.tool_dock.measure_strip_tab_bounds(PanelRegion::Right);
+    let right_wide_restored_labels_ok = right_strip_wide.as_ref().is_some_and(|m| {
+        m.tabs.len() == 3
+            && m.tabs
+                .iter()
+                .all(|t| t.fits_in_strip && t.label_visible && !t.ellipsized)
+    });
+    let center_adapted_ok = center_w_after_right_drag < center_w_before - 180;
+    let shot_sidebars_resized_wide = if let Some(dir) = media_dir {
+        let p = dir.join("l4-sidebars-resized-wide.png");
+        capture_widget_png(&win.window, &p).is_ok() && p.exists()
+    } else {
+        false
+    };
+
+    // 持久化到 layout.toml 并开新窗口验证真实启动恢复
+    win.persist_layout_now();
+    let layout_persisted_ok = wait_for(3000, || {
+        layout_toml_path.exists()
+            && services
+                .core
+                .layout_json()
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str::<hortus_config::LayoutState>(&json).ok())
+                .is_some_and(|st| {
+                    let l = st.regions.get("left").map(|r| r.size).unwrap_or(0.0);
+                    let r = st.regions.get("right").map(|r| r.size).unwrap_or(0.0);
+                    (l - 380.0).abs() <= 4.0 && (r - 360.0).abs() <= 4.0
+                })
+    })
+    .await;
+
+    let mut layout_restored_ok = false;
+    if let Some(app) = win
+        .window
+        .application()
+        .and_then(|a| a.downcast::<adw::Application>().ok())
+    {
+        let opts_restore = CliOptions {
+            vault: Some(vault_path.clone()),
+            width: Some(1280),
+            height: Some(800),
+            ..Default::default()
+        };
+        let win_restore =
+            HortusWindow::new_with_services(&app, opts_restore, Some(Arc::clone(&services)));
+        win_restore.present();
+        layout_restored_ok = wait_for(4000, || {
+            let st = win_restore.inner.state.borrow();
+            st.scan_complete
+                && (win_restore.inner.current_sidebar_width(PanelRegion::Left) - 380.0).abs() <= 4.0
+                && (win_restore.inner.current_sidebar_width(PanelRegion::Right) - 360.0).abs()
+                    <= 4.0
+        })
+        .await;
+        win_restore.inner.close_now_clean();
+        drop(win_restore);
+    }
+
+    win.reset_sidebar_width(PanelRegion::Left);
+    win.reset_sidebar_width(PanelRegion::Right);
+    let double_click_reset_ok = (win.state.borrow().left_sidebar_width - 280.0).abs() < 0.1
+        && (win.state.borrow().right_sidebar_width - 280.0).abs() < 0.1;
+    win.persist_layout_now();
+    glib::timeout_future(Duration::from_millis(160)).await;
+
     if let Some(entry) = win.build_session_entry() {
         crate::window::session::write_session_entries_to_core(&services.core, &[entry]);
     }
@@ -1242,12 +1408,34 @@ async fn run_suite(
             "win2_closed_clean": win2_closed_clean,
             "win2_pty_reaped": win2_pty_reaped,
         },
+        "sidebar_resize": {
+            "handles_ready": handles_ready,
+            "right_narrow_icon_only_ok": right_narrow_icon_only_ok,
+            "left_drag_no_right_drift": left_drag_no_right_drift,
+            "right_drag_ok": right_drag_ok,
+            "right_wide_restored_labels_ok": right_wide_restored_labels_ok,
+            "center_adapted_ok": center_adapted_ok,
+            "layout_persisted_ok": layout_persisted_ok,
+            "layout_restored_ok": layout_restored_ok,
+            "double_click_reset_ok": double_click_reset_ok,
+            "left_w_before": left_w_before,
+            "right_w_before": right_w_before,
+            "left_w_after_left_drag": left_w_after_left_drag,
+            "right_w_after_left_drag": right_w_after_left_drag,
+            "left_w_after_right_drag": left_w_after_right_drag,
+            "right_w_after_right_drag": right_w_after_right_drag,
+            "center_w_before": center_w_before,
+            "center_w_after_right_drag": center_w_after_right_drag,
+            "right_strip_narrow": right_strip_narrow,
+            "right_strip_wide": right_strip_wide,
+        },
         "screenshots": {
             "dynamic_sidebar": shot_dynamic_sidebar,
             "changes_context_moved": shot_changes_context_moved,
             "right_sidebar_terminal": shot_right_sidebar_terminal,
             "tool_add_menu": shot_tool_add_menu,
             "agent_changes_multi": shot_agent_changes_multi,
+            "sidebars_resized_wide": shot_sidebars_resized_wide,
         },
     })
 }

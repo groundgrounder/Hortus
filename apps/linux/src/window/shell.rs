@@ -15,6 +15,9 @@ use crate::services::AppServices;
 use crate::terminal::TerminalHost;
 use crate::window::actions::{apply_color_scheme, build_primary_menu};
 use crate::window::commands::WindowCommand;
+use crate::window::sidebar_resize::{
+    DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, wrap_sidebar_with_resize_handle,
+};
 use crate::window::state::WindowState;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -39,6 +42,8 @@ pub struct WindowInner {
     pub window_title: adw::WindowTitle,
     pub left_split: adw::OverlaySplitView,
     pub right_split: adw::OverlaySplitView,
+    pub left_resize_handle: gtk4::Box,
+    pub right_resize_handle: gtk4::Box,
     pub center_paned: gtk4::Paned,
     pub center_stack: gtk4::Stack,
     pub empty_status: adw::StatusPage,
@@ -283,22 +288,30 @@ impl HortusWindow {
             .end_child(bottom_panel_box)
             .build();
 
+        let (right_sidebar_wrap, right_resize_handle) = wrap_sidebar_with_resize_handle(
+            tool_dock.region_widget(PanelRegion::Right),
+            PanelRegion::Right,
+        );
         let right_split = adw::OverlaySplitView::builder()
-            .sidebar(tool_dock.region_widget(PanelRegion::Right))
+            .sidebar(&right_sidebar_wrap)
             .content(&center_paned)
             .sidebar_position(gtk4::PackType::End)
-            .min_sidebar_width(220.0)
-            .max_sidebar_width(480.0)
+            .min_sidebar_width(MIN_SIDEBAR_WIDTH)
+            .max_sidebar_width(MAX_SIDEBAR_WIDTH)
             .sidebar_width_fraction(0.24)
             .show_sidebar(true)
             .build();
 
+        let (left_sidebar_wrap, left_resize_handle) = wrap_sidebar_with_resize_handle(
+            tool_dock.region_widget(PanelRegion::Left),
+            PanelRegion::Left,
+        );
         let left_split = adw::OverlaySplitView::builder()
-            .sidebar(tool_dock.region_widget(PanelRegion::Left))
+            .sidebar(&left_sidebar_wrap)
             .content(&right_split)
             .sidebar_position(gtk4::PackType::Start)
-            .min_sidebar_width(220.0)
-            .max_sidebar_width(480.0)
+            .min_sidebar_width(MIN_SIDEBAR_WIDTH)
+            .max_sidebar_width(MAX_SIDEBAR_WIDTH)
             .sidebar_width_fraction(0.24)
             .show_sidebar(true)
             .build();
@@ -357,6 +370,9 @@ impl HortusWindow {
             scan_micros: 0,
             pending_open_notes,
             tabs: HashMap::new(),
+            left_sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            right_sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            pending_sidebar_widths: false,
             bottom_revealed: false,
             bottom_height: 260.0,
             pending_bottom_position: false,
@@ -396,6 +412,8 @@ impl HortusWindow {
             window_title,
             left_split,
             right_split,
+            left_resize_handle,
+            right_resize_handle,
             center_paned,
             center_stack,
             empty_status,
@@ -418,6 +436,8 @@ impl HortusWindow {
         });
 
         inner.bind_signals();
+        inner.install_sidebar_resize_handlers();
+        inner.apply_sidebar_widths(DEFAULT_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH);
         inner.register_actions();
         inner.init_knowledge_panels();
         inner.init_terminal_and_changes_panels();

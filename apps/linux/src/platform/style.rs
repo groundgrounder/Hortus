@@ -63,6 +63,21 @@ const BASE_CSS: &str = r#"
     background-color: @headerbar_bg_color;
 }
 
+.hortus-sidebar-resize-handle {
+    background-color: transparent;
+}
+
+.hortus-sidebar-resize-line {
+    min-width: 2px;
+    background-color: transparent;
+    transition: background-color 120ms ease;
+}
+
+.hortus-sidebar-resize-handle:hover .hortus-sidebar-resize-line,
+.hortus-sidebar-resize-handle.dragging .hortus-sidebar-resize-line {
+    background-color: alpha(@accent_bg_color, 0.55);
+}
+
 .hortus-mode-badge {
     font-size: 0.82em;
     padding: 2px 8px;

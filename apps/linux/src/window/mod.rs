@@ -11,6 +11,7 @@ pub mod reading_layout;
 pub mod save_notice;
 pub mod session;
 pub mod shell;
+pub mod sidebar_resize;
 pub mod state;
 pub mod tab_manager;
 pub mod terminal_agent;

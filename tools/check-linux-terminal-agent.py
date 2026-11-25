@@ -20,6 +20,7 @@ EXPECTED_PNGS = [
     "l3-v3-terminal-in-right-sidebar.png",
     "l3-v3-tool-add-menu-and-close.png",
     "l3-v3-agent-changes-and-multi-window.png",
+    "l4-sidebars-resized-wide.png",
 ]
 
 
@@ -316,7 +317,7 @@ def main() -> int:
 
             data = json.loads(main_json.read_text(encoding="utf-8"))
             check(data.get("ok") is True, f"L3 主套校验失败: {data}")
-            for section in ("dock_v2", "dock_v3", "terminal", "settings", "agent_changes", "multi_window", "screenshots"):
+            for section in ("dock_v2", "dock_v3", "terminal", "settings", "agent_changes", "multi_window", "sidebar_resize", "screenshots"):
                 sec_val = data.get(section, {})
                 check(isinstance(sec_val, dict) and len(sec_val) > 0, f"缺少检查段 {section}: {data}")
                 for k, v in sec_val.items():
