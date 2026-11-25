@@ -90,7 +90,7 @@ impl WindowInner {
                         ordinal: 1,
                     });
                 } else {
-                    win.show_toast("请先打开包含 Mermaid 图表的笔记");
+                    win.show_toast(crate::i18n::tr(crate::i18n::Key::ToastOpenDiagramNoteFirst));
                 }
             }
         });
@@ -103,9 +103,9 @@ impl WindowInner {
                 let next = !win.toolbar_view.reveals_top_bars();
                 win.toolbar_view.set_reveal_top_bars(next);
                 win.show_toast(if next {
-                    "已显示顶栏"
+                    crate::i18n::tr(crate::i18n::Key::ToastTopBarShown)
                 } else {
-                    "已隐藏顶栏，按 Ctrl+Shift+H 恢复"
+                    crate::i18n::tr(crate::i18n::Key::ToastTopBarHidden)
                 });
             }
         });
@@ -638,10 +638,15 @@ impl WindowInner {
             .copyright("© 2026 groundgrounder")
             .license_type(gtk4::License::Gpl30Only)
             .website("https://github.com/groundgrounder/Hortus")
-            .comments(
-                "面向阅读与 AI Agent 协作的原生 Markdown 知识库（Linux GTK4 + libadwaita 原生版）。",
-            )
             .build();
+        dialog.add_legal_section(
+            crate::i18n::tr(crate::i18n::Key::AboutThirdPartyNoticesTitle),
+            None,
+            gtk4::License::Custom,
+            Some(&gtk4::glib::markup_escape_text(crate::i18n::tr(
+                crate::i18n::Key::AboutThirdPartyNoticesSummary,
+            ))),
+        );
         dialog.present(Some(&self.window));
     }
 }
@@ -656,77 +661,78 @@ pub fn apply_color_scheme(choice: ColorSchemeChoice) {
 }
 
 pub fn build_primary_menu() -> gio::Menu {
+    use crate::i18n::{Key, fmt1, tr};
     let menu = gio::Menu::new();
 
     let file_sec = gio::Menu::new();
-    file_sec.append(Some("打开知识库…"), Some("win.open-vault"));
-    file_sec.append(Some("新建窗口 (Ctrl+Shift+N)"), Some("win.new-window"));
-    file_sec.append(Some("快速打开笔记 (Ctrl+P)"), Some("win.quick-open"));
-    file_sec.append(Some("新建笔记 (Ctrl+N)"), Some("win.new-note"));
-    file_sec.append(Some("新建文件夹"), Some("win.new-folder"));
-    file_sec.append(Some("重命名当前笔记…"), Some("win.rename-active"));
-    file_sec.append(Some("保存笔记 (Ctrl+S)"), Some("win.save-note"));
-    file_sec.append(Some("复制整篇笔记纯文本"), Some("win.copy-note-text"));
-    file_sec.append(Some("文内查找 (Ctrl+F)"), Some("win.find-in-note"));
-    file_sec.append(Some("文内替换 (Ctrl+H)"), Some("win.replace-in-note"));
-    file_sec.append(Some("全文搜索 (Ctrl+Shift+F)"), Some("win.focus-search"));
+    file_sec.append(Some(tr(Key::MenuOpenFolder)), Some("win.open-vault"));
+    file_sec.append(Some(tr(Key::MenuNewWindow)), Some("win.new-window"));
+    file_sec.append(Some(tr(Key::MenuQuickOpen)), Some("win.quick-open"));
+    file_sec.append(Some(tr(Key::MenuNewNote)), Some("win.new-note"));
+    file_sec.append(Some(tr(Key::MenuNewFolder)), Some("win.new-folder"));
+    file_sec.append(Some(tr(Key::MenuRenameNote)), Some("win.rename-active"));
+    file_sec.append(Some(tr(Key::MenuSaveNote)), Some("win.save-note"));
+    file_sec.append(Some(tr(Key::MenuCopyNoteText)), Some("win.copy-note-text"));
+    file_sec.append(Some(tr(Key::MenuFindInNote)), Some("win.find-in-note"));
     file_sec.append(
-        Some("切换阅读 / 编辑 (Ctrl+E)"),
+        Some(tr(Key::MenuReplaceInNote)),
+        Some("win.replace-in-note"),
+    );
+    file_sec.append(Some(tr(Key::MenuSearchFolder)), Some("win.focus-search"));
+    file_sec.append(
+        Some(tr(Key::MenuToggleReadingEditing)),
         Some("win.toggle-edit-mode"),
     );
-    file_sec.append(Some("关闭当前标签 (Ctrl+W)"), Some("win.close-tab"));
+    file_sec.append(Some(tr(Key::MenuCloseTab)), Some("win.close-tab"));
     menu.append_section(None, &file_sec);
 
     let agent_sec = gio::Menu::new();
     agent_sec.append(
-        Some("新建终端（底部）"),
+        Some(tr(Key::MenuNewTerminalBottom)),
         Some("win.dock-new-shell('bottom')"),
     );
-    agent_sec.append(Some("启动 Agent"), Some("win.launch-agent"));
+    agent_sec.append(Some(tr(Key::MenuLaunchAgent)), Some("win.launch-agent"));
     agent_sec.append(
-        Some("发送笔记路径到终端 (Ctrl+Shift+L)"),
+        Some(tr(Key::MenuSendPathToTerminal)),
         Some("win.send-path-to-terminal"),
     );
     agent_sec.append(
-        Some("发送选区到终端 (Ctrl+Shift+K)"),
+        Some(tr(Key::MenuSendSelectionToTerminal)),
         Some("win.send-selection-to-terminal"),
     );
-    agent_sec.append(Some("偏好设置… (Ctrl+,)"), Some("win.open-settings"));
+    agent_sec.append(Some(tr(Key::MenuPreferences)), Some("win.open-settings"));
     menu.append_section(None, &agent_sec);
 
     let view_sec = gio::Menu::new();
     view_sec.append(
-        Some("标签全景网格 (Ctrl+Shift+O)"),
+        Some(tr(Key::MenuTabOverview)),
         Some("win.toggle-tab-overview"),
     );
+    view_sec.append(Some(tr(Key::MenuFocusDiagram)), Some("win.focus-diagram"));
     view_sec.append(
-        Some("专注浏览图表 (Ctrl+Shift+D)"),
-        Some("win.focus-diagram"),
-    );
-    view_sec.append(
-        Some("切换左侧栏 (Ctrl+Shift+S)"),
+        Some(tr(Key::MenuToggleLeftSidebar)),
         Some("win.toggle-left-sidebar"),
     );
     view_sec.append(
-        Some("切换右侧栏 (Ctrl+Shift+I)"),
+        Some(tr(Key::MenuToggleRightSidebar)),
         Some("win.toggle-right-sidebar"),
     );
     view_sec.append(
-        Some("切换底部面板 (Ctrl+J)"),
+        Some(tr(Key::MenuToggleBottomPanel)),
         Some("win.toggle-bottom-panel"),
     );
+    view_sec.append(Some(tr(Key::MenuToggleTopBar)), Some("win.toggle-top-bar"));
     view_sec.append(
-        Some("显示 / 隐藏顶栏 (Ctrl+Shift+H)"),
-        Some("win.toggle-top-bar"),
+        Some(tr(Key::MenuToggleFullscreen)),
+        Some("win.toggle-fullscreen"),
     );
-    view_sec.append(Some("切换全屏 (F11)"), Some("win.toggle-fullscreen"));
     menu.append_section(None, &view_sec);
 
     let panel_sub = gio::Menu::new();
     for tool in StaticToolKind::ALL {
         let tool_sub = gio::Menu::new();
         for region in PanelRegion::ALL {
-            let item = gio::MenuItem::new(Some(&format!("移至{}", region.title())), None);
+            let item = gio::MenuItem::new(Some(&fmt1(Key::MenuMoveToRegion, region.title())), None);
             item.set_action_and_target_value(
                 Some("win.dock-add-tool"),
                 Some(&format!("{}:{}", region.id(), tool.id()).to_variant()),
@@ -735,16 +741,19 @@ pub fn build_primary_menu() -> gio::Menu {
         }
         panel_sub.append_submenu(Some(tool.title()), &tool_sub);
     }
-    menu.append_submenu(Some("面板位置"), &panel_sub);
+    menu.append_submenu(Some(tr(Key::MenuPanelPosition)), &panel_sub);
 
     let theme_sub = gio::Menu::new();
-    theme_sub.append(Some("跟随系统"), Some("win.color-scheme('system')"));
-    theme_sub.append(Some("浅色模式"), Some("win.color-scheme('light')"));
-    theme_sub.append(Some("深色模式"), Some("win.color-scheme('dark')"));
-    menu.append_submenu(Some("主题外观"), &theme_sub);
+    theme_sub.append(
+        Some(tr(Key::ThemeSystem)),
+        Some("win.color-scheme('system')"),
+    );
+    theme_sub.append(Some(tr(Key::ThemeLight)), Some("win.color-scheme('light')"));
+    theme_sub.append(Some(tr(Key::ThemeDark)), Some("win.color-scheme('dark')"));
+    menu.append_submenu(Some(tr(Key::MenuAppearance)), &theme_sub);
 
     let about_sec = gio::Menu::new();
-    about_sec.append(Some("关于 Hortus"), Some("win.about"));
+    about_sec.append(Some(tr(Key::MenuAbout)), Some("win.about"));
     menu.append_section(None, &about_sec);
     menu
 }

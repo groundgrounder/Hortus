@@ -4,6 +4,7 @@
 
 //! 反向链接面板：`handle.backlinks()` 移至 `gio::spawn_blocking` 异步执行，弱引用解环（C-06）。
 
+use crate::i18n::{Key, fmt1, fmt2, tr};
 use crate::knowledge::widgets::{OpenNoteCallback, clear_box, dim_label, panel_scroll};
 use gtk4::gio;
 use gtk4::glib;
@@ -54,7 +55,7 @@ impl Default for BacklinksPanel {
 impl BacklinksPanel {
     pub fn new() -> Self {
         let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        let title = gtk4::Label::new(Some("未打开笔记"));
+        let title = gtk4::Label::new(Some(tr(Key::NoNoteOpen)));
         title.add_css_class("dim-label");
         title.add_css_class("caption");
         title.set_xalign(0.0);
@@ -141,7 +142,7 @@ impl BacklinksPanel {
         clear_box(&self.inner.list);
         let Some(path) = path else {
             self.inner.state.borrow_mut().loading = false;
-            self.inner.title.set_label("未打开笔记");
+            self.inner.title.set_label(tr(Key::NoNoteOpen));
             return;
         };
         let Some(handle) = handle else {
@@ -151,7 +152,7 @@ impl BacklinksPanel {
         self.inner.state.borrow_mut().loading = true;
         self.inner
             .title
-            .set_label(&format!("正在查询「{path}」的反链…"));
+            .set_label(&fmt1(Key::BacklinksQuerying, &path));
 
         let weak = Rc::downgrade(&self.inner);
         glib::MainContext::default().spawn_local(async move {
@@ -171,9 +172,9 @@ impl BacklinksPanel {
             }
             inner
                 .title
-                .set_label(&format!("引用「{path}」的笔记（{} 条）", links.len()));
+                .set_label(&fmt2(Key::BacklinksCount, &path, links.len()));
             if links.is_empty() {
-                inner.list.append(&dim_label("还没有笔记引用这篇笔记"));
+                inner.list.append(&dim_label(tr(Key::BacklinksEmpty)));
                 return;
             }
             for link in &links {
@@ -189,7 +190,11 @@ impl BacklinksPanel {
     }
 
     fn render_row(inner: &Rc<BacklinksPanelInner>, link: &BacklinkInfo) -> gtk4::Button {
-        let count_hint = if link.embed { "嵌入" } else { "双链" };
+        let count_hint = if link.embed {
+            tr(Key::BacklinkKindEmbed)
+        } else {
+            tr(Key::BacklinkKindLink)
+        };
         let row = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
         let title = gtk4::Label::new(Some(&link.source));
         title.add_css_class("hortus-result-title");

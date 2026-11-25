@@ -4,6 +4,7 @@
 
 //! 层级标签浏览面板：`handle.tags()` 与 `notes_with_tag()` 均移至 `gio::spawn_blocking` 异步执行，弱引用解环（C-06）。
 
+use crate::i18n::{Key, fmt1, fmt2, tr};
 use crate::knowledge::widgets::{OpenNoteCallback, clear_box, dim_label, entry_row, panel_scroll};
 use gtk4::gio;
 use gtk4::glib;
@@ -68,12 +69,12 @@ impl TagsPanel {
         let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         header.add_css_class("hortus-panel-header");
         let filter_entry = gtk4::SearchEntry::builder()
-            .placeholder_text("过滤标签")
+            .placeholder_text(tr(Key::TagsFilterPlaceholder))
             .hexpand(true)
             .build();
         header.append(&filter_entry);
 
-        let status = gtk4::Label::new(Some("尚未打开知识库"));
+        let status = gtk4::Label::new(Some(tr(Key::TagsNoFolder)));
         status.add_css_class("dim-label");
         status.add_css_class("caption");
         status.set_xalign(0.0);
@@ -315,9 +316,9 @@ impl TagsPanel {
             .collect();
         if visible.is_empty() {
             let text = if tags.is_empty() {
-                "该知识库尚无标签"
+                tr(Key::TagsEmptyFolder)
             } else {
-                "没有匹配的标签"
+                tr(Key::TagsNoMatch)
             };
             inner.list.append(&dim_label(text));
             let mut st = inner.state.borrow_mut();
@@ -326,14 +327,13 @@ impl TagsPanel {
             inner.status.set_label(text);
             return;
         }
-        inner.status.set_label(&format!(
-            "{} 个标签{}",
-            tags.len(),
-            selected
-                .as_deref()
-                .map(|s| format!(" · 已选 #{s}"))
-                .unwrap_or_default()
-        ));
+        let sel_suffix = selected
+            .as_deref()
+            .map(|s| fmt1(Key::TagsSelectedSuffix, s))
+            .unwrap_or_default();
+        inner
+            .status
+            .set_label(&fmt2(Key::TagsCount, tags.len(), sel_suffix));
 
         let mut visible_notes = 0usize;
         let mut rows = 0usize;
@@ -386,7 +386,7 @@ impl TagsPanel {
                 if selected_notes_for.as_deref() == Some(tag.0.as_str()) {
                     visible_notes = selected_notes.len();
                     for note in &selected_notes {
-                        let row = entry_row(note, None, Some("打开并定位到标签"));
+                        let row = entry_row(note, None, Some(tr(Key::TagsOpenAndJump)));
                         let open_btn = gtk4::Button::builder()
                             .child(&row)
                             .halign(gtk4::Align::Fill)
@@ -412,10 +412,10 @@ impl TagsPanel {
                         inner.list.append(&open_btn);
                     }
                     if visible_notes == 0 {
-                        inner.list.append(&dim_label("没有笔记使用该标签"));
+                        inner.list.append(&dim_label(tr(Key::TagsNoNotes)));
                     }
                 } else if loading_notes {
-                    inner.list.append(&dim_label("正在加载标签笔记…"));
+                    inner.list.append(&dim_label(tr(Key::TagsLoadingNotes)));
                 }
             }
         }

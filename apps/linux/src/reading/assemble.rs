@@ -139,7 +139,7 @@ pub fn assemble_reading_segments(
 ) -> Vec<AssembledSegment> {
     let mut text = model.text.clone();
     let has_props = text.starts_with('\u{e000}');
-    let prop_label = "属性";
+    let prop_label = crate::i18n::tr(crate::i18n::Key::ReadingPropertiesLabel);
     let prop_delta_u16: isize = if has_props {
         text.remove(0);
         text.insert_str(0, prop_label);
@@ -305,7 +305,7 @@ pub fn assemble_reading_segments(
                     source_start: 0,
                     source_end: 0,
                     scene: None,
-                    failure: Some("图表尚未完成排版".into()),
+                    failure: Some(crate::i18n::tr(crate::i18n::Key::DiagramNotReady).into()),
                     collapsed: Vec::new(),
                     previous: None,
                 });

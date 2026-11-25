@@ -151,8 +151,7 @@ pub fn ensure_katex_fonts_registered_sync() -> Result<FontRegistrationStatus, St
     let off_main = guard.main_thread.is_some_and(|main| main != current_tid);
 
     let Some(dir) = locate_katex_fonts_dir() else {
-        let msg = "未找到 20 个 KaTeX TTF 字体文件（请检查 HORTUS_KATEX_FONTS_DIR 或安装目录）"
-            .to_string();
+        let msg = crate::i18n::tr(crate::i18n::Key::FontsKatexMissing).to_string();
         guard.status.error = Some(msg.clone());
         return Err(msg);
     };
@@ -177,7 +176,7 @@ pub fn ensure_katex_fonts_registered_sync() -> Result<FontRegistrationStatus, St
 pub async fn ensure_katex_fonts_registered_async() -> Result<FontRegistrationStatus, String> {
     let _status = gio::spawn_blocking(ensure_katex_fonts_registered_sync)
         .await
-        .map_err(|_| "KaTeX 字体注册后台任务失败".to_string())??;
+        .map_err(|_| crate::i18n::tr(crate::i18n::Key::FontsTaskFailed).to_string())??;
 
     let resolved = probe_katex_families_on_current_thread();
     let fresh_map = pangocairo::new_font_map();

@@ -5,6 +5,7 @@
 //! 原生设置对话框（`adw::PreferencesDialog`）：外观阅读、终端、Agent 与指南及外部修改冲突保护。
 
 use crate::core::ColorSchemeChoice;
+use crate::i18n::{Key, fmt1, tr};
 use crate::services::AppServices;
 use gtk4::gio;
 use gtk4::glib;
@@ -45,6 +46,7 @@ struct SettingsState {
     on_toast: Rc<dyn Fn(String)>,
     on_scheme: Rc<dyn Fn(ColorSchemeChoice)>,
     suppress_probe: bool,
+    guide_overridden: bool,
     discovered: Vec<Arc<DiscoveredAgentInfo>>,
     last_probe: Option<Arc<AgentProbeInfo>>,
     conflict_dialog: glib::WeakRef<adw::AlertDialog>,
@@ -87,41 +89,43 @@ impl SettingsDialog {
         on_scheme: Rc<dyn Fn(ColorSchemeChoice)>,
     ) -> Self {
         let dialog = adw::PreferencesDialog::builder()
-            .title("偏好设置")
+            .title(tr(Key::SettingsTitle))
             .content_width(660)
             .content_height(620)
             .build();
 
         // 1. 外观与阅读页
         let appearance_page = adw::PreferencesPage::builder()
-            .title("外观与阅读")
+            .title(tr(Key::SettingsPageAppearance))
             .name(SettingsPage::Appearance.name())
             .icon_name("applications-graphics-symbolic")
             .build();
 
         let reading_group = adw::PreferencesGroup::builder()
-            .title("阅读与排版")
-            .description("修改会同步至全部已打开窗口。")
+            .title(glib::markup_escape_text(tr(Key::SettingsGroupReading)))
             .build();
 
         let font_adj = gtk4::Adjustment::new(15.0, 12.0, 24.0, 0.5, 1.0, 0.0);
         let font_spin = adw::SpinRow::builder()
-            .title("正文字号")
-            .subtitle("范围 12.0–24.0 pt")
+            .title(tr(Key::SettingsFontSize))
             .adjustment(&font_adj)
             .digits(1)
             .build();
 
-        let view_items = gtk4::StringList::new(&["阅读视图", "源码编辑"]);
+        let view_items =
+            gtk4::StringList::new(&[tr(Key::SettingsViewReading), tr(Key::SettingsViewEditing)]);
         let default_view_combo = adw::ComboRow::builder()
-            .title("默认打开视图")
-            .subtitle("新打开笔记时的初始视图模式")
+            .title(tr(Key::SettingsDefaultView))
             .model(&view_items)
             .build();
 
-        let scheme_items = gtk4::StringList::new(&["跟随系统", "浅色模式", "深色模式"]);
+        let scheme_items = gtk4::StringList::new(&[
+            tr(Key::ThemeSystem),
+            tr(Key::ThemeLight),
+            tr(Key::ThemeDark),
+        ]);
         let scheme_combo = adw::ComboRow::builder()
-            .title("界面配色方案")
+            .title(tr(Key::SettingsColorScheme))
             .model(&scheme_items)
             .selected(match initial_scheme {
                 ColorSchemeChoice::System => 0,
@@ -136,12 +140,11 @@ impl SettingsDialog {
         appearance_page.add(&reading_group);
 
         let config_group = adw::PreferencesGroup::builder()
-            .title("配置文件")
-            .description("保存时原地更新已知字段，保留已有注释与其他自定义键。")
+            .title(tr(Key::SettingsGroupConfig))
             .build();
         let config_path_row = adw::ActionRow::builder()
-            .title("config.toml 路径")
-            .subtitle("正在读取…")
+            .title(tr(Key::SettingsConfigPathTitle))
+            .subtitle(tr(Key::SettingsLoading))
             .subtitle_selectable(true)
             .build();
         config_group.add(&config_path_row);
@@ -151,16 +154,17 @@ impl SettingsDialog {
 
         // 2. 终端页
         let terminal_page = adw::PreferencesPage::builder()
-            .title("终端")
+            .title(tr(Key::SettingsPageTerminal))
             .name(SettingsPage::Terminal.name())
             .icon_name("utilities-terminal-symbolic")
             .build();
 
         let term_group = adw::PreferencesGroup::builder()
-            .title("VTE4 内置终端")
-            .description("留空时跟随系统等宽字体（Monospace）。")
+            .title(tr(Key::SettingsGroupTerminal))
             .build();
-        let terminal_font_entry = adw::EntryRow::builder().title("终端等宽字体族").build();
+        let terminal_font_entry = adw::EntryRow::builder()
+            .title(tr(Key::SettingsTerminalFont))
+            .build();
         term_group.add(&terminal_font_entry);
         let save_row_term = Self::build_save_row();
         term_group.add(&save_row_term.0);
@@ -168,30 +172,29 @@ impl SettingsDialog {
 
         // 3. Agent 与指南页
         let agent_page = adw::PreferencesPage::builder()
-            .title("Agent 与指南")
+            .title(tr(Key::SettingsPageAgent))
             .name(SettingsPage::Agent.name())
             .icon_name("system-run-symbolic")
             .build();
 
         let discovered_group = adw::PreferencesGroup::builder()
-            .title("自动发现的 Agent")
-            .description("只读扫描系统与常见安装目录，绝不执行目标程序。")
+            .title(tr(Key::SettingsGroupDetectedAgents))
             .build();
         let refresh_discover_btn = gtk4::Button::builder()
             .icon_name("view-refresh-symbolic")
-            .tooltip_text("重新扫描已安装的 Agent")
+            .tooltip_text(tr(Key::SettingsRescanAgentsTooltip))
             .build();
         refresh_discover_btn.add_css_class("flat");
         discovered_group.set_header_suffix(Some(&refresh_discover_btn));
         agent_page.add(&discovered_group);
 
         let agent_cfg_group = adw::PreferencesGroup::builder()
-            .title("Agent 启动模板")
-            .description("每行一个 argv 元素（不做 shell 拆分）；参数中须包含 {guide} 占位符。")
+            .title(tr(Key::SettingsGroupAgentLaunch))
+            .description(tr(Key::SettingsAgentLaunchDesc))
             .build();
 
         let command_entry = adw::EntryRow::builder()
-            .title("command（可执行文件或命令名）")
+            .title(tr(Key::SettingsAgentCmdTitle))
             .build();
         agent_cfg_group.add(&command_entry);
 
@@ -200,7 +203,7 @@ impl SettingsDialog {
         args_box.set_margin_bottom(8);
         args_box.set_margin_start(12);
         args_box.set_margin_end(12);
-        let args_label = gtk4::Label::new(Some("args（每行一个 argv 元素）"));
+        let args_label = gtk4::Label::new(Some(tr(Key::SettingsAgentArgsLabel)));
         args_label.set_xalign(0.0);
         args_label.add_css_class("caption");
         args_label.add_css_class("dim-label");
@@ -223,9 +226,9 @@ impl SettingsDialog {
         args_box.append(&args_frame);
 
         let probe_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        let probe_badge = gtk4::Label::new(Some("未探测"));
+        let probe_badge = gtk4::Label::new(Some(tr(Key::SettingsProbeNotChecked)));
         probe_badge.add_css_class("hortus-agent-badge-err");
-        let probe_detail = gtk4::Label::new(Some("请填写 command 与包含 {guide} 的 args"));
+        let probe_detail = gtk4::Label::new(Some(tr(Key::SettingsProbePrompt)));
         probe_detail.add_css_class("caption");
         probe_detail.add_css_class("dim-label");
         probe_detail.set_xalign(0.0);
@@ -245,8 +248,7 @@ impl SettingsDialog {
         agent_page.add(&agent_cfg_group);
 
         let guide_group = adw::PreferencesGroup::builder()
-            .title("Agent 指南（agent-guide.md）")
-            .description("启动 Agent 时自动替换 {guide}，也可通过 `hortus guide` 获取。")
+            .title(tr(Key::SettingsGroupGuide))
             .build();
         let guide_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
         guide_box.set_margin_top(8);
@@ -254,7 +256,7 @@ impl SettingsDialog {
         guide_box.set_margin_start(12);
         guide_box.set_margin_end(12);
         let guide_meta = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        let guide_status = gtk4::Label::new(Some("内置默认"));
+        let guide_status = gtk4::Label::new(Some(tr(Key::SettingsGuideBuiltin)));
         guide_status.add_css_class("caption");
         guide_status.add_css_class("hortus-mode-badge");
         let guide_path_label = gtk4::Label::new(Some(""));
@@ -283,8 +285,8 @@ impl SettingsDialog {
 
         let guide_actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         guide_actions.set_halign(gtk4::Align::End);
-        let guide_reset_btn = gtk4::Button::with_label("恢复默认指南");
-        let guide_save_btn = gtk4::Button::with_label("保存指南");
+        let guide_reset_btn = gtk4::Button::with_label(tr(Key::SettingsGuideResetBtn));
+        let guide_save_btn = gtk4::Button::with_label(tr(Key::SettingsGuideSaveBtn));
         guide_save_btn.add_css_class("suggested-action");
         guide_actions.append(&guide_reset_btn);
         guide_actions.append(&guide_save_btn);
@@ -340,6 +342,7 @@ impl SettingsDialog {
                 on_toast,
                 on_scheme,
                 suppress_probe: false,
+                guide_overridden: false,
                 discovered: Vec::new(),
                 last_probe: None,
                 conflict_dialog: glib::WeakRef::new(),
@@ -359,10 +362,9 @@ impl SettingsDialog {
 
     fn build_save_row() -> (adw::ActionRow, gtk4::Button) {
         let row = adw::ActionRow::builder()
-            .title("保存 config.toml")
-            .subtitle("写入后立即广播热重载到全部窗口")
+            .title(tr(Key::SettingsSaveRowTitle))
             .build();
-        let btn = gtk4::Button::with_label("保存设置");
+        let btn = gtk4::Button::with_label(tr(Key::SettingsSaveBtn));
         btn.add_css_class("suggested-action");
         btn.set_valign(gtk4::Align::Center);
         row.add_suffix(&btn);
@@ -484,7 +486,7 @@ impl SettingsDialog {
                 Ok(info) => Self::apply_editable_config(&this, &info),
                 Err(err) => this
                     .config_path_row
-                    .set_subtitle(&format!("读取配置失败：{err}")),
+                    .set_subtitle(&fmt1(Key::SettingsReadFailed, err)),
             }
         });
     }
@@ -537,8 +539,8 @@ impl SettingsDialog {
         let stored = inner.state.borrow().discovered.clone();
         if stored.is_empty() {
             let row = adw::ActionRow::builder()
-                .title("未发现内置预设 Agent")
-                .subtitle("请在下方手动输入可执行文件路径或命令名")
+                .title(tr(Key::SettingsNoAgentsFound))
+                .subtitle(tr(Key::SettingsNoAgentsSubtitle))
                 .build();
             inner.discovered_group.add(&row);
             inner.discovered_rows.borrow_mut().push(row);
@@ -549,7 +551,7 @@ impl SettingsDialog {
                 .title(&agent.display_name)
                 .subtitle(&agent.executable)
                 .build();
-            let fill_btn = gtk4::Button::with_label("填充");
+            let fill_btn = gtk4::Button::with_label(tr(Key::SettingsFillBtn));
             fill_btn.set_valign(gtk4::Align::Center);
             let weak = Rc::downgrade(inner);
             let exec = agent.executable.clone();
@@ -611,23 +613,27 @@ impl SettingsDialog {
             let status_arc = Arc::new(status);
             this.state.borrow_mut().last_probe = Some(Arc::clone(&status_arc));
             if status_arc.available {
-                this.probe_badge.set_label("可用");
+                this.probe_badge.set_label(tr(Key::SettingsProbeOk));
                 this.probe_badge.remove_css_class("hortus-agent-badge-err");
                 this.probe_badge.add_css_class("hortus-agent-badge-ok");
-                this.probe_detail
-                    .set_label(status_arc.executable.as_deref().unwrap_or("已解析"));
+                this.probe_detail.set_label(
+                    status_arc
+                        .executable
+                        .as_deref()
+                        .unwrap_or(tr(Key::SettingsProbeResolved)),
+                );
             } else {
-                this.probe_badge.set_label("不可用");
+                this.probe_badge.set_label(tr(Key::SettingsProbeErr));
                 this.probe_badge.remove_css_class("hortus-agent-badge-ok");
                 this.probe_badge.add_css_class("hortus-agent-badge-err");
                 let msg = match status_arc.error.as_deref() {
-                    Some("agent.command_missing") => "未填写 command",
-                    Some("agent.guide_missing") => "args 中缺少 {guide} 占位符",
-                    Some("agent.command_not_absolute") => "含路径分隔符的命令须使用绝对路径",
-                    Some("agent.not_found") => "未在 PATH 中找到可执行文件",
-                    Some("agent.not_executable") => "目标不是可执行常规文件",
+                    Some("agent.command_missing") => tr(Key::SettingsProbeMissingCmd),
+                    Some("agent.guide_missing") => tr(Key::SettingsProbeMissingGuide),
+                    Some("agent.command_not_absolute") => tr(Key::SettingsProbeNotAbs),
+                    Some("agent.not_found") => tr(Key::SettingsProbeNotFound),
+                    Some("agent.not_executable") => tr(Key::SettingsProbeNotExec),
                     Some(other) => other,
-                    None => "配置无效",
+                    None => tr(Key::SettingsProbeInvalid),
                 };
                 this.probe_detail.set_label(msg);
             }
@@ -650,11 +656,12 @@ impl SettingsDialog {
     }
 
     fn apply_guide_info(inner: &Rc<SettingsInner>, info: &AgentGuideInfo) {
+        inner.state.borrow_mut().guide_overridden = info.overridden;
         inner.guide_buffer.set_text(&info.text);
         inner.guide_status.set_label(if info.overridden {
-            "自定义覆盖"
+            tr(Key::SettingsGuideCustom)
         } else {
-            "内置默认"
+            tr(Key::SettingsGuideBuiltin)
         });
         inner.guide_path_label.set_label(&info.path);
     }
@@ -682,10 +689,10 @@ impl SettingsDialog {
             match res {
                 Ok(info) => {
                     Self::apply_guide_info(&this, &info);
-                    (this.state.borrow().on_toast)("已保存 agent-guide.md".into());
+                    (this.state.borrow().on_toast)(tr(Key::SettingsGuideSavedToast).into());
                 }
                 Err(err) => {
-                    (this.state.borrow().on_toast)(format!("保存指南失败：{err}"));
+                    (this.state.borrow().on_toast)(fmt1(Key::SettingsGuideSaveFailedToast, err));
                 }
             }
         });
@@ -706,10 +713,10 @@ impl SettingsDialog {
             match res {
                 Ok(info) => {
                     Self::apply_guide_info(&this, &info);
-                    (this.state.borrow().on_toast)("已恢复默认 Agent 指南".into());
+                    (this.state.borrow().on_toast)(tr(Key::SettingsGuideResetToast).into());
                 }
                 Err(err) => {
-                    (this.state.borrow().on_toast)(format!("恢复默认指南失败：{err}"));
+                    (this.state.borrow().on_toast)(fmt1(Key::SettingsGuideResetFailedToast, err));
                 }
             }
         });
@@ -778,19 +785,19 @@ impl SettingsDialog {
                         alert.force_close();
                     }
                     Self::apply_editable_config(&this, &saved);
-                    this.save_status.set_label("配置已保存并热重载");
+                    this.save_status.set_label(tr(Key::SettingsSavedStatus));
                     services.config.apply_saved(&saved);
-                    (this.state.borrow().on_toast)("已保存配置并同步全部窗口".into());
+                    (this.state.borrow().on_toast)(tr(Key::SettingsSavedToast).into());
                 }
                 Err(err) if err.to_string() == "config.externally_modified" => {
                     this.state.borrow_mut().last_conflict = true;
-                    this.save_status
-                        .set_label("保存冲突：config.toml 已被外部修改");
+                    this.save_status.set_label(tr(Key::SettingsConflictStatus));
                     Self::prompt_external_conflict(&this);
                 }
                 Err(err) => {
-                    this.save_status.set_label(&format!("保存失败：{err}"));
-                    (this.state.borrow().on_toast)(format!("保存配置失败：{err}"));
+                    this.save_status
+                        .set_label(&fmt1(Key::SettingsSaveFailedStatus, &err));
+                    (this.state.borrow().on_toast)(fmt1(Key::SettingsSaveFailedToast, err));
                 }
             }
         });
@@ -798,11 +805,11 @@ impl SettingsDialog {
 
     fn prompt_external_conflict(inner: &Rc<SettingsInner>) {
         let alert = adw::AlertDialog::builder()
-            .heading("配置文件已被外部修改")
-            .body("打开设置后，config.toml 在磁盘上被其他程序修改。请选择重新加载最新配置或覆盖保存当前设置。")
+            .heading(tr(Key::SettingsConflictHeading))
+            .body(tr(Key::SettingsConflictBody))
             .build();
-        alert.add_response("reload", "重新加载最新配置");
-        alert.add_response("overwrite", "覆盖保存");
+        alert.add_response("reload", tr(Key::SettingsConflictReloadBtn));
+        alert.add_response("overwrite", tr(Key::SettingsConflictOverwriteBtn));
         alert.set_response_appearance("overwrite", adw::ResponseAppearance::Destructive);
         alert.set_default_response(Some("reload"));
         alert.set_close_response("reload");
@@ -822,7 +829,7 @@ impl SettingsDialog {
             } else {
                 this.state.borrow_mut().last_conflict = false;
                 Self::reload_config_async(&this);
-                this.save_status.set_label("已重新加载磁盘最新配置");
+                this.save_status.set_label(tr(Key::SettingsReloadedStatus));
             }
         });
         inner.state.borrow().conflict_dialog.set(Some(&alert));
@@ -911,7 +918,7 @@ impl SettingsDialog {
     }
 
     pub fn guide_overridden(&self) -> bool {
-        self.inner.guide_status.text() == "自定义覆盖"
+        self.inner.state.borrow().guide_overridden
     }
 
     pub fn save_guide_now(&self) {

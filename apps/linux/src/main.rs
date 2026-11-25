@@ -9,6 +9,7 @@ mod core;
 mod dock;
 mod editor;
 mod files;
+mod i18n;
 mod knowledge;
 mod platform;
 mod reading;

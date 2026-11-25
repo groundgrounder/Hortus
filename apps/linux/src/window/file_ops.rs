@@ -151,7 +151,7 @@ impl WindowInner {
         let weak = Rc::downgrade(self);
         let pd = parent_dir.clone();
         add_item(
-            "在此新建笔记",
+            crate::i18n::tr(crate::i18n::Key::TreeNewNoteHere),
             Box::new(move || {
                 if let Some(win) = weak.upgrade() {
                     win.prompt_new_entry_in(&pd, false);
@@ -161,7 +161,7 @@ impl WindowInner {
         let weak = Rc::downgrade(self);
         let pd = parent_dir;
         add_item(
-            "在此新建文件夹",
+            crate::i18n::tr(crate::i18n::Key::TreeNewFolderHere),
             Box::new(move || {
                 if let Some(win) = weak.upgrade() {
                     win.prompt_new_entry_in(&pd, true);
@@ -171,7 +171,7 @@ impl WindowInner {
         let weak = Rc::downgrade(self);
         let p = path.to_string();
         add_item(
-            "重命名…",
+            crate::i18n::tr(crate::i18n::Key::TreeRename),
             Box::new(move || {
                 if let Some(win) = weak.upgrade() {
                     win.begin_rename(&p, is_dir);
@@ -181,7 +181,7 @@ impl WindowInner {
         let weak = Rc::downgrade(self);
         let p = path.to_string();
         add_item(
-            "移到回收站…",
+            crate::i18n::tr(crate::i18n::Key::TreeMoveToTrash),
             Box::new(move || {
                 if let Some(win) = weak.upgrade() {
                     win.prompt_trash(&p, is_dir);
@@ -191,7 +191,7 @@ impl WindowInner {
         let weak = Rc::downgrade(self);
         let p = path.to_string();
         add_item(
-            "在文件管理器中显示",
+            crate::i18n::tr(crate::i18n::Key::TreeRevealInFileManager),
             Box::new(move || {
                 if let Some(win) = weak.upgrade() {
                     win.reveal_in_file_manager(&p);
@@ -219,7 +219,7 @@ impl WindowInner {
 
     fn prompt_new_entry_in(self: &Rc<Self>, parent: &str, directory: bool) {
         let Some(handle) = self.state.borrow().vault_handle() else {
-            self.show_toast("请先打开知识库");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastOpenFolderFirst));
             return;
         };
         let weak = Rc::downgrade(self);
@@ -236,7 +236,10 @@ impl WindowInner {
                 }
                 Err(err) => {
                     if let Some(win) = weak.upgrade() {
-                        win.show_toast(&short_error("创建失败", &err));
+                        win.show_toast(&short_error(
+                            crate::i18n::tr(crate::i18n::Key::CreateFailed),
+                            &err,
+                        ));
                     }
                 }
             }),
@@ -253,18 +256,21 @@ impl WindowInner {
         if !entry.directory && is_note_file_name(&entry.path) {
             self.open_note_at(&entry.path, None);
         } else {
-            self.show_toast(&format!("已创建文件夹「{}」", entry.name));
+            self.show_toast(&crate::i18n::fmt1(
+                crate::i18n::Key::ToastFolderCreated,
+                &entry.name,
+            ));
         }
         self.refresh_knowledge_after_write();
     }
 
     pub fn begin_rename(self: &Rc<Self>, path: &str, is_dir: bool) {
         if self.state.borrow().files_busy {
-            self.show_toast("上一个文件操作尚未完成");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastFileOpBusy));
             return;
         }
         let Some(handle) = self.state.borrow().vault_handle() else {
-            self.show_toast("请先打开知识库");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastOpenFolderFirst));
             return;
         };
         let weak = Rc::downgrade(self);
@@ -307,7 +313,7 @@ impl WindowInner {
         };
         let (Some(services), Some(handle), Some(vault_root)) = (services, handle, vault_root)
         else {
-            self.show_toast("请先打开知识库");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastOpenFolderFirst));
             return;
         };
         let parent = old_path
@@ -453,11 +459,13 @@ impl WindowInner {
                         "moved_tabs": moved_tabs.iter().map(|(_, new)| new.clone()).collect::<Vec<_>>(),
                     }));
                     if update_links {
-                        win.show_toast(&format!(
-                            "已重命名，更新 {updated_notes} 篇笔记的 {rewrites} 处链接"
+                        win.show_toast(&crate::i18n::fmt2(
+                            crate::i18n::Key::ToastRenamedWithLinks,
+                            updated_notes,
+                            rewrites,
                         ));
                     } else {
-                        win.show_toast("已重命名");
+                        win.show_toast(crate::i18n::tr(crate::i18n::Key::ToastRenamed));
                     }
                     win.refresh_knowledge_after_write();
                     let mut changed_paths: Vec<String> = moved_tabs
@@ -474,21 +482,24 @@ impl WindowInner {
                         "error": err,
                     }));
                     if err.starts_with("rename.unsaved:") {
-                        win.show_toast("有未保存修改，已取消重命名");
-                        win.state.borrow_mut().last_alert =
-                            Some("有未保存的修改，已取消重命名".into());
+                        let msg = crate::i18n::tr(crate::i18n::Key::ToastRenameCancelledUnsaved);
+                        win.show_toast(msg);
+                        win.state.borrow_mut().last_alert = Some(msg.into());
                     } else {
-                        win.show_toast(&short_error("重命名失败", &err));
+                        win.show_toast(&short_error(
+                            crate::i18n::tr(crate::i18n::Key::ErrRenameFailed),
+                            &err,
+                        ));
                     }
                 }
-                Err(_) => win.show_toast("重命名线程异常"),
+                Err(_) => win.show_toast(crate::i18n::tr(crate::i18n::Key::ErrThread)),
             }
         });
     }
 
     fn prompt_trash(self: &Rc<Self>, path: &str, is_dir: bool) {
         if self.state.borrow().files_busy {
-            self.show_toast("上一个文件操作尚未完成");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastFileOpBusy));
             return;
         }
         let dirty = self
@@ -524,7 +535,7 @@ impl WindowInner {
         };
         let (Some(services), Some(handle), Some(vault_root)) = (services, handle, vault_root)
         else {
-            self.show_toast("请先打开知识库");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastOpenFolderFirst));
             return;
         };
         let affected = self.affected_open_tabs(path);
@@ -602,7 +613,7 @@ impl WindowInner {
                     }
                     #[cfg(not(feature = "automation"))]
                     let _ = absolute;
-                    win.show_toast("已移到回收站");
+                    win.show_toast(crate::i18n::tr(crate::i18n::Key::ToastMovedToTrash));
                     win.refresh_knowledge_after_write();
                     let mut notify_paths = removed;
                     notify_paths.push(path_bg);
@@ -614,14 +625,17 @@ impl WindowInner {
                         "error": err,
                     }));
                     if err.starts_with("trash.unsaved:") {
-                        win.show_toast("有未保存修改，已取消移入回收站");
-                        win.state.borrow_mut().last_alert =
-                            Some("有未保存的修改，已取消移入回收站".into());
+                        let msg = crate::i18n::tr(crate::i18n::Key::ToastTrashCancelledUnsaved);
+                        win.show_toast(msg);
+                        win.state.borrow_mut().last_alert = Some(msg.into());
                     } else {
-                        win.show_toast(&short_error("移到回收站失败", &err));
+                        win.show_toast(&short_error(
+                            crate::i18n::tr(crate::i18n::Key::ErrTrashFailed),
+                            &err,
+                        ));
                     }
                 }
-                Err(_) => win.show_toast("回收站线程异常"),
+                Err(_) => win.show_toast(crate::i18n::tr(crate::i18n::Key::ErrThread)),
             }
         });
     }

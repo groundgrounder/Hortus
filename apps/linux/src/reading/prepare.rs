@@ -50,14 +50,14 @@ pub struct DecodedReadingModel {
 fn read_u32_le(data: &[u8], off: usize) -> Result<u32, String> {
     let slice = data
         .get(off..off + 4)
-        .ok_or_else(|| "ReadingModel 数据截断".to_string())?;
+        .ok_or_else(|| crate::i18n::tr(crate::i18n::Key::ModelCorrupt).to_string())?;
     Ok(u32::from_le_bytes(slice.try_into().unwrap()))
 }
 
 fn read_u64_le(data: &[u8], off: usize) -> Result<u64, String> {
     let slice = data
         .get(off..off + 8)
-        .ok_or_else(|| "ReadingModel 数据截断".to_string())?;
+        .ok_or_else(|| crate::i18n::tr(crate::i18n::Key::ModelCorrupt).to_string())?;
     Ok(u64::from_le_bytes(slice.try_into().unwrap()))
 }
 
@@ -66,17 +66,17 @@ impl DecodedReadingModel {
         let b_data = &wire.packed_blocks;
         let r_data = &wire.packed_runs;
         if b_data.len() < 8 || r_data.len() < 8 {
-            return Err("ReadingModel 头部长度不足".into());
+            return Err(crate::i18n::tr(crate::i18n::Key::ModelCorrupt).into());
         }
         let b_ver = read_u32_le(b_data, 0)?;
         let b_cnt = read_u32_le(b_data, 4)? as usize;
         let b_rec = match b_ver {
             1 => 64usize,
             2 => 36usize,
-            _ => return Err(format!("不支持的 block 版本：{b_ver}")),
+            _ => return Err(crate::i18n::tr(crate::i18n::Key::ModelCorrupt).into()),
         };
         if b_data.len() != 8 + b_cnt * b_rec {
-            return Err("ReadingModel packed_blocks 长度不匹配".into());
+            return Err(crate::i18n::tr(crate::i18n::Key::ModelCorrupt).into());
         }
 
         let r_ver = read_u32_le(r_data, 0)?;
@@ -84,10 +84,10 @@ impl DecodedReadingModel {
         let r_rec = match r_ver {
             1 => 40usize,
             2 => 20usize,
-            _ => return Err(format!("不支持的 run 版本：{r_ver}")),
+            _ => return Err(crate::i18n::tr(crate::i18n::Key::ModelCorrupt).into()),
         };
         if r_data.len() != 8 + r_cnt * r_rec {
-            return Err("ReadingModel packed_runs 长度不匹配".into());
+            return Err(crate::i18n::tr(crate::i18n::Key::ModelCorrupt).into());
         }
 
         let mut blocks = Vec::with_capacity(b_cnt);
@@ -118,7 +118,7 @@ impl DecodedReadingModel {
                     )
                 };
             if rs + rl > r_cnt {
-                return Err("ReadingModel run 索引越界".into());
+                return Err(crate::i18n::tr(crate::i18n::Key::ModelCorrupt).into());
             }
             blocks.push(DecodedBlock {
                 id,
@@ -229,12 +229,12 @@ pub fn prepare_reading_note_bg(req: &PrepareReadingRequest) -> Result<PreparedRe
     let wire = req
         .session
         .reading_model()
-        .map_err(|e| format!("读取 ReadingModel 失败：{e}"))?;
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::ReadNoteFailed, e))?;
     let model = DecodedReadingModel::decode(&wire)?;
     let snapshot = req
         .session
         .snapshot()
-        .map_err(|e| format!("读取文档快照失败：{e}"))?;
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::ReadNoteFailed, e))?;
     let source_text = snapshot.text;
     let headings: Vec<HeadingItem> = req
         .session

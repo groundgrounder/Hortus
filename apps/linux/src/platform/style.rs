@@ -261,25 +261,25 @@ const BASE_CSS: &str = r#"
 
 .hortus-tool-strip {
     min-height: 32px;
-    padding: 2px 3px;
+    padding: 2px 6px;
     background-color: transparent;
 }
 
 .hortus-tool-tab {
     min-width: 0;
     min-height: 26px;
-    padding: 2px 6px;
+    padding: 2px 8px;
     border-radius: 6px;
     transition: background-color 120ms ease;
 }
 
 .hortus-tool-tab.hortus-tool-tab-sidebar {
     min-width: 0;
-    padding: 2px 4px;
+    padding: 2px 8px;
 }
 
 .hortus-tool-tab.hortus-tool-tab-bottom {
-    padding: 2px 8px;
+    padding: 2px 10px;
 }
 
 .hortus-tool-tab:hover {

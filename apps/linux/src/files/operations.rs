@@ -57,11 +57,16 @@ pub fn save_temp_for(temp_dir: &Path, vault_root: &str, rel: &str) -> PathBuf {
 
 /// 错误提示只保留简短原因，避免长路径/英文 io 错误把通知条撑宽。
 pub fn short_error(prefix: &str, error: &str) -> String {
+    let sep = if crate::i18n::current_lang() == crate::i18n::Lang::ZhHans {
+        "："
+    } else {
+        ": "
+    };
     let reason: String = error.chars().take(32).collect();
     if error.chars().count() > 32 {
-        format!("{prefix}：{reason}…")
+        format!("{prefix}{sep}{reason}…")
     } else {
-        format!("{prefix}：{reason}")
+        format!("{prefix}{sep}{reason}")
     }
 }
 

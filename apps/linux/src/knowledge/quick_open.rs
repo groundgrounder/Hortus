@@ -60,7 +60,7 @@ impl Default for QuickOpen {
 impl QuickOpen {
     pub fn new() -> Self {
         let dialog = adw::Dialog::builder()
-            .title("快速打开")
+            .title(crate::i18n::tr(crate::i18n::Key::QuickOpenTitle))
             .content_width(500)
             .content_height(460)
             .build();
@@ -68,7 +68,7 @@ impl QuickOpen {
 
         let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         let entry = gtk4::SearchEntry::builder()
-            .placeholder_text("输入标题或路径，Enter 打开")
+            .placeholder_text(crate::i18n::tr(crate::i18n::Key::QuickOpenPlaceholder))
             .margin_top(10)
             .margin_bottom(8)
             .margin_start(12)

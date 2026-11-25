@@ -5,6 +5,7 @@
 //! Agent 安全启动闭环：校验 `[agent]` 配置 → 后台全库快照（可取消，失败硬阻断）→ 直接按 argv 启动 VTE4 标签。
 
 use crate::core::PanelRegion;
+use crate::i18n::{Key, fmt1, tr};
 use crate::services::AppServices;
 use crate::terminal::TerminalHost;
 use crate::terminal::process::build_terminal_env;
@@ -29,23 +30,21 @@ pub struct AgentLaunchCallbacks {
 
 fn friendly_spec_error(err: &str) -> String {
     match err {
-        "agent.not_configured" => {
-            "尚未配置 [agent] 启动模板。请在设置中配置 Agent 命令与参数。".into()
-        }
-        "agent.command_missing" => "Agent 配置缺少可执行命令（command）。".into(),
-        "agent.guide_missing" => "Agent 启动参数缺少 {guide} 占位符。".into(),
-        "agent.command_not_absolute" => "含路径分隔符的 Agent 命令必须使用绝对路径。".into(),
-        "agent.not_found" => "未在 PATH 中找到配置的 Agent 可执行文件。".into(),
-        "agent.not_executable" => "配置的 Agent 目标不是可执行常规文件。".into(),
-        other => format!("Agent 配置校验失败：{other}"),
+        "agent.not_configured" => tr(Key::AgentNotConfigured).into(),
+        "agent.command_missing" => tr(Key::AgentCmdMissing).into(),
+        "agent.guide_missing" => tr(Key::AgentGuideMissing).into(),
+        "agent.command_not_absolute" => tr(Key::AgentCmdNotAbsolute).into(),
+        "agent.not_found" => tr(Key::AgentNotFound).into(),
+        "agent.not_executable" => tr(Key::AgentNotExecutable).into(),
+        other => fmt1(Key::AgentInvalidConfig, other),
     }
 }
 
 /// 严格按安全闸门启动 Agent：
 /// 1) 校验 `[agent]` 配置（失败提示并引导设置，不建快照、不启进程）；
-/// 2) 打开“正在建立安全快照…”占位标签并后台执行 `begin_agent_session`；
+/// 2) 打开准备占位标签并后台执行 `begin_agent_session`；
 /// 3) 快照失败或被取消时硬性阻断启动，绝不静默降级；
-/// 4) 快照成功后以 `spec.executable + spec.args`（不经 shell 二次拆分）在 VTE4 启动并标记 `running`。
+/// 4) 快照成功后以 `spec.executable + spec.args`（不经 shell 二次拆分）在终端启动并标记 `running`。
 pub fn launch_agent_with_snapshot_gate(
     parent_window: &adw::ApplicationWindow,
     services: Arc<AppServices>,
@@ -55,7 +54,7 @@ pub fn launch_agent_with_snapshot_gate(
     callbacks: AgentLaunchCallbacks,
 ) {
     let Some(vault_root) = (callbacks.current_vault_root)() else {
-        (callbacks.on_toast)("请先打开知识库后再启动 Agent".into());
+        (callbacks.on_toast)(tr(Key::ToastOpenFolderBeforeAgent).into());
         return;
     };
 
@@ -83,11 +82,11 @@ pub fn launch_agent_with_snapshot_gate(
             Err(err) => {
                 if let Some(win) = win_weak.upgrade() {
                     let dialog = adw::AlertDialog::builder()
-                        .heading("无法启动 Agent")
+                        .heading(tr(Key::CannotStartAgentHeading))
                         .body(friendly_spec_error(&err))
                         .build();
-                    dialog.add_response("cancel", "取消");
-                    dialog.add_response("settings", "打开设置 → Agent");
+                    dialog.add_response("cancel", tr(Key::Cancel));
+                    dialog.add_response("settings", tr(Key::OpenAgentSettingsBtn));
                     dialog.set_response_appearance("settings", adw::ResponseAppearance::Suggested);
                     dialog.set_default_response(Some("settings"));
                     dialog.set_close_response("cancel");
@@ -134,8 +133,8 @@ pub fn launch_agent_with_snapshot_gate(
         let info = match snap_res {
             Ok(info) => info,
             Err(err) => {
-                terminal.fail_preparing_agent_tab(tab_id, &format!("快照失败：{err}"));
-                (callbacks.on_toast)(format!("建立安全快照失败，已阻止启动 Agent：{err}"));
+                terminal.fail_preparing_agent_tab(tab_id, &fmt1(Key::SnapshotFailedPrefix, &err));
+                (callbacks.on_toast)(fmt1(Key::SnapshotBlockedToast, &err));
                 return;
             }
         };

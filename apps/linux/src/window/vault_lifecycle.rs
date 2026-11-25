@@ -28,7 +28,7 @@ impl WindowInner {
                 gio::spawn_blocking(resolve_login_path)
                     .await
                     .map(|lp| (svcs, None, lp))
-                    .map_err(|_| "初始化线程异常".to_string())
+                    .map_err(|_| crate::i18n::tr(crate::i18n::Key::ErrThread).to_string())
             } else {
                 gio::spawn_blocking(|| {
                     let (svcs, warn) = AppServices::init_blocking()?;
@@ -36,7 +36,7 @@ impl WindowInner {
                     Ok::<_, String>((svcs, warn, lp))
                 })
                 .await
-                .unwrap_or_else(|_| Err("初始化线程异常".into()))
+                .unwrap_or_else(|_| Err(crate::i18n::tr(crate::i18n::Key::ErrThread).into()))
             };
             let _ = ensure_katex_fonts_registered_async().await;
             let Some(win) = weak.upgrade() else { return };
@@ -62,7 +62,10 @@ impl WindowInner {
                     win.terminal_host.apply_font(term_font);
                     win.load_saved_layout();
                     if let Some(warn) = font_warning {
-                        win.show_toast(&format!("KaTeX 字体提示：{warn}"));
+                        win.show_toast(&crate::i18n::fmt1(
+                            crate::i18n::Key::ToastKatexNotice,
+                            warn,
+                        ));
                     }
                     if let Some(vault) = win.options.vault.clone() {
                         win.open_vault_path(vault);
@@ -72,7 +75,7 @@ impl WindowInner {
                     }
                 }
                 Err(err) => {
-                    win.show_toast(&format!("初始化内核失败：{err}"));
+                    win.show_toast(&crate::i18n::fmt1(crate::i18n::Key::ToastInitFailed, err));
                 }
             }
         });
@@ -80,7 +83,7 @@ impl WindowInner {
 
     pub fn prompt_open_vault(self: &Rc<Self>) {
         let dialog = gtk4::FileDialog::builder()
-            .title("打开知识库文件夹")
+            .title(crate::i18n::tr(crate::i18n::Key::SelectFolderTitle))
             .modal(true)
             .build();
         let weak = Rc::downgrade(self);
@@ -100,7 +103,7 @@ impl WindowInner {
             st.services.clone()
         };
         let Some(services) = services else {
-            self.show_toast("内核尚未就绪");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastCoreNotReady));
             return;
         };
 
@@ -127,7 +130,7 @@ impl WindowInner {
             self.tab_view.close_page(&page);
         }
         self.vault_tree.clear();
-        self.render_outline_empty("正在扫描知识库…");
+        self.render_outline_empty(crate::i18n::tr(crate::i18n::Key::ScanningFolder));
 
         let weak = Rc::downgrade(self);
         let path_str = path.to_string_lossy().into_owned();
@@ -136,7 +139,7 @@ impl WindowInner {
         glib::MainContext::default().spawn_local(async move {
             let opened = gio::spawn_blocking(move || vaults.open_or_reuse(&core, &path_str))
                 .await
-                .unwrap_or_else(|_| Err("打开知识库线程异常".into()));
+                .unwrap_or_else(|_| Err(crate::i18n::tr(crate::i18n::Key::ErrThread).into()));
             let Some(win) = weak.upgrade() else { return };
             if win.state.borrow().disposing || win.state.borrow().vault_open_gen != open_gen {
                 return;
@@ -149,8 +152,9 @@ impl WindowInner {
                         .unwrap_or("Hortus")
                         .to_string();
                     win.window_title.set_subtitle(&folder_name);
-                    win.empty_status
-                        .set_description(Some("从左侧文件树选择一篇笔记。"));
+                    win.empty_status.set_description(Some(crate::i18n::tr(
+                        crate::i18n::Key::EmptySelectNoteHint,
+                    )));
                     let (sub_id, queue) = ctx.subscribe();
                     let temp_dir = {
                         let mut st = win.state.borrow_mut();
@@ -219,7 +223,7 @@ impl WindowInner {
                     });
                 }
                 Err(err) => {
-                    win.show_toast(&format!("无法打开知识库：{err}"));
+                    win.show_toast(&crate::i18n::fmt1(crate::i18n::Key::OpenFolderFailed, err));
                 }
             }
         });
@@ -384,17 +388,17 @@ impl WindowInner {
     }
 
     fn ask_exit_with_unsaved(self: &Rc<Self>, paths: &[String]) {
-        let mut body = String::from("以下笔记未能保存到磁盘：\n");
+        let mut body = String::from(crate::i18n::tr(crate::i18n::Key::UnsavedQuitBodyHeader));
         for path in paths {
             body.push_str(&format!("· {path}\n"));
         }
-        body.push_str("\n仍要退出吗？");
+        body.push_str(crate::i18n::tr(crate::i18n::Key::UnsavedQuitBodyFooter));
         let dialog = adw::AlertDialog::builder()
-            .heading("有未保存的修改")
+            .heading(crate::i18n::tr(crate::i18n::Key::UnsavedHeading))
             .body(&body)
             .build();
-        dialog.add_response("cancel", "取消");
-        dialog.add_response("quit", "放弃修改并退出");
+        dialog.add_response("cancel", crate::i18n::tr(crate::i18n::Key::Cancel));
+        dialog.add_response("quit", crate::i18n::tr(crate::i18n::Key::BtnDiscardAndQuit));
         dialog.set_response_appearance("quit", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");

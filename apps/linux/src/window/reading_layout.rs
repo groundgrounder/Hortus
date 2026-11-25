@@ -162,12 +162,16 @@ impl WindowInner {
             if let Some(path) = resolved.resolved_path {
                 self.open_note_at(&path, heading);
             } else if resolved.candidates.len() > 1 {
-                self.show_toast(&format!(
-                    "有多个笔记匹配「{raw_target}」（{} 篇），请在左侧目录选择",
-                    resolved.candidates.len()
+                self.show_toast(&crate::i18n::fmt2(
+                    crate::i18n::Key::ToastAmbiguousLink,
+                    raw_target,
+                    resolved.candidates.len(),
                 ));
             } else {
-                self.show_toast(&format!("未找到链接目标：{raw_target}"));
+                self.show_toast(&crate::i18n::fmt1(
+                    crate::i18n::Key::ToastMissingLink,
+                    raw_target,
+                ));
             }
         } else {
             self.open_note_at(raw_target, heading);
@@ -467,7 +471,7 @@ impl WindowInner {
 
     pub fn copy_active_note_plain_text(&self) {
         let Some(path) = self.active_tab_path() else {
-            self.show_toast("请先打开一篇笔记");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastNoNoteOpen));
             return;
         };
         let text = {
@@ -490,7 +494,7 @@ impl WindowInner {
         };
         if let Some(display) = gtk4::gdk::Display::default() {
             display.clipboard().set_text(&text);
-            self.show_toast("已复制整篇笔记纯文本");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastCopiedPlainText));
         }
     }
 
@@ -519,7 +523,7 @@ impl WindowInner {
 
     pub fn switch_edit_mode(self: &Rc<Self>, announce: bool) {
         let Some(path) = self.active_tab_path() else {
-            self.show_toast("请先打开一篇笔记");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastNoNoteOpen));
             return;
         };
         let (new_editing, needs_reading_refresh, anchor_u16, edit_view, content_stack) = {
@@ -576,9 +580,9 @@ impl WindowInner {
         }
         if announce {
             if new_editing {
-                self.show_toast("已切换到源码编辑态（Ctrl+S 保存）");
+                self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSwitchedToEdit));
             } else {
-                self.show_toast("已切回 Reading 阅读视图");
+                self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSwitchedToReading));
             }
         }
     }

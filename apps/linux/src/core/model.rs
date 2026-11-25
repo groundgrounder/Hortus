@@ -2,6 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
+use crate::i18n::{Key, fmt1, tr};
 use serde::{Deserialize, Serialize};
 
 pub const APP_ID: &str = "io.github.groundgrounder.Hortus";
@@ -28,9 +29,7 @@ impl ColorSchemeChoice {
             "system" => Ok(Self::System),
             "light" => Ok(Self::Light),
             "dark" => Ok(Self::Dark),
-            other => Err(format!(
-                "不支持的主题模式：{other}（可选 light|dark|system）"
-            )),
+            other => Err(fmt1(Key::CliUnsupportedColorScheme, other)),
         }
     }
 }
@@ -65,9 +64,9 @@ impl PanelRegion {
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Left => "左侧栏",
-            Self::Right => "右侧栏",
-            Self::Bottom => "底部面板",
+            Self::Left => tr(Key::RegionLeft),
+            Self::Right => tr(Key::RegionRight),
+            Self::Bottom => tr(Key::RegionBottom),
         }
     }
 }
@@ -118,12 +117,12 @@ impl StaticToolKind {
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Files => "文件",
-            Self::Search => "搜索",
-            Self::Tags => "标签",
-            Self::Outline => "大纲",
-            Self::Backlinks => "反链",
-            Self::Changes => "改动",
+            Self::Files => tr(Key::ToolFiles),
+            Self::Search => tr(Key::ToolSearch),
+            Self::Tags => tr(Key::ToolTags),
+            Self::Outline => tr(Key::ToolOutline),
+            Self::Backlinks => tr(Key::ToolBacklinks),
+            Self::Changes => tr(Key::ToolChanges),
         }
     }
 

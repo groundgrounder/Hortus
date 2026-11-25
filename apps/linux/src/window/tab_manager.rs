@@ -64,7 +64,8 @@ impl WindowInner {
         let reading_slot = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         reading_slot.set_vexpand(true);
         reading_slot.set_hexpand(true);
-        let loading_lbl = gtk4::Label::new(Some("正在渲染阅读视图…"));
+        let loading_lbl =
+            gtk4::Label::new(Some(crate::i18n::tr(crate::i18n::Key::RenderingReading)));
         loading_lbl.add_css_class("dim-label");
         loading_lbl.set_margin_top(36);
         reading_slot.append(&loading_lbl);
@@ -94,7 +95,7 @@ impl WindowInner {
         let tag_table = create_tag_table();
         let edit_buffer = gtk4::TextBuffer::new(Some(&tag_table));
         edit_buffer.set_enable_undo(true);
-        edit_buffer.set_text("正在加载…");
+        edit_buffer.set_text(crate::i18n::tr(crate::i18n::Key::RenderingReading));
         let edit_view = gtk4::TextView::builder()
             .buffer(&edit_buffer)
             .editable(true)
@@ -244,7 +245,7 @@ impl WindowInner {
                 Ok::<_, String>((session, text, headings, styles.packed_runs, prepared))
             })
             .await
-            .unwrap_or_else(|_| Err("读取笔记线程异常".into()));
+            .unwrap_or_else(|_| Err(crate::i18n::tr(crate::i18n::Key::ErrThread).into()));
 
             let Some(win) = weak.upgrade() else { return };
             if win.state.borrow().disposing {
@@ -275,13 +276,14 @@ impl WindowInner {
                         })
                     };
                     if let Some((edit_buffer, reading_slot)) = widgets {
-                        edit_buffer.set_text(&format!("读取笔记失败：{err}"));
+                        let msg = crate::i18n::fmt1(crate::i18n::Key::ReadNoteFailed, &err);
+                        edit_buffer.set_text(&msg);
                         clear_box(&reading_slot);
-                        let err_lbl = gtk4::Label::new(Some(&format!("读取笔记失败：{err}")));
+                        let err_lbl = gtk4::Label::new(Some(&msg));
                         err_lbl.set_margin_top(24);
                         reading_slot.append(&err_lbl);
                     }
-                    win.show_toast(&format!("打开笔记失败：{err}"));
+                    win.show_toast(&crate::i18n::fmt1(crate::i18n::Key::OpenNoteFailed, &err));
                     #[cfg(feature = "automation")]
                     crate::automation::maybe_schedule_automation(&win);
                 }
@@ -497,7 +499,7 @@ impl WindowInner {
             if self.state.borrow().tabs.is_empty() {
                 self.center_stack.set_visible_child_name("empty");
                 self.edit_badge.set_visible(false);
-                self.render_outline_empty("未打开笔记");
+                self.render_outline_empty(crate::i18n::tr(crate::i18n::Key::NoNoteOpen));
             } else {
                 self.sync_active_tab_ui();
             }
@@ -519,7 +521,7 @@ impl WindowInner {
         let active_path = self.active_tab_path();
         let Some(path) = active_path else {
             self.edit_badge.set_visible(false);
-            self.render_outline_empty("未打开笔记");
+            self.render_outline_empty(crate::i18n::tr(crate::i18n::Key::NoNoteOpen));
             return;
         };
         let (editing, headings, loaded) = {
@@ -540,7 +542,7 @@ impl WindowInner {
         if loaded {
             self.render_outline(&path, &headings);
         } else {
-            self.render_outline_empty("正在解析大纲…");
+            self.render_outline_empty(crate::i18n::tr(crate::i18n::Key::ParsingOutline));
         }
         self.refresh_backlinks(false);
         let completion = self

@@ -398,12 +398,14 @@ async fn run_wikilink_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     report.insert("stages".into(), serde_json::json!(stages.clone()));
     let tabs_before_missing = win.state.borrow().tabs.len();
     let click_missing = win.click_reading_wikilink(boundary, "L2 不存在的目标");
+    let expected_missing_prefix = crate::i18n::fmt1(crate::i18n::Key::ToastMissingLink, "L2");
+    let missing_prefix_head = expected_missing_prefix.split("L2").next().unwrap_or("");
     let missing_toast = wait_for(4000, || {
         win.state
             .borrow()
             .last_toast
             .as_deref()
-            .is_some_and(|toast| toast.contains("未找到链接目标"))
+            .is_some_and(|toast| toast.contains(missing_prefix_head))
     })
     .await;
     report.insert(
@@ -420,12 +422,14 @@ async fn run_wikilink_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     stages.push("click-ambiguous-target".into());
     report.insert("stages".into(), serde_json::json!(stages.clone()));
     let click_ambiguous = win.click_reading_wikilink(boundary, "同名");
+    let expected_ambig = crate::i18n::fmt2(crate::i18n::Key::ToastAmbiguousLink, "同名", 2);
+    let ambig_prefix = expected_ambig.split("同名").next().unwrap_or("");
     let ambiguous_toast = wait_for(4000, || {
         win.state
             .borrow()
             .last_toast
             .as_deref()
-            .is_some_and(|toast| toast.contains("多个笔记匹配"))
+            .is_some_and(|toast| toast.contains(ambig_prefix))
     })
     .await;
     report.insert(

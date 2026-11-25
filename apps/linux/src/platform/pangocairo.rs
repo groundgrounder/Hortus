@@ -41,22 +41,23 @@ unsafe extern "C" {
 pub fn fc_add_app_font_file(path: &Path) -> Result<(), String> {
     let raw = path
         .to_str()
-        .ok_or_else(|| format!("字体路径包含非 UTF-8 字符: {}", path.display()))?;
-    let cstr = CString::new(raw).map_err(|_| "字体路径包含空字节".to_string())?;
+        .ok_or_else(|| crate::i18n::fmt1(crate::i18n::Key::FontsNonUtf8Path, path.display()))?;
+    let cstr = CString::new(raw)
+        .map_err(|_| crate::i18n::tr(crate::i18n::Key::FontsNulPath).to_string())?;
     // SAFETY: FcInit / FcConfigGetCurrent / FcConfigAppFontAddFile 接收有效 C 字符串指针并在失败时返回 0。
     unsafe {
         let mut config = FcConfigGetCurrent();
         if config.is_null() {
             if FcInit() == 0 {
-                return Err("FcInit 初始化失败".into());
+                return Err(crate::i18n::tr(crate::i18n::Key::FontsFcInitFailed).into());
             }
             config = FcConfigGetCurrent();
         }
         if config.is_null() {
-            return Err("FcConfigGetCurrent 返回空指针".into());
+            return Err(crate::i18n::tr(crate::i18n::Key::FontsFcConfigNull).into());
         }
         if FcConfigAppFontAddFile(config, cstr.as_ptr()) == 0 {
-            return Err(format!("FcConfigAppFontAddFile 失败: {raw}"));
+            return Err(crate::i18n::fmt1(crate::i18n::Key::FontsFcAddFailed, raw));
         }
     }
     Ok(())

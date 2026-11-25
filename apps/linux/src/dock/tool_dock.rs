@@ -7,6 +7,7 @@
 //! `×` / 中键关闭、独立 PopoverMenu 右键迁移以及三区无损迁移（`transfer_page`）。
 
 use crate::core::{PanelRegion, StaticToolKind};
+use crate::i18n::{Key, fmt1, tr};
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::pango;
@@ -57,6 +58,7 @@ pub struct DockCallbacks {
 struct TabStripChipInner {
     region: Cell<PanelRegion>,
     root: gtk4::Box,
+    center_box: gtk4::Box,
     icon: gtk4::Image,
     label: gtk4::Label,
     close_btn: gtk4::Button,
@@ -94,18 +96,28 @@ impl TabStripChip {
     fn configure_for_region(&self, region: PanelRegion) {
         self.inner.region.set(region);
         let is_bottom = region == PanelRegion::Bottom;
+        self.inner.label.set_ellipsize(pango::EllipsizeMode::None);
+        self.inner.label.set_max_width_chars(-1);
         if is_bottom {
             self.inner.root.remove_css_class("hortus-tool-tab-sidebar");
             self.inner.root.add_css_class("hortus-tool-tab-bottom");
             self.inner.root.set_hexpand(false);
-            self.inner.label.set_hexpand(false);
-            self.inner.label.set_max_width_chars(24);
+            self.inner.center_box.set_hexpand(false);
+            self.inner.label.set_visible(true);
         } else {
             self.inner.root.remove_css_class("hortus-tool-tab-bottom");
             self.inner.root.add_css_class("hortus-tool-tab-sidebar");
             self.inner.root.set_hexpand(true);
-            self.inner.label.set_hexpand(true);
-            self.inner.label.set_max_width_chars(14);
+            self.inner.center_box.set_hexpand(true);
+        }
+    }
+
+    fn apply_sidebar_fit(&self, label_visible: bool, root_hexpand: bool) {
+        if self.inner.label.is_visible() != label_visible {
+            self.inner.label.set_visible(label_visible);
+        }
+        if self.inner.root.hexpands() != root_hexpand {
+            self.inner.root.set_hexpand(root_hexpand);
         }
     }
 
@@ -138,6 +150,8 @@ struct RegionWidgets {
     add_btn: gtk4::MenuButton,
     add_menu: gio::Menu,
     collapse_btn: Option<gtk4::Button>,
+    last_strip_width: Cell<i32>,
+    relayout_scheduled: Cell<bool>,
 }
 
 struct ActiveContextMenu {
@@ -179,6 +193,8 @@ pub struct TabChipBounds {
     pub fits_in_strip: bool,
     pub selected: bool,
     pub close_visible: bool,
+    pub label_visible: bool,
+    pub ellipsized: bool,
 }
 
 #[cfg(feature = "automation")]
@@ -251,7 +267,7 @@ impl ToolDock {
         let add_menu = gio::Menu::new();
         let add_btn = gtk4::MenuButton::builder()
             .icon_name("list-add-symbolic")
-            .tooltip_text("添加工具或新建终端")
+            .tooltip_text(tr(Key::DockAddTooltip))
             .menu_model(&add_menu)
             .valign(gtk4::Align::Center)
             .build();
@@ -265,7 +281,7 @@ impl ToolDock {
         let collapse_btn = if region == PanelRegion::Bottom {
             let btn = gtk4::Button::builder()
                 .icon_name("pan-down-symbolic")
-                .tooltip_text("收起底部面板 (Ctrl+J)")
+                .tooltip_text(tr(Key::DockCollapseBottomTooltip))
                 .valign(gtk4::Align::Center)
                 .build();
             btn.add_css_class("flat");
@@ -285,20 +301,20 @@ impl ToolDock {
         empty_box.set_halign(gtk4::Align::Center);
         empty_box.add_css_class("hortus-tool-empty");
 
-        let empty_lbl = gtk4::Label::new(Some("此区域暂无工具"));
+        let empty_lbl = gtk4::Label::new(Some(tr(Key::DockEmptyLabel)));
         empty_lbl.add_css_class("dim-label");
         empty_lbl.add_css_class("caption");
         let empty_actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         empty_actions.set_halign(gtk4::Align::Center);
         let new_shell_btn = gtk4::Button::builder()
-            .label("新建终端")
+            .label(tr(Key::DockNewTerminal))
             .action_name("win.dock-new-shell")
             .action_target(&region.id().to_variant())
             .build();
         new_shell_btn.add_css_class("flat");
         new_shell_btn.add_css_class("caption");
         let new_agent_btn = gtk4::Button::builder()
-            .label("启动 Agent")
+            .label(tr(Key::MenuLaunchAgent))
             .action_name("win.dock-launch-agent")
             .action_target(&region.id().to_variant())
             .build();
@@ -331,6 +347,8 @@ impl ToolDock {
             add_btn,
             add_menu,
             collapse_btn,
+            last_strip_width: Cell::new(-1),
+            relayout_scheduled: Cell::new(false),
         }
     }
 
@@ -349,23 +367,31 @@ impl ToolDock {
         root.set_margin_bottom(2);
         root.set_tooltip_text(Some(title));
 
+        let center_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+        center_box.set_halign(gtk4::Align::Center);
+        center_box.set_valign(gtk4::Align::Center);
+
         let icon = gtk4::Image::from_icon_name(icon_name);
         icon.set_pixel_size(14);
         icon.set_valign(gtk4::Align::Center);
 
         let label = gtk4::Label::new(Some(title));
         label.set_single_line_mode(true);
-        label.set_ellipsize(pango::EllipsizeMode::End);
-        label.set_xalign(0.0);
+        label.set_ellipsize(pango::EllipsizeMode::None);
+        label.set_xalign(0.5);
         label.set_valign(gtk4::Align::Center);
         label.add_css_class("caption");
+
+        center_box.append(&icon);
+        center_box.append(&label);
 
         let close_icon = gtk4::Image::from_icon_name("window-close-symbolic");
         close_icon.set_pixel_size(11);
         let close_btn = gtk4::Button::builder()
-            .tooltip_text("关闭标签")
+            .tooltip_text(tr(Key::DockCloseTab))
             .has_frame(false)
             .focus_on_click(false)
+            .halign(gtk4::Align::End)
             .valign(gtk4::Align::Center)
             .child(&close_icon)
             .build();
@@ -373,14 +399,14 @@ impl ToolDock {
         close_btn.add_css_class("hortus-tool-tab-close");
         close_btn.set_visible(false);
 
-        root.append(&icon);
-        root.append(&label);
+        root.append(&center_box);
         root.append(&close_btn);
 
         let chip = TabStripChip {
             inner: Rc::new(TabStripChipInner {
                 region: Cell::new(region),
                 root: root.clone(),
+                center_box,
                 icon,
                 label,
                 close_btn: close_btn.clone(),
@@ -549,6 +575,148 @@ impl ToolDock {
                     }
                 });
             }
+            if region != PanelRegion::Bottom {
+                let weak = Rc::downgrade(inner);
+                rw.strip_scroll
+                    .hadjustment()
+                    .connect_page_size_notify(move |adj| {
+                        let Some(this) = weak.upgrade() else { return };
+                        if this.state.borrow().disposing {
+                            return;
+                        }
+                        let w = adj.page_size().round() as i32;
+                        if let Some(rw_cur) = this.regions.get(&region)
+                            && (w - rw_cur.last_strip_width.get()).abs() >= 1
+                        {
+                            rw_cur.last_strip_width.set(w);
+                            Self::schedule_strip_reconcile(&this, region);
+                        }
+                    });
+            }
+        }
+    }
+
+    fn schedule_strip_reconcile(inner: &Rc<ToolDockInner>, region: PanelRegion) {
+        if region == PanelRegion::Bottom {
+            return;
+        }
+        let Some(rw) = inner.regions.get(&region) else {
+            return;
+        };
+        if rw.relayout_scheduled.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(inner);
+        glib::idle_add_local_once(move || {
+            let Some(this) = weak.upgrade() else { return };
+            if let Some(rw) = this.regions.get(&region) {
+                rw.relayout_scheduled.set(false);
+            }
+            if !this.state.borrow().disposing {
+                Self::reconcile_strip_labels(&this, region, None);
+            }
+        });
+    }
+
+    fn reconcile_strip_labels(
+        inner: &Rc<ToolDockInner>,
+        region: PanelRegion,
+        width_override: Option<i32>,
+    ) {
+        let Some(rw) = inner.regions.get(&region) else {
+            return;
+        };
+        if region == PanelRegion::Bottom {
+            let st = inner.state.borrow();
+            for entry in st.entries.values() {
+                if entry.region == region {
+                    entry.chip.apply_sidebar_fit(true, false);
+                }
+            }
+            return;
+        }
+        let avail = width_override.unwrap_or_else(|| {
+            let sw = rw.strip_scroll.width();
+            if sw > 0 {
+                sw
+            } else {
+                rw.strip_scroll.hadjustment().page_size().round() as i32
+            }
+        });
+        if avail <= 0 {
+            return;
+        }
+
+        let n_pages = rw.tab_view.n_pages();
+        if n_pages == 0 {
+            return;
+        }
+        let selected_page = rw.tab_view.selected_page();
+
+        let st = inner.state.borrow();
+        struct ChipMeasure {
+            chip: TabStripChip,
+            selected: bool,
+            full_w: i32,
+            icon_w: i32,
+        }
+        let mut items = Vec::with_capacity(n_pages as usize);
+        for idx in 0..n_pages {
+            let page = rw.tab_view.nth_page(idx);
+            let Some(entry) = st.entries.values().find(|e| e.page == page) else {
+                continue;
+            };
+            let is_sel = selected_page.as_ref() == Some(&entry.page);
+            let show_close = entry.chip.inner.selected.get() || entry.chip.inner.hovered.get();
+            let close_w = if show_close { 20 } else { 0 };
+            let layout = entry
+                .chip
+                .inner
+                .label
+                .create_pango_layout(Some(&entry.title));
+            let text_w = layout.pixel_size().0 + 6;
+            // padding(16) + icon(14) + center gap(4) + close_w + border/slack(4)
+            let full_w = text_w + 16 + 14 + 4 + close_w + 4;
+            let icon_w = 16 + 14 + close_w + 2;
+            items.push(ChipMeasure {
+                chip: entry.chip.clone(),
+                selected: is_sel,
+                full_w,
+                icon_w,
+            });
+        }
+        drop(st);
+
+        let n = items.len();
+        if n == 0 {
+            return;
+        }
+        let spacing = 2 * (n as i32 - 1);
+        let all_full_sum: i32 = items.iter().map(|m| m.full_w).sum::<i32>() + spacing;
+        if all_full_sum <= avail {
+            for item in items {
+                item.chip.apply_sidebar_fit(true, true);
+            }
+            return;
+        }
+
+        let active_idx = items.iter().position(|m| m.selected).unwrap_or(0);
+        let active_full_sum: i32 = items
+            .iter()
+            .enumerate()
+            .map(|(i, m)| if i == active_idx { m.full_w } else { m.icon_w })
+            .sum::<i32>()
+            + spacing;
+        if active_full_sum <= avail {
+            for (i, item) in items.into_iter().enumerate() {
+                let keep_label = i == active_idx;
+                item.chip.apply_sidebar_fit(keep_label, keep_label);
+            }
+            return;
+        }
+
+        for item in items {
+            item.chip.apply_sidebar_fit(false, true);
         }
     }
 
@@ -570,6 +738,7 @@ impl ToolDock {
                 }
             }
         }
+        Self::reconcile_strip_labels(inner, region, None);
         if let Some(chip_widget) = selected_chip {
             Self::ensure_chip_visible(rw, &chip_widget);
         }
@@ -683,7 +852,7 @@ impl ToolDock {
             if target == current_region {
                 continue;
             }
-            let item = gio::MenuItem::new(Some(&format!("移动到「{}」", target.title())), None);
+            let item = gio::MenuItem::new(Some(&fmt1(Key::DockMoveTabTo, target.title())), None);
             item.set_action_and_target_value(
                 Some("win.dock-move-tab"),
                 Some(&format!("{}:{}", target.id(), tab_id.encode()).to_variant()),
@@ -693,7 +862,7 @@ impl ToolDock {
         menu.append_section(None, &move_sec);
 
         let close_sec = gio::Menu::new();
-        let close_item = gio::MenuItem::new(Some("关闭标签"), None);
+        let close_item = gio::MenuItem::new(Some(tr(Key::DockCloseTab)), None);
         close_item.set_action_and_target_value(
             Some("win.dock-close-tab"),
             Some(&tab_id.encode().to_variant()),
@@ -718,14 +887,14 @@ impl ToolDock {
             rw.add_menu.remove_all();
 
             let term_sec = gio::Menu::new();
-            let shell_item = gio::MenuItem::new(Some("新建终端"), None);
+            let shell_item = gio::MenuItem::new(Some(tr(Key::DockNewTerminal)), None);
             shell_item.set_action_and_target_value(
                 Some("win.dock-new-shell"),
                 Some(&region.id().to_variant()),
             );
             term_sec.append_item(&shell_item);
 
-            let agent_item = gio::MenuItem::new(Some("启动 Agent"), None);
+            let agent_item = gio::MenuItem::new(Some(tr(Key::MenuLaunchAgent)), None);
             agent_item.set_action_and_target_value(
                 Some("win.dock-launch-agent"),
                 Some(&region.id().to_variant()),
@@ -737,8 +906,8 @@ impl ToolDock {
             for tool in StaticToolKind::ALL {
                 let label = match locations.get(&tool) {
                     None => tool.title().to_string(),
-                    Some(cur) if *cur == region => format!("{}（当前区域）", tool.title()),
-                    Some(_) => format!("{}（移至此处）", tool.title()),
+                    Some(cur) if *cur == region => fmt1(Key::DockToolHere, tool.title()),
+                    Some(_) => fmt1(Key::DockToolMoveHere, tool.title()),
                 };
                 let item = gio::MenuItem::new(Some(&label), None);
                 item.set_action_and_target_value(
@@ -747,7 +916,8 @@ impl ToolDock {
                 );
                 tools_sec.append_item(&item);
             }
-            rw.add_menu.append_section(Some("工具面板"), &tools_sec);
+            rw.add_menu
+                .append_section(Some(tr(Key::DockToolsSection)), &tools_sec);
         }
     }
 
@@ -1227,13 +1397,21 @@ impl ToolDock {
     }
 
     pub fn update_terminal_tab(&self, term_id: u64, title: &str, icon_name: &str) {
-        let mut st = self.inner.state.borrow_mut();
-        if let Some(entry) = st.entries.get_mut(&DockTabId::Terminal(term_id)) {
-            entry.title = title.to_string();
-            entry.page.set_title(title);
-            entry.page.set_icon(Some(&gio::ThemedIcon::new(icon_name)));
-            entry.page.set_tooltip(title);
-            entry.chip.update(title, icon_name);
+        let region = {
+            let mut st = self.inner.state.borrow_mut();
+            if let Some(entry) = st.entries.get_mut(&DockTabId::Terminal(term_id)) {
+                entry.title = title.to_string();
+                entry.page.set_title(title);
+                entry.page.set_icon(Some(&gio::ThemedIcon::new(icon_name)));
+                entry.page.set_tooltip(title);
+                entry.chip.update(title, icon_name);
+                Some(entry.region)
+            } else {
+                None
+            }
+        };
+        if let Some(region) = region {
+            Self::reconcile_strip_labels(&self.inner, region, None);
         }
     }
 
@@ -1477,6 +1655,8 @@ impl ToolDock {
                     fits_in_strip,
                     selected: entry.chip.inner.selected.get(),
                     close_visible: entry.chip.inner.close_btn.is_visible(),
+                    label_visible: entry.chip.inner.label.is_visible(),
+                    ellipsized: entry.chip.inner.label.ellipsize() != pango::EllipsizeMode::None,
                 });
             }
         }
@@ -1714,7 +1894,7 @@ mod tests {
             99,
             PanelRegion::Right,
             term_box.upcast_ref(),
-            "终端 99",
+            "Terminal 99",
             "utilities-terminal-symbolic",
         );
 
@@ -1767,19 +1947,79 @@ mod tests {
         );
         drop(st);
 
-        // 全部 6 个静态工具右键菜单均包含其余两区移动项与「关闭标签」
+        // 全部 6 个静态工具右键菜单均包含其余两区移动项与关闭项
         for kind in StaticToolKind::ALL {
             let id = DockTabId::Static(kind);
             let region = dock.static_tool_region(kind).expect("tool in layout");
             let labels = dock.context_menu_labels_for(id);
-            assert!(labels.iter().any(|l| l == "关闭标签"));
+            assert!(labels.iter().any(|l| l == tr(Key::DockCloseTab)));
             for target in PanelRegion::ALL {
-                let move_lbl = format!("移动到「{}」", target.title());
+                let move_lbl = fmt1(Key::DockMoveTabTo, target.title());
                 if target == region {
                     assert!(!labels.iter().any(|l| l == &move_lbl));
                 } else {
                     assert!(labels.iter().any(|l| l == &move_lbl));
                 }
+            }
+        }
+
+        // D2 动态宽度分级：宽条带全文字，窄条带激活保留全文字、非激活折叠为仅图标（无省略号），极窄全图标
+        ToolDock::reconcile_strip_labels(&dock.inner, PanelRegion::Left, Some(520));
+        {
+            let st = dock.inner.state.borrow();
+            for tool in [
+                StaticToolKind::Files,
+                StaticToolKind::Search,
+                StaticToolKind::Tags,
+            ] {
+                let entry = &st.entries[&DockTabId::Static(tool)];
+                assert!(entry.chip.inner.label.is_visible());
+                assert_eq!(
+                    entry.chip.inner.label.ellipsize(),
+                    pango::EllipsizeMode::None
+                );
+            }
+        }
+        ToolDock::reconcile_strip_labels(&dock.inner, PanelRegion::Left, Some(180));
+        {
+            let st = dock.inner.state.borrow();
+            assert!(
+                st.entries[&DockTabId::Static(StaticToolKind::Files)]
+                    .chip
+                    .inner
+                    .label
+                    .is_visible()
+            );
+            assert!(
+                !st.entries[&DockTabId::Static(StaticToolKind::Search)]
+                    .chip
+                    .inner
+                    .label
+                    .is_visible()
+            );
+            assert!(
+                !st.entries[&DockTabId::Static(StaticToolKind::Tags)]
+                    .chip
+                    .inner
+                    .label
+                    .is_visible()
+            );
+        }
+        ToolDock::reconcile_strip_labels(&dock.inner, PanelRegion::Left, Some(90));
+        {
+            let st = dock.inner.state.borrow();
+            for tool in [
+                StaticToolKind::Files,
+                StaticToolKind::Search,
+                StaticToolKind::Tags,
+            ] {
+                assert!(
+                    !st.entries[&DockTabId::Static(tool)]
+                        .chip
+                        .inner
+                        .label
+                        .is_visible()
+                );
             }
         }
 

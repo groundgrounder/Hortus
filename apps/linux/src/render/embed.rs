@@ -112,7 +112,7 @@ pub fn prepare_embed_bg(req: &EmbedRequest) -> Result<PreparedEmbed, String> {
             body_width,
             req.font_size,
         )
-        .map_err(|e| format!("嵌入解析失败：{e}"))?;
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::EmbedResolveFailed, e))?;
 
     let mut media = Vec::new();
     let mut math = Vec::new();
@@ -303,7 +303,7 @@ pub fn build_embed_card(
             &diagrams,
         );
     } else {
-        let loading = gtk4::Label::new(Some("正在解析嵌入内容…"));
+        let loading = gtk4::Label::new(Some(crate::i18n::tr(crate::i18n::Key::EmbedLoading)));
         loading.add_css_class("dim-label");
         loading.add_css_class("caption");
         loading.set_halign(gtk4::Align::Start);
@@ -319,7 +319,7 @@ pub fn build_embed_card(
             let req_job = req_bg.clone();
             let res = gio::spawn_blocking(move || prepare_embed_bg(&req_job))
                 .await
-                .unwrap_or_else(|_| Err("嵌入解析线程异常".into()));
+                .unwrap_or_else(|_| Err(crate::i18n::tr(crate::i18n::Key::ErrThread).into()));
             let (Some(body_slot), Some(header_btn), Some(title_label), Some(icon)) = (
                 body_weak.upgrade(),
                 header_weak.upgrade(),
@@ -462,13 +462,19 @@ fn populate_embed_card(
                 body_slot.append(diag_card.widget());
                 diagrams_out.borrow_mut().push(diag_card);
             } else {
-                show_embed_message(body_slot, "嵌入图表无法渲染");
+                show_embed_message(
+                    body_slot,
+                    crate::i18n::tr(crate::i18n::Key::EmbedDiagramFailed),
+                );
             }
         }
-        "cycle" => show_embed_message(body_slot, &format!("循环嵌入：{}", info.display_title)),
+        "cycle" => show_embed_message(
+            body_slot,
+            &crate::i18n::fmt1(crate::i18n::Key::EmbedCycle, &info.display_title),
+        ),
         "depth_exceeded" => show_embed_message(
             body_slot,
-            &format!("嵌入层级超过最大限制：{}", info.display_title),
+            &crate::i18n::fmt1(crate::i18n::Key::EmbedDepthExceeded, &info.display_title),
         ),
         "heading_missing" => {
             let h = info
@@ -476,7 +482,10 @@ fn populate_embed_card(
                 .as_deref()
                 .or(req.heading.as_deref())
                 .unwrap_or("");
-            show_embed_message(body_slot, &format!("未找到目标标题：{h}"));
+            show_embed_message(
+                body_slot,
+                &crate::i18n::fmt1(crate::i18n::Key::EmbedHeadingMissing, h),
+            );
         }
         "ambiguous" => {
             let list: String = info
@@ -486,10 +495,19 @@ fn populate_embed_card(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ");
-            show_embed_message(body_slot, &format!("多个笔记匹配“{}”：{list}", req.target));
+            show_embed_message(
+                body_slot,
+                &crate::i18n::fmt2(crate::i18n::Key::EmbedAmbiguous, &req.target, list),
+            );
         }
-        "broken" => show_embed_message(body_slot, &format!("未找到嵌入目标：“{}”", req.target)),
-        other => show_embed_message(body_slot, &format!("暂无法嵌入内容（{other}）")),
+        "broken" => show_embed_message(
+            body_slot,
+            &crate::i18n::fmt1(crate::i18n::Key::EmbedBroken, &req.target),
+        ),
+        other => show_embed_message(
+            body_slot,
+            &crate::i18n::fmt1(crate::i18n::Key::EmbedUnavailable, other),
+        ),
     }
 }
 

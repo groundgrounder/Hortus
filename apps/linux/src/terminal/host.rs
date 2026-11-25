@@ -199,10 +199,10 @@ impl TerminalHost {
             let mut st = self.inner.state.borrow_mut();
             let cbs = st.callbacks.clone();
             let Some(tab) = st.tabs.get_mut(&tab_id) else {
-                return Err("Agent 终端标签已关闭".into());
+                return Err(crate::i18n::tr(crate::i18n::Key::TermAgentTabClosed).into());
             };
             if tab.cancel_flag.load(Ordering::Acquire) {
-                return Err("Agent 启动已取消".into());
+                return Err(crate::i18n::tr(crate::i18n::Key::TermAgentCancelled).into());
             }
             tab.kind = TerminalKind::Agent {
                 session_id: Some(session_id.clone()),
@@ -222,7 +222,7 @@ impl TerminalHost {
             out
         };
         if pending_cancel.load(Ordering::Acquire) {
-            return Err("Agent 启动已取消".into());
+            return Err(crate::i18n::tr(crate::i18n::Key::TermAgentCancelled).into());
         }
         if let Some(ref cbs) = callbacks {
             (cbs.on_tab_updated)(tab_id, "Agent".to_string(), "system-run-symbolic");
@@ -238,9 +238,14 @@ impl TerminalHost {
         let mut st = self.inner.state.borrow_mut();
         if let Some(tab) = st.tabs.get_mut(&tab_id) {
             tab.phase = TerminalPhase::Failed(message.to_string());
-            tab.preparing_label
-                .set_text(&format!("启动失败：{message}"));
-            tab.status_label.set_text(&format!("未启动：{message}"));
+            tab.preparing_label.set_text(&crate::i18n::fmt1(
+                crate::i18n::Key::TermStartFailed,
+                message,
+            ));
+            tab.status_label.set_text(&crate::i18n::fmt1(
+                crate::i18n::Key::TermNotStarted,
+                message,
+            ));
             tab.status_bar.set_visible(true);
             tab.restart_btn.set_visible(false);
         }
@@ -495,10 +500,11 @@ impl TerminalHost {
         status_label.set_xalign(0.0);
         status_label.set_hexpand(true);
         status_label.add_css_class("caption");
-        let restart_btn = gtk4::Button::with_label("重新启动");
+        let restart_btn =
+            gtk4::Button::with_label(crate::i18n::tr(crate::i18n::Key::TermRestartBtn));
         restart_btn.add_css_class("flat");
         restart_btn.add_css_class("caption");
-        let close_btn = gtk4::Button::with_label("关闭标签");
+        let close_btn = gtk4::Button::with_label(crate::i18n::tr(crate::i18n::Key::BtnCloseTab));
         close_btn.add_css_class("flat");
         close_btn.add_css_class("caption");
         status_bar.append(&status_label);
@@ -517,9 +523,10 @@ impl TerminalHost {
         prep_box.set_halign(gtk4::Align::Center);
         let spinner = gtk4::Spinner::new();
         spinner.set_spinning(true);
-        let preparing_label = gtk4::Label::new(Some("正在建立全库安全快照，完成后再启动 Agent…"));
+        let preparing_label =
+            gtk4::Label::new(Some(crate::i18n::tr(crate::i18n::Key::TermPreparingMsg)));
         preparing_label.add_css_class("dim-label");
-        let cancel_prep_btn = gtk4::Button::with_label("取消");
+        let cancel_prep_btn = gtk4::Button::with_label(crate::i18n::tr(crate::i18n::Key::Cancel));
         prep_box.append(&spinner);
         prep_box.append(&preparing_label);
         prep_box.append(&cancel_prep_btn);
@@ -536,8 +543,14 @@ impl TerminalHost {
         });
 
         let (title, icon_name) = match &kind {
-            TerminalKind::Shell => (format!("终端 {id}"), "utilities-terminal-symbolic"),
-            TerminalKind::Agent { .. } => ("Agent（快照中）".to_string(), "system-run-symbolic"),
+            TerminalKind::Shell => (
+                crate::i18n::fmt1(crate::i18n::Key::TermTabShellTitle, id),
+                "utilities-terminal-symbolic",
+            ),
+            TerminalKind::Agent { .. } => (
+                crate::i18n::tr(crate::i18n::Key::TermTabAgentPreparing).to_string(),
+                "system-run-symbolic",
+            ),
         };
 
         {
@@ -672,7 +685,10 @@ impl TerminalHost {
                         let mut st = this.state.borrow_mut();
                         if let Some(tab) = st.tabs.get_mut(&tab_id) {
                             tab.phase = TerminalPhase::Failed(msg.clone());
-                            tab.status_label.set_text(&format!("启动进程失败：{msg}"));
+                            tab.status_label.set_text(&crate::i18n::fmt1(
+                                crate::i18n::Key::TermStartFailed,
+                                &msg,
+                            ));
                             tab.status_bar.set_visible(true);
                             tab.restart_btn
                                 .set_visible(matches!(tab.kind, TerminalKind::Shell));
@@ -695,7 +711,7 @@ impl TerminalHost {
             tab.phase = TerminalPhase::Exited(code);
             // 退出后严禁自动重启，显示显式退出码与按钮。
             tab.status_label
-                .set_text(&format!("已退出（退出码 {code}）"));
+                .set_text(&crate::i18n::fmt1(crate::i18n::Key::TermExitedCode, code));
             tab.status_bar.set_visible(true);
             tab.restart_btn
                 .set_visible(matches!(tab.kind, TerminalKind::Shell));

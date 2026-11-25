@@ -4,6 +4,7 @@
 
 //! 库内文件管理对话框：新建笔记/文件夹、重命名（含双链批量更新预览）与回收站二次确认。
 
+use crate::i18n::{Key, fmt1, fmt2, tr};
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -48,15 +49,15 @@ pub fn prompt_new_entry(
     on_done: CreateDone,
 ) {
     let title = if directory {
-        "新建文件夹"
+        tr(Key::CreateFolder)
     } else {
-        "新建笔记"
+        tr(Key::CreateNote)
     };
     let (dialog, header, body) = build_dialog(title);
     let subtitle = if parent_dir.is_empty() {
-        "位置：知识库根目录".to_string()
+        tr(Key::LocationRoot).to_string()
     } else {
-        format!("位置：{parent_dir}")
+        fmt1(Key::LocationSub, &parent_dir)
     };
     let hint = gtk4::Label::new(Some(&subtitle));
     hint.add_css_class("dim-label");
@@ -66,9 +67,9 @@ pub fn prompt_new_entry(
 
     let entry = gtk4::Entry::builder()
         .placeholder_text(if directory {
-            "文件夹名称"
+            tr(Key::FolderNamePlaceholder)
         } else {
-            "笔记名称（自动补 .md）"
+            tr(Key::NoteNamePlaceholder)
         })
         .activates_default(true)
         .build();
@@ -81,11 +82,11 @@ pub fn prompt_new_entry(
     error.set_visible(false);
     body.append(&error);
 
-    let cancel = gtk4::Button::with_label("取消");
+    let cancel = gtk4::Button::with_label(tr(Key::Cancel));
     let create = gtk4::Button::with_label(if directory {
-        "新建文件夹"
+        tr(Key::CreateFolder)
     } else {
-        "新建笔记"
+        tr(Key::CreateNote)
     });
     create.add_css_class("suggested-action");
     header.pack_start(&cancel);
@@ -112,7 +113,7 @@ pub fn prompt_new_entry(
         };
         let name = entry_ref.text().to_string();
         if name.trim().is_empty() {
-            error_done.set_label("名称不能为空");
+            error_done.set_label(tr(Key::ErrNameEmpty));
             error_done.set_visible(true);
             return;
         }
@@ -133,7 +134,7 @@ pub fn prompt_new_entry(
                 res.map_err(|e| e.to_string())
             })
             .await
-            .unwrap_or_else(|_| Err("创建线程异常".into()));
+            .unwrap_or_else(|_| Err(tr(Key::ErrThread).into()));
             match result {
                 Ok(entry) => {
                     if let Some(d) = dlg_async.upgrade() {
@@ -143,7 +144,7 @@ pub fn prompt_new_entry(
                 }
                 Err(err) => {
                     if let Some(e) = err_async.upgrade() {
-                        e.set_label(&format!("创建失败：{err}"));
+                        e.set_label(&fmt1(Key::CreateFailed, err));
                         e.set_visible(true);
                     }
                 }
@@ -167,9 +168,9 @@ pub fn prompt_rename(
     on_confirm: RenameConfirm,
 ) {
     let (dialog, header, body) = build_dialog(if is_dir {
-        "重命名文件夹"
+        tr(Key::RenameFolderTitle)
     } else {
-        "重命名笔记"
+        tr(Key::RenameNoteTitle)
     });
     let current_name = path.rsplit('/').next().unwrap_or(&path).to_string();
     let parent = path
@@ -178,9 +179,9 @@ pub fn prompt_rename(
         .unwrap_or_default();
 
     let hint = gtk4::Label::new(Some(&if parent.is_empty() {
-        "位置：知识库根目录".to_string()
+        tr(Key::LocationRoot).to_string()
     } else {
-        format!("位置：{parent}")
+        fmt1(Key::LocationSub, &parent)
     }));
     hint.add_css_class("dim-label");
     hint.add_css_class("caption");
@@ -198,22 +199,22 @@ pub fn prompt_rename(
     update_switch.set_active(true);
     update_switch.set_valign(gtk4::Align::Center);
     let switch_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
-    let switch_label = gtk4::Label::new(Some("同时更新指向此项的双链与嵌入"));
+    let switch_label = gtk4::Label::new(Some(tr(Key::RenameUpdateLinksSwitch)));
     switch_label.set_xalign(0.0);
     switch_label.set_hexpand(true);
     switch_row.append(&switch_label);
     switch_row.append(&update_switch);
     body.append(&switch_row);
 
-    let preview = gtk4::Label::new(Some("正在计算受影响的链接…"));
+    let preview = gtk4::Label::new(Some(tr(Key::RenameCalculatingLinks)));
     preview.add_css_class("dim-label");
     preview.add_css_class("caption");
     preview.set_xalign(0.0);
     preview.set_wrap(true);
     body.append(&preview);
 
-    let cancel = gtk4::Button::with_label("取消");
-    let confirm = gtk4::Button::with_label("重命名");
+    let cancel = gtk4::Button::with_label(tr(Key::Cancel));
+    let confirm = gtk4::Button::with_label(tr(Key::RenameConfirm));
     confirm.add_css_class("suggested-action");
     header.pack_start(&cancel);
     header.pack_end(&confirm);
@@ -253,18 +254,18 @@ pub fn prompt_rename(
             generation.set(generation.get() + 1);
             let my_generation = generation.get();
             if name.trim().is_empty() {
-                preview.set_label("名称不能为空");
+                preview.set_label(tr(Key::ErrNameEmpty));
                 return;
             }
             if name == current_name {
-                preview.set_label("名称未变化");
+                preview.set_label(tr(Key::RenameNameUnchanged));
                 return;
             }
             if !update_switch.is_active() {
-                preview.set_label("将仅重命名，不修改任何双链与嵌入。");
+                preview.set_label(tr(Key::RenameNoLinkUpdates));
                 return;
             }
-            preview.set_label("正在计算受影响的链接…");
+            preview.set_label(tr(Key::RenameCalculatingLinks));
             let handle_bg = Arc::clone(&handle);
             let entry_path = path.clone();
             let new_path_bg = new_path;
@@ -295,11 +296,12 @@ pub fn prompt_rename(
                     return;
                 };
                 let text = if result.affected_notes == 0 {
-                    "没有其他笔记引用此项，仅重命名。".to_string()
+                    tr(Key::RenameNoReferrers).to_string()
                 } else {
-                    format!(
-                        "将同步更新 {} 篇笔记中的 {} 处链接。",
-                        result.affected_notes, result.total_rewrites
+                    fmt2(
+                        Key::RenameWillUpdateLinks,
+                        result.affected_notes,
+                        result.total_rewrites,
                     )
                 };
                 preview_done.set_label(&text);
@@ -355,29 +357,24 @@ pub fn confirm_trash(
     on_confirm: TrashConfirm,
 ) {
     let title = if is_dir {
-        "将文件夹移到回收站？"
+        tr(Key::TrashFolderHeading)
     } else {
-        "将笔记移到回收站？"
+        tr(Key::TrashNoteHeading)
     };
-    let mut body = format!(
-        "「{path}」将移入系统回收站，可随时从回收站恢复。{}",
-        if is_dir {
-            "文件夹内的笔记会一并移入。"
-        } else {
-            ""
-        }
-    );
+    let mut body = if is_dir {
+        fmt1(Key::TrashBodyFolder, &path)
+    } else {
+        fmt1(Key::TrashBodyNote, &path)
+    };
     if dirty_tabs > 0 {
-        body.push_str(&format!(
-            "\n\n其中 {dirty_tabs} 个未保存标签页会先尝试保存。"
-        ));
+        body.push_str(&fmt1(Key::TrashBodyDirtySuffix, dirty_tabs));
     }
     let dialog = adw::AlertDialog::builder()
         .heading(title)
         .body(&body)
         .build();
-    dialog.add_response("cancel", "取消");
-    dialog.add_response("trash", "移到回收站");
+    dialog.add_response("cancel", tr(Key::Cancel));
+    dialog.add_response("trash", tr(Key::MoveToTrash));
     dialog.set_response_appearance("trash", adw::ResponseAppearance::Destructive);
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");

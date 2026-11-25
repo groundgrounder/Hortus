@@ -104,15 +104,21 @@ pub struct MathScene {
 impl MathScene {
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < 8 || bytes.len() > 32 * 1024 * 1024 {
-            return Err("公式载荷长度异常".into());
+            return Err(crate::i18n::fmt1(
+                crate::i18n::Key::MathInternalErr,
+                "length",
+            ));
         }
         let version = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         let len = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
         if version != 1 || len != bytes.len() - 8 {
-            return Err("公式载荷协议头无效".into());
+            return Err(crate::i18n::fmt1(
+                crate::i18n::Key::MathInternalErr,
+                "header",
+            ));
         }
-        let scene: Self =
-            serde_json::from_slice(&bytes[8..]).map_err(|e| format!("公式 JSON 解析失败：{e}"))?;
+        let scene: Self = serde_json::from_slice(&bytes[8..])
+            .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::MathInternalErr, e))?;
         if !scene.width.is_finite()
             || !scene.height.is_finite()
             || !scene.depth.is_finite()
@@ -123,7 +129,10 @@ impl MathScene {
             || scene.height > 4096.0
             || scene.depth > 4096.0
         {
-            return Err("公式几何边界非法".into());
+            return Err(crate::i18n::fmt1(
+                crate::i18n::Key::MathInternalErr,
+                "bounds",
+            ));
         }
         Ok(scene)
     }
@@ -366,19 +375,29 @@ impl MathRenderService {
 
 fn format_math_failure(err: &MathFailure) -> String {
     match err {
-        MathFailure::Parse { message } => format!("公式语法错误：{message}"),
-        MathFailure::ResourceLimit { message } => format!("公式超出资源限制：{message}"),
-        MathFailure::Panic { message } => format!("公式引擎内部异常：{message}"),
-        MathFailure::InvalidLayout { message } => format!("公式排版错误：{message}"),
+        MathFailure::Parse { message } => {
+            crate::i18n::fmt1(crate::i18n::Key::MathParseErr, message)
+        }
+        MathFailure::ResourceLimit { message } => {
+            crate::i18n::fmt1(crate::i18n::Key::MathResourceErr, message)
+        }
+        MathFailure::Panic { message } => {
+            crate::i18n::fmt1(crate::i18n::Key::MathInternalErr, message)
+        }
+        MathFailure::InvalidLayout { message } => {
+            crate::i18n::fmt1(crate::i18n::Key::MathLayoutErr, message)
+        }
     }
 }
 
 /// 在后台线程用 Cairo RecordingSurface + Pango 测量 CJK/Emoji/生僻缺失字形的归一化 `(width, height, depth)`（单位为 `em`）。
 fn measure_fallback_glyph(codepoint: u32, size_px: f64) -> Result<MathGlyphMetrics, String> {
-    let ch = char::from_u32(codepoint).ok_or_else(|| "无效字形码点".to_string())?;
+    let ch = char::from_u32(codepoint)
+        .ok_or_else(|| crate::i18n::fmt1(crate::i18n::Key::MathInternalErr, codepoint))?;
     let surface = cairo::RecordingSurface::create(cairo::Content::ColorAlpha, None)
-        .map_err(|e| format!("创建度量表面失败：{e}"))?;
-    let cr = cairo::Context::new(&surface).map_err(|e| format!("创建度量上下文失败：{e}"))?;
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::MathInternalErr, e))?;
+    let cr = cairo::Context::new(&surface)
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::MathInternalErr, e))?;
     let font_map = pangocairo::new_font_map();
     let pango_ctx = pangocairo::create_pango_context(&cr, Some(&font_map));
     let layout = pango::Layout::new(&pango_ctx);

@@ -5,6 +5,7 @@
 //! 编辑态 `[[` 双链自动补全：仅读取当前光标行切片触发，Weak 解环（C-05 修复）。
 
 use crate::core::Utf16Mapper;
+use crate::i18n::{Key, tr};
 use crate::knowledge::widgets::{dim_label, entry_row};
 use gtk4::gio;
 use gtk4::glib;
@@ -74,7 +75,7 @@ impl LinkCompletion {
         panel.set_can_focus(false);
         panel.set_focusable(false);
         panel.set_visible(false);
-        let header = dim_label("插入双链  Enter 确认 · Esc 关闭");
+        let header = dim_label(tr(Key::CompletionHeader));
         header.set_margin_top(4);
         header.set_margin_bottom(4);
         header.set_margin_start(10);

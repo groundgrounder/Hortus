@@ -31,7 +31,7 @@ impl WindowInner {
     pub fn render_outline(self: &Rc<Self>, note_path: &str, headings: &[HeadingItem]) {
         clear_box(&self.outline_box);
         if headings.is_empty() {
-            self.render_outline_empty("本笔记暂无标题大纲");
+            self.render_outline_empty(crate::i18n::tr(crate::i18n::Key::OutlineEmpty));
             return;
         }
         for heading in headings {
@@ -127,13 +127,13 @@ impl WindowInner {
             })
         };
         let Some((services_slot, vault_slot, source, mmd, diagram)) = fields else {
-            self.show_toast("请先打开包含图表的笔记");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastOpenDiagramNoteFirst));
             return;
         };
         let (Some(services), Some(vault_root), Some(diagram)) =
             (services_slot, vault_slot, diagram)
         else {
-            self.show_toast("当前笔记没有可用的 Mermaid 图表");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastNoMermaidDiagram));
             return;
         };
         let Some(scene) = diagram.scene else { return };
@@ -198,9 +198,9 @@ impl WindowInner {
     ) {
         let dialog = gtk4::FileDialog::builder()
             .title(match kind {
-                DiagramExportKind::Svg => "导出 SVG 矢量图",
-                DiagramExportKind::Png => "导出高分 PNG 图片",
-                DiagramExportKind::Pdf => "导出 PDF 文档",
+                DiagramExportKind::Svg => crate::i18n::tr(crate::i18n::Key::ExportTitleSvg),
+                DiagramExportKind::Png => crate::i18n::tr(crate::i18n::Key::ExportTitlePng),
+                DiagramExportKind::Pdf => crate::i18n::tr(crate::i18n::Key::ExportTitlePdf),
             })
             .initial_name(default_export_filename(&meta.note_path, meta.ordinal, kind))
             .modal(true)
@@ -226,12 +226,15 @@ impl WindowInner {
                         .and_then(|n| n.to_str())
                         .unwrap_or("diagram");
                     if let Some(win) = weak_done.upgrade() {
-                        win.show_toast(&format!("已导出 {name}"));
+                        win.show_toast(&crate::i18n::fmt1(crate::i18n::Key::ToastExported, name));
                     }
                 }
                 Err(err) => {
                     if let Some(win) = weak_done.upgrade() {
-                        win.show_toast(&short_error("导出失败", &err));
+                        win.show_toast(&short_error(
+                            crate::i18n::tr(crate::i18n::Key::ErrExportFailed),
+                            &err,
+                        ));
                     }
                 }
             });

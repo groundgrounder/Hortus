@@ -8,6 +8,7 @@
 use crate::agent::diff_view::render_entry_detail;
 use crate::core::is_note_file_name;
 use crate::files::operations::save_temp_for;
+use crate::i18n::{Key, fmt1, fmt2, fmt3, fmt5, tr};
 use crate::knowledge::widgets::{clear_box, dim_label, panel_scroll};
 use gtk4::gio;
 use gtk4::glib;
@@ -81,7 +82,7 @@ impl ChangesPanel {
 
         let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
         header.add_css_class("hortus-panel-header");
-        let title_lbl = gtk4::Label::new(Some("本次会话改动"));
+        let title_lbl = gtk4::Label::new(Some(tr(Key::ChangesTitle)));
         title_lbl.add_css_class("caption");
         title_lbl.add_css_class("dim-label");
         title_lbl.set_xalign(0.0);
@@ -89,12 +90,12 @@ impl ChangesPanel {
 
         let refresh_btn = gtk4::Button::builder()
             .icon_name("view-refresh-symbolic")
-            .tooltip_text("刷新会话与本次会话改动")
+            .tooltip_text(tr(Key::ChangesRefreshTooltip))
             .build();
         refresh_btn.add_css_class("flat");
         let delete_btn = gtk4::Button::builder()
             .icon_name("user-trash-symbolic")
-            .tooltip_text("删除选中会话快照")
+            .tooltip_text(tr(Key::ChangesDeleteSnapshotTooltip))
             .build();
         delete_btn.add_css_class("flat");
 
@@ -106,15 +107,15 @@ impl ChangesPanel {
         let session_row = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
         session_row.set_margin_start(8);
         session_row.set_margin_end(8);
-        let session_combo = gtk4::DropDown::from_strings(&["暂无会话"]);
+        let session_combo = gtk4::DropDown::from_strings(&[tr(Key::ChangesNoSessions)]);
         session_combo.set_hexpand(true);
-        let session_meta = gtk4::Label::new(Some("启动 Agent 后将在此显示本次会话改动。"));
+        let session_meta = gtk4::Label::new(Some(tr(Key::ChangesEmptyHint)));
         session_meta.add_css_class("caption");
         session_meta.add_css_class("dim-label");
         session_meta.set_xalign(0.0);
         session_meta.set_wrap(true);
 
-        let rollback_all_btn = gtk4::Button::with_label("回滚整次会话改动");
+        let rollback_all_btn = gtk4::Button::with_label(tr(Key::ChangesRestoreAllBtn));
         rollback_all_btn.add_css_class("destructive-action");
         rollback_all_btn.add_css_class("caption");
         rollback_all_btn.set_sensitive(false);
@@ -133,7 +134,7 @@ impl ChangesPanel {
         let entries_scroll = panel_scroll(&entries_box);
         entries_scroll.set_min_content_height(64);
 
-        let detail_title = gtk4::Label::new(Some("选择一个改动条目查看逐行 diff"));
+        let detail_title = gtk4::Label::new(Some(tr(Key::ChangesDetailPrompt)));
         detail_title.add_css_class("caption");
         detail_title.add_css_class("dim-label");
         detail_title.set_xalign(0.0);
@@ -264,7 +265,7 @@ impl ChangesPanel {
         let Some(core) = core else { return };
         let Some(vault) = vault_root.filter(|v| !v.is_empty()) else {
             inner.state.borrow_mut().sessions.clear();
-            Self::render_no_sessions(inner, "未打开知识库");
+            Self::render_no_sessions(inner, tr(Key::ChangesNoFolder));
             return;
         };
 
@@ -290,7 +291,7 @@ impl ChangesPanel {
             inner.state.borrow_mut().selected_session_id = None;
             inner.state.borrow_mut().summary = None;
             inner.state.borrow_mut().detail = None;
-            Self::render_no_sessions(inner, "当前知识库暂无 Agent 会话快照");
+            Self::render_no_sessions(inner, tr(Key::ChangesNoSnapshots));
             return;
         }
 
@@ -304,11 +305,11 @@ impl ChangesPanel {
         let labels: Vec<String> = usable_or_all
             .iter()
             .map(|s| {
-                format!(
-                    "{} · {} ({} 项)",
+                fmt3(
+                    Key::ChangesSessionOption,
                     short_id(&s.id),
                     state_label(&s.state),
-                    s.entries
+                    s.entries,
                 )
             })
             .collect();
@@ -332,7 +333,7 @@ impl ChangesPanel {
         inner.state.borrow_mut().suppress_combo = true;
         inner
             .session_combo
-            .set_model(Some(&gtk4::StringList::new(&["暂无会话"])));
+            .set_model(Some(&gtk4::StringList::new(&[tr(Key::ChangesNoSessions)])));
         inner.session_combo.set_selected(0);
         inner.state.borrow_mut().suppress_combo = false;
         inner.session_meta.set_text(msg);
@@ -341,7 +342,7 @@ impl ChangesPanel {
         clear_box(&inner.entries_box);
         clear_box(&inner.detail_box);
         inner.entries_box.append(&dim_label(msg));
-        inner.detail_title.set_text("本次会话改动详情");
+        inner.detail_title.set_text(tr(Key::ChangesDetailTitle));
     }
 
     fn review_selected_session(inner: &Rc<ChangesPanelInner>, session_id: &str) {
@@ -362,18 +363,18 @@ impl ChangesPanel {
         if let Some(ref info) = session_info {
             let active = matches!(info.state.as_str(), "preparing" | "running");
             inner.delete_btn.set_sensitive(!active);
-            inner.session_meta.set_text(&format!(
-                "状态：{} · 快照 {} 项",
+            inner.session_meta.set_text(&fmt2(
+                Key::ChangesSessionMeta,
                 state_label(&info.state),
-                info.entries
+                info.entries,
             ));
             if !info.usable {
                 inner.rollback_all_btn.set_sensitive(false);
                 clear_box(&inner.entries_box);
                 clear_box(&inner.detail_box);
-                inner.entries_box.append(&dim_label(&format!(
-                    "会话不可审阅（{}）",
-                    state_label(&info.state)
+                inner.entries_box.append(&dim_label(&fmt1(
+                    Key::ChangesSessionUnusable,
+                    state_label(&info.state),
                 )));
                 return;
             }
@@ -383,7 +384,7 @@ impl ChangesPanel {
         clear_box(&inner.detail_box);
         inner
             .entries_box
-            .append(&dim_label("正在后台对比本次会话改动…"));
+            .append(&dim_label(tr(Key::ChangesLoadingSummary)));
         inner.rollback_all_btn.set_sensitive(false);
 
         let weak = Rc::downgrade(inner);
@@ -407,7 +408,7 @@ impl ChangesPanel {
                     this.state.borrow_mut().last_error = Some(err.to_string());
                     clear_box(&this.entries_box);
                     this.entries_box
-                        .append(&dim_label(&format!("审阅失败：{err}")));
+                        .append(&dim_label(&fmt1(Key::ChangesReviewFailed, err)));
                 }
             }
         });
@@ -418,14 +419,14 @@ impl ChangesPanel {
         let c = &summary.counts;
         inner
             .title_lbl
-            .set_text(&format!("本次会话改动（{}）", summary.entries.len()));
-        inner.session_meta.set_text(&format!(
-            "状态：{} · +{} / ~{} / -{} / 重命名 {}",
+            .set_text(&fmt1(Key::ChangesTitleWithCount, summary.entries.len()));
+        inner.session_meta.set_text(&fmt5(
+            Key::ChangesSummaryStats,
             state_label(&summary.state),
             c.added,
             c.modified,
             c.deleted,
-            c.renamed
+            c.renamed,
         ));
         inner
             .rollback_all_btn
@@ -436,9 +437,9 @@ impl ChangesPanel {
             inner.state.borrow_mut().summary = Some(Arc::new(summary));
             inner
                 .entries_box
-                .append(&dim_label("本次会话尚未产生文件改动。"));
+                .append(&dim_label(tr(Key::ChangesNoneInSession)));
             clear_box(&inner.detail_box);
-            inner.detail_title.set_text("无改动详情");
+            inner.detail_title.set_text(tr(Key::ChangesNoDetails));
             return;
         }
 
@@ -478,7 +479,7 @@ impl ChangesPanel {
             if entry.change != "deleted" && is_note_file_name(&entry.id) {
                 let view_btn = gtk4::Button::builder()
                     .icon_name("document-open-symbolic")
-                    .tooltip_text("打开笔记")
+                    .tooltip_text(tr(Key::ChangesOpenNoteTooltip))
                     .build();
                 view_btn.add_css_class("flat");
                 let weak = Rc::downgrade(inner);
@@ -495,7 +496,7 @@ impl ChangesPanel {
 
             let rb_btn = gtk4::Button::builder()
                 .icon_name("edit-undo-symbolic")
-                .tooltip_text("回滚此文件")
+                .tooltip_text(tr(Key::ChangesRestoreFileTooltip))
                 .build();
             rb_btn.add_css_class("flat");
             let weak = Rc::downgrade(inner);
@@ -537,7 +538,9 @@ impl ChangesPanel {
             .detail_title
             .set_text(&format!("{} · {}", change_badge(&entry.change), entry.id));
         clear_box(&inner.detail_box);
-        inner.detail_box.append(&dim_label("正在加载 diff…"));
+        inner
+            .detail_box
+            .append(&dim_label(tr(Key::ChangesLoadingDetail)));
 
         let weak = Rc::downgrade(inner);
         let sid = session_id.to_string();
@@ -562,7 +565,7 @@ impl ChangesPanel {
                 Err(err) => {
                     clear_box(&this.detail_box);
                     this.detail_box
-                        .append(&dim_label(&format!("加载详情失败：{err}")));
+                        .append(&dim_label(&fmt1(Key::ChangesDetailFailed, err)));
                 }
             }
         });
@@ -696,7 +699,7 @@ impl ChangesPanel {
                 inner.state.borrow_mut().last_error = None;
                 inner.state.borrow_mut().last_rollback_report = Some("reverted".into());
                 if let Some(ref cbs) = inner.state.borrow().callbacks {
-                    (cbs.on_toast)("已安全回滚到快照内容".into());
+                    (cbs.on_toast)(tr(Key::ChangesRestoredToast).into());
                     (cbs.on_rolled_back)(affected);
                 }
                 Self::refresh_impl(inner);
@@ -705,10 +708,9 @@ impl ChangesPanel {
                 let code = err.to_string();
                 inner.state.borrow_mut().last_error = Some(code.clone());
                 let msg = if code == "history.review_stale" {
-                    "文件在审阅后已被外部修改（review_stale），已中止回滚，请先刷新审阅后再决定。"
-                        .into()
+                    tr(Key::ChangesStaleToast).into()
                 } else {
-                    format!("回滚失败：{code}")
+                    fmt1(Key::ChangesRestoreFailed, &code)
                 };
                 if let Some(ref cbs) = inner.state.borrow().callbacks {
                     (cbs.on_toast)(msg);
@@ -732,13 +734,11 @@ impl ChangesPanel {
             return;
         }
         let dialog = adw::AlertDialog::builder()
-            .heading("回滚整次会话改动？")
-            .body(format!(
-                "将按本次审阅基线回滚 {count} 个受影响条目。磁盘上已被外部修改的条目会以冲突跳过，绝不静默覆盖。"
-            ))
+            .heading(tr(Key::ChangesRestoreAllHeading))
+            .body(fmt1(Key::ChangesRestoreAllBody, count))
             .build();
-        dialog.add_response("cancel", "取消");
-        dialog.add_response("rollback", "全部回滚");
+        dialog.add_response("cancel", tr(Key::Cancel));
+        dialog.add_response("rollback", tr(Key::ChangesRestoreAllConfirm));
         dialog.set_response_appearance("rollback", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
@@ -783,7 +783,7 @@ impl ChangesPanel {
                 Err(err) => {
                     this.state.borrow_mut().last_error = Some(err.to_string());
                     if let Some(ref cbs) = this.state.borrow().callbacks {
-                        (cbs.on_toast)(format!("整会话回滚失败：{err}"));
+                        (cbs.on_toast)(fmt1(Key::ChangesSessionRestoreFailed, err));
                     }
                 }
             }
@@ -794,11 +794,11 @@ impl ChangesPanel {
         inner: &Rc<ChangesPanelInner>,
         report: SessionRollbackReportInfo,
     ) {
-        let msg = format!(
-            "回滚完成：成功 {} 项，过期冲突跳过 {} 项，失败 {} 项。",
+        let msg = fmt3(
+            Key::ChangesRestoreReportSummary,
             report.reverted_paths.len(),
             report.skipped_stale.len(),
-            report.failed.len()
+            report.failed.len(),
         );
         inner.state.borrow_mut().last_rollback_report = Some(msg.clone());
         let parent = inner
@@ -812,22 +812,22 @@ impl ChangesPanel {
         {
             let mut detail = String::from(&msg);
             if !report.skipped_stale.is_empty() {
-                detail.push_str("\n\n以下文件在审阅后已被磁盘外部修改（review_stale，已跳过）：\n");
+                detail.push_str(tr(Key::ChangesReportStaleHeader));
                 for item in &report.skipped_stale {
                     detail.push_str(&format!("· {} ({})\n", item.path, item.reason));
                 }
             }
             if !report.failed.is_empty() {
-                detail.push_str("\n以下文件回滚失败：\n");
+                detail.push_str(tr(Key::ChangesReportFailedHeader));
                 for item in &report.failed {
                     detail.push_str(&format!("· {} ({})\n", item.path, item.reason));
                 }
             }
             let alert = adw::AlertDialog::builder()
-                .heading("整会话回滚报告")
+                .heading(tr(Key::ChangesReportHeading))
                 .body(detail)
                 .build();
-            alert.add_response("ok", "知道了");
+            alert.add_response("ok", tr(Key::BtnOk));
             alert.set_default_response(Some("ok"));
             alert.present(Some(&win));
         }
@@ -855,7 +855,7 @@ impl ChangesPanel {
         };
         if active {
             if let Some(ref cbs) = inner.state.borrow().callbacks {
-                (cbs.on_toast)("运行中的 Agent 会话禁止删除快照".into());
+                (cbs.on_toast)(tr(Key::ChangesDeleteRunningBlocked).into());
             }
             return;
         }
@@ -863,11 +863,11 @@ impl ChangesPanel {
             return;
         };
         let dialog = adw::AlertDialog::builder()
-            .heading("删除本次会话快照？")
-            .body("仅删除应用数据目录中的历史快照，不会修改或删除知识库内的任何笔记文件。")
+            .heading(tr(Key::ChangesDeleteHeading))
+            .body(tr(Key::ChangesDeleteBody))
             .build();
-        dialog.add_response("cancel", "取消");
-        dialog.add_response("delete", "删除快照");
+        dialog.add_response("cancel", tr(Key::Cancel));
+        dialog.add_response("delete", tr(Key::ChangesDeleteConfirm));
         dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
@@ -900,14 +900,14 @@ impl ChangesPanel {
                 Ok(()) => {
                     this.state.borrow_mut().selected_session_id = None;
                     if let Some(ref cbs) = this.state.borrow().callbacks {
-                        (cbs.on_toast)("已删除会话快照（知识库文件未受影响）".into());
+                        (cbs.on_toast)(tr(Key::ChangesDeletedToast).into());
                     }
                     Self::refresh_impl(&this);
                 }
                 Err(err) => {
                     this.state.borrow_mut().last_error = Some(err.to_string());
                     if let Some(ref cbs) = this.state.borrow().callbacks {
-                        (cbs.on_toast)(format!("删除快照失败：{err}"));
+                        (cbs.on_toast)(fmt1(Key::ChangesDeleteFailed, err));
                     }
                 }
             }
@@ -1006,25 +1006,25 @@ fn short_id(id: &str) -> &str {
 
 fn state_label(state: &str) -> &'static str {
     match state {
-        "preparing" => "准备快照",
-        "ready" => "已就绪",
-        "running" => "运行中",
-        "exited" => "已退出",
-        "interrupted" => "已中断",
-        "cancelled" => "已取消",
-        "failed" => "失败",
-        _ => "未知",
+        "preparing" => tr(Key::StatePreparing),
+        "ready" => tr(Key::StateReady),
+        "running" => tr(Key::StateRunning),
+        "exited" => tr(Key::StateExited),
+        "interrupted" => tr(Key::StateInterrupted),
+        "cancelled" => tr(Key::StateCancelled),
+        "failed" => tr(Key::StateFailed),
+        _ => tr(Key::StateUnknown),
     }
 }
 
 fn change_badge(change: &str) -> &'static str {
     match change {
-        "added" => "新增",
-        "modified" => "修改",
-        "deleted" => "删除",
-        "renamed" => "重命名",
-        "type_changed" => "类型变化",
-        _ => "改动",
+        "added" => tr(Key::ChangeAdded),
+        "modified" => tr(Key::ChangeModified),
+        "deleted" => tr(Key::ChangeDeleted),
+        "renamed" => tr(Key::ChangeRenamed),
+        "type_changed" => tr(Key::ChangeTypeChanged),
+        _ => tr(Key::ChangeOther),
     }
 }
 

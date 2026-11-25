@@ -41,28 +41,30 @@ pub fn format_diagram_failure(err: &DiagramFailure) -> String {
     match err {
         DiagramFailure::Unsupported { diagram_type } => {
             if diagram_type.trim().is_empty() {
-                "暂不支持该 Mermaid 图表类型".into()
+                crate::i18n::tr(crate::i18n::Key::DiagramUnsupported).into()
             } else {
-                format!("暂不支持的 Mermaid 图表类型：{diagram_type}")
+                crate::i18n::fmt1(crate::i18n::Key::DiagramUnsupportedTyped, diagram_type)
             }
         }
         DiagramFailure::UnsupportedConstruct { line, kind, .. } => {
-            format!("第 {line} 行使用了暂不支持的图表语法（{kind}）")
+            crate::i18n::fmt2(crate::i18n::Key::DiagramUnsupportedConstruct, line, kind)
         }
         DiagramFailure::NotATree { multi_parent } => {
             if multi_parent.is_empty() {
-                "该图表包含多父节点关系，无法折叠为树结构".into()
+                crate::i18n::tr(crate::i18n::Key::DiagramNotTree).into()
             } else {
-                format!(
-                    "节点存在多父级关系，无法转为树结构：{}",
-                    multi_parent.join(", ")
+                crate::i18n::fmt1(
+                    crate::i18n::Key::DiagramNotTreeNodes,
+                    multi_parent.join(", "),
                 )
             }
         }
         DiagramFailure::Syntax { line, kind } => {
-            format!("Mermaid 语法错误（第 {line} 行：{kind}）")
+            crate::i18n::fmt2(crate::i18n::Key::DiagramSyntaxErr, line, kind)
         }
-        DiagramFailure::Engine { kind } => format!("图表引擎内部异常：{kind}"),
+        DiagramFailure::Engine { kind } => {
+            crate::i18n::fmt1(crate::i18n::Key::DiagramEngineErr, kind)
+        }
     }
 }
 
@@ -404,10 +406,10 @@ pub fn render_scene_to_png_bytes(scene: &SceneData, scale: f64) -> Result<Vec<u8
     let px_w = (scene.width * scale).ceil().max(1.0) as i32;
     let px_h = (scene.height * scale).ceil().max(1.0) as i32;
     let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, px_w, px_h)
-        .map_err(|e| format!("创建 ImageSurface 失败：{e}"))?;
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::ExportImageFailed, e))?;
     {
-        let cr =
-            cairo::Context::new(&surface).map_err(|e| format!("创建 Cairo 上下文失败：{e}"))?;
+        let cr = cairo::Context::new(&surface)
+            .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::ExportImageFailed, e))?;
         cr.scale(scale, scale);
         draw_scene(&cr, scene, None, None);
     }
@@ -415,7 +417,7 @@ pub fn render_scene_to_png_bytes(scene: &SceneData, scale: f64) -> Result<Vec<u8
     let mut out = Cursor::new(Vec::new());
     surface
         .write_to_png(&mut out)
-        .map_err(|e| format!("编码 PNG 失败：{e}"))?;
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::ExportImageFailed, e))?;
     Ok(out.into_inner())
 }
 
@@ -424,20 +426,20 @@ pub fn render_scene_to_pdf_bytes(scene: &SceneData) -> Result<Vec<u8>, String> {
     let w = scene.width.max(1.0);
     let h = scene.height.max(1.0);
     let surface = cairo::PdfSurface::for_stream(w, h, Vec::<u8>::new())
-        .map_err(|e| format!("创建 PdfSurface 失败：{e}"))?;
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::ExportImageFailed, e))?;
     {
-        let cr =
-            cairo::Context::new(&surface).map_err(|e| format!("创建 PDF Cairo 上下文失败：{e}"))?;
+        let cr = cairo::Context::new(&surface)
+            .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::ExportImageFailed, e))?;
         draw_scene(&cr, scene, None, None);
         let _ = cr.show_page();
     }
     let stream = surface
         .finish_output_stream()
-        .map_err(|e| format!("完成 PDF 流失败：{}", e.error))?;
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::ExportImageFailed, e.error))?;
     stream
         .downcast::<Vec<u8>>()
         .map(|boxed| *boxed)
-        .map_err(|_| "PDF 输出流类型不匹配".to_string())
+        .map_err(|_| crate::i18n::fmt1(crate::i18n::Key::ExportImageFailed, "pdf stream"))
 }
 
 #[derive(Clone, Copy)]
@@ -497,22 +499,25 @@ pub fn export_diagram_to_file(
                         meta.collapsed,
                     )
                     .map_err(|e| format_diagram_failure(&e))?;
-                std::fs::write(&dest, svg.as_bytes()).map_err(|e| format!("写入文件失败：{e}"))?;
+                std::fs::write(&dest, svg.as_bytes())
+                    .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::WriteFileFailed, e))?;
                 Ok(dest)
             }
             DiagramExportKind::Png => {
                 let bytes = render_scene_to_png_bytes(&meta.scene, 2.0)?;
-                std::fs::write(&dest, &bytes).map_err(|e| format!("写入文件失败：{e}"))?;
+                std::fs::write(&dest, &bytes)
+                    .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::WriteFileFailed, e))?;
                 Ok(dest)
             }
             DiagramExportKind::Pdf => {
                 let bytes = render_scene_to_pdf_bytes(&meta.scene)?;
-                std::fs::write(&dest, &bytes).map_err(|e| format!("写入文件失败：{e}"))?;
+                std::fs::write(&dest, &bytes)
+                    .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::WriteFileFailed, e))?;
                 Ok(dest)
             }
         })
         .await
-        .unwrap_or_else(|_| Err("导出线程异常".into()));
+        .unwrap_or_else(|_| Err(crate::i18n::tr(crate::i18n::Key::ErrThread).into()));
         on_done(res);
     });
 }

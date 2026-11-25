@@ -137,37 +137,51 @@ impl CliOptions {
                     return Ok(options);
                 }
                 "--vault" => {
-                    let value = iter.next().ok_or("--vault 需要提供目录路径")?;
+                    let value = iter.next().ok_or_else(|| {
+                        crate::i18n::tr(crate::i18n::Key::CliMissingVaultArg).to_string()
+                    })?;
                     options.vault = Some(PathBuf::from(value));
                 }
                 "--open" => {
-                    let value = iter.next().ok_or("--open 需要提供笔记相对路径")?;
+                    let value = iter.next().ok_or_else(|| {
+                        crate::i18n::tr(crate::i18n::Key::CliMissingOpenArg).to_string()
+                    })?;
                     options.open_notes.push(value);
                 }
                 "--width" => {
-                    let value = iter.next().ok_or("--width 需要提供整数像素值")?;
-                    let parsed = value
-                        .parse::<i32>()
-                        .map_err(|_| format!("--width 参数无效：{value}"))?;
+                    let value = iter.next().ok_or_else(|| {
+                        crate::i18n::tr(crate::i18n::Key::CliMissingWidthArg).to_string()
+                    })?;
+                    let parsed = value.parse::<i32>().map_err(|_| {
+                        crate::i18n::fmt1(crate::i18n::Key::CliInvalidWidthArg, &value)
+                    })?;
                     if parsed < 320 {
-                        return Err(format!("--width 过小：{parsed}"));
+                        return Err(crate::i18n::fmt1(
+                            crate::i18n::Key::CliSmallWidthArg,
+                            parsed,
+                        ));
                     }
                     options.width = Some(parsed);
                 }
                 "--height" => {
-                    let value = iter.next().ok_or("--height 需要提供整数像素值")?;
-                    let parsed = value
-                        .parse::<i32>()
-                        .map_err(|_| format!("--height 参数无效：{value}"))?;
+                    let value = iter.next().ok_or_else(|| {
+                        crate::i18n::tr(crate::i18n::Key::CliMissingHeightArg).to_string()
+                    })?;
+                    let parsed = value.parse::<i32>().map_err(|_| {
+                        crate::i18n::fmt1(crate::i18n::Key::CliInvalidHeightArg, &value)
+                    })?;
                     if parsed < 240 {
-                        return Err(format!("--height 过小：{parsed}"));
+                        return Err(crate::i18n::fmt1(
+                            crate::i18n::Key::CliSmallHeightArg,
+                            parsed,
+                        ));
                     }
                     options.height = Some(parsed);
                 }
                 "--color-scheme" => {
-                    let value = iter
-                        .next()
-                        .ok_or("--color-scheme 需要提供 light|dark|system")?;
+                    let value = iter.next().ok_or_else(|| {
+                        crate::i18n::tr(crate::i18n::Key::CliMissingColorSchemeArg).to_string()
+                    })?;
                     options.color_scheme = Some(ColorSchemeChoice::parse(&value)?);
                 }
                 "--new-instance" => {
@@ -183,12 +197,12 @@ impl CliOptions {
                 "--focus-diagram" => {
                     let value = iter
                         .next()
-                        .ok_or("--focus-diagram 需要提供图块序号（从 1 开始）")?;
+                        .ok_or("--focus-diagram requires a 1-based integer")?;
                     let parsed = value
                         .parse::<u32>()
-                        .map_err(|_| format!("--focus-diagram 参数无效：{value}"))?;
+                        .map_err(|_| format!("invalid --focus-diagram value: {value}"))?;
                     if parsed == 0 {
-                        return Err("--focus-diagram 序号须 >= 1".into());
+                        return Err("--focus-diagram must be >= 1".into());
                     }
                     options.focus_diagram = Some(parsed);
                 }
@@ -196,60 +210,58 @@ impl CliOptions {
                 "--scroll-fraction" => {
                     let value = iter
                         .next()
-                        .ok_or("--scroll-fraction 需要提供 0..1 浮点数")?;
+                        .ok_or("--scroll-fraction requires a float in 0..1")?;
                     let parsed = value
                         .parse::<f64>()
-                        .map_err(|_| format!("--scroll-fraction 参数无效：{value}"))?;
+                        .map_err(|_| format!("invalid --scroll-fraction value: {value}"))?;
                     options.scroll_fraction = Some(parsed.clamp(0.0, 1.0));
                 }
                 #[cfg(feature = "automation")]
                 "--smoke-json" => {
-                    let value = iter.next().ok_or("--smoke-json 需要提供输出路径")?;
+                    let value = iter.next().ok_or("--smoke-json requires a path")?;
                     options.smoke_json = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
                 "--reading-json" => {
-                    let value = iter.next().ok_or("--reading-json 需要提供输出路径")?;
+                    let value = iter.next().ok_or("--reading-json requires a path")?;
                     options.reading_json = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
                 "--screenshot" => {
-                    let value = iter.next().ok_or("--screenshot 需要提供输出 PNG 路径")?;
+                    let value = iter.next().ok_or("--screenshot requires a PNG path")?;
                     options.screenshot = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
                 "--quit-after-ms" => {
-                    let value = iter.next().ok_or("--quit-after-ms 需要提供毫秒整数")?;
+                    let value = iter.next().ok_or("--quit-after-ms requires milliseconds")?;
                     let parsed = value
                         .parse::<u64>()
-                        .map_err(|_| format!("--quit-after-ms 参数无效：{value}"))?;
+                        .map_err(|_| format!("invalid --quit-after-ms value: {value}"))?;
                     options.quit_after_ms = Some(parsed);
                 }
                 #[cfg(feature = "automation")]
                 "--edit-knowledge-json" => {
-                    let value = iter
-                        .next()
-                        .ok_or("--edit-knowledge-json 需要提供输出路径")?;
+                    let value = iter.next().ok_or("--edit-knowledge-json requires a path")?;
                     options.edit_knowledge_json = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
                 "--edit-knowledge-scene" => {
                     let value = iter
                         .next()
-                        .ok_or("--edit-knowledge-scene 需要提供场景名称")?;
+                        .ok_or("--edit-knowledge-scene requires a scene name")?;
                     if !L2_SCENES.contains(&value.as_str()) {
-                        return Err(format!("未知的 L2 截图场景：{value}"));
+                        return Err(format!("unknown L2 scene: {value}"));
                     }
                     options.edit_knowledge_scene = Some(value);
                 }
                 #[cfg(feature = "automation")]
                 "--wikilink-json" => {
-                    let value = iter.next().ok_or("--wikilink-json 需要提供输出路径")?;
+                    let value = iter.next().ok_or("--wikilink-json requires a path")?;
                     options.wikilink_json = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
                 "--layout-width-json" => {
-                    let value = iter.next().ok_or("--layout-width-json 需要提供输出路径")?;
+                    let value = iter.next().ok_or("--layout-width-json requires a path")?;
                     options.layout_width_json = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
@@ -258,81 +270,53 @@ impl CliOptions {
                 }
                 #[cfg(feature = "automation")]
                 "--live-resize-json" => {
-                    let value = iter.next().ok_or("--live-resize-json 需要提供输出路径")?;
+                    let value = iter.next().ok_or("--live-resize-json requires a path")?;
                     options.live_resize_json = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
                 "--terminal-agent-json" => {
-                    let value = iter
-                        .next()
-                        .ok_or("--terminal-agent-json 需要提供输出路径")?;
+                    let value = iter.next().ok_or("--terminal-agent-json requires a path")?;
                     options.terminal_agent_json = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
                 "--terminal-agent-media" => {
                     let value = iter
                         .next()
-                        .ok_or("--terminal-agent-media 需要提供目录路径")?;
+                        .ok_or("--terminal-agent-media requires a directory path")?;
                     options.terminal_agent_media = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
                 "--terminal-agent-vault2" => {
                     let value = iter
                         .next()
-                        .ok_or("--terminal-agent-vault2 需要提供目录路径")?;
+                        .ok_or("--terminal-agent-vault2 requires a directory path")?;
                     options.terminal_agent_vault2 = Some(PathBuf::from(value));
                 }
                 #[cfg(feature = "automation")]
                 "--restore-session-json" => {
                     let value = iter
                         .next()
-                        .ok_or("--restore-session-json 需要提供输出路径")?;
+                        .ok_or("--restore-session-json requires a path")?;
                     options.restore_session_json = Some(PathBuf::from(value));
                 }
-                other => return Err(format!("未知参数：{other}")),
+                other => return Err(crate::i18n::fmt1(crate::i18n::Key::CliUnknownArg, other)),
             }
         }
         Ok(options)
     }
 
-    pub fn usage() -> &'static str {
+    pub fn usage() -> String {
         #[cfg(feature = "automation")]
         {
-            "用法：hortus-gtk [选项]
-  --vault <目录>             启动时直接打开指定知识库
-  --open <相对路径>          初始打开指定笔记（可多次传入）
-  --width <像素>             指定窗口初始宽度
-  --height <像素>            指定窗口初始高度
-  --color-scheme <模式>      主题：light | dark | system
-  --new-instance             启动独立新进程实例
-  --overview                 初始打开 AdwTabOverview 标签全景网格
-  --hide-top-bar             初始隐藏顶栏
-  --edit                     打开首篇笔记后切入编辑模式
-  --focus-diagram <序号>     打开首篇笔记后进入指定图表专注模式
-  --scroll-fraction <比例>   截图或导出前滚动到指定纵向比例 (0..1)
-  --smoke-json <路径>        运行 L0 行为自检并导出 JSON 后退出
-  --reading-json <路径>      运行 L1 阅读态与场景完整自检并导出 JSON 后退出
-  --edit-knowledge-json <路径>
-                             运行 L2 编辑/保存/知识导航/文件管理自检并导出 JSON 后退出
-  --wikilink-json <路径>      运行阅读视图双链真实点击回归并导出 JSON 后退出
-  --layout-width-json <路径>  测量阅读视图图表/表格/图片实际宽与侧栏重排并导出 JSON 后退出
-  --layout-hide-sidebars      宽度适配回归后在测量前收起左右侧栏
-  --live-resize-json <路径>   运行真实窗口动态缩放自检并导出 JSON 后退出
-  --edit-knowledge-scene <场景>
-                             L2 界面截图场景：search-backlinks | tags | quick-open |
-                             edit-find-completion | rename-links
-  --screenshot <路径>        渲染完成后导出窗口 PNG 截图后退出
-  --quit-after-ms <毫秒>     到达延迟后退出"
+            format!(
+                "{}{}",
+                crate::i18n::tr(crate::i18n::Key::CliUsageProd),
+                crate::i18n::tr(crate::i18n::Key::CliUsageAutoSuffix)
+            )
         }
         #[cfg(not(feature = "automation"))]
         {
-            "用法：hortus-gtk [选项]
-  --vault <目录>             启动时直接打开指定知识库
-  --open <相对路径>          初始打开指定笔记（可多次传入）
-  --width <像素>             指定窗口初始宽度
-  --height <像素>            指定窗口初始高度
-  --color-scheme <模式>      主题：light | dark | system
-  --new-instance             启动独立新进程实例"
+            crate::i18n::tr(crate::i18n::Key::CliUsageProd).to_string()
         }
     }
 }

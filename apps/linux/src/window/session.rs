@@ -126,7 +126,7 @@ impl WindowInner {
             .application()
             .and_then(|a| a.downcast::<adw::Application>().ok())
         else {
-            self.show_toast("无法获取应用实例以打开新窗口");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastCannotOpenNewWindow));
             return None;
         };
         let (services, vault_root) = {

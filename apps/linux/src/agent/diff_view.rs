@@ -4,6 +4,7 @@
 
 //! 逐行 Unified Diff 渲染控件：原生着色 hunk 头与增删行，支持单 hunk 回滚。
 
+use crate::i18n::{Key, fmt2, tr};
 use gtk4::prelude::*;
 use hortus_ffi::{ReviewDiffHunk, ReviewEntryDetail};
 use std::rc::Rc;
@@ -20,9 +21,7 @@ pub fn render_entry_detail(
     if detail.binary {
         let before_sz = detail.entry.before.as_ref().map(|m| m.size).unwrap_or(0);
         let after_sz = detail.entry.after.as_ref().map(|m| m.size).unwrap_or(0);
-        let msg = gtk4::Label::new(Some(&format!(
-            "二进制文件（快照：{before_sz} B → 当前：{after_sz} B），不支持逐行 diff，可整文件回滚。"
-        )));
+        let msg = gtk4::Label::new(Some(&fmt2(Key::DiffBinaryMsg, before_sz, after_sz)));
         msg.add_css_class("dim-label");
         msg.add_css_class("caption");
         msg.set_wrap(true);
@@ -32,7 +31,7 @@ pub fn render_entry_detail(
     }
 
     if detail.large {
-        let msg = gtk4::Label::new(Some("文件过大（>4 MiB），已跳过逐行 diff，可整文件回滚。"));
+        let msg = gtk4::Label::new(Some(tr(Key::DiffLargeMsg)));
         msg.add_css_class("dim-label");
         msg.add_css_class("caption");
         msg.set_wrap(true);
@@ -42,6 +41,7 @@ pub fn render_entry_detail(
     }
 
     if !detail.text {
+        let none_lbl = tr(Key::DiffNoneLabel).to_string();
         let before_kind = detail
             .entry
             .before
@@ -56,7 +56,7 @@ pub fn render_entry_detail(
                         .unwrap_or_default()
                 )
             })
-            .unwrap_or_else(|| "无".into());
+            .unwrap_or_else(|| none_lbl.clone());
         let after_kind = detail
             .entry
             .after
@@ -71,10 +71,8 @@ pub fn render_entry_detail(
                         .unwrap_or_default()
                 )
             })
-            .unwrap_or_else(|| "无".into());
-        let msg = gtk4::Label::new(Some(&format!(
-            "非文本条目（快照：{before_kind} → 当前：{after_kind}）。"
-        )));
+            .unwrap_or(none_lbl);
+        let msg = gtk4::Label::new(Some(&fmt2(Key::DiffNonTextMsg, before_kind, after_kind)));
         msg.add_css_class("dim-label");
         msg.add_css_class("caption");
         msg.set_wrap(true);
@@ -85,9 +83,9 @@ pub fn render_entry_detail(
 
     if detail.content_identical || detail.hunks.is_empty() {
         let msg = gtk4::Label::new(Some(if detail.content_identical {
-            "文件内容未变化（仅路径或权限变化）。"
+            tr(Key::DiffIdenticalContent)
         } else {
-            "无文本行差异。"
+            tr(Key::DiffNoTextChanges)
         }));
         msg.add_css_class("dim-label");
         msg.add_css_class("caption");
@@ -112,7 +110,7 @@ pub fn render_entry_detail(
         header_row.append(&header_lbl);
 
         if can_hunk_rollback {
-            let rb_btn = gtk4::Button::with_label("回滚此处");
+            let rb_btn = gtk4::Button::with_label(tr(Key::DiffRestoreSectionBtn));
             rb_btn.add_css_class("flat");
             rb_btn.add_css_class("caption");
             let hunk_clone = hunk.clone();

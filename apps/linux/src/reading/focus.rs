@@ -122,7 +122,7 @@ impl FocusController {
         let bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         bar.add_css_class("hortus-focus-bar");
 
-        let title_label = gtk4::Label::new(Some("图表专注模式"));
+        let title_label = gtk4::Label::new(Some(crate::i18n::tr(crate::i18n::Key::FocusTitle)));
         title_label.add_css_class("heading");
         title_label.set_margin_start(6);
 
@@ -133,22 +133,22 @@ impl FocusController {
 
         let zoom_out_btn = gtk4::Button::builder()
             .icon_name("zoom-out-symbolic")
-            .tooltip_text("缩小 (Ctrl+-)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::FocusZoomOutTooltip))
             .build();
         zoom_out_btn.add_css_class("flat");
 
         let zoom_in_btn = gtk4::Button::builder()
             .icon_name("zoom-in-symbolic")
-            .tooltip_text("放大 (Ctrl+=)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::FocusZoomInTooltip))
             .build();
         zoom_in_btn.add_css_class("flat");
 
-        let fit_btn = gtk4::Button::with_label("适应");
-        fit_btn.set_tooltip_text(Some("适应画布 (Ctrl+0)"));
+        let fit_btn = gtk4::Button::with_label(crate::i18n::tr(crate::i18n::Key::FocusFitBtn));
+        fit_btn.set_tooltip_text(Some(crate::i18n::tr(crate::i18n::Key::FocusFitTooltip)));
         fit_btn.add_css_class("flat");
 
         let actual_btn = gtk4::Button::with_label("100%");
-        actual_btn.set_tooltip_text(Some("实际大小 100% (Ctrl+1)"));
+        actual_btn.set_tooltip_text(Some(crate::i18n::tr(crate::i18n::Key::FocusActualTooltip)));
         actual_btn.add_css_class("flat");
 
         let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
@@ -163,14 +163,14 @@ impl FocusController {
         export_popover.set_child(Some(&export_menu));
 
         let export_btn = gtk4::MenuButton::builder()
-            .label("导出")
+            .label(crate::i18n::tr(crate::i18n::Key::FocusExportBtn))
             .popover(&export_popover)
             .build();
         export_btn.add_css_class("flat");
 
         let close_btn = gtk4::Button::builder()
             .icon_name("window-close-symbolic")
-            .tooltip_text("退出专注模式 (Esc / Ctrl+Shift+D)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::FocusExitTooltip))
             .build();
         close_btn.add_css_class("flat");
         close_btn.add_css_class("circular");
@@ -225,9 +225,18 @@ impl FocusController {
         close_btn: &gtk4::Button,
     ) {
         for (label, kind) in [
-            ("导出 SVG…", DiagramExportKind::Svg),
-            ("导出 PNG (2x)…", DiagramExportKind::Png),
-            ("导出 PDF…", DiagramExportKind::Pdf),
+            (
+                crate::i18n::tr(crate::i18n::Key::ExportMenuSvg),
+                DiagramExportKind::Svg,
+            ),
+            (
+                crate::i18n::tr(crate::i18n::Key::ExportMenuPng),
+                DiagramExportKind::Png,
+            ),
+            (
+                crate::i18n::tr(crate::i18n::Key::ExportMenuPdf),
+                DiagramExportKind::Pdf,
+            ),
         ] {
             let item_btn = gtk4::Button::with_label(label);
             item_btn.add_css_class("flat");

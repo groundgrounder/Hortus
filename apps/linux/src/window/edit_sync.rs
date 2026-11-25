@@ -392,7 +392,7 @@ impl WindowInner {
 
     pub fn find_open(&self, replace: bool) {
         let Some(path) = self.active_tab_path() else {
-            self.show_toast("请先打开一篇笔记");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastNoNoteOpen));
             return;
         };
         let (editing, find, edit_view, edit_buffer, reading) = {
@@ -415,7 +415,7 @@ impl WindowInner {
             find.bind_reading(&surface);
             find.open(false);
         } else {
-            self.show_toast("当前阅读页面尚未完成装载");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastReadingNotReady));
         }
     }
 
@@ -466,7 +466,9 @@ impl WindowInner {
             )
         };
         if !editing {
-            self.show_toast("请先按 Ctrl+E 切换到源码编辑态后再对齐表格");
+            self.show_toast(crate::i18n::tr(
+                crate::i18n::Key::ToastAlignTableRequiresEdit,
+            ));
             return;
         }
         let Some(session) = session else { return };

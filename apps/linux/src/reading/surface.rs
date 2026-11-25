@@ -563,7 +563,7 @@ pub fn build_reading_surface(
                 source_start: 0,
                 source_end: prepared.source_text.len() as u64,
                 scene: None,
-                failure: Some("未生成 Mermaid 图表场景".into()),
+                failure: Some(crate::i18n::tr(crate::i18n::Key::DiagramNotReady).into()),
                 collapsed: Vec::new(),
                 previous: None,
             });

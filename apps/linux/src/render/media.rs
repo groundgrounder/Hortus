@@ -337,7 +337,9 @@ pub fn build_image_widget(
 
     if media.reason == "image.remote" {
         let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        let hint = gtk4::Label::new(Some("出于隐私与安全策略，阅读视图不自动请求远程图片"));
+        let hint = gtk4::Label::new(Some(crate::i18n::tr(
+            crate::i18n::Key::MediaRemoteNotLoaded,
+        )));
         hint.add_css_class("dim-label");
         hint.add_css_class("caption");
         let open_btn = gtk4::Button::with_label(&block.image_target);
@@ -357,10 +359,10 @@ pub fn build_image_widget(
         card.append(&open_btn);
     } else {
         let reason_text = match media.reason.as_str() {
-            "image.missing" => "本地图片文件不存在",
-            "image.outside" => "图片路径位于当前知识库外部，已阻止访问",
-            "image.svg_unsupported" => "SVG 文件格式不支持或无法解析",
-            "image.decode_failed" => "图片解码失败",
+            "image.missing" => crate::i18n::tr(crate::i18n::Key::MediaMissing),
+            "image.outside" => crate::i18n::tr(crate::i18n::Key::MediaOutside),
+            "image.svg_unsupported" => crate::i18n::tr(crate::i18n::Key::MediaSvgUnsupported),
+            "image.decode_failed" => crate::i18n::tr(crate::i18n::Key::MediaDecodeFailed),
             other => other,
         };
         let label = gtk4::Label::new(Some(reason_text));
@@ -556,7 +558,10 @@ pub fn build_table_widget(
                         badge.set_ellipsize(pango::EllipsizeMode::End);
                         badge.set_max_width_chars(14);
                         badge.set_tooltip_text(Some(
-                            math_item.failure.as_deref().unwrap_or("公式语法错误"),
+                            math_item
+                                .failure
+                                .as_deref()
+                                .unwrap_or(crate::i18n::tr(crate::i18n::Key::MathSyntaxInvalid)),
                         ));
                         badge.upcast()
                     };

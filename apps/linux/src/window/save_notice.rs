@@ -91,14 +91,12 @@ impl WindowInner {
         };
         match issue {
             DocumentIssue::Conflict => {
-                label.set_text(&format!(
-                    "外部已修改「{path}」。未保存的修改仍完整保留在内存中，请选择处理方式。"
-                ));
+                label.set_text(&crate::i18n::fmt1(crate::i18n::Key::NoticeConflict, path));
                 row.add_css_class("hortus-notice-warning");
                 let weak = Rc::downgrade(self);
                 let p = path.to_string();
                 add_button(
-                    "保留我的修改",
+                    crate::i18n::tr(crate::i18n::Key::BtnKeepMine),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
@@ -109,7 +107,7 @@ impl WindowInner {
                 let weak = Rc::downgrade(self);
                 let p = path.to_string();
                 add_button(
-                    "载入磁盘版本",
+                    crate::i18n::tr(crate::i18n::Key::BtnUseDisk),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
@@ -120,7 +118,7 @@ impl WindowInner {
                 let weak = Rc::downgrade(self);
                 let p = path.to_string();
                 add_button(
-                    "另存为冲突副本",
+                    crate::i18n::tr(crate::i18n::Key::BtnConflictCopy),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
@@ -130,14 +128,12 @@ impl WindowInner {
                 );
             }
             DocumentIssue::Missing => {
-                label.set_text(&format!(
-                    "磁盘文件已被删除或移走：「{path}」。可以重新保存到原路径，或关闭该标签页。"
-                ));
+                label.set_text(&crate::i18n::fmt1(crate::i18n::Key::NoticeMissing, path));
                 row.add_css_class("hortus-notice-error");
                 let weak = Rc::downgrade(self);
                 let p = path.to_string();
                 add_button(
-                    "重新保存到原路径",
+                    crate::i18n::tr(crate::i18n::Key::BtnRecreate),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
@@ -148,7 +144,7 @@ impl WindowInner {
                 let weak = Rc::downgrade(self);
                 let p = path.to_string();
                 add_button(
-                    "关闭标签页",
+                    crate::i18n::tr(crate::i18n::Key::BtnCloseTab),
                     true,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
@@ -158,12 +154,12 @@ impl WindowInner {
                 );
             }
             DocumentIssue::Recovery => {
-                label.set_text(&format!("发现上次未保存的恢复稿：「{path}」。"));
+                label.set_text(&crate::i18n::fmt1(crate::i18n::Key::NoticeRecovery, path));
                 row.add_css_class("hortus-notice-warning");
                 let weak = Rc::downgrade(self);
                 let p = path.to_string();
                 add_button(
-                    "恢复草稿",
+                    crate::i18n::tr(crate::i18n::Key::BtnRestoreDraft),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
@@ -174,7 +170,7 @@ impl WindowInner {
                 let weak = Rc::downgrade(self);
                 let p = path.to_string();
                 add_button(
-                    "丢弃恢复稿",
+                    crate::i18n::tr(crate::i18n::Key::BtnDiscardDraft),
                     true,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
@@ -185,20 +181,24 @@ impl WindowInner {
             }
             DocumentIssue::SaveFailed => {
                 let detail = match message.as_str() {
-                    "document.save_failed" => "磁盘写入失败".to_string(),
-                    "readonly.no_write_permission" => "笔记或目录没有写权限".to_string(),
-                    "readonly.invalid_utf8" => "文件不是有效的 UTF-8 文本".to_string(),
-                    "" => "未知原因".to_string(),
-                    other => other.to_string(),
+                    "document.save_failed" => crate::i18n::tr(crate::i18n::Key::SaveErrWrite),
+                    "readonly.no_write_permission" => {
+                        crate::i18n::tr(crate::i18n::Key::SaveErrPermission)
+                    }
+                    "readonly.invalid_utf8" => crate::i18n::tr(crate::i18n::Key::SaveErrUtf8),
+                    "" => crate::i18n::tr(crate::i18n::Key::SaveErrUnknown),
+                    other => other,
                 };
-                label.set_text(&format!(
-                    "保存失败：「{path}」（{detail}）。修改仍保留在内存中。"
+                label.set_text(&crate::i18n::fmt2(
+                    crate::i18n::Key::NoticeSaveFailed,
+                    path,
+                    detail,
                 ));
                 row.add_css_class("hortus-notice-error");
                 let weak = Rc::downgrade(self);
                 let p = path.to_string();
                 add_button(
-                    "重试",
+                    crate::i18n::tr(crate::i18n::Key::BtnRetry),
                     false,
                     Box::new(move || {
                         if let Some(win) = weak.upgrade() {
@@ -300,9 +300,12 @@ impl WindowInner {
             handle.upsert_note_content(path.to_string(), saved_text);
         }
         if let Some(copy) = update.copy_path.clone() {
-            self.show_toast(&format!("已另存为冲突副本：{copy}"));
+            self.show_toast(&crate::i18n::fmt1(
+                crate::i18n::Key::ToastConflictCopySaved,
+                copy,
+            ));
         } else if announce && saved_clean {
-            self.show_toast("已保存");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSaved));
         }
         self.update_tab_title(path);
         self.update_tab_notice(path);
@@ -397,13 +400,17 @@ impl WindowInner {
 
     fn ask_unsaved_close(self: &Rc<Self>, page: &adw::TabPage, path: &str) {
         let dialog = adw::AlertDialog::builder()
-            .heading("有未保存的修改")
-            .body(format!(
-                "「{path}」未能保存到磁盘（可能已被外部修改或路径不可写）。仍要关闭标签页吗？"
+            .heading(crate::i18n::tr(crate::i18n::Key::UnsavedHeading))
+            .body(crate::i18n::fmt1(
+                crate::i18n::Key::UnsavedTabCloseBody,
+                path,
             ))
             .build();
-        dialog.add_response("cancel", "取消");
-        dialog.add_response("close", "放弃修改并关闭");
+        dialog.add_response("cancel", crate::i18n::tr(crate::i18n::Key::Cancel));
+        dialog.add_response(
+            "close",
+            crate::i18n::tr(crate::i18n::Key::BtnDiscardAndClose),
+        );
         dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
@@ -446,10 +453,13 @@ impl WindowInner {
             match result {
                 Ok(Ok(_)) => {
                     win.reload_tab_from_session(&path, true);
-                    win.show_toast("已载入磁盘版本");
+                    win.show_toast(crate::i18n::tr(crate::i18n::Key::ToastLoadedDisk));
                 }
-                Ok(Err(err)) => win.show_toast(&format!("载入磁盘版本失败：{err}")),
-                Err(_) => win.show_toast("载入磁盘版本线程异常"),
+                Ok(Err(err)) => win.show_toast(&crate::i18n::fmt1(
+                    crate::i18n::Key::ToastLoadDiskFailed,
+                    err,
+                )),
+                Err(_) => win.show_toast(crate::i18n::tr(crate::i18n::Key::ErrThread)),
             }
         });
     }
@@ -469,13 +479,16 @@ impl WindowInner {
                 Ok(Ok(_)) => {
                     win.reload_tab_from_session(&path, false);
                     win.show_toast(if restore {
-                        "已恢复未保存草稿"
+                        crate::i18n::tr(crate::i18n::Key::ToastDraftRestored)
                     } else {
-                        "已丢弃恢复草稿"
+                        crate::i18n::tr(crate::i18n::Key::ToastDraftDiscarded)
                     });
                 }
-                Ok(Err(err)) => win.show_toast(&short_error("处理恢复稿失败", &err.to_string())),
-                Err(_) => win.show_toast("处理恢复稿线程异常"),
+                Ok(Err(err)) => win.show_toast(&short_error(
+                    crate::i18n::tr(crate::i18n::Key::ToastDraftFailed),
+                    &err.to_string(),
+                )),
+                Err(_) => win.show_toast(crate::i18n::tr(crate::i18n::Key::ErrThread)),
             }
         });
     }
@@ -643,10 +656,17 @@ impl WindowInner {
                             match accepted {
                                 Ok(Ok(_)) => {
                                     win.reload_tab_from_session(&path, true);
-                                    win.show_toast("检测到外部修改并已刷新");
+                                    win.show_toast(crate::i18n::tr(
+                                        crate::i18n::Key::ToastExternalRefreshed,
+                                    ));
                                 }
-                                Ok(Err(err)) => win.show_toast(&format!("刷新笔记失败：{err}")),
-                                Err(_) => win.show_toast("刷新笔记线程异常"),
+                                Ok(Err(err)) => win.show_toast(&crate::i18n::fmt1(
+                                    crate::i18n::Key::ToastRefreshFailed,
+                                    err,
+                                )),
+                                Err(_) => {
+                                    win.show_toast(crate::i18n::tr(crate::i18n::Key::ErrThread))
+                                }
                             }
                         }
                     } else {

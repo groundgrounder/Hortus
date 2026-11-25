@@ -161,7 +161,7 @@ pub fn build_diagram_card(
                 &source,
                 initial.source_start,
                 initial.source_end,
-                "图表场景为空",
+                crate::i18n::tr(crate::i18n::Key::DiagramEmptyScene),
                 content_width,
             ),
             state: None,
@@ -235,13 +235,19 @@ pub fn build_diagram_card(
                 .set_cursor_from_name(if pointer { Some("pointer") } else { None });
             if let Some(ref hit) = found {
                 let tip = if let Some(ref target) = hit.link_target {
-                    Some(format!("打开笔记：{target}"))
+                    Some(crate::i18n::fmt1(
+                        crate::i18n::Key::DiagramOpenNoteTooltip,
+                        target,
+                    ))
                 } else if hit.can_collapse {
-                    Some(if hit.collapsed {
-                        "点击展开分支".to_string()
-                    } else {
-                        "点击折叠分支".to_string()
-                    })
+                    Some(
+                        if hit.collapsed {
+                            crate::i18n::tr(crate::i18n::Key::DiagramExpandTooltip)
+                        } else {
+                            crate::i18n::tr(crate::i18n::Key::DiagramCollapseTooltip)
+                        }
+                        .to_string(),
+                    )
                 } else {
                     None
                 };
@@ -368,7 +374,7 @@ pub fn build_diagram_card(
 
     let focus_btn = gtk4::Button::builder()
         .icon_name("view-fullscreen-symbolic")
-        .tooltip_text("专注查看图表 (Ctrl+Shift+D)")
+        .tooltip_text(crate::i18n::tr(crate::i18n::Key::DiagramFocusBtnTooltip))
         .build();
     focus_btn.add_css_class("flat");
     focus_btn.add_css_class("circular");
@@ -388,9 +394,18 @@ pub fn build_diagram_card(
     export_list.set_margin_start(4);
     export_list.set_margin_end(4);
     for (label, kind) in [
-        ("导出为 SVG…", DiagramExportKind::Svg),
-        ("导出为 PNG (2x)…", DiagramExportKind::Png),
-        ("导出为 PDF…", DiagramExportKind::Pdf),
+        (
+            crate::i18n::tr(crate::i18n::Key::ExportMenuSvg),
+            DiagramExportKind::Svg,
+        ),
+        (
+            crate::i18n::tr(crate::i18n::Key::ExportMenuPng),
+            DiagramExportKind::Png,
+        ),
+        (
+            crate::i18n::tr(crate::i18n::Key::ExportMenuPdf),
+            DiagramExportKind::Pdf,
+        ),
     ] {
         let btn = gtk4::Button::with_label(label);
         btn.add_css_class("flat");
@@ -417,7 +432,7 @@ pub fn build_diagram_card(
 
     let export_btn = gtk4::MenuButton::builder()
         .icon_name("document-save-symbolic")
-        .tooltip_text("导出图表 (SVG / PNG / PDF)")
+        .tooltip_text(crate::i18n::tr(crate::i18n::Key::DiagramExportBtnTooltip))
         .popover(&export_popover)
         .build();
     export_btn.add_css_class("flat");

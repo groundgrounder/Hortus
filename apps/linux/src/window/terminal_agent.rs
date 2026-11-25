@@ -138,13 +138,13 @@ impl WindowInner {
 
     pub fn send_path_to_terminal(self: &Rc<Self>) {
         let Some(relpath) = self.active_tab_path() else {
-            self.show_toast("请先打开一篇笔记后再发送路径到终端");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSendPathNoNote));
             return;
         };
         let fallback = self.tool_dock.preferred_terminal_region();
         let (_id, region, quoted) = self.terminal_host.send_note_path(&relpath, fallback);
         self.set_region_revealed(region, true);
-        self.show_toast(&format!("已发送笔记路径到终端：{quoted}"));
+        self.show_toast(&crate::i18n::fmt1(crate::i18n::Key::ToastSentPath, quoted));
     }
 
     pub fn active_note_selection(&self) -> Option<String> {
@@ -176,15 +176,15 @@ impl WindowInner {
 
     pub fn send_selection_to_terminal(self: &Rc<Self>) {
         let Some(text) = self.active_note_selection() else {
-            self.show_toast("请先选中笔记文本后再发送到终端");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSendSelEmpty));
             return;
         };
         let fallback = self.tool_dock.preferred_terminal_region();
         if let Some((_id, region, _)) = self.terminal_host.send_selection(&text, fallback) {
             self.set_region_revealed(region, true);
-            self.show_toast("已安全发送选中文本到终端");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSentSelection));
         } else {
-            self.show_toast("当前选区仅含控制字符，已忽略发送");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSelControlOnly));
         }
     }
 
@@ -199,7 +199,7 @@ impl WindowInner {
             (st.services.clone(), st.login_path.clone())
         };
         let Some(services) = services else {
-            self.show_toast("内核尚未就绪");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastCoreNotReady));
             return;
         };
         let weak_toast = Rc::downgrade(self);
@@ -257,7 +257,7 @@ impl WindowInner {
             (st.services.clone(), st.login_path.clone())
         };
         let Some(services) = services else {
-            self.show_toast("内核尚未就绪");
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastCoreNotReady));
             return None;
         };
         let scheme = match adw::StyleManager::default().color_scheme() {
@@ -319,9 +319,7 @@ impl WindowInner {
             }
             win.changes_panel.refresh();
             win.refresh_vault_tabs_and_broadcast();
-            win.show_toast(&format!(
-                "Agent 已退出（状态码 {code}）：可在「本次会话改动」查看 diff 或按需回滚"
-            ));
+            win.show_toast(&crate::i18n::fmt1(crate::i18n::Key::ToastAgentExited, code));
         });
     }
 

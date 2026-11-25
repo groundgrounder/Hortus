@@ -4,6 +4,7 @@
 
 //! 全文搜索面板：后台异步查询、输入防抖、并发取消与弱引用解环（G-07 / C-06 修复）。
 
+use crate::i18n::{Key, fmt2, fmt4, tr};
 use crate::knowledge::widgets::{
     OpenNoteCallback, clear_box, entry_row, panel_scroll, snippet_markup,
 };
@@ -69,12 +70,12 @@ impl SearchPanel {
         let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         header.add_css_class("hortus-panel-header");
         let entry = gtk4::SearchEntry::builder()
-            .placeholder_text("全文搜索（Ctrl+Shift+F）")
+            .placeholder_text(tr(Key::SearchPlaceholder))
             .hexpand(true)
             .build();
         header.append(&entry);
 
-        let status = gtk4::Label::new(Some("输入关键字开始搜索"));
+        let status = gtk4::Label::new(Some(tr(Key::SearchPrompt)));
         status.add_css_class("dim-label");
         status.add_css_class("caption");
         status.set_xalign(0.0);
@@ -198,7 +199,7 @@ impl SearchPanel {
 
         if query.trim().is_empty() {
             clear_box(&inner.list);
-            inner.status.set_label("输入关键字开始搜索");
+            inner.status.set_label(tr(Key::SearchPrompt));
             let mut st = inner.state.borrow_mut();
             st.group_buttons.clear();
             st.groups = 0;
@@ -208,7 +209,7 @@ impl SearchPanel {
         }
 
         if !immediate {
-            inner.status.set_label("正在搜索…");
+            inner.status.set_label(tr(Key::SearchInProgress));
         }
 
         let weak = Rc::downgrade(inner);
@@ -268,9 +269,12 @@ impl SearchPanel {
         inner.state.borrow_mut().group_buttons.clear();
         let total: usize = results.iter().map(|r| r.matches.len()).sum();
         let total_count: u64 = results.iter().map(|r| u64::from(r.count)).sum();
-        inner.status.set_label(&format!(
-            "「{query}」：{} 篇笔记，{total} 处匹配（共 {total_count} 处）",
-            results.len()
+        inner.status.set_label(&fmt4(
+            Key::SearchResultsSummary,
+            query,
+            results.len(),
+            total,
+            total_count,
         ));
 
         for result in results {
@@ -278,7 +282,7 @@ impl SearchPanel {
             let header = entry_row(
                 &result.title,
                 None,
-                Some(&format!("{} · {} 处匹配", result.path, result.count)),
+                Some(&fmt2(Key::SearchResultMeta, &result.path, result.count)),
             );
             let header_btn = gtk4::Button::builder()
                 .child(&header)

@@ -104,49 +104,49 @@ impl HortusWindow {
 
         let left_toggle = gtk4::ToggleButton::builder()
             .icon_name("sidebar-show-symbolic")
-            .tooltip_text("切换左侧栏 (Ctrl+Shift+S)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipToggleLeftSidebar))
             .active(true)
             .build();
         let open_vault_btn = gtk4::Button::builder()
             .icon_name("folder-open-symbolic")
-            .label("打开知识库")
-            .tooltip_text("打开知识库文件夹 (Ctrl+O)")
+            .label(crate::i18n::tr(crate::i18n::Key::OpenFolderBtn))
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipOpenFolder))
             .action_name("win.open-vault")
             .build();
         open_vault_btn.add_css_class("flat");
         header_bar.pack_start(&left_toggle);
         header_bar.pack_start(&open_vault_btn);
 
-        let edit_badge = gtk4::Label::new(Some("源码编辑 · Ctrl+S 保存"));
+        let edit_badge = gtk4::Label::new(Some(crate::i18n::tr(crate::i18n::Key::EditBadge)));
         edit_badge.add_css_class("hortus-mode-badge");
         edit_badge.set_visible(false);
 
         let mode_toggle_btn = gtk4::Button::builder()
             .icon_name("document-edit-symbolic")
-            .tooltip_text("切换阅读 / 源码编辑视图 (Ctrl+E)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipToggleEditMode))
             .action_name("win.toggle-edit-mode")
             .build();
         mode_toggle_btn.add_css_class("flat");
 
         let menu_button = gtk4::MenuButton::builder()
             .icon_name("open-menu-symbolic")
-            .tooltip_text("主菜单")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipMainMenu))
             .primary(true)
             .menu_model(&build_primary_menu())
             .build();
         let bottom_toggle = gtk4::ToggleButton::builder()
             .icon_name("utilities-terminal-symbolic")
-            .tooltip_text("切换底部面板 (Ctrl+J)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipToggleBottomPanel))
             .active(false)
             .build();
         let right_toggle = gtk4::ToggleButton::builder()
             .icon_name("sidebar-show-right-symbolic")
-            .tooltip_text("切换右侧栏 (Ctrl+Shift+I)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipToggleRightSidebar))
             .active(true)
             .build();
         let overview_btn = gtk4::Button::builder()
             .icon_name("view-grid-symbolic")
-            .tooltip_text("标签全景网格 (Ctrl+Shift+O)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipTabOverview))
             .action_name("win.toggle-tab-overview")
             .build();
 
@@ -171,20 +171,20 @@ impl HortusWindow {
         let files_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         let files_header = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
         files_header.add_css_class("hortus-panel-header");
-        let files_title = gtk4::Label::new(Some("文件"));
+        let files_title = gtk4::Label::new(Some(crate::i18n::tr(crate::i18n::Key::ToolFiles)));
         files_title.add_css_class("caption");
         files_title.add_css_class("dim-label");
         files_title.set_xalign(0.0);
         files_title.set_hexpand(true);
         let new_note_btn = gtk4::Button::builder()
             .icon_name("document-new-symbolic")
-            .tooltip_text("新建笔记 (Ctrl+N)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipNewNote))
             .action_name("win.new-note")
             .build();
         new_note_btn.add_css_class("flat");
         let new_folder_btn = gtk4::Button::builder()
             .icon_name("folder-new-symbolic")
-            .tooltip_text("新建文件夹")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipNewFolder))
             .action_name("win.new-folder")
             .build();
         new_folder_btn.add_css_class("flat");
@@ -244,7 +244,7 @@ impl HortusWindow {
         tabs_container.append(&tab_view);
 
         let open_empty_btn = gtk4::Button::builder()
-            .label("打开知识库…")
+            .label(crate::i18n::tr(crate::i18n::Key::OpenFolderEllipsis))
             .action_name("win.open-vault")
             .halign(gtk4::Align::Center)
             .build();
@@ -254,7 +254,7 @@ impl HortusWindow {
         let empty_status = adw::StatusPage::builder()
             .icon_name("accessories-text-editor-symbolic")
             .title("Hortus")
-            .description("打开知识库，开始阅读。")
+            .description(crate::i18n::tr(crate::i18n::Key::EmptyStateDescription))
             .child(&open_empty_btn)
             .vexpand(true)
             .hexpand(true)
@@ -423,7 +423,7 @@ impl HortusWindow {
         inner.init_terminal_and_changes_panels();
         inner.install_tree_context_menu();
         inner.start_disk_poll_timer();
-        inner.render_outline_empty("未打开笔记");
+        inner.render_outline_empty(crate::i18n::tr(crate::i18n::Key::NoNoteOpen));
         inner.initialize_services_async();
 
         // 由自持字段 keepalive 在窗口打开期间维持控制器存活；teardown/destroy 时置 None 解环（C-01）。
@@ -493,7 +493,11 @@ impl WindowInner {
             WindowCommand::DockMoveTab { tab_id, region } => {
                 self.tool_dock.move_tab(tab_id, region);
                 if let DockTabId::Static(tool) = tab_id {
-                    self.show_toast(&format!("已将「{}」移至{}", tool.title(), region.title()));
+                    self.show_toast(&crate::i18n::fmt2(
+                        crate::i18n::Key::ToastMovedTool,
+                        tool.title(),
+                        region.title(),
+                    ));
                 }
             }
             WindowCommand::DockCloseTab(tab_id) => self.tool_dock.close_tab(tab_id),
@@ -588,7 +592,9 @@ impl WindowInner {
             let fs = win.is_fullscreen();
             this.toolbar_view.set_reveal_top_bars(!fs);
             if fs {
-                this.show_toast("已进入全屏并隐藏顶栏，按 F11 退出全屏");
+                this.show_toast(crate::i18n::tr(
+                    crate::i18n::Key::ToastFullscreenTopBarHidden,
+                ));
             }
         });
 

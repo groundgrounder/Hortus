@@ -92,7 +92,7 @@ impl FindBar {
         let root = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
         let find_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
         let entry = gtk4::SearchEntry::builder()
-            .placeholder_text("查找 (Ctrl+F)")
+            .placeholder_text(crate::i18n::tr(crate::i18n::Key::FindPlaceholder))
             .hexpand(true)
             .build();
         let status = gtk4::Label::new(Some(""));
@@ -102,12 +102,12 @@ impl FindBar {
 
         let prev = gtk4::Button::builder()
             .icon_name("go-up-symbolic")
-            .tooltip_text("上一个匹配 (Shift+Enter)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::FindPrevTooltip))
             .build();
         prev.add_css_class("flat");
         let next = gtk4::Button::builder()
             .icon_name("go-down-symbolic")
-            .tooltip_text("下一个匹配 (Enter)")
+            .tooltip_text(crate::i18n::tr(crate::i18n::Key::FindNextTooltip))
             .build();
         next.add_css_class("flat");
 
@@ -118,12 +118,12 @@ impl FindBar {
 
         let replace_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
         let replace_entry = gtk4::Entry::builder()
-            .placeholder_text("替换为 (Ctrl+H)")
+            .placeholder_text(crate::i18n::tr(crate::i18n::Key::ReplacePlaceholder))
             .hexpand(true)
             .build();
-        let replace_one = gtk4::Button::with_label("替换");
+        let replace_one = gtk4::Button::with_label(crate::i18n::tr(crate::i18n::Key::ReplaceOne));
         replace_one.add_css_class("flat");
-        let replace_all = gtk4::Button::with_label("全部替换");
+        let replace_all = gtk4::Button::with_label(crate::i18n::tr(crate::i18n::Key::ReplaceAll));
         replace_all.add_css_class("flat");
         replace_box.append(&replace_entry);
         replace_box.append(&replace_one);
@@ -547,9 +547,11 @@ impl FindBar {
         };
         Self::highlight_and_scroll(inner);
         if matches_len == 0 {
-            inner
-                .status
-                .set_label(if is_empty_query { "" } else { "无匹配" });
+            inner.status.set_label(if is_empty_query {
+                ""
+            } else {
+                crate::i18n::tr(crate::i18n::Key::FindNoMatches)
+            });
         } else {
             inner
                 .status

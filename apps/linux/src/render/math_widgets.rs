@@ -30,7 +30,9 @@ pub fn build_display_math_widget(item: &PreparedMathBlock, max_width: f64) -> Di
         return DisplayMathBlock {
             root: build_math_fallback_widget(
                 &item.block.display_source,
-                item.failure.as_deref().unwrap_or("公式渲染失败"),
+                item.failure
+                    .as_deref()
+                    .unwrap_or(crate::i18n::tr(crate::i18n::Key::MathRenderFailed)),
                 true,
                 max_width,
             ),
@@ -217,7 +219,9 @@ pub fn build_inline_math_widget(item: &PreparedMathBlock) -> gtk4::Widget {
     let Some(ref math) = item.math else {
         return build_math_fallback_widget(
             &item.block.display_source,
-            item.failure.as_deref().unwrap_or("公式语法错误"),
+            item.failure
+                .as_deref()
+                .unwrap_or(crate::i18n::tr(crate::i18n::Key::MathSyntaxInvalid)),
             false,
             0.0,
         );

@@ -83,11 +83,13 @@ fn escape_xml_attr(s: &str) -> String {
 
 /// 在内存中解析并清洗本地 SVG：删除脚本、事件处理器与外部 URL，确保零联网加载。
 pub fn sanitize_svg_bytes(raw: &[u8]) -> Result<SvgSanitizeOutcome, String> {
-    let text = std::str::from_utf8(raw).map_err(|_| "SVG 文件非有效 UTF-8 编码".to_string())?;
-    let doc = roxmltree::Document::parse(text).map_err(|e| format!("SVG XML 解析失败：{e}"))?;
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| crate::i18n::tr(crate::i18n::Key::SvgInvalidUtf8).to_string())?;
+    let doc = roxmltree::Document::parse(text)
+        .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::SvgXmlParseFailed, e))?;
     let root = doc.root_element();
     if root.tag_name().name() != "svg" {
-        return Err("SVG 根节点不是 <svg>".into());
+        return Err(crate::i18n::tr(crate::i18n::Key::SvgMissingRoot).into());
     }
 
     let mut stripped_external_refs = 0usize;
