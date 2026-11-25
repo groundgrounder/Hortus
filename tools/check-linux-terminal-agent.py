@@ -322,6 +322,13 @@ def main() -> int:
                 for k, v in sec_val.items():
                     if isinstance(v, bool):
                         check(v is True, f"检查项 {section}.{k} 未通过: {data}")
+            for strip_key in ("left_strip_3", "right_strip_3", "bottom_strip_1", "right_strip_4"):
+                strip_val = data["dock_v3"].get(strip_key, {})
+                tabs = strip_val.get("tabs", [])
+                check(len(tabs) > 0, f"{strip_key} 缺少标签测量数据: {strip_val}")
+                for tab in tabs:
+                    check(tab.get("has_close_button") is False, f"工具标签不应存在内联关闭按钮: {tab}")
+                    check(tab.get("has_motion_controller") is False, f"工具标签不应存在悬停控制器: {tab}")
             check(
                 data["terminal"]["quoted_space_path"] == "'folder/sub note.md' ",
                 f"空格路径 shell 引用异常: {data['terminal']['quoted_space_path']}",

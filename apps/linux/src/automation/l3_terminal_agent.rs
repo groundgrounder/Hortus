@@ -2,7 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! L3 端到端自动化验证：统一单层三区工具标签栏、`+`/`×` 与无损跨区迁移、
+//! L3 端到端自动化验证：统一单层三区工具标签栏、`+` 与右键/中键关闭及无损跨区迁移、
 //! VTE4 终端安全发送、Agent 快照闸门与三级回滚、设置热重载、多窗口实时同步与会话恢复。
 
 use crate::automation::driver::{capture_widget_png, wait_for};
@@ -331,20 +331,34 @@ async fn run_suite(
     let left_3tabs_fit = left_strip_3.as_ref().is_some_and(|m| {
         m.tabs.len() == 3
             && m.strip_width > 120.0
-            && m.tabs
-                .iter()
-                .all(|t| t.fits_in_strip && !t.ellipsized && t.width > 24.0 && t.width < 140.0)
+            && m.tabs.iter().all(|t| {
+                t.fits_in_strip
+                    && !t.ellipsized
+                    && !t.has_close_button
+                    && !t.has_motion_controller
+                    && t.width > 24.0
+                    && t.width < 140.0
+            })
     });
     let right_3tabs_fit = right_strip_3.as_ref().is_some_and(|m| {
         m.tabs.len() == 3
             && m.strip_width > 120.0
-            && m.tabs
-                .iter()
-                .all(|t| t.fits_in_strip && !t.ellipsized && t.width > 24.0 && t.width < 140.0)
+            && m.tabs.iter().all(|t| {
+                t.fits_in_strip
+                    && !t.ellipsized
+                    && !t.has_close_button
+                    && !t.has_motion_controller
+                    && t.width > 24.0
+                    && t.width < 140.0
+            })
     });
-    let bottom_tab_compact = bottom_strip_1
-        .as_ref()
-        .is_some_and(|m| m.tabs.len() == 1 && m.tabs[0].fits_in_strip && m.tabs[0].width < 220.0);
+    let bottom_tab_compact = bottom_strip_1.as_ref().is_some_and(|m| {
+        m.tabs.len() == 1
+            && m.tabs[0].fits_in_strip
+            && !m.tabs[0].has_close_button
+            && !m.tabs[0].has_motion_controller
+            && m.tabs[0].width < 220.0
+    });
 
     // 截图 1 (v3): 标准宽度下左右边栏 3 标签完整显示不溢出 + 底部单层紧凑终端栏
     let shot_dynamic_sidebar = if let Some(dir) = media_dir {
@@ -477,10 +491,29 @@ async fn run_suite(
     let right_strip_4 = win.tool_dock.measure_strip_tab_bounds(PanelRegion::Right);
     let right_4tabs_fit = right_strip_4.as_ref().is_some_and(|m| {
         m.tabs.len() == 4
-            && m.tabs
-                .iter()
-                .all(|t| t.fits_in_strip && !t.ellipsized && t.width > 24.0)
+            && m.tabs.iter().all(|t| {
+                t.fits_in_strip
+                    && !t.ellipsized
+                    && !t.has_close_button
+                    && !t.has_motion_controller
+                    && t.width > 24.0
+            })
             && m.tabs.iter().any(|t| t.selected && t.label_visible)
+    });
+    let no_inline_close_buttons = [
+        &left_strip_3,
+        &right_strip_3,
+        &bottom_strip_1,
+        &right_strip_4,
+    ]
+    .into_iter()
+    .all(|strip| {
+        strip.as_ref().is_some_and(|m| {
+            !m.tabs.is_empty()
+                && m.tabs
+                    .iter()
+                    .all(|t| !t.has_close_button && !t.has_motion_controller)
+        })
     });
 
     // 截图 2 (v3): 终端停靠在右侧栏并与大纲/反链/改动同层并列、动态缩窄不溢出
@@ -543,17 +576,28 @@ async fn run_suite(
         && bottom_auto_collapsed_on_move
         && win.tool_dock.tab_region(term_tab_id) == Some(PanelRegion::Bottom);
 
-    // 测试工具栏 × 关闭与 + 菜单添加/跨区移入
+    // 测试工具栏右键「关闭标签」与 + 菜单添加/跨区移入
     let left_count_before = win.tool_dock.tab_count(PanelRegion::Left);
-    win.tool_dock
-        .close_tab(DockTabId::Static(StaticToolKind::Tags));
-    glib::timeout_future(Duration::from_millis(120)).await;
-    let left_count_after_close = win.tool_dock.tab_count(PanelRegion::Left);
-    let tags_closed = left_count_after_close + 1 == left_count_before
-        && win
-            .tool_dock
-            .static_tool_region(StaticToolKind::Tags)
-            .is_none();
+    let tags_id = DockTabId::Static(StaticToolKind::Tags);
+    let tags_ctx_opened = win.tool_dock.open_tab_context_menu(tags_id);
+    let tags_ctx_visible = wait_for(1500, || {
+        win.tool_dock
+            .active_context_menu_popover()
+            .is_some_and(|(_, p)| p.is_visible())
+    })
+    .await;
+    let tags_ctx_close_clicked = win.tool_dock.activate_context_menu_item(close_tab_lbl);
+    let tags_closed = wait_for(2000, || {
+        win.tool_dock.tab_count(PanelRegion::Left) + 1 == left_count_before
+            && win
+                .tool_dock
+                .static_tool_region(StaticToolKind::Tags)
+                .is_none()
+    })
+    .await
+        && tags_ctx_opened
+        && tags_ctx_visible
+        && tags_ctx_close_clicked;
 
     let right_add_labels = win.tool_dock.add_menu_labels(PanelRegion::Right);
     let move_files_lbl = crate::i18n::fmt1(
@@ -1139,6 +1183,7 @@ async fn run_suite(
             "right_3tabs_fit": right_3tabs_fit,
             "bottom_tab_compact": bottom_tab_compact,
             "right_4tabs_fit": right_4tabs_fit,
+            "no_inline_close_buttons": no_inline_close_buttons,
             "changes_real_context_menu_ok": changes_real_context_menu_ok,
             "changes_ctx_with_diff_ok": changes_ctx_with_diff_ok,
             "left_strip_3": left_strip_3,

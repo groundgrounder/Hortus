@@ -291,20 +291,6 @@ const BASE_CSS: &str = r#"
     font-weight: 600;
 }
 
-.hortus-tool-tab-close {
-    min-width: 14px;
-    min-height: 14px;
-    padding: 0;
-    margin: 0;
-    border-radius: 999px;
-    opacity: 0.72;
-}
-
-.hortus-tool-tab-close:hover {
-    opacity: 1.0;
-    background-color: alpha(currentColor, 0.14);
-}
-
 .hortus-tool-action-btn,
 .hortus-tool-action-btn > button,
 .hortus-tool-action-btn button {

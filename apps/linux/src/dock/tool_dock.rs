@@ -4,7 +4,7 @@
 
 //! 统一单层工具标签容器：左/右/底三区共用一套原生 GTK4 动态宽度标签条（`ToolTabStrip`）
 //! 与底层 `adw::TabView` 内容宿主；静态工具与终端/Agent 实例平级同层、支持 `+` 添加、
-//! `×` / 中键关闭、独立 PopoverMenu 右键迁移以及三区无损迁移（`transfer_page`）。
+//! 右键菜单 / 中键关闭、独立 PopoverMenu 右键迁移以及三区无损迁移（`transfer_page`）。
 
 use crate::core::{PanelRegion, StaticToolKind};
 use crate::i18n::{Key, fmt1, tr};
@@ -61,9 +61,7 @@ struct TabStripChipInner {
     center_box: gtk4::Box,
     icon: gtk4::Image,
     label: gtk4::Label,
-    close_btn: gtk4::Button,
     selected: Cell<bool>,
-    hovered: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -74,22 +72,15 @@ struct TabStripChip {
 impl TabStripChip {
     fn sync_visual(&self) {
         let selected = self.inner.selected.get();
-        let hovered = self.inner.hovered.get();
         if selected {
             self.inner.root.add_css_class("selected");
         } else {
             self.inner.root.remove_css_class("selected");
         }
-        self.inner.close_btn.set_visible(selected || hovered);
     }
 
     fn set_selected(&self, selected: bool) {
         self.inner.selected.set(selected);
-        self.sync_visual();
-    }
-
-    fn set_hovered(&self, hovered: bool) {
-        self.inner.hovered.set(hovered);
         self.sync_visual();
     }
 
@@ -192,7 +183,8 @@ pub struct TabChipBounds {
     pub height: f32,
     pub fits_in_strip: bool,
     pub selected: bool,
-    pub close_visible: bool,
+    pub has_close_button: bool,
+    pub has_motion_controller: bool,
     pub label_visible: bool,
     pub ellipsized: bool,
 }
@@ -359,7 +351,7 @@ impl ToolDock {
         title: &str,
         icon_name: &str,
     ) -> TabStripChip {
-        let root = gtk4::Box::new(gtk4::Orientation::Horizontal, 3);
+        let root = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         root.add_css_class("hortus-tool-tab");
         root.set_overflow(gtk4::Overflow::Hidden);
         root.set_valign(gtk4::Align::Fill);
@@ -385,22 +377,7 @@ impl ToolDock {
         center_box.append(&icon);
         center_box.append(&label);
 
-        let close_icon = gtk4::Image::from_icon_name("window-close-symbolic");
-        close_icon.set_pixel_size(11);
-        let close_btn = gtk4::Button::builder()
-            .tooltip_text(tr(Key::DockCloseTab))
-            .has_frame(false)
-            .focus_on_click(false)
-            .halign(gtk4::Align::End)
-            .valign(gtk4::Align::Center)
-            .child(&close_icon)
-            .build();
-        close_btn.add_css_class("flat");
-        close_btn.add_css_class("hortus-tool-tab-close");
-        close_btn.set_visible(false);
-
         root.append(&center_box);
-        root.append(&close_btn);
 
         let chip = TabStripChip {
             inner: Rc::new(TabStripChipInner {
@@ -409,49 +386,17 @@ impl ToolDock {
                 center_box,
                 icon,
                 label,
-                close_btn: close_btn.clone(),
                 selected: Cell::new(false),
-                hovered: Cell::new(false),
             }),
         };
         chip.configure_for_region(region);
 
-        // 悬停显隐 × 关闭按钮（非选中态默认隐藏 × 以节省边栏横向空间）
-        let motion = gtk4::EventControllerMotion::new();
-        {
-            let chip_weak = Rc::downgrade(&chip.inner);
-            motion.connect_enter(move |_, _, _| {
-                if let Some(ci) = chip_weak.upgrade() {
-                    TabStripChip { inner: ci }.set_hovered(true);
-                }
-            });
-        }
-        {
-            let chip_weak = Rc::downgrade(&chip.inner);
-            motion.connect_leave(move |_| {
-                if let Some(ci) = chip_weak.upgrade() {
-                    TabStripChip { inner: ci }.set_hovered(false);
-                }
-            });
-        }
-        root.add_controller(motion);
-
-        // 左键点击切换标签页
+        // 左键点击切换标签页（不注册悬停布局控制器，确保鼠标滑过标签栏纹丝不动）
         let left_click = gtk4::GestureClick::new();
         left_click.set_button(1);
         {
             let dock_weak = Rc::downgrade(inner);
-            let chip_weak = Rc::downgrade(&chip.inner);
-            left_click.connect_released(move |_, _, x, y| {
-                let Some(ci) = chip_weak.upgrade() else {
-                    return;
-                };
-                if ci.close_btn.is_visible()
-                    && let Some(cb_bounds) = ci.close_btn.compute_bounds(&ci.root)
-                    && cb_bounds.contains_point(&gtk4::graphene::Point::new(x as f32, y as f32))
-                {
-                    return;
-                }
+            left_click.connect_released(move |_, _, _, _| {
                 if let Some(this) = dock_weak.upgrade() {
                     Self::select_tab_impl(&this, tab_id);
                 }
@@ -485,16 +430,6 @@ impl ToolDock {
             });
         }
         root.add_controller(right_click);
-
-        // 点击 × 按钮关闭标签
-        {
-            let dock_weak = Rc::downgrade(inner);
-            close_btn.connect_clicked(move |_| {
-                if let Some(this) = dock_weak.upgrade() {
-                    Self::close_tab_impl(&this, tab_id);
-                }
-            });
-        }
 
         chip
     }
@@ -667,17 +602,15 @@ impl ToolDock {
                 continue;
             };
             let is_sel = selected_page.as_ref() == Some(&entry.page);
-            let show_close = entry.chip.inner.selected.get() || entry.chip.inner.hovered.get();
-            let close_w = if show_close { 20 } else { 0 };
             let layout = entry
                 .chip
                 .inner
                 .label
                 .create_pango_layout(Some(&entry.title));
             let text_w = layout.pixel_size().0 + 6;
-            // padding(16) + icon(14) + center gap(4) + close_w + border/slack(4)
-            let full_w = text_w + 16 + 14 + 4 + close_w + 4;
-            let icon_w = 16 + 14 + close_w + 2;
+            // padding(16) + icon(14) + center gap(4) + border/slack(4)
+            let full_w = text_w + 16 + 14 + 4 + 4;
+            let icon_w = 16 + 14 + 2;
             items.push(ChipMeasure {
                 chip: entry.chip.clone(),
                 selected: is_sel,
@@ -841,7 +774,9 @@ impl ToolDock {
             popover: popover.clone(),
             _menu: menu,
         });
-        popover.popup();
+        if rw.root.native().and_then(|n| n.surface()).is_some() {
+            popover.popup();
+        }
         true
     }
 
@@ -1654,7 +1589,8 @@ impl ToolDock {
                     height,
                     fits_in_strip,
                     selected: entry.chip.inner.selected.get(),
-                    close_visible: entry.chip.inner.close_btn.is_visible(),
+                    has_close_button: widget_has_button_descendant(chip_w.upcast_ref()),
+                    has_motion_controller: widget_has_motion_controller(chip_w.upcast_ref()),
                     label_visible: entry.chip.inner.label.is_visible(),
                     ellipsized: entry.chip.inner.label.ellipsize() != pango::EllipsizeMode::None,
                 });
@@ -1688,6 +1624,34 @@ impl ToolDock {
     pub fn add_button_widget(&self, region: PanelRegion) -> Option<gtk4::MenuButton> {
         self.inner.regions.get(&region).map(|rw| rw.add_btn.clone())
     }
+}
+
+#[cfg(any(test, feature = "automation"))]
+fn widget_has_button_descendant(root: &gtk4::Widget) -> bool {
+    if root.is::<gtk4::Button>() {
+        return true;
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        if widget_has_button_descendant(&c) {
+            return true;
+        }
+        child = c.next_sibling();
+    }
+    false
+}
+
+#[cfg(any(test, feature = "automation"))]
+fn widget_has_motion_controller(widget: &gtk4::Widget) -> bool {
+    let model = widget.observe_controllers();
+    for idx in 0..model.n_items() {
+        if let Some(obj) = model.item(idx)
+            && obj.is::<gtk4::EventControllerMotion>()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(feature = "automation")]
@@ -1931,14 +1895,23 @@ mod tests {
         let dock = ToolDock::new(dummy_static_widgets());
         dock.apply_default_layout();
 
-        // 选中态显示 ×，非选中态默认隐藏 × 以节省边栏横向空间
+        // 所有工具标签芯片均无内联 × 关闭按钮与悬停布局控制器，保持居中对称且悬停零位移
         let st = dock.inner.state.borrow();
         let files_entry = &st.entries[&DockTabId::Static(StaticToolKind::Files)];
         let search_entry = &st.entries[&DockTabId::Static(StaticToolKind::Search)];
         assert!(files_entry.chip.inner.selected.get());
-        assert!(files_entry.chip.inner.close_btn.is_visible());
+        assert!(files_entry.chip.widget().has_css_class("selected"));
         assert!(!search_entry.chip.inner.selected.get());
-        assert!(!search_entry.chip.inner.close_btn.is_visible());
+        assert!(!search_entry.chip.widget().has_css_class("selected"));
+        for entry in st.entries.values() {
+            assert!(!widget_has_button_descendant(
+                entry.chip.widget().upcast_ref()
+            ));
+            assert!(!widget_has_motion_controller(
+                entry.chip.widget().upcast_ref()
+            ));
+            assert_eq!(entry.chip.inner.center_box.halign(), gtk4::Align::Center);
+        }
         assert!(
             files_entry
                 .chip
