@@ -12,6 +12,7 @@ use crate::knowledge::{BacklinksPanel, QuickOpen, SearchPanel, TagsPanel};
 use crate::reading::FocusController;
 use crate::render::math::MathRenderService;
 use crate::services::AppServices;
+use crate::services::ui_prefs::load_saved_color_scheme;
 use crate::terminal::TerminalHost;
 use crate::window::actions::{apply_color_scheme, build_primary_menu};
 use crate::window::commands::WindowCommand;
@@ -32,6 +33,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn bump_next_window_id_with(counter: &AtomicU64, window_id: &str) {
+    if let Some(num) = window_id
+        .strip_prefix("win-")
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        counter.fetch_max(num.saturating_add(1), Ordering::Relaxed);
+    }
+}
+
+pub fn bump_next_window_id(window_id: &str) {
+    bump_next_window_id_with(&NEXT_WINDOW_ID, window_id);
+}
 
 pub struct WindowInner {
     pub window: adw::ApplicationWindow,
@@ -94,6 +108,8 @@ impl HortusWindow {
 
         if let Some(scheme) = options.color_scheme {
             apply_color_scheme(scheme);
+        } else if app.windows().is_empty() {
+            apply_color_scheme(load_saved_color_scheme());
         }
 
         let toast_overlay = adw::ToastOverlay::new();
@@ -340,8 +356,16 @@ impl HortusWindow {
         tab_overview.set_child(Some(&toolbar_view));
         tab_overview.set_view(Some(&tab_view));
 
+        let resize_probe = gtk4::DrawingArea::new();
+        resize_probe.set_can_target(false);
+        resize_probe.set_focusable(false);
+        resize_probe.set_hexpand(true);
+        resize_probe.set_vexpand(true);
+
         root_overlay.set_child(Some(&tab_overview));
         root_overlay.add_overlay(focus.root());
+        root_overlay.add_overlay(&resize_probe);
+        root_overlay.set_measure_overlay(&resize_probe, false);
         toast_overlay.set_child(Some(&root_overlay));
         window.set_content(Some(&toast_overlay));
 
@@ -370,9 +394,12 @@ impl HortusWindow {
             scan_micros: 0,
             pending_open_notes,
             tabs: HashMap::new(),
+            desired_left_width: DEFAULT_SIDEBAR_WIDTH,
+            desired_right_width: DEFAULT_SIDEBAR_WIDTH,
             left_sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             pending_sidebar_widths: false,
+            resize_clamp_source: None,
             bottom_revealed: false,
             bottom_height: 260.0,
             pending_bottom_position: false,
@@ -387,6 +414,7 @@ impl HortusWindow {
             pending_file_changes: Vec::new(),
             file_change_source: None,
             disk_poll_source: None,
+            disk_poll_inflight: false,
             #[cfg(feature = "automation")]
             automation_source: None,
             #[cfg(feature = "automation")]
@@ -440,6 +468,7 @@ impl HortusWindow {
 
         inner.bind_signals();
         inner.install_sidebar_resize_handlers();
+        inner.install_width_probe(&resize_probe);
         inner.apply_sidebar_widths(DEFAULT_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH);
         inner.register_actions();
         inner.init_knowledge_panels();

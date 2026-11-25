@@ -6,6 +6,7 @@ pub mod actions;
 pub mod commands;
 pub mod edit_sync;
 pub mod file_ops;
+pub mod menu;
 pub mod outline;
 pub mod reading_layout;
 pub mod save_notice;

@@ -4,16 +4,15 @@
 
 //! 窗口动作、知识面板联动、三区统一工具面板显隐及布局持久化。
 
-use crate::core::{APP_ID, APP_VERSION, ColorSchemeChoice, PanelRegion, StaticToolKind};
+use crate::core::{ColorSchemeChoice, PanelRegion, StaticToolKind};
 use crate::dock::DockTabId;
 use crate::window::commands::WindowCommand;
+pub use crate::window::menu::{apply_color_scheme, build_primary_menu, current_color_scheme};
 use crate::window::shell::WindowInner;
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
 use hortus_ffi::{SaveChoice, VaultHandle};
-use libadwaita as adw;
-use libadwaita::prelude::*;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -138,7 +137,7 @@ impl WindowInner {
         let initial_scheme = self
             .options
             .color_scheme
-            .unwrap_or(ColorSchemeChoice::System)
+            .unwrap_or_else(current_color_scheme)
             .as_str();
         let weak = Rc::downgrade(self);
         let color_action = gio::SimpleAction::new_stateful(
@@ -487,10 +486,52 @@ impl WindowInner {
         self.backlinks_panel.update(path, force);
     }
 
+    pub fn is_static_tool_visible(&self, kind: StaticToolKind) -> bool {
+        let Some(region) = self.tool_dock.static_tool_region(kind) else {
+            return false;
+        };
+        let revealed = match region {
+            PanelRegion::Left => self.left_split.shows_sidebar(),
+            PanelRegion::Right => self.right_split.shows_sidebar(),
+            PanelRegion::Bottom => self.state.borrow().bottom_revealed,
+        };
+        revealed && self.tool_dock.active_tab_in_region(region) == Some(DockTabId::Static(kind))
+    }
+
+    pub fn handle_static_tool_shown(&self, kind: StaticToolKind) {
+        match kind {
+            StaticToolKind::Changes => self.changes_panel.refresh(),
+            StaticToolKind::Tags => self.tags_panel.refresh_if_dirty(),
+            StaticToolKind::Search => self.search_panel.refresh_if_dirty(),
+            StaticToolKind::Backlinks if self.backlinks_panel.is_dirty() => {
+                self.refresh_backlinks(true);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn flush_visible_static_tool(&self, region: PanelRegion) {
+        if let Some(DockTabId::Static(kind)) = self.tool_dock.active_tab_in_region(region) {
+            self.handle_static_tool_shown(kind);
+        }
+    }
+
     pub fn refresh_knowledge_after_write(&self) {
-        self.tags_panel.refresh();
-        self.search_panel.rerun_now();
-        self.refresh_backlinks(true);
+        if self.is_static_tool_visible(StaticToolKind::Tags) {
+            self.tags_panel.refresh();
+        } else {
+            self.tags_panel.mark_dirty();
+        }
+        if self.is_static_tool_visible(StaticToolKind::Search) {
+            self.search_panel.rerun_now();
+        } else {
+            self.search_panel.mark_dirty();
+        }
+        if self.is_static_tool_visible(StaticToolKind::Backlinks) {
+            self.refresh_backlinks(true);
+        } else {
+            self.backlinks_panel.mark_dirty();
+        }
     }
 
     #[cfg(feature = "automation")]
@@ -526,10 +567,12 @@ impl WindowInner {
             if self.tool_dock.tab_count(PanelRegion::Bottom) == 0 {
                 self.terminal_host.open_shell_in_region(PanelRegion::Bottom);
             }
+            self.flush_visible_static_tool(PanelRegion::Bottom);
         } else {
             bottom_box.set_visible(false);
             self.state.borrow_mut().pending_bottom_position = false;
         }
+        self.schedule_layout_save();
     }
 
     fn apply_bottom_paned_position(self: &Rc<Self>, bottom_height: f64) {
@@ -575,13 +618,20 @@ impl WindowInner {
             return;
         };
         self.state.borrow_mut().suppressing_layout_save = true;
-        let (left_w, right_w, bottom_h) = self.tool_dock.apply_layout_state(&layout);
-        self.state.borrow_mut().bottom_height = bottom_h.clamp(120.0, 520.0);
-        self.left_split
-            .set_show_sidebar(self.tool_dock.tab_count(PanelRegion::Left) > 0);
-        self.right_split
-            .set_show_sidebar(self.tool_dock.tab_count(PanelRegion::Right) > 0);
-        self.apply_sidebar_widths(left_w, right_w);
+        let applied = self.tool_dock.apply_layout_state(&layout);
+        let left_show = applied
+            .left_visible
+            .unwrap_or_else(|| self.tool_dock.tab_count(PanelRegion::Left) > 0);
+        let right_show = applied
+            .right_visible
+            .unwrap_or_else(|| self.tool_dock.tab_count(PanelRegion::Right) > 0);
+        self.state.borrow_mut().bottom_height = applied.bottom_size.clamp(120.0, 520.0);
+        self.left_split.set_show_sidebar(left_show);
+        self.right_split.set_show_sidebar(right_show);
+        if let Some(bottom_show) = applied.bottom_visible {
+            self.set_bottom_panel_revealed(bottom_show);
+        }
+        self.apply_sidebar_widths(applied.left_size, applied.right_size);
         self.state.borrow_mut().suppressing_layout_save = false;
     }
 
@@ -606,13 +656,14 @@ impl WindowInner {
     }
 
     pub fn persist_layout_now(&self) {
-        let (core, left_w, right_w, bottom_height, suppressing) = {
+        let (core, left_w, right_w, bottom_height, bottom_visible, suppressing) = {
             let st = self.state.borrow();
             (
                 st.services.as_ref().map(|s| Arc::clone(&s.core)),
-                st.left_sidebar_width,
-                st.right_sidebar_width,
+                st.desired_left_width,
+                st.desired_right_width,
                 st.bottom_height,
+                st.bottom_revealed,
                 st.disposing || st.suppressing_layout_save,
             )
         };
@@ -620,9 +671,14 @@ impl WindowInner {
             return;
         }
         let Some(core) = core else { return };
-        let layout = self
-            .tool_dock
-            .export_layout_state(left_w, right_w, bottom_height);
+        let layout = self.tool_dock.export_layout_state(
+            left_w,
+            self.left_split.shows_sidebar(),
+            right_w,
+            self.right_split.shows_sidebar(),
+            bottom_height,
+            bottom_visible,
+        );
         if let Ok(json) = serde_json::to_string(&layout) {
             gio::spawn_blocking(move || {
                 let _ = core.save_layout(json);
@@ -645,134 +701,7 @@ impl WindowInner {
 
     pub fn apply_color_scheme_and_sync(&self, choice: ColorSchemeChoice) {
         apply_color_scheme(choice);
+        let _ = crate::services::ui_prefs::save_color_scheme(choice);
         self.sync_color_scheme_action(choice);
     }
-
-    fn show_about_dialog(&self) {
-        let dialog = adw::AboutDialog::builder()
-            .application_name("Hortus")
-            .application_icon(APP_ID)
-            .version(APP_VERSION)
-            .developer_name("groundgrounder")
-            .copyright("© 2026 groundgrounder")
-            .license_type(gtk4::License::Gpl30Only)
-            .website("https://github.com/groundgrounder/Hortus")
-            .build();
-        dialog.add_legal_section(
-            crate::i18n::tr(crate::i18n::Key::AboutThirdPartyNoticesTitle),
-            None,
-            gtk4::License::Custom,
-            Some(&gtk4::glib::markup_escape_text(crate::i18n::tr(
-                crate::i18n::Key::AboutThirdPartyNoticesSummary,
-            ))),
-        );
-        dialog.present(Some(&self.window));
-    }
-}
-
-pub fn apply_color_scheme(choice: ColorSchemeChoice) {
-    let manager = adw::StyleManager::default();
-    match choice {
-        ColorSchemeChoice::System => manager.set_color_scheme(adw::ColorScheme::Default),
-        ColorSchemeChoice::Light => manager.set_color_scheme(adw::ColorScheme::ForceLight),
-        ColorSchemeChoice::Dark => manager.set_color_scheme(adw::ColorScheme::ForceDark),
-    }
-}
-
-pub fn build_primary_menu() -> gio::Menu {
-    use crate::i18n::{Key, fmt1, tr};
-    let menu = gio::Menu::new();
-
-    let file_sec = gio::Menu::new();
-    file_sec.append(Some(tr(Key::MenuOpenFolder)), Some("win.open-vault"));
-    file_sec.append(Some(tr(Key::MenuNewWindow)), Some("win.new-window"));
-    file_sec.append(Some(tr(Key::MenuQuickOpen)), Some("win.quick-open"));
-    file_sec.append(Some(tr(Key::MenuNewNote)), Some("win.new-note"));
-    file_sec.append(Some(tr(Key::MenuNewFolder)), Some("win.new-folder"));
-    file_sec.append(Some(tr(Key::MenuRenameNote)), Some("win.rename-active"));
-    file_sec.append(Some(tr(Key::MenuSaveNote)), Some("win.save-note"));
-    file_sec.append(Some(tr(Key::MenuCopyNoteText)), Some("win.copy-note-text"));
-    file_sec.append(Some(tr(Key::MenuFindInNote)), Some("win.find-in-note"));
-    file_sec.append(
-        Some(tr(Key::MenuReplaceInNote)),
-        Some("win.replace-in-note"),
-    );
-    file_sec.append(Some(tr(Key::MenuSearchFolder)), Some("win.focus-search"));
-    file_sec.append(
-        Some(tr(Key::MenuToggleReadingEditing)),
-        Some("win.toggle-edit-mode"),
-    );
-    file_sec.append(Some(tr(Key::MenuCloseTab)), Some("win.close-tab"));
-    menu.append_section(None, &file_sec);
-
-    let agent_sec = gio::Menu::new();
-    agent_sec.append(
-        Some(tr(Key::MenuNewTerminalBottom)),
-        Some("win.dock-new-shell('bottom')"),
-    );
-    agent_sec.append(Some(tr(Key::MenuLaunchAgent)), Some("win.launch-agent"));
-    agent_sec.append(
-        Some(tr(Key::MenuSendPathToTerminal)),
-        Some("win.send-path-to-terminal"),
-    );
-    agent_sec.append(
-        Some(tr(Key::MenuSendSelectionToTerminal)),
-        Some("win.send-selection-to-terminal"),
-    );
-    agent_sec.append(Some(tr(Key::MenuPreferences)), Some("win.open-settings"));
-    menu.append_section(None, &agent_sec);
-
-    let view_sec = gio::Menu::new();
-    view_sec.append(
-        Some(tr(Key::MenuTabOverview)),
-        Some("win.toggle-tab-overview"),
-    );
-    view_sec.append(Some(tr(Key::MenuFocusDiagram)), Some("win.focus-diagram"));
-    view_sec.append(
-        Some(tr(Key::MenuToggleLeftSidebar)),
-        Some("win.toggle-left-sidebar"),
-    );
-    view_sec.append(
-        Some(tr(Key::MenuToggleRightSidebar)),
-        Some("win.toggle-right-sidebar"),
-    );
-    view_sec.append(
-        Some(tr(Key::MenuToggleBottomPanel)),
-        Some("win.toggle-bottom-panel"),
-    );
-    view_sec.append(Some(tr(Key::MenuToggleTopBar)), Some("win.toggle-top-bar"));
-    view_sec.append(
-        Some(tr(Key::MenuToggleFullscreen)),
-        Some("win.toggle-fullscreen"),
-    );
-    menu.append_section(None, &view_sec);
-
-    let panel_sub = gio::Menu::new();
-    for tool in StaticToolKind::ALL {
-        let tool_sub = gio::Menu::new();
-        for region in PanelRegion::ALL {
-            let item = gio::MenuItem::new(Some(&fmt1(Key::MenuMoveToRegion, region.title())), None);
-            item.set_action_and_target_value(
-                Some("win.dock-add-tool"),
-                Some(&format!("{}:{}", region.id(), tool.id()).to_variant()),
-            );
-            tool_sub.append_item(&item);
-        }
-        panel_sub.append_submenu(Some(tool.title()), &tool_sub);
-    }
-    menu.append_submenu(Some(tr(Key::MenuPanelPosition)), &panel_sub);
-
-    let theme_sub = gio::Menu::new();
-    theme_sub.append(
-        Some(tr(Key::ThemeSystem)),
-        Some("win.color-scheme('system')"),
-    );
-    theme_sub.append(Some(tr(Key::ThemeLight)), Some("win.color-scheme('light')"));
-    theme_sub.append(Some(tr(Key::ThemeDark)), Some("win.color-scheme('dark')"));
-    menu.append_submenu(Some(tr(Key::MenuAppearance)), &theme_sub);
-
-    let about_sec = gio::Menu::new();
-    about_sec.append(Some(tr(Key::MenuAbout)), Some("win.about"));
-    menu.append_section(None, &about_sec);
-    menu
 }

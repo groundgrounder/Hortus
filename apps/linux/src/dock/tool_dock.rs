@@ -43,6 +43,16 @@ impl DockTabId {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AppliedLayoutState {
+    pub left_size: f64,
+    pub right_size: f64,
+    pub bottom_size: f64,
+    pub left_visible: Option<bool>,
+    pub right_visible: Option<bool>,
+    pub bottom_visible: Option<bool>,
+}
+
 #[derive(Clone)]
 pub struct DockCallbacks {
     pub on_request_close_terminal: Rc<dyn Fn(u64)>,
@@ -51,7 +61,7 @@ pub struct DockCallbacks {
     pub on_region_collapse: Rc<dyn Fn(PanelRegion)>,
     pub on_terminal_selected: Rc<dyn Fn(u64)>,
     pub on_terminal_moved: Rc<dyn Fn(u64, PanelRegion)>,
-    pub on_changes_shown: Rc<dyn Fn()>,
+    pub on_static_tool_shown: Rc<dyn Fn(StaticToolKind)>,
     pub on_layout_changed: Rc<dyn Fn()>,
 }
 
@@ -482,12 +492,8 @@ impl ToolDock {
                                 }
                             }
                             DockTabId::Static(kind) => {
-                                if kind == StaticToolKind::Changes
-                                    && let Some(ref cbs) = cbs
-                                {
-                                    (cbs.on_changes_shown)();
-                                }
                                 if let Some(ref cbs) = cbs {
+                                    (cbs.on_static_tool_shown)(kind);
                                     (cbs.on_layout_changed)();
                                 }
                             }
@@ -911,7 +917,7 @@ impl ToolDock {
     }
 
     /// 恢复已保存的 `LayoutState`（仅静态工具与 `"terminal"` 区域偏好，绝不恢复动态终端 PTY）。
-    pub fn apply_layout_state(&self, layout: &LayoutState) -> (f64, f64, f64) {
+    pub fn apply_layout_state(&self, layout: &LayoutState) -> AppliedLayoutState {
         self.inner.state.borrow_mut().suppress_callbacks = true;
         // 先关闭全部静态工具页（保留 static_widgets），再按布局文件重新挂载。
         let static_pages: Vec<(PanelRegion, adw::TabPage, TabStripChip)> = {
@@ -973,29 +979,27 @@ impl ToolDock {
         self.inner.state.borrow_mut().suppress_callbacks = false;
         Self::rebuild_add_menus(&self.inner);
 
-        let left_size = layout
-            .regions
-            .get("left")
-            .map(|r| r.size.clamp(180.0, 480.0))
-            .unwrap_or(280.0);
-        let right_size = layout
-            .regions
-            .get("right")
-            .map(|r| r.size.clamp(180.0, 480.0))
-            .unwrap_or(280.0);
-        let bottom_size = layout
-            .regions
-            .get("bottom")
-            .map(|r| r.size.clamp(120.0, 520.0))
-            .unwrap_or(260.0);
-        (left_size, right_size, bottom_size)
+        let left = layout.regions.get("left");
+        let right = layout.regions.get("right");
+        let bottom = layout.regions.get("bottom");
+        AppliedLayoutState {
+            left_size: left.map(|r| r.size.clamp(180.0, 480.0)).unwrap_or(280.0),
+            right_size: right.map(|r| r.size.clamp(180.0, 480.0)).unwrap_or(280.0),
+            bottom_size: bottom.map(|r| r.size.clamp(120.0, 520.0)).unwrap_or(260.0),
+            left_visible: left.and_then(|r| r.visible),
+            right_visible: right.and_then(|r| r.visible),
+            bottom_visible: bottom.and_then(|r| r.visible),
+        }
     }
 
     pub fn export_layout_state(
         &self,
         left_size: f64,
+        left_visible: bool,
         right_size: f64,
+        right_visible: bool,
         bottom_size: f64,
+        bottom_visible: bool,
     ) -> LayoutState {
         let st = self.inner.state.borrow();
         let mut regions = BTreeMap::new();
@@ -1033,16 +1037,16 @@ impl ToolDock {
                     selected,
                 }]
             };
-            let size = match region {
-                PanelRegion::Left => left_size.clamp(180.0, 480.0),
-                PanelRegion::Right => right_size.clamp(180.0, 480.0),
-                PanelRegion::Bottom => bottom_size.clamp(120.0, 520.0),
+            let (size, visible) = match region {
+                PanelRegion::Left => (left_size.clamp(180.0, 480.0), Some(left_visible)),
+                PanelRegion::Right => (right_size.clamp(180.0, 480.0), Some(right_visible)),
+                PanelRegion::Bottom => (bottom_size.clamp(120.0, 520.0), Some(bottom_visible)),
             };
             regions.insert(
                 region.id().to_string(),
                 RegionLayout {
                     groups,
-                    visible: None,
+                    visible,
                     size,
                 },
             );
@@ -1091,11 +1095,8 @@ impl ToolDock {
                 if reveal && let Some(ref cbs) = inner.state.borrow().callbacks {
                     (cbs.on_region_reveal)(target_region);
                 }
-                if kind == StaticToolKind::Changes
-                    && activate
-                    && let Some(ref cbs) = inner.state.borrow().callbacks
-                {
-                    (cbs.on_changes_shown)();
+                if activate && let Some(ref cbs) = inner.state.borrow().callbacks {
+                    (cbs.on_static_tool_shown)(kind);
                 }
                 return;
             }
@@ -1139,8 +1140,8 @@ impl ToolDock {
                 if reveal {
                     (cbs.on_region_reveal)(target_region);
                 }
-                if kind == StaticToolKind::Changes && activate {
-                    (cbs.on_changes_shown)();
+                if activate {
+                    (cbs.on_static_tool_shown)(kind);
                 }
                 (cbs.on_layout_changed)();
             }
@@ -1217,10 +1218,9 @@ impl ToolDock {
                     (cbs.on_terminal_moved)(tid, target_region);
                     (cbs.on_terminal_selected)(tid);
                 }
-                DockTabId::Static(StaticToolKind::Changes) => {
-                    (cbs.on_changes_shown)();
+                DockTabId::Static(kind) => {
+                    (cbs.on_static_tool_shown)(kind);
                 }
-                DockTabId::Static(_) => {}
             }
             (cbs.on_layout_changed)();
         }
@@ -1415,7 +1415,6 @@ impl ToolDock {
             .map(|e| e.region)
     }
 
-    #[cfg(feature = "automation")]
     pub fn active_tab_in_region(&self, region: PanelRegion) -> Option<DockTabId> {
         let page = self.inner.regions.get(&region)?.tab_view.selected_page()?;
         self.inner
@@ -1809,7 +1808,7 @@ mod tests {
             on_region_collapse: Rc::new(|_| {}),
             on_terminal_selected: Rc::new(|_| {}),
             on_terminal_moved: Rc::new(|_, _| {}),
-            on_changes_shown: Rc::new(|| {}),
+            on_static_tool_shown: Rc::new(|_| {}),
             on_layout_changed: Rc::new(|| {}),
         });
 
@@ -1865,11 +1864,15 @@ mod tests {
             "utilities-terminal-symbolic",
         );
 
-        let layout = dock.export_layout_state(300.0, 340.0, 260.0);
+        let layout = dock.export_layout_state(300.0, false, 340.0, true, 260.0, false);
         assert!(layout.validate().is_ok());
         let json = serde_json::to_string(&layout).unwrap();
         assert!(!json.contains("99"));
         assert!(json.contains("\"terminal\""));
+        let applied = dock.apply_layout_state(&layout);
+        assert_eq!(applied.left_visible, Some(false));
+        assert_eq!(applied.right_visible, Some(true));
+        assert_eq!(applied.bottom_visible, Some(false));
 
         let closed_count = Rc::new(Cell::new(0usize));
         let closed_cb = Rc::clone(&closed_count);
@@ -1882,7 +1885,7 @@ mod tests {
             on_region_collapse: Rc::new(|_| {}),
             on_terminal_selected: Rc::new(|_| {}),
             on_terminal_moved: Rc::new(|_, _| {}),
-            on_changes_shown: Rc::new(|| {}),
+            on_static_tool_shown: Rc::new(|_| {}),
             on_layout_changed: Rc::new(|| {}),
         });
         dock.close_terminal_tab(99);

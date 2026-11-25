@@ -4,6 +4,7 @@
 
 pub mod app_services;
 pub mod config_service;
+pub mod ui_prefs;
 pub mod vault_registry;
 pub mod window_registry;
 

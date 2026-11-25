@@ -86,9 +86,12 @@ pub struct WindowState {
     pub scan_micros: u64,
     pub pending_open_notes: Vec<String>,
     pub tabs: HashMap<String, OpenNoteTab>,
+    pub desired_left_width: f64,
+    pub desired_right_width: f64,
     pub left_sidebar_width: f64,
     pub right_sidebar_width: f64,
     pub pending_sidebar_widths: bool,
+    pub resize_clamp_source: Option<glib::SourceId>,
     pub bottom_revealed: bool,
     pub bottom_height: f64,
     pub pending_bottom_position: bool,
@@ -105,6 +108,7 @@ pub struct WindowState {
     pub pending_file_changes: Vec<String>,
     pub file_change_source: Option<glib::SourceId>,
     pub disk_poll_source: Option<glib::SourceId>,
+    pub disk_poll_inflight: bool,
     #[cfg(feature = "automation")]
     pub automation_source: Option<glib::SourceId>,
     #[cfg(feature = "automation")]
@@ -143,6 +147,9 @@ impl WindowState {
             id.remove();
         }
         if let Some(id) = self.layout_save_source.take() {
+            id.remove();
+        }
+        if let Some(id) = self.resize_clamp_source.take() {
             id.remove();
         }
         #[cfg(feature = "automation")]

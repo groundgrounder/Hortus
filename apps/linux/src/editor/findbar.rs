@@ -31,6 +31,7 @@ struct FindMatch {
 #[derive(Default)]
 struct FindState {
     targets: Vec<FindTarget>,
+    buffer_changed_handler: Option<(glib::WeakRef<gtk4::TextBuffer>, glib::SignalHandlerId)>,
     scrolled: glib::WeakRef<gtk4::ScrolledWindow>,
     content_box: glib::WeakRef<gtk4::Box>,
     editable: bool,
@@ -66,8 +67,14 @@ struct FindBarInner {
 
 impl Drop for FindBarInner {
     fn drop(&mut self) {
-        if let Some(src) = self.state.borrow_mut().debounce_source.take() {
+        let mut st = self.state.borrow_mut();
+        if let Some(src) = st.debounce_source.take() {
             src.remove();
+        }
+        if let Some((buf_weak, handler_id)) = st.buffer_changed_handler.take()
+            && let Some(buf) = buf_weak.upgrade()
+        {
+            buf.disconnect(handler_id);
         }
     }
 }
@@ -271,6 +278,7 @@ impl FindBar {
     pub fn bind(&self, view: &gtk4::TextView, buffer: &gtk4::TextBuffer, editable: bool) {
         {
             let mut st = self.inner.state.borrow_mut();
+            Self::disconnect_buffer_signal(&mut st);
             let v_ref = glib::WeakRef::new();
             v_ref.set(Some(view));
             let b_ref = glib::WeakRef::new();
@@ -279,6 +287,18 @@ impl FindBar {
                 view: v_ref,
                 buffer: b_ref,
             }];
+            let weak = Rc::downgrade(&self.inner);
+            let handler_id = buffer.connect_changed(move |_| {
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                if inner.bar.is_search_mode() {
+                    Self::schedule_recompute(&inner, true);
+                }
+            });
+            let h_ref = glib::WeakRef::new();
+            h_ref.set(Some(buffer));
+            st.buffer_changed_handler = Some((h_ref, handler_id));
             st.scrolled.set(None);
             st.content_box.set(None);
             st.editable = editable;
@@ -293,6 +313,7 @@ impl FindBar {
     pub fn bind_reading(&self, surface: &ReadingSurfaceHandle) {
         {
             let mut st = self.inner.state.borrow_mut();
+            Self::disconnect_buffer_signal(&mut st);
             st.targets = surface
                 .text_views()
                 .into_iter()
@@ -315,6 +336,31 @@ impl FindBar {
             st.query = self.inner.entry.text().to_string();
         }
         self.inner.replace_box.set_visible(false);
+    }
+
+    fn disconnect_buffer_signal(st: &mut FindState) {
+        if let Some((buf_weak, handler_id)) = st.buffer_changed_handler.take()
+            && let Some(buf) = buf_weak.upgrade()
+        {
+            buf.disconnect(handler_id);
+        }
+    }
+
+    fn schedule_recompute(inner: &Rc<FindBarInner>, keep_current: bool) {
+        if let Some(old) = inner.state.borrow_mut().debounce_source.take() {
+            old.remove();
+        }
+        let weak = Rc::downgrade(inner);
+        let src = glib::timeout_add_local_once(Duration::from_millis(90), move || {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            inner.state.borrow_mut().debounce_source = None;
+            if inner.bar.is_search_mode() {
+                Self::recompute(&inner, keep_current);
+            }
+        });
+        inner.state.borrow_mut().debounce_source = Some(src);
     }
 
     pub fn open(&self, editable: bool) {
@@ -381,12 +427,18 @@ impl FindBar {
     }
 
     #[cfg(feature = "automation")]
+    pub fn replace_current(&self) {
+        Self::replace_current_impl(&self.inner);
+    }
+
+    #[cfg(feature = "automation")]
     pub fn replace_all(&self) {
         Self::replace_all_impl(&self.inner);
     }
 
     pub fn teardown(&self) {
         let mut st = self.inner.state.borrow_mut();
+        Self::disconnect_buffer_signal(&mut st);
         if let Some(src) = st.debounce_source.take() {
             src.remove();
         }
@@ -432,7 +484,50 @@ impl FindBar {
         Self::highlight_and_scroll(inner);
     }
 
+    fn buffer_range_matches(
+        buffer: &gtk4::TextBuffer,
+        start: usize,
+        end: usize,
+        query: &str,
+    ) -> bool {
+        if query.is_empty() || start >= end {
+            return false;
+        }
+        let char_len = buffer.char_count() as usize;
+        if end > char_len {
+            return false;
+        }
+        let s = buffer.iter_at_offset(start as i32);
+        let e = buffer.iter_at_offset(end as i32);
+        buffer.text(&s, &e, false).as_str() == query
+    }
+
     fn replace_current_impl(inner: &Rc<FindBarInner>) {
+        let entry_query = inner.entry.text().to_string();
+        if entry_query.is_empty() {
+            return;
+        }
+        let needs_recompute = {
+            let st = inner.state.borrow();
+            if !st.editable {
+                return;
+            }
+            if st.query != entry_query {
+                true
+            } else if let Some(&m) = st.matches.get(st.current)
+                && let Some(buffer) = st
+                    .targets
+                    .get(m.target_idx)
+                    .and_then(|t| t.buffer.upgrade())
+            {
+                !Self::buffer_range_matches(&buffer, m.start, m.end, &entry_query)
+            } else {
+                false
+            }
+        };
+        if needs_recompute {
+            Self::recompute(inner, true);
+        }
         let (buffer, m) = {
             let st = inner.state.borrow();
             if !st.editable {
@@ -448,6 +543,9 @@ impl FindBar {
             else {
                 return;
             };
+            if !Self::buffer_range_matches(&buffer, m.start, m.end, &entry_query) {
+                return;
+            }
             (buffer, m)
         };
         let replacement = inner.replace_entry.text().to_string();
@@ -465,6 +563,28 @@ impl FindBar {
     }
 
     fn replace_all_impl(inner: &Rc<FindBarInner>) {
+        let entry_query = inner.entry.text().to_string();
+        if entry_query.is_empty() {
+            return;
+        }
+        let needs_recompute = {
+            let st = inner.state.borrow();
+            if !st.editable {
+                return;
+            }
+            let Some(buffer) = st.targets.first().and_then(|t| t.buffer.upgrade()) else {
+                return;
+            };
+            st.query != entry_query
+                || st
+                    .matches
+                    .iter()
+                    .filter(|m| m.target_idx == 0)
+                    .any(|m| !Self::buffer_range_matches(&buffer, m.start, m.end, &entry_query))
+        };
+        if needs_recompute {
+            Self::recompute(inner, true);
+        }
         let (buffer, ranges, replacement) = {
             let st = inner.state.borrow();
             if !st.editable {
@@ -477,6 +597,7 @@ impl FindBar {
                 .matches
                 .iter()
                 .filter(|m| m.target_idx == 0)
+                .filter(|m| Self::buffer_range_matches(&buffer, m.start, m.end, &entry_query))
                 .map(|m| (m.start, m.end))
                 .collect();
             (buffer, ranges, inner.replace_entry.text().to_string())

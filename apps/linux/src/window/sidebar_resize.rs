@@ -80,6 +80,7 @@ pub fn compute_split_fractions(
     left_w: f64,
     right_w: f64,
     left_visible: bool,
+    right_visible: bool,
     left_collapsed: bool,
     right_collapsed: bool,
 ) -> (f64, f64, f64, f64) {
@@ -87,15 +88,12 @@ pub fn compute_split_fractions(
     let clamped_left = left_w.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
     let clamped_right = right_w.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
 
-    let left_max = compute_sidebar_max_width(
-        safe_total,
-        if left_visible && !left_collapsed && !right_collapsed {
-            clamped_right
-        } else {
-            0.0
-        },
-        left_collapsed,
-    );
+    let right_occupied_for_left = if right_visible && !right_collapsed && !left_collapsed {
+        clamped_right
+    } else {
+        0.0
+    };
+    let left_max = compute_sidebar_max_width(safe_total, right_occupied_for_left, left_collapsed);
     let eff_left = clamped_left.min(left_max);
     let left_occupied = if left_visible && !left_collapsed {
         eff_left
@@ -143,27 +141,33 @@ impl WindowInner {
         }
     }
 
-    pub fn apply_sidebar_widths(self: &Rc<Self>, left_w: f64, right_w: f64) {
+    pub fn apply_sidebar_widths(self: &Rc<Self>, desired_left_w: f64, desired_right_w: f64) {
         let split_w = self.left_split.width();
         let total_w = if split_w > 0 {
             f64::from(split_w)
         } else {
             f64::from(self.window.default_width().max(720))
         };
+        let desired_left = desired_left_w.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        let desired_right = desired_right_w.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
         let left_visible = self.left_split.shows_sidebar();
+        let right_visible = self.right_split.shows_sidebar();
         let left_collapsed = self.left_split.is_collapsed();
         let right_collapsed = self.right_split.is_collapsed();
 
         let (eff_left, eff_right, left_frac, right_frac) = compute_split_fractions(
             total_w,
-            left_w,
-            right_w,
+            desired_left,
+            desired_right,
             left_visible,
+            right_visible,
             left_collapsed,
             right_collapsed,
         );
         {
             let mut st = self.state.borrow_mut();
+            st.desired_left_width = desired_left;
+            st.desired_right_width = desired_right;
             st.left_sidebar_width = eff_left;
             st.right_sidebar_width = eff_right;
             st.pending_sidebar_widths = split_w <= 0;
@@ -182,9 +186,41 @@ impl WindowInner {
     pub fn reapply_sidebar_widths(self: &Rc<Self>) {
         let (left_w, right_w) = {
             let st = self.state.borrow();
-            (st.left_sidebar_width, st.right_sidebar_width)
+            (st.desired_left_width, st.desired_right_width)
         };
         self.apply_sidebar_widths(left_w, right_w);
+    }
+
+    pub fn install_width_probe(self: &Rc<Self>, probe: &gtk4::DrawingArea) {
+        let last_width = Rc::new(Cell::new(0));
+        let weak = Rc::downgrade(self);
+        probe.connect_resize(move |_, width, _| {
+            if width <= 0 || last_width.get() == width {
+                return;
+            }
+            last_width.set(width);
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            if win.state.borrow().disposing {
+                return;
+            }
+            if let Some(old) = win.state.borrow_mut().resize_clamp_source.take() {
+                old.remove();
+            }
+            let weak_timer = Rc::downgrade(&win);
+            let src =
+                glib::timeout_add_local_once(std::time::Duration::from_millis(45), move || {
+                    let Some(win) = weak_timer.upgrade() else {
+                        return;
+                    };
+                    win.state.borrow_mut().resize_clamp_source = None;
+                    if !win.state.borrow().disposing {
+                        win.reapply_sidebar_widths();
+                    }
+                });
+            win.state.borrow_mut().resize_clamp_source = Some(src);
+        });
     }
 
     fn schedule_pending_sidebar_widths(self: &Rc<Self>) {
@@ -211,7 +247,7 @@ impl WindowInner {
     pub fn reset_sidebar_width(self: &Rc<Self>, region: PanelRegion) {
         let (cur_left, cur_right) = {
             let st = self.state.borrow();
-            (st.left_sidebar_width, st.right_sidebar_width)
+            (st.desired_left_width, st.desired_right_width)
         };
         match region {
             PanelRegion::Left => self.apply_sidebar_widths(DEFAULT_SIDEBAR_WIDTH, cur_right),
@@ -225,13 +261,20 @@ impl WindowInner {
         self.bind_single_sidebar_handle(&self.left_resize_handle, PanelRegion::Left);
         self.bind_single_sidebar_handle(&self.right_resize_handle, PanelRegion::Right);
 
-        for split in [&self.left_split, &self.right_split] {
+        for (region, split) in [
+            (PanelRegion::Left, &self.left_split),
+            (PanelRegion::Right, &self.right_split),
+        ] {
             let weak_show = Rc::downgrade(self);
-            split.connect_show_sidebar_notify(move |_| {
+            split.connect_show_sidebar_notify(move |split_view| {
                 if let Some(win) = weak_show.upgrade()
                     && !win.state.borrow().disposing
                 {
                     win.reapply_sidebar_widths();
+                    if split_view.shows_sidebar() {
+                        win.flush_visible_static_tool(region);
+                    }
+                    win.schedule_layout_save();
                 }
             });
             let weak_col = Rc::downgrade(self);
@@ -384,7 +427,8 @@ impl WindowInner {
                 };
                 let max_allowed = compute_sidebar_max_width(window_w, other_visible, collapsed);
                 let next_left = (start_left_w + delta).clamp(MIN_SIDEBAR_WIDTH, max_allowed);
-                self.apply_sidebar_widths(next_left, start_right_w);
+                let desired_right = self.state.borrow().desired_right_width;
+                self.apply_sidebar_widths(next_left, desired_right);
             }
             PanelRegion::Right => {
                 let collapsed = self.right_split.is_collapsed();
@@ -398,7 +442,8 @@ impl WindowInner {
                 };
                 let max_allowed = compute_sidebar_max_width(window_w, other_visible, collapsed);
                 let next_right = (start_right_w - delta).clamp(MIN_SIDEBAR_WIDTH, max_allowed);
-                self.apply_sidebar_widths(start_left_w, next_right);
+                let desired_left = self.state.borrow().desired_left_width;
+                self.apply_sidebar_widths(desired_left, next_right);
             }
             PanelRegion::Bottom => {}
         }
@@ -444,18 +489,34 @@ mod tests {
 
     #[test]
     fn split_fractions_keep_opposite_sidebar_stable_and_center_min_width() {
-        let (l1, r1, lf1, rf1) = compute_split_fractions(1280.0, 260.0, 220.0, true, false, false);
+        let (l1, r1, lf1, rf1) =
+            compute_split_fractions(1280.0, 260.0, 220.0, true, true, false, false);
         assert!((l1 - 260.0).abs() < 0.01);
         assert!((r1 - 220.0).abs() < 0.01);
         assert!((1280.0 * lf1 - 260.0).abs() < 0.5);
         assert!(((1280.0 - 260.0) * rf1 - 220.0).abs() < 0.5);
 
         // 左侧栏拉宽至 380px 时，右侧栏实际分配像素保持 220px 不随左侧缩水。
-        let (l2, r2, lf2, rf2) = compute_split_fractions(1280.0, 380.0, 220.0, true, false, false);
+        let (l2, r2, lf2, rf2) =
+            compute_split_fractions(1280.0, 380.0, 220.0, true, true, false, false);
         assert!((l2 - 380.0).abs() < 0.01);
         assert!((r2 - 220.0).abs() < 0.01);
         assert!((1280.0 * lf2 - 380.0).abs() < 0.5);
         assert!(((1280.0 - 380.0) * rf2 - 220.0).abs() < 0.5);
+
+        // 相反侧栏隐藏时，不占用主栏预算。
+        let (l_only, _, _, _) =
+            compute_split_fractions(900.0, 420.0, 360.0, true, false, false, false);
+        assert!((l_only - 420.0).abs() < 0.01);
+
+        // 窄窗口双栏互相夹紧时不超正文下限；窗口放宽后可按同一期望值恢复。
+        let (narrow_l, narrow_r, _, _) =
+            compute_split_fractions(880.0, 380.0, 360.0, true, true, false, false);
+        assert!(880.0 - narrow_l - narrow_r >= MIN_CENTER_CONTENT_WIDTH - 0.1);
+        let (wide_l, wide_r, _, _) =
+            compute_split_fractions(1280.0, 380.0, 360.0, true, true, false, false);
+        assert!((wide_l - 380.0).abs() < 0.01);
+        assert!((wide_r - 360.0).abs() < 0.01);
 
         // 中间正文区至少保留 320px。
         let max_left_on_900 = compute_sidebar_max_width(900.0, 350.0, false);

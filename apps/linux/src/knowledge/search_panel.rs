@@ -6,7 +6,7 @@
 
 use crate::i18n::{Key, fmt2, fmt4, tr};
 use crate::knowledge::widgets::{
-    OpenNoteCallback, clear_box, entry_row, panel_scroll, snippet_markup,
+    OpenNoteCallback, clear_box, entry_row, panel_scroll, snippet_markup, snippet_row,
 };
 use gtk4::gio;
 use gtk4::glib;
@@ -29,6 +29,7 @@ struct SearchState {
     groups: usize,
     matches: usize,
     pending: bool,
+    dirty: bool,
     on_open: Option<OpenNoteCallback>,
     group_buttons: Vec<gtk4::Button>,
 }
@@ -131,11 +132,28 @@ impl SearchPanel {
 
     /// 索引随磁盘变化后显式重跑当前查询（G-07 修复：不再发射伪 `search-changed` 信号）。
     pub fn rerun_now(&self) {
+        self.inner.state.borrow_mut().dirty = false;
         let query = self.inner.entry.text().to_string();
         if query.trim().is_empty() {
             return;
         }
         Self::schedule_query(&self.inner, query, false);
+    }
+
+    pub fn mark_dirty(&self) {
+        self.inner.state.borrow_mut().dirty = true;
+    }
+
+    pub fn refresh_if_dirty(&self) {
+        let dirty = {
+            let mut st = self.inner.state.borrow_mut();
+            let was = st.dirty;
+            st.dirty = false;
+            was
+        };
+        if dirty {
+            self.rerun_now();
+        }
     }
 
     /// 立即执行一次查询（跳过输入防抖），用于并发取消验证。
@@ -193,6 +211,7 @@ impl SearchPanel {
             st.generation += 1;
             st.queries += 1;
             st.pending = true;
+            st.dirty = false;
             st.last_query = query.clone();
             st.generation
         };
@@ -314,7 +333,7 @@ impl SearchPanel {
 
             for m in result.matches.iter().take(3) {
                 let markup = snippet_markup(&m.snippet, m.snippet_start, m.start, m.length);
-                let row = entry_row(&format!("L{}", m.start), Some(&markup), None);
+                let row = snippet_row(&markup);
                 let btn = gtk4::Button::builder()
                     .child(&row)
                     .halign(gtk4::Align::Fill)

@@ -39,6 +39,7 @@ struct ChangesState {
     temp_dir: PathBuf,
     sessions: Vec<Arc<AgentSessionInfo>>,
     selected_session_id: Option<String>,
+    reviewed_session_id: Option<String>,
     selected_entry_id: Option<String>,
     summary: Option<Arc<SessionReviewSummary>>,
     detail: Option<Arc<ReviewEntryDetail>>,
@@ -222,8 +223,13 @@ impl ChangesPanel {
                     st.sessions.get(idx).map(|s| s.id.clone())
                 };
                 if let Some(id) = selected_id {
-                    this.state.borrow_mut().selected_session_id = Some(id.clone());
-                    this.state.borrow_mut().selected_entry_id = None;
+                    {
+                        let mut st = this.state.borrow_mut();
+                        st.selected_session_id = Some(id.clone());
+                        st.selected_entry_id = None;
+                        st.detail_gen = st.detail_gen.wrapping_add(1);
+                        st.detail = None;
+                    }
                     Self::review_selected_session(&this, &id);
                 }
             });
@@ -246,14 +252,24 @@ impl ChangesPanel {
     ) {
         {
             let mut st = self.inner.state.borrow_mut();
+            if let Some(old) = st.active_cancel.take() {
+                old.cancel();
+            }
             st.core = Some(core);
             st.vault_root = vault_root;
             st.temp_dir = temp_dir;
+            st.review_gen = st.review_gen.wrapping_add(1);
+            st.detail_gen = st.detail_gen.wrapping_add(1);
             st.selected_session_id = None;
+            st.reviewed_session_id = None;
             st.selected_entry_id = None;
             st.summary = None;
             st.detail = None;
         }
+        clear_box(&self.inner.detail_box);
+        self.inner
+            .detail_title
+            .set_text(tr(Key::ChangesDetailTitle));
         Self::refresh_impl(&self.inner);
     }
 
@@ -351,7 +367,7 @@ impl ChangesPanel {
     }
 
     fn review_selected_session(inner: &Rc<ChangesPanelInner>, session_id: &str) {
-        let (core, cancel, rev_gen, session_info) = {
+        let (core, cancel, rev_gen, session_info, session_changed) = {
             let mut st = inner.state.borrow_mut();
             if let Some(old) = st.active_cancel.take() {
                 old.cancel();
@@ -359,10 +375,22 @@ impl ChangesPanel {
             let cancel = ReviewCancellation::new();
             st.active_cancel = Some(Arc::clone(&cancel));
             st.review_gen = st.review_gen.wrapping_add(1);
+            let session_changed = st.reviewed_session_id.as_deref() != Some(session_id);
+            st.reviewed_session_id = Some(session_id.to_string());
+            if session_changed {
+                st.detail_gen = st.detail_gen.wrapping_add(1);
+                st.selected_entry_id = None;
+                st.detail = None;
+            }
             st.summary = None;
-            st.detail = None;
             let info = st.sessions.iter().find(|s| s.id == session_id).cloned();
-            (st.core.clone(), cancel, st.review_gen, info)
+            (
+                st.core.clone(),
+                cancel,
+                st.review_gen,
+                info,
+                session_changed,
+            )
         };
         let Some(core) = core else { return };
         if let Some(ref info) = session_info {
@@ -386,7 +414,10 @@ impl ChangesPanel {
         }
 
         clear_box(&inner.entries_box);
-        clear_box(&inner.detail_box);
+        if session_changed {
+            clear_box(&inner.detail_box);
+            inner.detail_title.set_text(tr(Key::ChangesDetailTitle));
+        }
         inner
             .entries_box
             .append(&dim_label(tr(Key::ChangesLoadingSummary)));
@@ -549,6 +580,7 @@ impl ChangesPanel {
 
         let weak = Rc::downgrade(inner);
         let sid = session_id.to_string();
+        let sid_for_render = sid.clone();
         let path = entry.id.clone();
         let old_path = entry.old_path.clone();
         glib::MainContext::default().spawn_local(async move {
@@ -566,7 +598,7 @@ impl ChangesPanel {
                 return;
             }
             match res {
-                Ok(detail) => Self::render_detail(&this, detail),
+                Ok(detail) => Self::render_detail(&this, &sid_for_render, detail),
                 Err(err) => {
                     clear_box(&this.detail_box);
                     this.detail_box
@@ -576,15 +608,9 @@ impl ChangesPanel {
         });
     }
 
-    fn render_detail(inner: &Rc<ChangesPanelInner>, detail: ReviewEntryDetail) {
-        let sid = detail.entry.id.clone();
+    fn render_detail(inner: &Rc<ChangesPanelInner>, session_id: &str, detail: ReviewEntryDetail) {
         let entry = detail.entry.clone();
-        let session_id = inner
-            .state
-            .borrow()
-            .selected_session_id
-            .clone()
-            .unwrap_or_default();
+        let session_id = session_id.to_string();
         let detail_arc = Arc::new(detail);
         inner.state.borrow_mut().detail = Some(Arc::clone(&detail_arc));
         let weak = Rc::downgrade(inner);
@@ -603,7 +629,6 @@ impl ChangesPanel {
                 }
             }),
         );
-        let _ = sid;
     }
 
     fn rollback_temp_dir(inner: &Rc<ChangesPanelInner>) -> Option<String> {

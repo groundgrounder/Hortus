@@ -85,3 +85,14 @@ pub fn entry_row(title: &str, subtitle: Option<&str>, meta: Option<&str>) -> gtk
     }
     row
 }
+
+pub fn snippet_row(markup: &str) -> gtk4::Box {
+    let row = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    let sub = gtk4::Label::new(None);
+    sub.set_markup(markup);
+    sub.set_xalign(0.0);
+    sub.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    sub.add_css_class("hortus-result-snippet");
+    row.append(&sub);
+    row
+}

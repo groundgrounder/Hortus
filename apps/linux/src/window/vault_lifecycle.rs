@@ -131,6 +131,7 @@ impl WindowInner {
         drop(old_ctx);
 
         self.vault_tree.clear();
+        crate::render::media::clear_local_image_cache();
         self.render_outline_empty(crate::i18n::tr(crate::i18n::Key::ScanningFolder));
 
         let weak = Rc::downgrade(self);
@@ -232,80 +233,86 @@ impl WindowInner {
 
     pub fn start_disk_poll_timer(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
-        let source_id = glib::timeout_add_seconds_local(1, move || {
+        let source_id = glib::timeout_add_seconds_local(2, move || {
             let Some(win) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            let (paths, root, busy, disposing) = {
+            let (paths, root, busy, disposing, inflight) = {
                 let st = win.state.borrow();
                 (
                     st.tabs.keys().cloned().collect::<Vec<_>>(),
                     st.vault_root().unwrap_or_default(),
                     st.files_busy,
                     st.disposing,
+                    st.disk_poll_inflight,
                 )
             };
             if disposing {
                 return glib::ControlFlow::Break;
             }
-            if busy || root.is_empty() {
+            if busy || root.is_empty() || inflight || paths.is_empty() {
                 return glib::ControlFlow::Continue;
             }
-            for path in paths {
-                let absolute = Path::new(&root).join(&path);
-                let meta = std::fs::metadata(&absolute).ok();
-                let current = meta.as_ref().map(|meta| {
-                    let modified = meta
-                        .modified()
-                        .ok()
-                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|duration| duration.as_nanos())
-                        .unwrap_or(0);
-                    (meta.len(), modified)
-                });
-                let (known, loaded) = {
-                    let st = win.state.borrow();
-                    let Some(tab) = st.tabs.get(&path) else {
-                        continue;
-                    };
-                    (
-                        tab.edit_state.borrow().disk_stamp,
-                        tab.source_loaded && tab.session.is_some(),
-                    )
+            win.state.borrow_mut().disk_poll_inflight = true;
+            let weak_done = Rc::downgrade(&win);
+            glib::MainContext::default().spawn_local(async move {
+                let stamps = gio::spawn_blocking(move || {
+                    crate::editor::save_sync::collect_disk_stamps(&root, &paths)
+                })
+                .await
+                .unwrap_or_default();
+                let Some(win) = weak_done.upgrade() else {
+                    return;
                 };
-                if !loaded {
-                    continue;
+                win.state.borrow_mut().disk_poll_inflight = false;
+                if win.state.borrow().disposing {
+                    return;
                 }
-                let changed = match (known, current) {
-                    (Some(known), Some(current)) => known != current,
-                    (Some(_), None) => true,
-                    _ => false,
-                };
-                if changed {
-                    let counted = {
+                for (path, current) in stamps {
+                    let (known, loaded) = {
                         let st = win.state.borrow();
-                        match st.tabs.get(&path) {
-                            Some(tab) => {
-                                tab.edit_state.borrow_mut().poll_refreshes += 1;
-                                true
-                            }
-                            None => false,
-                        }
+                        let Some(tab) = st.tabs.get(&path) else {
+                            continue;
+                        };
+                        (
+                            tab.edit_state.borrow().disk_stamp,
+                            tab.source_loaded && tab.session.is_some(),
+                        )
                     };
-                    if counted {
-                        win.refresh_document_tab(&path);
+                    if !loaded {
+                        continue;
                     }
-                }
-                if current.is_some() {
-                    let st = win.state.borrow();
-                    if let Some(tab) = st.tabs.get(&path) {
-                        let mut edit = tab.edit_state.borrow_mut();
-                        if edit.disk_stamp.is_none() {
-                            edit.disk_stamp = current;
+                    let changed = match (known, current) {
+                        (Some(known), Some(current)) => known != current,
+                        (Some(_), None) => true,
+                        _ => false,
+                    };
+                    if changed {
+                        let counted = {
+                            let st = win.state.borrow();
+                            match st.tabs.get(&path) {
+                                Some(tab) => {
+                                    tab.edit_state.borrow_mut().poll_refreshes += 1;
+                                    true
+                                }
+                                None => false,
+                            }
+                        };
+                        if counted {
+                            win.refresh_document_tab(&path);
+                        }
+                    }
+                    if current.is_some() {
+                        let st = win.state.borrow();
+                        if let Some(tab) = st.tabs.get(&path) {
+                            let mut edit = tab.edit_state.borrow_mut();
+                            if edit.disk_stamp.is_none() {
+                                edit.disk_stamp = current;
+                            }
                         }
                     }
                 }
-            }
+            });
             glib::ControlFlow::Continue
         });
         self.state.borrow_mut().disk_poll_source = Some(source_id);
@@ -340,7 +347,7 @@ impl WindowInner {
         };
         let unsaved: Vec<(String, String, Arc<hortus_ffi::DocumentSession>)> = pending
             .into_iter()
-            .filter(|(_, _, session)| session.persistence() != DocumentPersistence::Persisted)
+            .filter(|(_, _, session)| session.persistence() == DocumentPersistence::Unsaved)
             .collect();
         self.state.borrow_mut().close_unsaved = unsaved.len() as u32;
         if unsaved.is_empty() {
@@ -382,7 +389,7 @@ impl WindowInner {
             }
             let still_unsaved: Vec<String> = results
                 .into_iter()
-                .filter(|(_, persistence)| *persistence != DocumentPersistence::Persisted)
+                .filter(|(_, persistence)| *persistence == DocumentPersistence::Unsaved)
                 .map(|(path, _)| path)
                 .collect();
             if still_unsaved.is_empty() {

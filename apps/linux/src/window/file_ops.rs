@@ -104,9 +104,7 @@ impl WindowInner {
                 self.maybe_refresh_tab(&rel);
             }
         }
-        self.tags_panel.refresh();
-        self.search_panel.rerun_now();
-        self.refresh_backlinks(true);
+        self.refresh_knowledge_after_write();
     }
 
     pub fn install_tree_context_menu(self: &Rc<Self>) {

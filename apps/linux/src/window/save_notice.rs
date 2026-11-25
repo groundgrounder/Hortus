@@ -18,7 +18,6 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use hortus_ffi::{DocumentIssue, DocumentPersistence, DocumentUpdate, SaveChoice};
 use libadwaita as adw;
-use libadwaita::prelude::*;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -419,7 +418,7 @@ impl WindowInner {
         };
         let needs_protection = session
             .as_ref()
-            .map(|s| s.persistence() != DocumentPersistence::Persisted)
+            .map(|s| s.persistence() == DocumentPersistence::Unsaved)
             .unwrap_or(false)
             || edit_state.borrow().dirty;
         if !needs_protection {
@@ -431,7 +430,7 @@ impl WindowInner {
         let path_bg = path;
         glib::MainContext::default().spawn_local(async move {
             let Some(win) = weak.upgrade() else { return };
-            let persisted = if let Some(session) = session {
+            let can_close = if let Some(session) = session {
                 let vault_root = if !tab_vault_root.is_empty() {
                     tab_vault_root
                 } else {
@@ -447,58 +446,22 @@ impl WindowInner {
                 let update = gio::spawn_blocking(move || session.prepare_close(temp, true))
                     .await
                     .unwrap_or_else(|_| fallback.failed_save("document.save_failed".into()));
-                let persisted = update.persistence == DocumentPersistence::Persisted;
+                let can_close = update.persistence != DocumentPersistence::Unsaved;
                 let mut edit = edit_state.borrow_mut();
                 edit.dirty = update.dirty;
                 edit.issue = Some(update.issue);
                 edit.message = update.message.clone();
-                persisted
+                can_close
             } else {
                 true
             };
             let Some(win) = weak.upgrade() else { return };
-            if persisted {
+            if can_close {
                 win.tab_view.close_page_finish(&page_bg, true);
             } else {
                 win.ask_unsaved_close(&page_bg, &path_bg);
             }
         });
-    }
-
-    fn ask_unsaved_close(self: &Rc<Self>, page: &adw::TabPage, path: &str) {
-        let dialog = adw::AlertDialog::builder()
-            .heading(crate::i18n::tr(crate::i18n::Key::UnsavedHeading))
-            .body(crate::i18n::fmt1(
-                crate::i18n::Key::UnsavedTabCloseBody,
-                path,
-            ))
-            .build();
-        dialog.add_response("cancel", crate::i18n::tr(crate::i18n::Key::Cancel));
-        dialog.add_response(
-            "close",
-            crate::i18n::tr(crate::i18n::Key::BtnDiscardAndClose),
-        );
-        dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
-        {
-            let mut st = self.state.borrow_mut();
-            st.last_alert = Some(dialog.heading().unwrap_or_default().to_string());
-            st.last_alert_dialog.set(Some(&dialog));
-        }
-        let weak = Rc::downgrade(self);
-        let page = page.clone();
-        dialog.connect_response(None, move |_, response| {
-            if let Some(win) = weak.upgrade() {
-                win.state.borrow_mut().last_alert_dialog.set(None);
-                if response == "close" {
-                    win.tab_view.close_page_finish(&page, true);
-                } else {
-                    win.tab_view.close_page_finish(&page, false);
-                }
-            }
-        });
-        dialog.present(Some(&self.window));
     }
 
     fn conflict_use_disk(self: &Rc<Self>, path: &str) {
@@ -566,25 +529,23 @@ impl WindowInner {
     }
 
     pub fn reload_tab_from_session(self: &Rc<Self>, path: &str, preserve_scroll: bool) {
-        let (session, edit_state, edit_seq_before, fraction) = {
+        let (session, edit_state, edit_seq_before, anchor) = {
             let st = self.state.borrow();
             let Some(tab) = st.tabs.get(path) else {
                 return;
             };
-            let fraction = if preserve_scroll {
-                tab.reading.as_ref().and_then(|reading| {
-                    let adj = reading.scrolled.vadjustment();
-                    let max = adj.upper() - adj.page_size();
-                    (max > 0.0).then(|| adj.value() / max)
-                })
-            } else {
-                None
-            };
+            let anchor = crate::editor::save_sync::capture_edit_reload_anchor(
+                preserve_scroll,
+                tab.reading.as_ref().map(|r| &r.scrolled),
+                tab.editing,
+                &tab.edit_scrolled,
+                &tab.edit_buffer,
+            );
             (
                 tab.session.clone(),
                 tab.edit_state.clone(),
                 tab.edit_state.borrow().edit_seq,
-                fraction,
+                anchor,
             )
         };
         let Some(session) = session else { return };
@@ -643,6 +604,11 @@ impl WindowInner {
             };
             if let Some(tab) = win.state.borrow().tabs.get(&path) {
                 tab.edit_view.set_editable(!locked);
+                crate::editor::save_sync::restore_edit_reload_anchor(
+                    anchor,
+                    &tab.edit_scrolled,
+                    &tab.edit_buffer,
+                );
             }
             if let Some(find) = win
                 .state
@@ -669,7 +635,9 @@ impl WindowInner {
             }
             win.refresh_reading_tab(
                 &path,
-                fraction.map(crate::window::reading_layout::ReadingScrollTarget::Fraction),
+                anchor
+                    .reading_fraction
+                    .map(crate::window::reading_layout::ReadingScrollTarget::Fraction),
             );
             win.update_disk_stamp(&path);
             win.update_tab_title(&path);

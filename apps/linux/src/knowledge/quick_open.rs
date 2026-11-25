@@ -25,6 +25,7 @@ struct QuickState {
     hits: Vec<QuickOpenHit>,
     on_open: Option<OpenNoteCallback>,
     selected: usize,
+    pending: bool,
     open: bool,
 }
 
@@ -35,6 +36,7 @@ pub struct QuickOpenStats {
     pub last_query: String,
     pub hits: usize,
     pub first: Option<String>,
+    pub pending: bool,
     pub open: bool,
 }
 
@@ -131,15 +133,23 @@ impl QuickOpen {
             last_query: st.last_query.clone(),
             hits: st.hits.len(),
             first: st.hits.first().map(|h| h.path.clone()),
+            pending: st.pending,
             open: st.open,
         }
     }
 
     pub fn open(&self, parent: &gtk4::Window) {
-        self.inner.state.borrow_mut().open = true;
+        {
+            let mut st = self.inner.state.borrow_mut();
+            st.open = true;
+            st.hits.clear();
+            st.selected = 0;
+            st.generation += 1;
+            st.pending = st.handle.is_some();
+        }
+        render_quick_hits(&self.inner.list, &[], 0);
         self.inner.window.borrow().set(Some(parent));
         self.inner.entry.set_text("");
-        self.inner.state.borrow_mut().selected = 0;
         self.inner.dialog.present(Some(parent));
         self.inner.entry.grab_focus();
         Self::query_now(&self.inner, "");
@@ -186,8 +196,12 @@ impl QuickOpen {
                     st.generation += 1;
                     st.queries += 1;
                     st.last_query = query.clone();
+                    st.hits.clear();
+                    st.selected = 0;
+                    st.pending = true;
                     st.generation
                 };
+                render_quick_hits(&inner.list, &[], 0);
                 let weak_debounce = Rc::downgrade(&inner);
                 glib::timeout_add_local_once(Duration::from_millis(90), move || {
                     let Some(inner) = weak_debounce.upgrade() else {
@@ -213,9 +227,10 @@ impl QuickOpen {
                         if st.generation != generation {
                             return;
                         }
+                        st.pending = false;
                         st.hits = result;
                         st.selected = 0;
-                        render_quick_hits(&inner.list, &st);
+                        render_quick_hits(&inner.list, &st.hits, st.selected);
                     });
                 });
             });
@@ -232,7 +247,7 @@ impl QuickOpen {
                 match keyval {
                     Key::Down | Key::Up => {
                         let mut st = inner.state.borrow_mut();
-                        if st.hits.is_empty() {
+                        if st.pending || st.hits.is_empty() {
                             return glib::Propagation::Proceed;
                         }
                         if keyval == Key::Down {
@@ -240,10 +255,13 @@ impl QuickOpen {
                         } else {
                             st.selected = st.selected.saturating_sub(1);
                         }
-                        render_quick_hits(&inner.list, &st);
+                        render_quick_hits(&inner.list, &st.hits, st.selected);
                         glib::Propagation::Stop
                     }
                     Key::Return | Key::KP_Enter => {
+                        if inner.state.borrow().pending {
+                            return glib::Propagation::Stop;
+                        }
                         Self::open_selected(&inner);
                         glib::Propagation::Stop
                     }
@@ -266,6 +284,9 @@ impl QuickOpen {
     }
 
     fn open_selected(inner: &Rc<QuickOpenInner>) {
+        if inner.state.borrow().pending {
+            return;
+        }
         open_selected_impl(&inner.state);
         inner.state.borrow_mut().open = false;
         inner.dialog.close();
@@ -275,13 +296,18 @@ impl QuickOpen {
         let (handle, generation) = {
             let mut st = inner.state.borrow_mut();
             let Some(handle) = st.handle.clone() else {
+                st.pending = false;
                 return;
             };
             st.generation += 1;
             st.queries += 1;
             st.last_query = query.to_string();
+            st.hits.clear();
+            st.selected = 0;
+            st.pending = true;
             (handle, st.generation)
         };
+        render_quick_hits(&inner.list, &[], 0);
         let query = query.to_string();
         let weak = Rc::downgrade(inner);
         glib::MainContext::default().spawn_local(async move {
@@ -293,24 +319,25 @@ impl QuickOpen {
             if st.generation != generation {
                 return;
             }
+            st.pending = false;
             st.hits = result;
             st.selected = 0;
-            render_quick_hits(&inner.list, &st);
+            render_quick_hits(&inner.list, &st.hits, st.selected);
         });
     }
 }
 
-fn render_quick_hits(list: &gtk4::ListBox, state: &QuickState) {
+fn render_quick_hits(list: &gtk4::ListBox, hits: &[QuickOpenHit], selected: usize) {
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);
     }
-    for (index, hit) in state.hits.iter().enumerate() {
+    for (index, hit) in hits.iter().enumerate() {
         let row = gtk4::ListBoxRow::new();
         let label = entry_row(&hit.title, None, Some(&hit.path));
         label.set_margin_start(6);
         label.set_margin_end(6);
         row.set_child(Some(&label));
-        if index == state.selected {
+        if index == selected {
             row.add_css_class("suggested-action");
         }
         list.append(&row);

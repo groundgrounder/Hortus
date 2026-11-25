@@ -264,11 +264,21 @@ pub fn launch_initial_windows(app: &adw::Application, opts: CliOptions) {
     services.ensure_dark_listener();
     services.config.ensure_monitor_and_css();
 
+    if opts.color_scheme.is_none() {
+        crate::window::actions::apply_color_scheme(
+            crate::services::ui_prefs::load_saved_color_scheme(),
+        );
+    }
+
     let saved = parse_restorable_entries(&services.core);
     if saved.is_empty() {
         let win = HortusWindow::new_with_services(app, opts, Some(services));
         win.present();
         return;
+    }
+
+    for entry in &saved {
+        crate::window::shell::bump_next_window_id(&entry.id);
     }
 
     for entry in saved {
@@ -315,4 +325,21 @@ pub fn parse_restorable_entries(core: &hortus_ffi::WorkspaceCore) -> Vec<SavedWi
     list.into_iter()
         .filter(|entry| !entry.path.is_empty() && Path::new(&entry.path).is_dir())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::window::shell::bump_next_window_id_with;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn bump_next_window_id_prevents_collision_with_restored_windows() {
+        let counter = AtomicU64::new(1);
+        bump_next_window_id_with(&counter, "win-1");
+        bump_next_window_id_with(&counter, "win-4");
+        bump_next_window_id_with(&counter, "win-2");
+        bump_next_window_id_with(&counter, "custom-id");
+        assert_eq!(counter.fetch_add(1, Ordering::Relaxed), 5);
+        assert_eq!(counter.fetch_add(1, Ordering::Relaxed), 6);
+    }
 }
