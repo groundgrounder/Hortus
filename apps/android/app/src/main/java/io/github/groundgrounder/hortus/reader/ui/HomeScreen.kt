@@ -41,7 +41,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.groundgrounder.hortus.R
+import io.github.groundgrounder.hortus.app.IntentRouter
 import io.github.groundgrounder.hortus.reader.model.ReaderUiState
 import io.github.groundgrounder.hortus.reader.state.ReaderViewModel
 import kotlinx.coroutines.Dispatchers
@@ -55,7 +57,16 @@ internal fun HomeScreen(
     onRequestPermission: () -> Unit,
     state: ReaderUiState,
 ) {
-    var path by remember { mutableStateOf(viewModel.preferencesState.vaultPath ?: "/storage/emulated/0") }
+    val preferences by viewModel.preferencesFlow.collectAsStateWithLifecycle()
+    var path by remember {
+        mutableStateOf(preferences.vaultPath?.takeIf(IntentRouter::isValidVaultDirectory) ?: "")
+    }
+    LaunchedEffect(preferences.vaultPath) {
+        val saved = preferences.vaultPath
+        if (path.isBlank() && saved != null && IntentRouter.isValidVaultDirectory(saved)) {
+            path = saved
+        }
+    }
     var pickerOpen by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
@@ -87,19 +98,30 @@ internal fun HomeScreen(
                 }
             } else {
                 item {
+                    val trimmed = path.trim()
+                    val candidate = File(trimmed)
+                    val isRoot = trimmed.isNotEmpty() && candidate.isAbsolute && candidate.isDirectory &&
+                        IntentRouter.isStorageRoot(candidate)
                     OutlinedTextField(
                         value = path,
                         onValueChange = { path = it },
                         label = { Text(stringResource(R.string.reader_folder_path)) },
+                        isError = isRoot,
+                        supportingText = if (isRoot) {
+                            { Text(stringResource(R.string.vault_root_forbidden)) }
+                        } else {
+                            null
+                        },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
                 item {
+                    val trimmed = path.trim()
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
-                            onClick = { viewModel.start(path.trim(), null) },
-                            enabled = File(path.trim()).isAbsolute && File(path.trim()).isDirectory,
+                            onClick = { viewModel.start(trimmed, null) },
+                            enabled = IntentRouter.isValidVaultDirectory(trimmed),
                         ) { Text(stringResource(R.string.reader_open)) }
                         OutlinedButton(onClick = { pickerOpen = true }) {
                             Text(stringResource(R.string.reader_open_folder))
@@ -206,7 +228,11 @@ private fun VaultPickerDialog(onDismiss: () -> Unit, onPick: (String) -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(onClick = { onPick(directory.path) }) {
+            val valid = IntentRouter.isValidVaultDirectory(directory.path)
+            TextButton(
+                onClick = { onPick(directory.path) },
+                enabled = valid,
+            ) {
                 Text(stringResource(R.string.reader_use_folder))
             }
         },
