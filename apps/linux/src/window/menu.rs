@@ -88,7 +88,9 @@ pub fn current_color_scheme() -> ColorSchemeChoice {
     }
 }
 
-pub fn build_primary_menu() -> gio::Menu {
+pub fn build_primary_menu(
+    profiles: &[crate::services::config_service::AgentProfileSummary],
+) -> gio::Menu {
     use crate::i18n::{Key, fmt1, tr};
     let menu = gio::Menu::new();
 
@@ -120,6 +122,23 @@ pub fn build_primary_menu() -> gio::Menu {
         Some("win.dock-new-shell('bottom')"),
     );
     agent_sec.append(Some(tr(Key::MenuLaunchAgent)), Some("win.launch-agent"));
+    if profiles.len() > 1 {
+        for profile in profiles {
+            let item = gio::MenuItem::new(
+                Some(&fmt1(Key::MenuLaunchAgentProfile, &profile.name)),
+                None,
+            );
+            item.set_action_and_target_value(
+                Some("win.launch-agent-profile"),
+                Some(&profile.id.to_variant()),
+            );
+            agent_sec.append_item(&item);
+        }
+    }
+    agent_sec.append(
+        Some(tr(Key::MenuCustomAgentCommand)),
+        Some("win.launch-custom-agent"),
+    );
     agent_sec.append(
         Some(tr(Key::MenuSendPathToTerminal)),
         Some("win.send-path-to-terminal"),

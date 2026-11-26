@@ -18,6 +18,14 @@ use std::time::Duration;
 pub const FONT_SIZE_MIN: f64 = 9.0;
 pub const FONT_SIZE_MAX: f64 = 40.0;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentProfileSummary {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigSnapshot {
     pub config_path: String,
@@ -27,6 +35,8 @@ pub struct ConfigSnapshot {
     pub agent_configured: bool,
     pub agent_command: Option<String>,
     pub agent_args: Vec<String>,
+    pub agent_profiles: Vec<AgentProfileSummary>,
+    pub agent_default_profile: Option<String>,
 }
 
 impl Default for ConfigSnapshot {
@@ -39,6 +49,8 @@ impl Default for ConfigSnapshot {
             agent_configured: false,
             agent_command: None,
             agent_args: Vec::new(),
+            agent_profiles: Vec::new(),
+            agent_default_profile: None,
         }
     }
 }
@@ -68,6 +80,17 @@ impl From<&EditableConfigInfo> for ConfigSnapshot {
             agent_configured: info.agent_configured,
             agent_command: info.agent_command.clone(),
             agent_args: info.agent_args.clone(),
+            agent_profiles: info
+                .agent_profiles
+                .iter()
+                .map(|p| AgentProfileSummary {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    command: p.command.clone(),
+                    args: p.args.clone(),
+                })
+                .collect(),
+            agent_default_profile: info.agent_default_profile.clone(),
         }
     }
 }

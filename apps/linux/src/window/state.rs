@@ -121,6 +121,7 @@ pub struct WindowState {
     pub last_alert: Option<String>,
     pub last_alert_dialog: glib::WeakRef<adw::AlertDialog>,
     pub settings_dialog: Option<crate::settings::SettingsDialog>,
+    pub custom_agent_dialog: Option<crate::agent::CustomAgentDialog>,
     /// 窗口销毁期间不再拦截 close-page，避免对已关闭页面调用 close_page_finish。
     pub disposing: bool,
     #[cfg(feature = "automation")]

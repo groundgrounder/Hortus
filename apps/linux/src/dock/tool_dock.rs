@@ -166,6 +166,7 @@ struct ToolDockState {
     static_widgets: HashMap<StaticToolKind, gtk4::Widget>,
     entries: HashMap<DockTabId, DockTabEntry>,
     preferred_terminal_region: PanelRegion,
+    agent_profiles: Vec<(String, String)>,
     callbacks: Option<DockCallbacks>,
     suppress_callbacks: bool,
     disposing: bool,
@@ -220,6 +221,7 @@ impl ToolDock {
                 static_widgets,
                 entries: HashMap::new(),
                 preferred_terminal_region: PanelRegion::Bottom,
+                agent_profiles: Vec::new(),
                 callbacks: None,
                 suppress_callbacks: false,
                 disposing: false,
@@ -815,17 +817,36 @@ impl ToolDock {
         menu.append_section(None, &close_sec);
     }
 
+    pub fn set_agent_profiles(&self, profiles: Vec<(String, String)>) {
+        let changed = {
+            let mut st = self.inner.state.borrow_mut();
+            if st.agent_profiles == profiles {
+                false
+            } else {
+                st.agent_profiles = profiles;
+                true
+            }
+        };
+        if changed {
+            Self::rebuild_add_menus(&self.inner);
+        }
+    }
+
     fn rebuild_add_menus(inner: &Rc<ToolDockInner>) {
-        let locations: HashMap<StaticToolKind, PanelRegion> = {
+        let (locations, agent_profiles): (
+            HashMap<StaticToolKind, PanelRegion>,
+            Vec<(String, String)>,
+        ) = {
             let st = inner.state.borrow();
-            StaticToolKind::ALL
+            let locs = StaticToolKind::ALL
                 .into_iter()
                 .filter_map(|k| {
                     st.entries
                         .get(&DockTabId::Static(k))
                         .map(|entry| (k, entry.region))
                 })
-                .collect()
+                .collect();
+            (locs, st.agent_profiles.clone())
         };
         for (&region, rw) in &inner.regions {
             rw.add_menu.remove_all();
@@ -844,6 +865,25 @@ impl ToolDock {
                 Some(&region.id().to_variant()),
             );
             term_sec.append_item(&agent_item);
+
+            if agent_profiles.len() > 1 {
+                for (id, name) in &agent_profiles {
+                    let item =
+                        gio::MenuItem::new(Some(&fmt1(Key::MenuLaunchAgentProfile, name)), None);
+                    item.set_action_and_target_value(
+                        Some("win.dock-launch-agent-profile"),
+                        Some(&format!("{}:{id}", region.id()).to_variant()),
+                    );
+                    term_sec.append_item(&item);
+                }
+            }
+
+            let custom_item = gio::MenuItem::new(Some(tr(Key::MenuCustomAgentCommand)), None);
+            custom_item.set_action_and_target_value(
+                Some("win.dock-launch-custom-agent"),
+                Some(&region.id().to_variant()),
+            );
+            term_sec.append_item(&custom_item);
             rw.add_menu.append_section(None, &term_sec);
 
             let tools_sec = gio::Menu::new();

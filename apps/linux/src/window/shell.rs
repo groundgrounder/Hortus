@@ -67,6 +67,7 @@ pub struct WindowInner {
     pub bottom_toggle: gtk4::ToggleButton,
     pub edit_badge: gtk4::Label,
     pub mode_toggle_btn: gtk4::Button,
+    pub primary_menu_button: gtk4::MenuButton,
     pub tool_dock: ToolDock,
     pub terminal_host: TerminalHost,
     pub changes_panel: ChangesPanel,
@@ -110,7 +111,11 @@ impl HortusWindow {
         if let Some(scheme) = options.color_scheme {
             apply_color_scheme(scheme);
         } else if app.windows().is_empty() {
-            apply_color_scheme(load_saved_color_scheme());
+            let saved = preloaded_services
+                .as_ref()
+                .map(|svcs| crate::services::ui_prefs::load_color_scheme_with_core(&svcs.core))
+                .unwrap_or_else(load_saved_color_scheme);
+            apply_color_scheme(saved);
         }
 
         let toast_overlay = adw::ToastOverlay::new();
@@ -154,7 +159,7 @@ impl HortusWindow {
             .icon_name("open-menu-symbolic")
             .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipMainMenu))
             .primary(true)
-            .menu_model(&build_primary_menu())
+            .menu_model(&build_primary_menu(&[]))
             .build();
         let bottom_toggle = gtk4::ToggleButton::builder()
             .icon_name("utilities-terminal-symbolic")
@@ -426,6 +431,7 @@ impl HortusWindow {
             last_alert: None,
             last_alert_dialog: glib::WeakRef::new(),
             settings_dialog: None,
+            custom_agent_dialog: None,
             disposing: false,
             #[cfg(feature = "automation")]
             last_stage: String::new(),
@@ -457,6 +463,7 @@ impl HortusWindow {
             bottom_toggle,
             edit_badge,
             mode_toggle_btn,
+            primary_menu_button: menu_button,
             tool_dock,
             terminal_host,
             changes_panel,
@@ -543,6 +550,12 @@ impl WindowInner {
                 self.terminal_host.open_shell_in_region(region);
             }
             WindowCommand::DockLaunchAgent(region) => self.launch_agent_in_region(region),
+            WindowCommand::DockLaunchAgentProfile { region, profile_id } => {
+                self.launch_agent_profile_in_region(region, &profile_id)
+            }
+            WindowCommand::DockLaunchCustomAgent(region) => {
+                self.open_custom_agent_dialog(Some(region))
+            }
             WindowCommand::DockAddTool { region, tool } => {
                 self.tool_dock.open_or_move_static_tool(tool, region, true);
             }
@@ -562,6 +575,8 @@ impl WindowInner {
             WindowCommand::NewWindow => self.open_new_window(),
             WindowCommand::OpenSettings(page) => self.open_settings_dialog(page),
             WindowCommand::LaunchAgent => self.launch_agent_action(),
+            WindowCommand::LaunchAgentProfile(id) => self.launch_agent_profile_action(&id),
+            WindowCommand::OpenCustomAgentDialog(reg) => self.open_custom_agent_dialog(reg),
             WindowCommand::SendPathToTerminal => self.send_path_to_terminal(),
             WindowCommand::SendSelectionToTerminal => self.send_selection_to_terminal(),
             WindowCommand::ConfigChanged(cfg) => self.apply_config_update(&cfg),
@@ -666,7 +681,7 @@ impl WindowInner {
     }
 
     pub fn teardown(&self) {
-        let (keepalive, services, reg_id, vault_ctx, vault_sub_id, tabs, settings_dialog) = {
+        let taken = {
             let mut st = self.state.borrow_mut();
             if st.disposing {
                 return;
@@ -685,9 +700,15 @@ impl WindowInner {
                 st.vault_sub_id.take(),
                 std::mem::take(&mut st.tabs),
                 st.settings_dialog.take(),
+                st.custom_agent_dialog.take(),
             )
         };
-        if let Some(dlg) = settings_dialog {
+        let (keepalive, services, reg_id, vault_ctx, vault_sub_id, tabs, settings_dlg, custom_dlg) =
+            taken;
+        if let Some(dlg) = settings_dlg {
+            dlg.force_close();
+        }
+        if let Some(dlg) = custom_dlg {
             dlg.force_close();
         }
         if let (Some(ctx), Some(sub_id)) = (&vault_ctx, vault_sub_id) {

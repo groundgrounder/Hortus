@@ -921,13 +921,11 @@ async fn run_suite(
     let theme_switch_single_refresh =
         theme_switch_delta == 1 && action_state_dark.as_deref() == Some("dark");
     win.send_command(WindowCommand::ApplyColorScheme(
-        crate::core::ColorSchemeChoice::Light,
+        win.options
+            .color_scheme
+            .unwrap_or(crate::core::ColorSchemeChoice::Light),
     ));
-    let _ = wait_for(2000, || {
-        win.state.borrow().theme_refreshes > refreshes_after_dark
-    })
-    .await;
-    glib::timeout_future(Duration::from_millis(100)).await;
+    glib::timeout_future(Duration::from_millis(120)).await;
 
     // -------------------------------------------------------------------------
     // Part 4: 右侧栏直接启动 Agent + 快照闸门 + Changes 面板 + 红绿 Diff + 多窗口合成截图
@@ -1371,6 +1369,210 @@ async fn run_suite(
     }
 
     // -------------------------------------------------------------------------
+    // Part 4b (L6): 多配置档保存与指定档启动 + MCP JSON 复制 + 自定义命令弹窗与只读指南注入回滚闭环
+    // -------------------------------------------------------------------------
+    win.open_settings_dialog(Some(SettingsPage::Agent));
+    let _ = wait_for(2000, || win.settings_dialog().is_some()).await;
+    let mut profiles_saved_ok = false;
+    let mut mcp_json_ok = false;
+    if let Some(dlg_p) = win.settings_dialog() {
+        let _ = wait_for(2500, || {
+            let sub = dlg_p.config_path_subtitle();
+            !sub.is_empty() && sub.contains("config.toml")
+        })
+        .await;
+        let mcp_json = dlg_p.copy_mcp_config_now();
+        mcp_json_ok = serde_json::from_str::<serde_json::Value>(&mcp_json).is_ok_and(|v| {
+            let cmd = v["mcpServers"]["hortus"]["command"].as_str().unwrap_or("");
+            let args = &v["mcpServers"]["hortus"]["args"];
+            !cmd.is_empty() && args[0] == "mcp" && args[1] == "--vault" && args[2] == vault_root
+        });
+        dlg_p.set_profiles(
+            vec![
+                hortus_ffi::AgentProfileInfo {
+                    id: "primary".into(),
+                    name: "Primary".into(),
+                    command: mock_agent.clone(),
+                    args: vec!["{guide}".into()],
+                },
+                hortus_ffi::AgentProfileInfo {
+                    id: "secondary".into(),
+                    name: "Secondary".into(),
+                    command: mock_agent.clone(),
+                    args: vec!["--profile-marker".into(), "{guide}".into()],
+                },
+            ],
+            Some("primary".into()),
+        );
+        dlg_p.save_config_now(true);
+        profiles_saved_ok = wait_for(3000, || {
+            let snap = services.config.snapshot();
+            snap.agent_profiles.len() == 2
+                && snap.agent_default_profile.as_deref() == Some("primary")
+        })
+        .await;
+        glib::timeout_future(Duration::from_millis(180)).await;
+        if let Some(dir) = media_dir {
+            let _ = capture_widget_png(&win.window, &dir.join("l6-settings-agent-profiles.png"));
+        }
+        dlg_p.close();
+        drop(dlg_p);
+        let _ = wait_for(2000, || win.settings_dialog().is_none()).await;
+    }
+
+    // 按指定命名配置档（secondary）启动，验证进入 Changes 并可回滚
+    let sessions_before_prof: std::collections::HashSet<String> = win
+        .changes_panel
+        .sessions()
+        .into_iter()
+        .map(|s| s.id.clone())
+        .collect();
+    let _ = gtk4::prelude::WidgetExt::activate_action(
+        &win.window,
+        "win.dock-launch-agent-profile",
+        Some(&"bottom:secondary".to_variant()),
+    );
+    let profile_launch_done = wait_for(8000, || {
+        win.changes_panel
+            .sessions()
+            .iter()
+            .any(|s| !sessions_before_prof.contains(&s.id) && s.state == "exited" && s.usable)
+    })
+    .await;
+    let profile_sid = win
+        .changes_panel
+        .sessions()
+        .into_iter()
+        .find(|s| !sessions_before_prof.contains(&s.id))
+        .map(|s| s.id.clone())
+        .unwrap_or_default();
+    let profile_marker_ok = vault_path.join("profile-marker.md").exists();
+    let mut profile_rb_ok = false;
+    if !profile_sid.is_empty() {
+        win.changes_panel.select_session(&profile_sid);
+        let _ = wait_for(3000, || {
+            win.changes_panel
+                .summary_snapshot()
+                .is_some_and(|sum| sum.session_id == profile_sid && !sum.entries.is_empty())
+        })
+        .await;
+        let _ = win.changes_panel.rollback_session_now();
+        profile_rb_ok = wait_for(4000, || !vault_path.join("profile-marker.md").exists()).await;
+        win.changes_panel.delete_session_now(&profile_sid);
+        let _ = wait_for(2500, || {
+            !win.changes_panel
+                .sessions()
+                .iter()
+                .any(|s| s.id == profile_sid)
+        })
+        .await;
+    }
+    let multi_profile_launch_ok =
+        profiles_saved_ok && profile_launch_done && profile_marker_ok && profile_rb_ok;
+
+    // 自定义命令弹窗启动：验证快照门禁、HORTUS_AGENT_GUIDE_FILE 只读文件存在、命令行不含多行指南、改动进入 Changes 并回滚
+    let custom_probe = temp_dir.join("l6_custom_agent_probe.txt");
+    let _ = std::fs::remove_file(&custom_probe);
+    let custom_cmd = format!(
+        "test -f \"$HORTUS_AGENT_GUIDE_FILE\" && test ! -w \"$HORTUS_AGENT_GUIDE_FILE\" && printf 'GUIDE=%s\\nSESSION=%s\\n' \"$HORTUS_AGENT_GUIDE_FILE\" \"${{HORTUS_AGENT_SESSION:-}}\" > '{}' && printf '# Custom Agent\\n\\nCreated via custom command.\\n' > custom-agent-note.md",
+        custom_probe.to_string_lossy()
+    );
+    let sessions_before_custom: std::collections::HashSet<String> = win
+        .changes_panel
+        .sessions()
+        .into_iter()
+        .map(|s| s.id.clone())
+        .collect();
+    // 预先写入两条可读历史示例，便于弹窗展示最近命令列表
+    let _ = services
+        .core
+        .record_custom_agent_command("claude --print".into());
+    let _ = services
+        .core
+        .record_custom_agent_command("codex --model o3".into());
+    win.open_custom_agent_dialog(Some(PanelRegion::Bottom));
+    let custom_dlg_opened = wait_for(2000, || win.custom_agent_dialog().is_some()).await;
+    if let Some(cdlg) = win.custom_agent_dialog() {
+        glib::timeout_future(Duration::from_millis(200)).await;
+        if let Some(dir) = media_dir {
+            let _ = capture_widget_png(&win.window, &dir.join("l6-custom-agent-dialog.png"));
+        }
+        cdlg.set_command(&custom_cmd);
+        cdlg.trigger_launch();
+        drop(cdlg);
+    }
+    let custom_dlg_closed = wait_for(2500, || win.custom_agent_dialog().is_none()).await;
+    let custom_launch_done =
+        wait_for(8000, || {
+            custom_probe.exists()
+                && win.changes_panel.sessions().iter().any(|s| {
+                    !sessions_before_custom.contains(&s.id) && s.state == "exited" && s.usable
+                })
+        })
+        .await;
+    let custom_probe_txt = std::fs::read_to_string(&custom_probe).unwrap_or_default();
+    let custom_guide_env_ok = custom_probe_txt.contains("GUIDE=")
+        && custom_probe_txt.contains("agent-guide-active.md")
+        && custom_probe_txt.contains("SESSION=")
+        && !custom_cmd.contains('\n');
+    let custom_history_ok = services
+        .core
+        .custom_agent_history()
+        .is_ok_and(|h| h.first().is_some_and(|c| c == &custom_cmd));
+    let custom_sid = win
+        .changes_panel
+        .sessions()
+        .into_iter()
+        .find(|s| !sessions_before_custom.contains(&s.id))
+        .map(|s| s.id.clone())
+        .unwrap_or_default();
+    let mut custom_rb_ok = false;
+    if !custom_sid.is_empty() {
+        win.changes_panel.select_session(&custom_sid);
+        let _ = wait_for(3000, || {
+            win.changes_panel
+                .summary_snapshot()
+                .is_some_and(|sum| sum.session_id == custom_sid && !sum.entries.is_empty())
+        })
+        .await;
+        let _ = win.changes_panel.rollback_session_now();
+        custom_rb_ok = wait_for(4000, || !vault_path.join("custom-agent-note.md").exists()).await;
+        win.changes_panel.delete_session_now(&custom_sid);
+        let _ = wait_for(2500, || {
+            !win.changes_panel
+                .sessions()
+                .iter()
+                .any(|s| s.id == custom_sid)
+        })
+        .await;
+    }
+    for tid in win.terminal_host.tab_ids() {
+        win.terminal_host.close_tab_by_id(tid);
+    }
+    let custom_agent_loop_ok = custom_dlg_opened
+        && custom_dlg_closed
+        && custom_launch_done
+        && custom_guide_env_ok
+        && custom_history_ok
+        && custom_rb_ok;
+
+    // 恢复单 [agent] 配置，保持后续用例基线一致
+    if let Ok(cur) = services.core.editable_config() {
+        let _ = services.core.save_editable_config_with_profiles(
+            EditableConfigInputInfo {
+                font_size: cur.font_size,
+                default_view: cur.default_view,
+                terminal_font: cur.terminal_font,
+                agent_command: Some(mock_agent.clone()),
+                agent_args: vec!["{guide}".into()],
+            },
+            Vec::new(),
+            None,
+            None,
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Part 6 (L4c): 左右边栏平滑拖拽调宽、互不挤压、ToolDock/阅读区自适应与持久化恢复
     // -------------------------------------------------------------------------
     win.left_split.set_show_sidebar(true);
@@ -1490,10 +1692,11 @@ async fn run_suite(
     })
     .await;
 
-    // L5-20: 主题偏好持久化到 linux-ui.toml
+    // L6: 主题偏好持久化到 config.toml（不再写入 linux-ui.toml）
     win.apply_color_scheme_and_sync(crate::core::ColorSchemeChoice::Dark);
-    let ui_prefs_persisted_ok = crate::services::ui_prefs::load_saved_color_scheme()
-        == crate::core::ColorSchemeChoice::Dark;
+    let ui_prefs_persisted_ok = services.core.color_scheme().is_ok_and(|s| s == "dark")
+        && crate::services::ui_prefs::load_color_scheme_with_core(&services.core)
+            == crate::core::ColorSchemeChoice::Dark;
 
     let mut layout_restored_ok = false;
     let mut layout_visibility_restored_ok = false;
@@ -1619,6 +1822,9 @@ async fn run_suite(
             "session_rb_ok": session_rb_ok,
             "session_deleted": session_deleted,
             "vault_intact_after_delete": vault_intact_after_delete,
+            "mcp_json_ok": mcp_json_ok,
+            "multi_profile_launch_ok": multi_profile_launch_ok,
+            "custom_agent_loop_ok": custom_agent_loop_ok,
         },
         "multi_window": {
             "same_services_ptr": same_services_ptr,
@@ -1679,7 +1885,7 @@ pub fn execute_session_restore_check(app: &adw::Application, opts: CliOptions) {
 
     if opts.color_scheme.is_none() {
         crate::window::actions::apply_color_scheme(
-            crate::services::ui_prefs::load_saved_color_scheme(),
+            crate::services::ui_prefs::load_color_scheme_with_core(&services.core),
         );
     }
 

@@ -191,10 +191,17 @@ impl TerminalHost {
         &self,
         tab_id: u64,
         session_id: String,
+        title: Option<String>,
         working_dir: String,
         argv: Vec<String>,
         envv: Vec<String>,
     ) -> Result<(), String> {
+        let display_title = title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Agent")
+            .to_string();
         let (vte, stack, pending_cancel, callbacks) = {
             let mut st = self.inner.state.borrow_mut();
             let cbs = st.callbacks.clone();
@@ -208,7 +215,7 @@ impl TerminalHost {
                 session_id: Some(session_id.clone()),
             };
             tab.phase = TerminalPhase::Running;
-            tab.title = "Agent".to_string();
+            tab.title = display_title.clone();
             tab.working_dir = working_dir.clone();
             tab.argv = argv.clone();
             tab.envv = envv.clone();
@@ -225,7 +232,7 @@ impl TerminalHost {
             return Err(crate::i18n::tr(crate::i18n::Key::TermAgentCancelled).into());
         }
         if let Some(ref cbs) = callbacks {
-            (cbs.on_tab_updated)(tab_id, "Agent".to_string(), "system-run-symbolic");
+            (cbs.on_tab_updated)(tab_id, display_title, "system-run-symbolic");
             (cbs.on_request_select_tab)(tab_id);
         }
         stack.set_visible_child_name("terminal");
@@ -460,7 +467,7 @@ impl TerminalHost {
             .clone()
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()));
-        let envv = build_terminal_env(inner.state.borrow().vault_root.as_deref(), None, None);
+        let envv = build_terminal_env(inner.state.borrow().vault_root.as_deref(), None, None, None);
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let id = Self::insert_tab(
             inner,

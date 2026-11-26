@@ -116,12 +116,14 @@ pub fn build_terminal_env(
     vault_root: Option<&str>,
     agent_session_id: Option<&str>,
     effective_path: Option<&str>,
+    agent_guide_file: Option<&str>,
 ) -> Vec<String> {
     build_terminal_env_from_vars(
         std::env::vars_os(),
         vault_root,
         agent_session_id,
         effective_path,
+        agent_guide_file,
     )
 }
 
@@ -130,6 +132,7 @@ pub fn build_terminal_env_from_vars(
     vault_root: Option<&str>,
     agent_session_id: Option<&str>,
     effective_path: Option<&str>,
+    agent_guide_file: Option<&str>,
 ) -> Vec<String> {
     let mut env_map: BTreeMap<String, String> = vars
         .into_iter()
@@ -140,8 +143,9 @@ pub fn build_terminal_env_from_vars(
         })
         .collect();
 
-    // 剥离父进程遗留的多余隔离变量
+    // 剥离父进程遗留的多余隔离变量，防止污染普通 Shell 或普通配置档会话
     env_map.remove("HORTUS_AGENT_SESSION");
+    env_map.remove("HORTUS_AGENT_GUIDE_FILE");
 
     env_map.insert("TERM".into(), "xterm-256color".into());
     if !has_utf8_locale(env_map.get("LC_ALL")) && !has_utf8_locale(env_map.get("LANG")) {
@@ -170,6 +174,9 @@ pub fn build_terminal_env_from_vars(
     }
     if let Some(id) = agent_session_id.filter(|s| !s.is_empty()) {
         env_map.insert("HORTUS_AGENT_SESSION".into(), id.to_string());
+    }
+    if let Some(guide_file) = agent_guide_file.filter(|g| !g.is_empty()) {
+        env_map.insert("HORTUS_AGENT_GUIDE_FILE".into(), guide_file.to_string());
     }
 
     env_map
@@ -274,12 +281,61 @@ mod tests {
             Some("/tmp/vault"),
             Some("sess-1"),
             Some("/usr/bin:/bin"),
+            None,
         );
         assert!(env.iter().any(|item| item == "OK_VAR=value"));
         assert!(env.iter().any(|item| item.starts_with("BAD_VAL=a/")));
         assert!(env.iter().any(|item| item == "HORTUS_VAULT=/tmp/vault"));
         assert!(env.iter().any(|item| item == "HORTUS_AGENT_SESSION=sess-1"));
         assert!(!env.iter().any(|item| item.contains("ignored")));
+    }
+
+    #[test]
+    fn build_terminal_env_strips_and_injects_agent_guide_file() {
+        let inherited = vec![
+            (
+                OsString::from("HORTUS_AGENT_GUIDE_FILE"),
+                OsString::from("/tmp/stale-guide.md"),
+            ),
+            (
+                OsString::from("HORTUS_AGENT_SESSION"),
+                OsString::from("stale-session"),
+            ),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ];
+
+        // 普通 Shell 与普通配置档：必须剥离父进程遗留的 HORTUS_AGENT_GUIDE_FILE
+        let plain =
+            build_terminal_env_from_vars(inherited.clone(), Some("/tmp/vault"), None, None, None);
+        assert!(
+            !plain
+                .iter()
+                .any(|item| item.starts_with("HORTUS_AGENT_GUIDE_FILE="))
+        );
+        assert!(
+            !plain
+                .iter()
+                .any(|item| item.starts_with("HORTUS_AGENT_SESSION="))
+        );
+
+        // 自定义命令启动 Agent：注入指定只读指南路径
+        let custom = build_terminal_env_from_vars(
+            inherited,
+            Some("/tmp/vault"),
+            Some("sess-custom"),
+            None,
+            Some("/tmp/cache/agent-guide-active.md"),
+        );
+        assert!(
+            custom
+                .iter()
+                .any(|item| item == "HORTUS_AGENT_GUIDE_FILE=/tmp/cache/agent-guide-active.md")
+        );
+        assert!(
+            custom
+                .iter()
+                .any(|item| item == "HORTUS_AGENT_SESSION=sess-custom")
+        );
     }
 
     #[cfg(unix)]

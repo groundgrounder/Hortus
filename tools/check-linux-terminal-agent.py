@@ -175,6 +175,20 @@ if [[ "${1:-}" == "--sleep" ]]; then
   sleep 30
   exit 0
 fi
+if [[ "${1:-}" == "--profile-marker" ]]; then
+  GUIDE_TEXT="${2:-}"
+  if [[ -z "$GUIDE_TEXT" ]] || [[ "$GUIDE_TEXT" != *"Hortus"* ]]; then
+    echo "missing expanded guide text for profile" >&2
+    exit 2
+  fi
+  if [[ -z "${HORTUS_AGENT_SESSION:-}" ]]; then
+    echo "missing HORTUS_AGENT_SESSION" >&2
+    exit 3
+  fi
+  printf '# Profile Marker\n\nLaunched via named profile.\n' > profile-marker.md
+  echo "MOCK_PROFILE_DONE"
+  exit 0
+fi
 GUIDE_TEXT="${1:-}"
 if [[ -z "$GUIDE_TEXT" ]] || [[ "$GUIDE_TEXT" != *"Hortus"* ]]; then
   echo "missing expanded guide text" >&2
@@ -341,6 +355,9 @@ def main() -> int:
                 ("settings", "theme_switch_single_refresh"),
                 ("multi_window", "dirty_missing_preserved_across_windows"),
                 ("agent_changes", "running_agent_close_interrupted"),
+                ("agent_changes", "mcp_json_ok"),
+                ("agent_changes", "multi_profile_launch_ok"),
+                ("agent_changes", "custom_agent_loop_ok"),
                 ("sidebar_resize", "layout_visibility_restored_ok"),
                 ("sidebar_resize", "ui_prefs_persisted_ok"),
             ):

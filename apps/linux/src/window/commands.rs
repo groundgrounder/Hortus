@@ -42,6 +42,11 @@ pub enum WindowCommand {
     ToggleBottomPanel(bool),
     DockNewShell(PanelRegion),
     DockLaunchAgent(PanelRegion),
+    DockLaunchAgentProfile {
+        region: PanelRegion,
+        profile_id: String,
+    },
+    DockLaunchCustomAgent(PanelRegion),
     DockAddTool {
         region: PanelRegion,
         tool: StaticToolKind,
@@ -56,6 +61,8 @@ pub enum WindowCommand {
     NewWindow,
     OpenSettings(Option<SettingsPage>),
     LaunchAgent,
+    LaunchAgentProfile(String),
+    OpenCustomAgentDialog(Option<PanelRegion>),
     SendPathToTerminal,
     SendSelectionToTerminal,
     ConfigChanged(ConfigSnapshot),

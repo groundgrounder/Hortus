@@ -2,17 +2,19 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 原生设置对话框（`adw::PreferencesDialog`）：外观阅读、终端、Agent 与指南及外部修改冲突保护。
+//! 原生设置对话框（`adw::PreferencesDialog`）：外观阅读、终端、Agent 多配置档、MCP 配置复制与指南及冲突保护。
 
 use crate::core::ColorSchemeChoice;
 use crate::i18n::{Key, fmt1, tr};
 use crate::services::AppServices;
 use crate::services::config_service::{FONT_SIZE_MAX, FONT_SIZE_MIN};
+use crate::services::mcp_helper::mcp_config_json_for_vault;
+use gtk4::gdk;
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
 use hortus_ffi::{
-    AgentGuideInfo, AgentProbeInfo, DiscoveredAgentInfo, EditableConfigInfo,
+    AgentGuideInfo, AgentProbeInfo, AgentProfileInfo, DiscoveredAgentInfo, EditableConfigInfo,
     EditableConfigInputInfo,
 };
 use libadwaita as adw;
@@ -46,10 +48,15 @@ struct SettingsState {
     last_conflict: bool,
     on_toast: Rc<dyn Fn(String)>,
     on_scheme: Rc<dyn Fn(ColorSchemeChoice)>,
+    current_vault_root: Rc<dyn Fn() -> Option<String>>,
     suppress_probe: bool,
     suppress_scheme: bool,
+    suppress_profile_sync: bool,
     guide_overridden: bool,
     discovered: Vec<Arc<DiscoveredAgentInfo>>,
+    profiles: Vec<AgentProfileInfo>,
+    default_profile: Option<String>,
+    selected_profile: Option<usize>,
     last_probe: Option<Arc<AgentProbeInfo>>,
     conflict_dialog: glib::WeakRef<adw::AlertDialog>,
 }
@@ -66,6 +73,9 @@ struct SettingsInner {
     terminal_font_entry: adw::EntryRow,
     discovered_group: adw::PreferencesGroup,
     discovered_rows: RefCell<Vec<adw::ActionRow>>,
+    profiles_group: adw::PreferencesGroup,
+    profile_rows: RefCell<Vec<adw::ActionRow>>,
+    profile_name_entry: adw::EntryRow,
     command_entry: adw::EntryRow,
     args_buffer: gtk4::TextBuffer,
     probe_badge: gtk4::Label,
@@ -89,11 +99,12 @@ impl SettingsDialog {
         initial_scheme: ColorSchemeChoice,
         on_toast: Rc<dyn Fn(String)>,
         on_scheme: Rc<dyn Fn(ColorSchemeChoice)>,
+        current_vault_root: Rc<dyn Fn() -> Option<String>>,
     ) -> Self {
         let dialog = adw::PreferencesDialog::builder()
             .title(tr(Key::SettingsTitle))
             .content_width(660)
-            .content_height(620)
+            .content_height(640)
             .build();
 
         // 1. 外观与阅读页
@@ -179,20 +190,37 @@ impl SettingsDialog {
             .icon_name("system-run-symbolic")
             .build();
 
-        let discovered_group = adw::PreferencesGroup::builder()
-            .title(tr(Key::SettingsGroupDetectedAgents))
+        // MCP 配置一键复制入口
+        let mcp_group = adw::PreferencesGroup::new();
+        let mcp_row = adw::ActionRow::builder()
+            .title(tr(Key::SettingsCopyMcpTitle))
             .build();
-        let refresh_discover_btn = gtk4::Button::builder()
-            .icon_name("view-refresh-symbolic")
-            .tooltip_text(tr(Key::SettingsRescanAgentsTooltip))
-            .build();
-        refresh_discover_btn.add_css_class("flat");
-        discovered_group.set_header_suffix(Some(&refresh_discover_btn));
-        agent_page.add(&discovered_group);
+        let copy_mcp_btn = gtk4::Button::with_label(tr(Key::SettingsCopyMcpBtn));
+        copy_mcp_btn.set_valign(gtk4::Align::Center);
+        mcp_row.add_suffix(&copy_mcp_btn);
+        mcp_row.set_activatable_widget(Some(&copy_mcp_btn));
+        mcp_group.add(&mcp_row);
+        agent_page.add(&mcp_group);
 
+        // 多配置档列表
+        let profiles_group = adw::PreferencesGroup::builder()
+            .title(tr(Key::SettingsGroupProfiles))
+            .build();
+        let add_profile_btn = gtk4::Button::with_label(tr(Key::SettingsProfileAddBtn));
+        add_profile_btn.add_css_class("flat");
+        profiles_group.set_header_suffix(Some(&add_profile_btn));
+        agent_page.add(&profiles_group);
+
+        // 启动命令编辑区（多配置档时编辑当前选中档；无配置档时兼容旧 `[agent]`）
         let agent_cfg_group = adw::PreferencesGroup::builder()
             .title(tr(Key::SettingsGroupAgentLaunch))
             .build();
+
+        let profile_name_entry = adw::EntryRow::builder()
+            .title(tr(Key::SettingsProfileNameTitle))
+            .visible(false)
+            .build();
+        agent_cfg_group.add(&profile_name_entry);
 
         let command_entry = adw::EntryRow::builder()
             .title(tr(Key::SettingsAgentCmdTitle))
@@ -247,6 +275,17 @@ impl SettingsDialog {
         let save_row_agent = Self::build_save_row();
         agent_cfg_group.add(&save_row_agent.0);
         agent_page.add(&agent_cfg_group);
+
+        let discovered_group = adw::PreferencesGroup::builder()
+            .title(tr(Key::SettingsGroupDetectedAgents))
+            .build();
+        let refresh_discover_btn = gtk4::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .tooltip_text(tr(Key::SettingsRescanAgentsTooltip))
+            .build();
+        refresh_discover_btn.add_css_class("flat");
+        discovered_group.set_header_suffix(Some(&refresh_discover_btn));
+        agent_page.add(&discovered_group);
 
         let guide_group = adw::PreferencesGroup::builder()
             .title(tr(Key::SettingsGroupGuide))
@@ -326,6 +365,9 @@ impl SettingsDialog {
             terminal_font_entry,
             discovered_group,
             discovered_rows: RefCell::new(Vec::new()),
+            profiles_group,
+            profile_rows: RefCell::new(Vec::new()),
+            profile_name_entry,
             command_entry,
             args_buffer,
             probe_badge,
@@ -342,10 +384,15 @@ impl SettingsDialog {
                 last_conflict: false,
                 on_toast,
                 on_scheme,
+                current_vault_root,
                 suppress_probe: false,
                 suppress_scheme: false,
+                suppress_profile_sync: false,
                 guide_overridden: false,
                 discovered: Vec::new(),
+                profiles: Vec::new(),
+                default_profile: None,
+                selected_profile: None,
                 last_probe: None,
                 conflict_dialog: glib::WeakRef::new(),
             }),
@@ -354,10 +401,13 @@ impl SettingsDialog {
         Self::bind_signals(
             &inner,
             &[save_row_app.1, save_row_term.1, save_row_agent.1],
+            &copy_mcp_btn,
+            &add_profile_btn,
             &refresh_discover_btn,
             &guide_save_btn,
             &guide_reset_btn,
         );
+        Self::render_profiles(&inner);
         Self::reload_all(&inner);
         Self { inner }
     }
@@ -374,9 +424,12 @@ impl SettingsDialog {
         (row, btn)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bind_signals(
         inner: &Rc<SettingsInner>,
         save_buttons: &[gtk4::Button],
+        copy_mcp_btn: &gtk4::Button,
+        add_profile_btn: &gtk4::Button,
         refresh_discover: &gtk4::Button,
         guide_save: &gtk4::Button,
         guide_reset: &gtk4::Button,
@@ -386,6 +439,24 @@ impl SettingsDialog {
             btn.connect_clicked(move |_| {
                 if let Some(this) = weak.upgrade() {
                     Self::save_config_impl(&this, false);
+                }
+            });
+        }
+
+        {
+            let weak = Rc::downgrade(inner);
+            copy_mcp_btn.connect_clicked(move |_| {
+                if let Some(this) = weak.upgrade() {
+                    Self::copy_mcp_config_impl(&this);
+                }
+            });
+        }
+
+        {
+            let weak = Rc::downgrade(inner);
+            add_profile_btn.connect_clicked(move |_| {
+                if let Some(this) = weak.upgrade() {
+                    Self::add_profile_impl(&this);
                 }
             });
         }
@@ -404,6 +475,16 @@ impl SettingsDialog {
                 };
                 let cb = this.state.borrow().on_scheme.clone();
                 cb(choice);
+                Self::refresh_digest_from_core(&this);
+            });
+        }
+
+        {
+            let weak = Rc::downgrade(inner);
+            inner.profile_name_entry.connect_changed(move |_| {
+                if let Some(this) = weak.upgrade() {
+                    Self::sync_selected_profile_from_fields(&this, true);
+                }
             });
         }
 
@@ -411,6 +492,7 @@ impl SettingsDialog {
             let weak = Rc::downgrade(inner);
             inner.command_entry.connect_changed(move |_| {
                 if let Some(this) = weak.upgrade() {
+                    Self::sync_selected_profile_from_fields(&this, true);
                     Self::probe_agent_async(&this);
                 }
             });
@@ -420,6 +502,7 @@ impl SettingsDialog {
             let weak = Rc::downgrade(inner);
             inner.args_buffer.connect_changed(move |_| {
                 if let Some(this) = weak.upgrade() {
+                    Self::sync_selected_profile_from_fields(&this, false);
                     Self::probe_agent_async(&this);
                 }
             });
@@ -453,6 +536,251 @@ impl SettingsDialog {
         }
     }
 
+    fn refresh_digest_from_core(inner: &Rc<SettingsInner>) {
+        let core = Arc::clone(&inner.state.borrow().services.core);
+        if let Ok(info) = core.editable_config() {
+            inner.state.borrow_mut().digest = info.digest;
+        }
+    }
+
+    fn copy_mcp_config_impl(inner: &Rc<SettingsInner>) -> String {
+        let vault_root = (inner.state.borrow().current_vault_root)();
+        let json = mcp_config_json_for_vault(vault_root.as_deref());
+        if let Some(display) = gdk::Display::default() {
+            display.clipboard().set_text(&json);
+        }
+        (inner.state.borrow().on_toast)(tr(Key::ToastCopiedMcpConfig).into());
+        json
+    }
+
+    fn next_unique_profile_id(existing: &[AgentProfileInfo]) -> String {
+        let mut n = existing.len() + 1;
+        loop {
+            let candidate = format!("profile-{n}");
+            if !existing.iter().any(|p| p.id == candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    fn add_profile_impl(inner: &Rc<SettingsInner>) {
+        let idx = {
+            let mut st = inner.state.borrow_mut();
+            let id = Self::next_unique_profile_id(&st.profiles);
+            let name = fmt1(Key::SettingsProfileUntitled, st.profiles.len() + 1);
+            let profile = AgentProfileInfo {
+                id: id.clone(),
+                name,
+                command: String::new(),
+                args: vec!["{guide}".to_string()],
+            };
+            st.profiles.push(profile);
+            if st.default_profile.is_none() {
+                st.default_profile = Some(id);
+            }
+            let idx = st.profiles.len() - 1;
+            st.selected_profile = Some(idx);
+            idx
+        };
+        Self::render_profiles(inner);
+        Self::load_selected_profile_into_fields(inner, idx);
+    }
+
+    fn sync_selected_profile_from_fields(inner: &Rc<SettingsInner>, refresh_rows: bool) {
+        let updated = {
+            let mut st = inner.state.borrow_mut();
+            if st.suppress_profile_sync {
+                return;
+            }
+            let Some(idx) = st.selected_profile else {
+                return;
+            };
+            let Some(profile) = st.profiles.get_mut(idx) else {
+                return;
+            };
+            let new_name = inner.profile_name_entry.text().to_string();
+            let new_cmd = inner.command_entry.text().to_string();
+            let new_args = Self::collect_args(&inner.args_buffer);
+            let meta_changed = profile.name != new_name || profile.command != new_cmd;
+            profile.name = new_name;
+            profile.command = new_cmd;
+            profile.args = new_args;
+            meta_changed
+        };
+        if refresh_rows && updated {
+            Self::update_profile_row_labels(inner);
+        }
+    }
+
+    fn update_profile_row_labels(inner: &Rc<SettingsInner>) {
+        let rows = inner.profile_rows.borrow();
+        let st = inner.state.borrow();
+        for (idx, profile) in st.profiles.iter().enumerate() {
+            if let Some(row) = rows.get(idx) {
+                let is_default = st.default_profile.as_deref() == Some(profile.id.as_str());
+                let title = if is_default {
+                    format!(
+                        "{} ({})",
+                        profile.name,
+                        tr(Key::SettingsProfileDefaultBadge)
+                    )
+                } else {
+                    profile.name.clone()
+                };
+                row.set_title(&glib::markup_escape_text(&title));
+                row.set_subtitle(&glib::markup_escape_text(&profile.command));
+            }
+        }
+    }
+
+    fn load_selected_profile_into_fields(inner: &Rc<SettingsInner>, idx: usize) {
+        let profile = {
+            let mut st = inner.state.borrow_mut();
+            st.selected_profile = Some(idx);
+            st.suppress_probe = true;
+            st.suppress_profile_sync = true;
+            st.profiles.get(idx).cloned()
+        };
+        if let Some(p) = profile {
+            inner.profile_name_entry.set_visible(true);
+            inner.profile_name_entry.set_text(&p.name);
+            inner.command_entry.set_text(&p.command);
+            inner.args_buffer.set_text(&p.args.join("\n"));
+        }
+        {
+            let mut st = inner.state.borrow_mut();
+            st.suppress_profile_sync = false;
+            st.suppress_probe = false;
+        }
+        Self::probe_agent_async(inner);
+    }
+
+    fn render_profiles(inner: &Rc<SettingsInner>) {
+        {
+            let mut rows = inner.profile_rows.borrow_mut();
+            for row in rows.drain(..) {
+                inner.profiles_group.remove(&row);
+            }
+        }
+        let (profiles, default_id, selected_idx) = {
+            let st = inner.state.borrow();
+            (
+                st.profiles.clone(),
+                st.default_profile.clone(),
+                st.selected_profile,
+            )
+        };
+        inner.profile_name_entry.set_visible(!profiles.is_empty());
+        if profiles.is_empty() {
+            let row = adw::ActionRow::builder()
+                .title(tr(Key::SettingsProfileEmpty))
+                .build();
+            inner.profiles_group.add(&row);
+            inner.profile_rows.borrow_mut().push(row);
+            return;
+        }
+        for (idx, profile) in profiles.iter().enumerate() {
+            let is_default = default_id.as_deref() == Some(profile.id.as_str());
+            let title = if is_default {
+                format!(
+                    "{} ({})",
+                    profile.name,
+                    tr(Key::SettingsProfileDefaultBadge)
+                )
+            } else {
+                profile.name.clone()
+            };
+            let row = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(&title))
+                .subtitle(glib::markup_escape_text(&profile.command))
+                .activatable(true)
+                .build();
+            if selected_idx == Some(idx) {
+                row.add_css_class("accent");
+            }
+            {
+                let weak = Rc::downgrade(inner);
+                row.connect_activated(move |_| {
+                    if let Some(this) = weak.upgrade() {
+                        Self::load_selected_profile_into_fields(&this, idx);
+                        Self::render_profiles(&this);
+                    }
+                });
+            }
+            if !is_default {
+                let default_btn = gtk4::Button::with_label(tr(Key::SettingsProfileSetDefaultBtn));
+                default_btn.add_css_class("flat");
+                default_btn.set_valign(gtk4::Align::Center);
+                let weak = Rc::downgrade(inner);
+                let pid = profile.id.clone();
+                default_btn.connect_clicked(move |_| {
+                    if let Some(this) = weak.upgrade() {
+                        this.state.borrow_mut().default_profile = Some(pid.clone());
+                        Self::render_profiles(&this);
+                    }
+                });
+                row.add_suffix(&default_btn);
+            }
+            let del_btn = gtk4::Button::builder()
+                .icon_name("user-trash-symbolic")
+                .tooltip_text(tr(Key::SettingsProfileDeleteBtn))
+                .valign(gtk4::Align::Center)
+                .build();
+            del_btn.add_css_class("flat");
+            {
+                let weak = Rc::downgrade(inner);
+                let pid = profile.id.clone();
+                del_btn.connect_clicked(move |_| {
+                    if let Some(this) = weak.upgrade() {
+                        Self::delete_profile_impl(&this, &pid);
+                    }
+                });
+            }
+            row.add_suffix(&del_btn);
+            inner.profiles_group.add(&row);
+            inner.profile_rows.borrow_mut().push(row);
+        }
+    }
+
+    fn delete_profile_impl(inner: &Rc<SettingsInner>, profile_id: &str) {
+        let next_sel = {
+            let mut st = inner.state.borrow_mut();
+            st.profiles.retain(|p| p.id != profile_id);
+            if st.default_profile.as_deref() == Some(profile_id) {
+                st.default_profile = st.profiles.first().map(|p| p.id.clone());
+            }
+            if st.profiles.is_empty() {
+                st.selected_profile = None;
+                None
+            } else {
+                let idx = st
+                    .selected_profile
+                    .unwrap_or(0)
+                    .min(st.profiles.len().saturating_sub(1));
+                st.selected_profile = Some(idx);
+                Some(idx)
+            }
+        };
+        Self::render_profiles(inner);
+        if let Some(idx) = next_sel {
+            Self::load_selected_profile_into_fields(inner, idx);
+        } else {
+            let mut st = inner.state.borrow_mut();
+            st.suppress_probe = true;
+            st.suppress_profile_sync = true;
+            drop(st);
+            inner.profile_name_entry.set_text("");
+            inner.command_entry.set_text("");
+            inner.args_buffer.set_text("");
+            let mut st = inner.state.borrow_mut();
+            st.suppress_profile_sync = false;
+            st.suppress_probe = false;
+            drop(st);
+            Self::probe_agent_async(inner);
+        }
+    }
+
     pub fn present(&self, parent: &impl IsA<gtk4::Widget>, page: Option<SettingsPage>) {
         if let Some(page) = page {
             self.select_page(page);
@@ -474,6 +802,7 @@ impl SettingsDialog {
     }
 
     pub fn sync_color_scheme(&self, choice: ColorSchemeChoice) {
+        Self::refresh_digest_from_core(&self.inner);
         let target = match choice {
             ColorSchemeChoice::System => 0,
             ColorSchemeChoice::Light => 1,
@@ -548,11 +877,26 @@ impl SettingsDialog {
     }
 
     fn apply_editable_config(inner: &Rc<SettingsInner>, info: &EditableConfigInfo) {
-        {
+        let selected_idx = {
             let mut st = inner.state.borrow_mut();
             st.digest = info.digest.clone();
             st.suppress_probe = true;
-        }
+            st.suppress_profile_sync = true;
+            st.profiles = info.agent_profiles.clone();
+            st.default_profile = info.agent_default_profile.clone();
+            let sel = if st.profiles.is_empty() {
+                None
+            } else {
+                let def_idx = st
+                    .default_profile
+                    .as_deref()
+                    .and_then(|id| st.profiles.iter().position(|p| p.id == id))
+                    .unwrap_or(0);
+                Some(def_idx)
+            };
+            st.selected_profile = sel;
+            sel
+        };
         inner.config_path_row.set_subtitle(&info.config_path);
         inner
             .font_spin
@@ -563,11 +907,26 @@ impl SettingsDialog {
         inner
             .terminal_font_entry
             .set_text(info.terminal_font.as_deref().unwrap_or(""));
-        inner
-            .command_entry
-            .set_text(info.agent_command.as_deref().unwrap_or(""));
-        inner.args_buffer.set_text(&info.agent_args.join("\n"));
-        inner.state.borrow_mut().suppress_probe = false;
+        Self::render_profiles(inner);
+        if let Some(idx) = selected_idx {
+            let p = inner.state.borrow().profiles[idx].clone();
+            inner.profile_name_entry.set_visible(true);
+            inner.profile_name_entry.set_text(&p.name);
+            inner.command_entry.set_text(&p.command);
+            inner.args_buffer.set_text(&p.args.join("\n"));
+        } else {
+            inner.profile_name_entry.set_visible(false);
+            inner.profile_name_entry.set_text("");
+            inner
+                .command_entry
+                .set_text(info.agent_command.as_deref().unwrap_or(""));
+            inner.args_buffer.set_text(&info.agent_args.join("\n"));
+        }
+        {
+            let mut st = inner.state.borrow_mut();
+            st.suppress_profile_sync = false;
+            st.suppress_probe = false;
+        }
         Self::probe_agent_async(inner);
     }
 
@@ -612,15 +971,12 @@ impl SettingsDialog {
             let fill_btn = gtk4::Button::with_label(tr(Key::SettingsFillBtn));
             fill_btn.set_valign(gtk4::Align::Center);
             let weak = Rc::downgrade(inner);
+            let display_name = agent.display_name.clone();
             let exec = agent.executable.clone();
             let args = agent.suggested_args.clone();
             fill_btn.connect_clicked(move |_| {
                 if let Some(this) = weak.upgrade() {
-                    this.state.borrow_mut().suppress_probe = true;
-                    this.command_entry.set_text(&exec);
-                    this.args_buffer.set_text(&args.join("\n"));
-                    this.state.borrow_mut().suppress_probe = false;
-                    Self::probe_agent_async(&this);
+                    Self::fill_command_and_args(&this, &display_name, &exec, &args);
                 }
             });
             row.add_suffix(&fill_btn);
@@ -628,6 +984,24 @@ impl SettingsDialog {
             inner.discovered_group.add(&row);
             inner.discovered_rows.borrow_mut().push(row);
         }
+    }
+
+    fn fill_command_and_args(
+        inner: &Rc<SettingsInner>,
+        display_name: &str,
+        exec: &str,
+        args: &[String],
+    ) {
+        let has_selected_profile = inner.state.borrow().selected_profile.is_some();
+        inner.state.borrow_mut().suppress_probe = true;
+        if has_selected_profile && inner.profile_name_entry.text().trim().is_empty() {
+            inner.profile_name_entry.set_text(display_name);
+        }
+        inner.command_entry.set_text(exec);
+        inner.args_buffer.set_text(&args.join("\n"));
+        inner.state.borrow_mut().suppress_probe = false;
+        Self::sync_selected_profile_from_fields(inner, true);
+        Self::probe_agent_async(inner);
     }
 
     fn collect_args(buffer: &gtk4::TextBuffer) -> Vec<String> {
@@ -780,7 +1154,14 @@ impl SettingsDialog {
         });
     }
 
-    fn build_input(inner: &Rc<SettingsInner>) -> EditableConfigInputInfo {
+    fn build_input(
+        inner: &Rc<SettingsInner>,
+    ) -> (
+        EditableConfigInputInfo,
+        Vec<AgentProfileInfo>,
+        Option<String>,
+    ) {
+        Self::sync_selected_profile_from_fields(inner, false);
         let font_size =
             ((inner.font_spin.value() * 2.0).round() / 2.0).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
         let default_view = if inner.default_view_combo.selected() == 1 {
@@ -792,22 +1173,34 @@ impl SettingsDialog {
             let raw = inner.terminal_font_entry.text().trim().to_string();
             if raw.is_empty() { None } else { Some(raw) }
         };
-        let agent_command = {
-            let raw = inner.command_entry.text().trim().to_string();
-            if raw.is_empty() { None } else { Some(raw) }
+        let (profiles, default_profile) = {
+            let st = inner.state.borrow();
+            (st.profiles.clone(), st.default_profile.clone())
         };
-        let agent_args = Self::collect_args(&inner.args_buffer);
-        EditableConfigInputInfo {
-            font_size,
-            default_view,
-            terminal_font,
-            agent_command,
-            agent_args,
-        }
+        let (agent_command, agent_args) = if profiles.is_empty() {
+            let cmd = {
+                let raw = inner.command_entry.text().trim().to_string();
+                if raw.is_empty() { None } else { Some(raw) }
+            };
+            (cmd, Self::collect_args(&inner.args_buffer))
+        } else {
+            (None, Vec::new())
+        };
+        (
+            EditableConfigInputInfo {
+                font_size,
+                default_view,
+                terminal_font,
+                agent_command,
+                agent_args,
+            },
+            profiles,
+            default_profile,
+        )
     }
 
     fn save_config_impl(inner: &Rc<SettingsInner>, force_overwrite: bool) {
-        let input = Self::build_input(inner);
+        let (input, profiles, default_profile) = Self::build_input(inner);
         let (services, expected_digest) = {
             let st = inner.state.borrow();
             (
@@ -822,14 +1215,20 @@ impl SettingsDialog {
         let weak = Rc::downgrade(inner);
         glib::MainContext::default().spawn_local(async move {
             let svc = Arc::clone(&services);
-            let res =
-                gio::spawn_blocking(move || svc.core.save_editable_config(input, expected_digest))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(hortus_ffi::CoreError::Failure {
-                            kind: "config.thread_error".into(),
-                        })
-                    });
+            let res = gio::spawn_blocking(move || {
+                svc.core.save_editable_config_with_profiles(
+                    input,
+                    profiles,
+                    default_profile,
+                    expected_digest,
+                )
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(hortus_ffi::CoreError::Failure {
+                    kind: "config.thread_error".into(),
+                })
+            });
             let Some(this) = weak.upgrade() else { return };
             match res {
                 Ok(saved) => {
@@ -917,6 +1316,32 @@ impl SettingsDialog {
         self.inner.args_buffer.set_text(&args.join("\n"));
     }
 
+    pub fn set_profiles(&self, profiles: Vec<AgentProfileInfo>, default_profile: Option<String>) {
+        let sel = if profiles.is_empty() {
+            None
+        } else {
+            let def_idx = default_profile
+                .as_deref()
+                .and_then(|id| profiles.iter().position(|p| p.id == id))
+                .unwrap_or(0);
+            Some(def_idx)
+        };
+        {
+            let mut st = self.inner.state.borrow_mut();
+            st.profiles = profiles;
+            st.default_profile = default_profile;
+            st.selected_profile = sel;
+        }
+        SettingsDialog::render_profiles(&self.inner);
+        if let Some(idx) = sel {
+            SettingsDialog::load_selected_profile_into_fields(&self.inner, idx);
+        }
+    }
+
+    pub fn copy_mcp_config_now(&self) -> String {
+        SettingsDialog::copy_mcp_config_impl(&self.inner)
+    }
+
     pub fn fill_discovered_agent(&self, id: &str) -> bool {
         let found = self
             .inner
@@ -929,13 +1354,12 @@ impl SettingsDialog {
         let Some(agent) = found else {
             return false;
         };
-        self.inner.state.borrow_mut().suppress_probe = true;
-        self.inner.command_entry.set_text(&agent.executable);
-        self.inner
-            .args_buffer
-            .set_text(&agent.suggested_args.join("\n"));
-        self.inner.state.borrow_mut().suppress_probe = false;
-        SettingsDialog::probe_agent_async(&self.inner);
+        SettingsDialog::fill_command_and_args(
+            &self.inner,
+            &agent.display_name,
+            &agent.executable,
+            &agent.suggested_args,
+        );
         true
     }
 
@@ -1034,6 +1458,7 @@ mod tests {
             ColorSchemeChoice::System,
             Rc::new(|_| {}),
             Rc::new(|_| {}),
+            Rc::new(|| None),
         );
         let weak = Rc::downgrade(&dlg.inner);
         assert_eq!(weak.strong_count(), 1);

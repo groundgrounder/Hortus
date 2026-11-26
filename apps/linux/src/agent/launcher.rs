@@ -2,7 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Agent 安全启动闭环：校验 `[agent]` 配置 → 后台全库快照（可取消，失败硬阻断）→ 直接按 argv 启动 VTE4 标签。
+//! Agent 安全启动闭环：校验配置档或自定义命令 → 后台全库快照（可取消，失败硬阻断）→ 启动 VTE4 标签。
 
 use crate::core::PanelRegion;
 use crate::i18n::{Key, fmt1, tr};
@@ -18,6 +18,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentLaunchTarget {
+    DefaultProfile,
+    Profile { id: String, name: String },
+    CustomCommand(String),
+}
+
 #[derive(Clone)]
 pub struct AgentLaunchCallbacks {
     pub on_toast: Rc<dyn Fn(String)>,
@@ -28,6 +35,14 @@ pub struct AgentLaunchCallbacks {
     pub is_disposing: Rc<dyn Fn() -> bool>,
 }
 
+struct PreparedAgentSpec {
+    executable: String,
+    args: Vec<String>,
+    effective_path: String,
+    guide_file: Option<String>,
+    tab_title: Option<String>,
+}
+
 fn friendly_spec_error(err: &str) -> String {
     match err {
         "agent.not_configured" => tr(Key::AgentNotConfigured).into(),
@@ -36,21 +51,23 @@ fn friendly_spec_error(err: &str) -> String {
         "agent.command_not_absolute" => tr(Key::AgentCmdNotAbsolute).into(),
         "agent.not_found" => tr(Key::AgentNotFound).into(),
         "agent.not_executable" => tr(Key::AgentNotExecutable).into(),
+        "agent.profile_not_found" => tr(Key::AgentProfileNotFound).into(),
         other => fmt1(Key::AgentInvalidConfig, other),
     }
 }
 
 /// 严格按安全闸门启动 Agent：
-/// 1) 校验 `[agent]` 配置（失败提示并引导设置，不建快照、不启进程）；
+/// 1) 校验配置档或准备自定义命令只读指南文件（失败提示，不建快照、不启进程）；
 /// 2) 打开准备占位标签并后台执行 `begin_agent_session`；
 /// 3) 快照失败或被取消时硬性阻断启动，绝不静默降级；
-/// 4) 快照成功后以 `spec.executable + spec.args`（不经 shell 二次拆分）在终端启动并标记 `running`。
+/// 4) 快照成功后以 `executable + args` 与安全环境变量在终端启动并标记 `running`。
 pub fn launch_agent_with_snapshot_gate(
     parent_window: &adw::ApplicationWindow,
     services: Arc<AppServices>,
     terminal: TerminalHost,
     target_region: PanelRegion,
     login_path: Option<String>,
+    target: AgentLaunchTarget,
     callbacks: AgentLaunchCallbacks,
 ) {
     let Some(vault_root) = (callbacks.current_vault_root)() else {
@@ -64,12 +81,53 @@ pub fn launch_agent_with_snapshot_gate(
     glib::MainContext::default().spawn_local(async move {
         let lp_bg = lp.clone();
         let core_bg = Arc::clone(&core);
-        let spec_res = gio::spawn_blocking(move || {
-            let spec = core_bg
-                .agent_spec_with_path(lp_bg.clone())
-                .map_err(|e| e.to_string())?;
-            let effective_path = core_bg.effective_agent_path(lp_bg);
-            Ok::<_, String>((spec, effective_path))
+        let target_bg = target.clone();
+        let spec_res = gio::spawn_blocking(move || match target_bg {
+            AgentLaunchTarget::DefaultProfile => {
+                let spec = core_bg
+                    .agent_spec_for_profile(None, lp_bg.clone())
+                    .map_err(|e| e.to_string())?;
+                let effective_path = core_bg.effective_agent_path(lp_bg);
+                Ok::<_, String>(PreparedAgentSpec {
+                    executable: spec.executable,
+                    args: spec.args,
+                    effective_path,
+                    guide_file: None,
+                    tab_title: None,
+                })
+            }
+            AgentLaunchTarget::Profile { id, name } => {
+                let spec = core_bg
+                    .agent_spec_for_profile(Some(id), lp_bg.clone())
+                    .map_err(|e| e.to_string())?;
+                let effective_path = core_bg.effective_agent_path(lp_bg);
+                let trimmed = name.trim();
+                let tab_title = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(fmt1(Key::TermTabAgentNamed, trimmed))
+                };
+                Ok::<_, String>(PreparedAgentSpec {
+                    executable: spec.executable,
+                    args: spec.args,
+                    effective_path,
+                    guide_file: None,
+                    tab_title,
+                })
+            }
+            AgentLaunchTarget::CustomCommand(command) => {
+                let launch = core_bg
+                    .prepare_custom_agent_launch(command.clone(), lp_bg)
+                    .map_err(|e| e.to_string())?;
+                let _ = core_bg.record_custom_agent_command(command);
+                Ok::<_, String>(PreparedAgentSpec {
+                    executable: launch.executable,
+                    args: launch.args,
+                    effective_path: launch.path,
+                    guide_file: Some(launch.guide_file),
+                    tab_title: None,
+                })
+            }
         })
         .await
         .unwrap_or_else(|_| Err("agent.thread_error".into()));
@@ -77,7 +135,7 @@ pub fn launch_agent_with_snapshot_gate(
         if (callbacks.is_disposing)() {
             return;
         }
-        let (spec, effective_path) = match spec_res {
+        let prepared = match spec_res {
             Ok(ok) => ok,
             Err(err) => {
                 if let Some(win) = win_weak.upgrade() {
@@ -139,10 +197,15 @@ pub fn launch_agent_with_snapshot_gate(
             }
         };
 
-        let mut argv = Vec::with_capacity(1 + spec.args.len());
-        argv.push(spec.executable);
-        argv.extend(spec.args);
-        let envv = build_terminal_env(Some(&vault_root), Some(&info.id), Some(&effective_path));
+        let mut argv = Vec::with_capacity(1 + prepared.args.len());
+        argv.push(prepared.executable);
+        argv.extend(prepared.args);
+        let envv = build_terminal_env(
+            Some(&vault_root),
+            Some(&info.id),
+            Some(&prepared.effective_path),
+            prepared.guide_file.as_deref(),
+        );
         let sid = info.id.clone();
 
         // 在启动进程之前先把快照状态推进到 running，避免短生命周期 Agent 竞态退出。
@@ -161,7 +224,14 @@ pub fn launch_agent_with_snapshot_gate(
             return;
         }
 
-        match terminal.start_agent_in_tab(tab_id, sid.clone(), vault_root, argv, envv) {
+        match terminal.start_agent_in_tab(
+            tab_id,
+            sid.clone(),
+            prepared.tab_title,
+            vault_root,
+            argv,
+            envv,
+        ) {
             Ok(()) => {
                 (callbacks.on_session_changed)();
             }

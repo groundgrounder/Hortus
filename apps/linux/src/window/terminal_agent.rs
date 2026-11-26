@@ -4,13 +4,16 @@
 
 //! 窗口级终端、Agent 启动闸门、「本次会话改动」面板、统一工具区回调与设置对话框协调。
 
-use crate::agent::{AgentLaunchCallbacks, ChangesCallbacks, launch_agent_with_snapshot_gate};
+use crate::agent::{
+    AgentLaunchCallbacks, AgentLaunchTarget, ChangesCallbacks, CustomAgentDialog,
+    launch_agent_with_snapshot_gate,
+};
 use crate::core::PanelRegion;
 use crate::dock::DockCallbacks;
 use crate::services::ConfigSnapshot;
 use crate::settings::{SettingsDialog, SettingsPage};
 use crate::terminal::TerminalHostCallbacks;
-use crate::window::actions::apply_color_scheme;
+use crate::window::actions::{apply_color_scheme, build_primary_menu};
 use crate::window::commands::WindowCommand;
 use crate::window::shell::WindowInner;
 use gtk4::gio;
@@ -193,7 +196,116 @@ impl WindowInner {
         self.launch_agent_in_region(region);
     }
 
+    pub fn launch_agent_profile_action(self: &Rc<Self>, profile_id: &str) {
+        let region = self.tool_dock.preferred_terminal_region();
+        self.launch_agent_profile_in_region(region, profile_id);
+    }
+
     pub fn launch_agent_in_region(self: &Rc<Self>, target_region: PanelRegion) {
+        self.launch_agent_target_in_region(target_region, AgentLaunchTarget::DefaultProfile);
+    }
+
+    pub fn launch_agent_profile_in_region(
+        self: &Rc<Self>,
+        target_region: PanelRegion,
+        profile_id: &str,
+    ) {
+        let profile_name = self
+            .state
+            .borrow()
+            .services
+            .as_ref()
+            .and_then(|s| {
+                s.config
+                    .snapshot()
+                    .agent_profiles
+                    .into_iter()
+                    .find(|p| p.id == profile_id)
+                    .map(|p| p.name)
+            })
+            .unwrap_or_default();
+        self.launch_agent_target_in_region(
+            target_region,
+            AgentLaunchTarget::Profile {
+                id: profile_id.to_string(),
+                name: profile_name,
+            },
+        );
+    }
+
+    pub fn launch_custom_agent_in_region(
+        self: &Rc<Self>,
+        target_region: PanelRegion,
+        command: String,
+    ) {
+        self.launch_agent_target_in_region(
+            target_region,
+            AgentLaunchTarget::CustomCommand(command),
+        );
+    }
+
+    pub fn open_custom_agent_dialog(self: &Rc<Self>, target_region: Option<PanelRegion>) {
+        let core = self
+            .state
+            .borrow()
+            .services
+            .as_ref()
+            .map(|s| Arc::clone(&s.core));
+        let Some(core) = core else {
+            self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastCoreNotReady));
+            return;
+        };
+        if let Some(old) = self.state.borrow_mut().custom_agent_dialog.take() {
+            old.force_close();
+        }
+        let region = target_region.unwrap_or_else(|| self.tool_dock.preferred_terminal_region());
+        let weak_launch = Rc::downgrade(self);
+        let dlg = CustomAgentDialog::new(
+            core,
+            Rc::new(move |cmd| {
+                if let Some(win) = weak_launch.upgrade() {
+                    win.launch_custom_agent_in_region(region, cmd);
+                }
+            }),
+        );
+        let weak_close = Rc::downgrade(self);
+        dlg.connect_closed(move |closed_dlg| {
+            if let Some(win) = weak_close.upgrade() {
+                let mut st = win.state.borrow_mut();
+                if st
+                    .custom_agent_dialog
+                    .as_ref()
+                    .is_some_and(|cur| cur.same_instance(closed_dlg))
+                {
+                    st.custom_agent_dialog = None;
+                }
+            }
+        });
+        self.state.borrow_mut().custom_agent_dialog = Some(dlg.clone());
+        dlg.present(&self.window);
+    }
+
+    #[cfg(feature = "automation")]
+    pub fn custom_agent_dialog(&self) -> Option<CustomAgentDialog> {
+        self.state.borrow().custom_agent_dialog.clone()
+    }
+
+    pub fn sync_agent_profiles_menus(&self, cfg: &ConfigSnapshot) {
+        self.primary_menu_button
+            .set_menu_model(Some(&build_primary_menu(&cfg.agent_profiles)));
+        let items: Vec<(String, String)> = cfg
+            .agent_profiles
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        self.tool_dock.set_agent_profiles(items);
+    }
+
+    fn launch_agent_target_in_region(
+        self: &Rc<Self>,
+        target_region: PanelRegion,
+        target: AgentLaunchTarget,
+    ) {
         let (services, login_path) = {
             let st = self.state.borrow();
             (st.services.clone(), st.login_path.clone())
@@ -214,6 +326,7 @@ impl WindowInner {
             self.terminal_host.clone(),
             target_region,
             login_path,
+            target,
             AgentLaunchCallbacks {
                 on_toast: Rc::new(move |msg| {
                     if let Some(win) = weak_toast.upgrade() {
@@ -263,6 +376,8 @@ impl WindowInner {
         let scheme = crate::window::actions::current_color_scheme();
         let weak_toast = Rc::downgrade(self);
         let weak_scheme = Rc::downgrade(self);
+        let weak_vault = Rc::downgrade(self);
+        let core_scheme = Arc::clone(&services.core);
         Some(SettingsDialog::new(
             services,
             login_path,
@@ -274,10 +389,16 @@ impl WindowInner {
             }),
             Rc::new(move |choice| {
                 apply_color_scheme(choice);
-                let _ = crate::services::ui_prefs::save_color_scheme(choice);
+                let _ =
+                    crate::services::ui_prefs::save_color_scheme_with_core(&core_scheme, choice);
                 if let Some(win) = weak_scheme.upgrade() {
                     win.sync_color_scheme_action(choice);
                 }
+            }),
+            Rc::new(move || {
+                weak_vault
+                    .upgrade()
+                    .and_then(|w| w.state.borrow().vault_root())
             }),
         ))
     }
@@ -312,6 +433,7 @@ impl WindowInner {
 
     pub fn apply_config_update(self: &Rc<Self>, cfg: &ConfigSnapshot) {
         self.terminal_host.apply_font(cfg.terminal_font.clone());
+        self.sync_agent_profiles_menus(cfg);
         self.refresh_all_reading_tabs();
     }
 

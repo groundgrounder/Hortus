@@ -183,6 +183,40 @@ impl WindowInner {
         self.window.add_action(&dock_launch_agent);
 
         let weak = Rc::downgrade(self);
+        let dock_launch_profile =
+            gio::SimpleAction::new("dock-launch-agent-profile", Some(glib::VariantTy::STRING));
+        dock_launch_profile.connect_activate(move |_, param| {
+            let Some(raw) = param.and_then(|v| v.str()) else {
+                return;
+            };
+            let Some((reg_str, profile_id)) = raw.split_once(':') else {
+                return;
+            };
+            if let Some(region) = PanelRegion::parse(reg_str)
+                && !profile_id.is_empty()
+                && let Some(win) = weak.upgrade()
+            {
+                win.send_command(WindowCommand::DockLaunchAgentProfile {
+                    region,
+                    profile_id: profile_id.to_string(),
+                });
+            }
+        });
+        self.window.add_action(&dock_launch_profile);
+
+        let weak = Rc::downgrade(self);
+        let dock_launch_custom =
+            gio::SimpleAction::new("dock-launch-custom-agent", Some(glib::VariantTy::STRING));
+        dock_launch_custom.connect_activate(move |_, param| {
+            if let Some(reg) = param.and_then(|v| v.str()).and_then(PanelRegion::parse)
+                && let Some(win) = weak.upgrade()
+            {
+                win.send_command(WindowCommand::DockLaunchCustomAgent(reg));
+            }
+        });
+        self.window.add_action(&dock_launch_custom);
+
+        let weak = Rc::downgrade(self);
         let dock_add_tool = gio::SimpleAction::new("dock-add-tool", Some(glib::VariantTy::STRING));
         dock_add_tool.connect_activate(move |_, param| {
             let Some(raw) = param.and_then(|v| v.str()) else {
@@ -316,6 +350,27 @@ impl WindowInner {
             }
         });
         self.window.add_action(&launch_agent);
+
+        let weak = Rc::downgrade(self);
+        let launch_profile =
+            gio::SimpleAction::new("launch-agent-profile", Some(glib::VariantTy::STRING));
+        launch_profile.connect_activate(move |_, param| {
+            if let Some(id) = param.and_then(|v| v.str()).filter(|s| !s.is_empty())
+                && let Some(win) = weak.upgrade()
+            {
+                win.send_command(WindowCommand::LaunchAgentProfile(id.to_string()));
+            }
+        });
+        self.window.add_action(&launch_profile);
+
+        let weak = Rc::downgrade(self);
+        let launch_custom = gio::SimpleAction::new("launch-custom-agent", None);
+        launch_custom.connect_activate(move |_, _| {
+            if let Some(win) = weak.upgrade() {
+                win.send_command(WindowCommand::OpenCustomAgentDialog(None));
+            }
+        });
+        self.window.add_action(&launch_custom);
 
         let weak = Rc::downgrade(self);
         let send_path = gio::SimpleAction::new("send-path-to-terminal", None);
@@ -701,7 +756,17 @@ impl WindowInner {
 
     pub fn apply_color_scheme_and_sync(&self, choice: ColorSchemeChoice) {
         apply_color_scheme(choice);
-        let _ = crate::services::ui_prefs::save_color_scheme(choice);
+        let core = self
+            .state
+            .borrow()
+            .services
+            .as_ref()
+            .map(|s| Arc::clone(&s.core));
+        if let Some(core) = core {
+            let _ = crate::services::ui_prefs::save_color_scheme_with_core(&core, choice);
+        } else {
+            let _ = crate::services::ui_prefs::save_color_scheme(choice);
+        }
         self.sync_color_scheme_action(choice);
     }
 }

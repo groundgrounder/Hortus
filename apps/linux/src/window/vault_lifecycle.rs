@@ -51,7 +51,8 @@ impl WindowInner {
                     services
                         .windows
                         .register(reg_id, WindowInnerBridge::new(Rc::downgrade(&win)));
-                    let term_font = services.config.snapshot().terminal_font;
+                    let cfg_snap = services.config.snapshot();
+                    let term_font = cfg_snap.terminal_font.clone();
                     {
                         let mut st = win.state.borrow_mut();
                         st.math_service = Arc::clone(&services.math_service);
@@ -60,6 +61,7 @@ impl WindowInner {
                         st.login_path = login_path;
                     }
                     win.terminal_host.apply_font(term_font);
+                    win.sync_agent_profiles_menus(&cfg_snap);
                     win.load_saved_layout();
                     if let Some(warn) = font_warning {
                         win.show_toast(&crate::i18n::fmt1(
