@@ -1057,22 +1057,6 @@
         }
       }
     },
-    "A native Markdown knowledge base for people and agents.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "A native Markdown knowledge base for people and agents."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "为人与智能体打造的原生 Markdown 知识库。"
-          }
-        }
-      }
-    },
     "GPL-3.0-only application; MIT OR Apache-2.0 core.": {
       "localizations": {
         "en": {
@@ -1313,38 +1297,6 @@
         }
       }
     },
-    "Not available yet": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Not available yet"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "尚未接入"
-          }
-        }
-      }
-    },
-    "%@, not available yet": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@, not available yet"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@，尚未接入"
-          }
-        }
-      }
-    },
     "Tree diagram": {
       "localizations": {
         "en": {
@@ -1405,38 +1357,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "保存到原路径"
-          }
-        }
-      }
-    },
-    "Open a knowledge base to start reading.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open a knowledge base to start reading."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "打开知识库，开始阅读。"
-          }
-        }
-      }
-    },
-    "Open Knowledge Base…": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open Knowledge Base…"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "打开知识库…"
           }
         }
       }
@@ -1949,22 +1869,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "放弃更改并移到废纸篓"
-          }
-        }
-      }
-    },
-    "You can put it back from the Trash.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "You can put it back from the Trash."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "之后可以从系统废纸篓放回。"
           }
         }
       }
@@ -2668,7 +2572,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "图片路径位于笔记库外"
+            "value": "图片路径位于文件夹外"
           }
         }
       }
@@ -2909,22 +2813,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "打开匹配文本"
-          }
-        }
-      }
-    },
-    "Open a knowledge base to use the terminal": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open a knowledge base to use the terminal"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "打开知识库后才能使用终端"
           }
         }
       }
@@ -3404,7 +3292,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "库在快照期间发生变化，快照未完成"
+            "value": "文件夹在快照期间发生变化，快照未完成"
           }
         }
       }
@@ -3420,7 +3308,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "库里有无法安全快照的条目"
+            "value": "文件夹里有无法安全快照的条目"
           }
         }
       }
@@ -3500,7 +3388,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "库中有无法读取的文件，快照未完成"
+            "value": "文件夹中有无法读取的文件，快照未完成"
           }
         }
       }
@@ -3612,7 +3500,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "删除会话 %@ 的快照？笔记库不会被改动，但此会话将无法再审阅或回滚。"
+            "value": "删除会话 %@ 的快照？文件夹不会被改动，但此会话将无法再审阅或回滚。"
           }
         }
       }
@@ -3645,22 +3533,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "回滚此文件"
-          }
-        }
-      }
-    },
-    "Revert Hunk": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Revert Hunk"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "回滚此更改"
           }
         }
       }
@@ -3708,7 +3580,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "删除此会话快照；不会改动笔记库"
+            "value": "删除此会话快照；不会改动文件夹"
           }
         }
       }
@@ -3741,22 +3613,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "仅反向还原此改动"
-          }
-        }
-      }
-    },
-    "Revert hunk at line %d": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Revert hunk at line %d"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "回滚第 %d 行的更改"
           }
         }
       }
@@ -3805,22 +3661,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "还原本次会话的全部已审阅改动？将影响 %d 项更改。"
-          }
-        }
-      }
-    },
-    "Delete this session snapshot? The note folder is not changed, but this session can no longer be reviewed or rolled back.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Delete this session snapshot? The note folder is not changed, but this session can no longer be reviewed or rolled back."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "删除此会话快照？笔记库不会被改动，但此会话将无法再审阅或回滚。"
           }
         }
       }
@@ -3953,22 +3793,6 @@
         }
       }
     },
-    "This change no longer matches the reviewed diff": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This change no longer matches the reviewed diff"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此更改已与审阅时的 diff 不一致"
-          }
-        }
-      }
-    },
     "The file changed while rolling back this change": {
       "localizations": {
         "en": {
@@ -3981,22 +3805,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "回滚此更改时文件已变化"
-          }
-        }
-      }
-    },
-    "Only text file changes support hunk rollback": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Only text file changes support hunk rollback"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "只有文本文件的更改支持按处回滚"
           }
         }
       }
@@ -4173,22 +3981,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "选择一项查看详情"
-          }
-        }
-      }
-    },
-    "Open a knowledge base to review session changes": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open a knowledge base to review session changes"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "打开知识库后可审阅本次会话改动"
           }
         }
       }
@@ -4653,22 +4445,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "二进制附件"
-          }
-        }
-      }
-    },
-    "Large file (not diffed)": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Large file (not diffed)"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "大文件（未逐行比较）"
           }
         }
       }
@@ -5249,22 +5025,6 @@
         }
       }
     },
-    "Writes known values to config.toml and keeps your comments.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Writes known values to config.toml and keeps your comments."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "将已知项写回 config.toml，并保留你的注释。"
-          }
-        }
-      }
-    },
     "Body font size": {
       "localizations": {
         "en": {
@@ -5325,22 +5085,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "默认视图"
-          }
-        }
-      }
-    },
-    "Notes opened after saving use this view. Open notes keep their current view.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Notes opened after saving use this view. Open notes keep their current view."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "保存后打开的笔记使用此视图；已打开的笔记保持当前视图。"
           }
         }
       }
@@ -5421,38 +5165,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "该字体未安装，终端回退到 SF Mono。"
-          }
-        }
-      }
-    },
-    "Nerd Font icon fallback stays available for installed Nerd Fonts.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nerd Font icon fallback stays available for installed Nerd Fonts."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已安装的 Nerd Font 图标回退保持可用。"
-          }
-        }
-      }
-    },
-    "Changing the font keeps running shells and Agent sessions alive.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Changing the font keeps running shells and Agent sessions alive."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "更换字体会保留正在运行的 shell 和 Agent 会话。"
           }
         }
       }
@@ -5613,22 +5325,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "参数必须包含 {guide}"
-          }
-        }
-      }
-    },
-    "Each item is one argv element; Hortus does not use a shell to split arguments.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Each item is one argv element; Hortus does not use a shell to split arguments."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "每一项是一个 argv 元素；Hortus 不通过 shell 拆分参数。"
           }
         }
       }
@@ -5837,22 +5533,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "从磁盘重新加载配置"
-          }
-        }
-      }
-    },
-    "Hortus updates known values in place and keeps your comments, unknown keys, and [[vault]] overrides.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hortus updates known values in place and keeps your comments, unknown keys, and [[vault]] overrides."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hortus 原地更新已知项，并保留你的注释、未知字段和 [[vault]] 覆盖。"
           }
         }
       }
@@ -6093,22 +5773,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "填入 %@"
-          }
-        }
-      }
-    },
-    "Fills the command and arguments without saving.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Fills the command and arguments without saving."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "仅填入命令与参数，不自动保存。"
           }
         }
       }
@@ -6797,6 +6461,118 @@
           "stringUnit": {
             "state": "translated",
             "value": "未保存的更改"
+          }
+        }
+      }
+    },
+    "Open a folder to use the terminal": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open a folder to use the terminal"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开文件夹后才能使用终端"
+          }
+        }
+      }
+    },
+    "Open a folder to review session changes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open a folder to review session changes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开文件夹后可审阅本次会话改动"
+          }
+        }
+      }
+    },
+    "Revert Change": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Revert Change"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "回滚这一处"
+          }
+        }
+      }
+    },
+    "Revert change at line %d": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Revert change at line %d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "回滚第 %d 行的更改"
+          }
+        }
+      }
+    },
+    "This change no longer matches the reviewed change": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This change no longer matches the reviewed change"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这一处已与审阅时的更改不一致"
+          }
+        }
+      }
+    },
+    "Only text file changes support per-change rollback": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only text file changes support per-change rollback"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "只有文本文件的更改支持按处回滚"
+          }
+        }
+      }
+    },
+    "Large file (line comparison unavailable)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Large file (line comparison unavailable)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "大文件（未逐行比较）"
           }
         }
       }

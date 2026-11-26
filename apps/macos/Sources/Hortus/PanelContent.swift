@@ -57,7 +57,7 @@ struct PanelContent: View {
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "folder").font(.title).foregroundStyle(.tertiary)
-                    Button("Open Knowledge Base…") { workspace.chooseFolder() }
+                    Button("Open Folder…") { workspace.chooseFolder() }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -66,11 +66,11 @@ struct PanelContent: View {
     private var terminalEmptyState: some View {
         VStack(spacing: 10) {
             Image(systemName: "terminal").font(.title2).foregroundStyle(.tertiary)
-            Text(L10n.string("Open a knowledge base to use the terminal"))
+            Text(L10n.string("Open a folder to use the terminal"))
                 .font(.callout).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(L10n.string("Open a knowledge base to use the terminal"))
+        .accessibilityLabel(L10n.string("Open a folder to use the terminal"))
     }
 }

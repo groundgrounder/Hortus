@@ -274,7 +274,7 @@ final class TerminalController {
     /// 固定顺序：模板与可执行文件 → 后台完整快照并发布元数据 → 复核标签/库根/代次 → exec。
     private func launchAgent(_ tab: TerminalTab) {
         guard let workspace, let core = workspace.core, let root = workspace.root else {
-            tab.agentPhase = .failed(L10n.string("Open a knowledge base to use the terminal"))
+            tab.agentPhase = .failed(L10n.string("Open a folder to use the terminal"))
             return
         }
         tab.generation += 1

@@ -70,7 +70,6 @@ struct SettingsView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!model.canSave)
                 .accessibilityLabel(L10n.string("Save settings"))
-                .accessibilityHint(L10n.string("Writes known values to config.toml and keeps your comments."))
         }
         .padding(12)
     }
@@ -106,9 +105,6 @@ private struct GeneralSettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .accessibilityLabel(L10n.string("Default view"))
-                Text(L10n.string("Notes opened after saving use this view. Open notes keep their current view."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -142,12 +138,6 @@ private struct TerminalSettingsView: View {
                           systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
                 }
-                Text(L10n.string("Nerd Font icon fallback stays available for installed Nerd Fonts."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(L10n.string("Changing the font keeps running shells and Agent sessions alive."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -188,9 +178,6 @@ private struct AgentSettingsView: View {
                         : L10n.string("Arguments must include {guide}"),
                       systemImage: model.guideIncludesPlaceholder ? "checkmark.circle" : "exclamationmark.triangle")
                     .foregroundStyle(model.guideIncludesPlaceholder ? Color.secondary : Color.orange)
-                Text(L10n.string("Each item is one argv element; Hortus does not use a shell to split arguments."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section(L10n.string("Agent Guide")) {
@@ -262,7 +249,6 @@ private struct AgentSettingsView: View {
                     .accessibilityLabel(model.isAgentSelected(agent)
                                             ? L10n.string("Selected %@", agent.displayName)
                                             : L10n.string("Use %@", agent.displayName))
-                    .accessibilityHint(L10n.string("Fills the command and arguments without saving."))
                 }
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel(agent.displayName)
@@ -360,9 +346,6 @@ private struct ConfigurationSettingsView: View {
                     Button(L10n.string("Reload from Disk")) { Task { await model.load() } }
                         .accessibilityLabel(L10n.string("Reload configuration from disk"))
                 }
-                Text(L10n.string("Hortus updates known values in place and keeps your comments, unknown keys, and [[vault]] overrides."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             if !model.diagnostics.isEmpty {
                 Section(L10n.string("Diagnostics")) {

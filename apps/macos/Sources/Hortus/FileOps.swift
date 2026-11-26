@@ -417,9 +417,7 @@ extension Workspace {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = L10n.string("Move “%@” to Trash?", target)
-        if unsaved.isEmpty {
-            alert.informativeText = L10n.string("You can put it back from the Trash.")
-        } else {
+        if !unsaved.isEmpty {
             alert.informativeText = L10n.string("These notes have unsaved changes and will be discarded:")
                 + "\n\n" + Self.noteList(unsaved)
         }

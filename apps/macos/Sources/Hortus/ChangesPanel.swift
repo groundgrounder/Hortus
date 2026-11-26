@@ -206,7 +206,7 @@ struct ChangesPanel: View {
 
     @ViewBuilder private var content: some View {
         if workspace.root == nil {
-            empty(L10n.string("Open a knowledge base to review session changes"))
+            empty(L10n.string("Open a folder to review session changes"))
         } else if model.sessions.isEmpty {
             empty(L10n.string("No reviewable sessions"))
         } else if let session = model.selectedSession, !session.usable {
@@ -409,7 +409,7 @@ struct ChangesPanel: View {
 
     @ViewBuilder private func detailBody(_ detail: ReviewEntryDetail, entry: ReviewEntryInfo) -> some View {
         if detail.large {
-            note(L10n.string("Large file (not diffed)"))
+            note(L10n.string("Large file (line comparison unavailable)"))
         } else if detail.binary {
             note(L10n.string("Binary attachment"))
         } else if detail.text {
@@ -454,14 +454,14 @@ struct ChangesPanel: View {
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 if model.canRevertHunks {
-                    Button(L10n.string("Revert Hunk")) {
+                    Button(L10n.string("Revert Change")) {
                         Task { await model.rollbackHunk(hunk, index: index) }
                     }
                     .buttonStyle(.link)
                     .font(.caption2)
                     .disabled(model.rollbackBusy)
                     .help(L10n.string("Reverse only this change"))
-                    .accessibilityLabel(L10n.string("Revert hunk at line %d", Int(hunk.newStart)))
+                    .accessibilityLabel(L10n.string("Revert change at line %d", Int(hunk.newStart)))
                 }
             }
             .padding(.horizontal, 6)

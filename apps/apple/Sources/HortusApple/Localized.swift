@@ -131,11 +131,11 @@ public enum L10n {
         case "history.review_stale":
             return string("The disk changed since this review. Refresh before rolling back.")
         case "history.hunk_invalid":
-            return string("This change no longer matches the reviewed diff")
+            return string("This change no longer matches the reviewed change")
         case "history.hunk_stale":
             return string("The file changed while rolling back this change")
         case "history.hunk_unsupported":
-            return string("Only text file changes support hunk rollback")
+            return string("Only text file changes support per-change rollback")
         case "history.directory_not_empty":
             return string("The folder is not empty; roll back its added contents first")
         case "history.target_exists":
