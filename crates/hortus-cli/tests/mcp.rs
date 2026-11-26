@@ -551,3 +551,61 @@ fn oversized_line_is_drained_and_the_next_request_is_served() {
     assert_eq!(server.read()["id"], 43);
     assert!(server.finish().0.success());
 }
+
+#[test]
+fn external_add_edit_delete_are_immediately_visible_and_guide_skips_vault() {
+    let fixture = Fixture::new();
+    let vault = fixture.vault();
+    let mut server = fixture.start();
+
+    // Guide works before any vault query and even if vault is later emptied.
+    let guide_before = server.call("hortus_guide", json!({}));
+    assert_eq!(tool_text(&guide_before), hortus_config::AGENT_GUIDE);
+
+    // Initial search warms the cache.
+    let initial = server.call("hortus_search", json!({"query": "FreshExternalToken"}));
+    assert_eq!(structured(&initial)["results"].as_array().unwrap().len(), 0);
+
+    // External add
+    let dynamic_note = vault.join("dynamic.md");
+    write(&dynamic_note, "# Dynamic\n\nFreshExternalToken #fresh\n");
+    let after_add = server.call("hortus_search", json!({"query": "FreshExternalToken"}));
+    assert_eq!(structured(&after_add)["results"][0]["path"], "dynamic.md");
+    let tags_after_add = server.call("hortus_tags", json!({"tag": "fresh"}));
+    assert_eq!(structured(&tags_after_add)["count"], 1);
+
+    // External edit
+    write(&dynamic_note, "# Dynamic\n\nEditedExternalToken #fresh\n");
+    let after_edit_old = server.call("hortus_search", json!({"query": "FreshExternalToken"}));
+    assert_eq!(
+        structured(&after_edit_old)["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let after_edit_new = server.call("hortus_search", json!({"query": "EditedExternalToken"}));
+    assert_eq!(
+        structured(&after_edit_new)["results"][0]["path"],
+        "dynamic.md"
+    );
+
+    // External delete
+    fs::remove_file(&dynamic_note).unwrap();
+    let after_delete = server.call("hortus_search", json!({"query": "EditedExternalToken"}));
+    assert_eq!(
+        structured(&after_delete)["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // Snapshot after external cleanup must remain untouched by further MCP calls.
+    let before = snapshot(&vault);
+    let _ = server.call("hortus_orphans", json!({}));
+    let _ = server.call("hortus_guide", json!({}));
+    let (status, stderr) = server.finish();
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(before, snapshot(&vault), "MCP server wrote to the vault");
+}

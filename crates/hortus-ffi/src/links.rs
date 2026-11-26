@@ -5,11 +5,25 @@ use hortus_links::{LinkResolution, LinkRewrite, ResolvedLink};
 use hortus_vault::note::{self, WriteFailure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// 单次异常只丢失当前调用的结果，后续查询仍可继续使用索引。
 fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(|poisoned| {
+        lock.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn recover_read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        lock.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+fn recover_write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|poisoned| {
         lock.clear_poison();
         poisoned.into_inner()
     })
@@ -398,8 +412,8 @@ impl VaultHandle {
         &self,
         updates: impl IntoIterator<Item = (String, Option<String>)>,
     ) {
-        let mut search = recover_lock(&self.search);
-        let mut links = recover_lock(&self.links);
+        let mut search = recover_write(&self.search);
+        let mut links = recover_write(&self.links);
         for (path, text) in updates {
             if let Some(text) = text {
                 if links.text(&path) == Some(&text) {
@@ -612,7 +626,7 @@ impl VaultHandle {
 #[uniffi::export]
 impl VaultHandle {
     pub fn backlinks(&self, path: String) -> Vec<BacklinkInfo> {
-        let index = recover_lock(&self.links);
+        let index = recover_read(&self.links);
         let mut offsets = UTF16Offset::default();
         let mut source = String::new();
         index
@@ -643,7 +657,7 @@ impl VaultHandle {
     }
 
     pub fn links(&self, path: String) -> Vec<ResolvedLinkInfo> {
-        let index = recover_lock(&self.links);
+        let index = recover_read(&self.links);
         resolved_links(
             index.text(&path).unwrap_or_default(),
             index.links(&path).unwrap_or_default(),
@@ -651,7 +665,7 @@ impl VaultHandle {
     }
 
     pub fn knowledge_markup(&self, path: String, text: String) -> KnowledgeMarkupInfo {
-        let (links, tags) = recover_lock(&self.links).markup(&path, &text);
+        let (links, tags) = recover_read(&self.links).markup(&path, &text);
         let mut offsets = UTF16Offset::default();
         let tags = tags
             .into_iter()
@@ -671,7 +685,7 @@ impl VaultHandle {
     }
 
     pub fn tags(&self) -> Vec<TagSummaryInfo> {
-        recover_lock(&self.links)
+        recover_read(&self.links)
             .tags()
             .into_iter()
             .map(|tag| TagSummaryInfo {
@@ -684,11 +698,11 @@ impl VaultHandle {
     }
 
     pub fn notes_with_tag(&self, tag: String) -> Vec<String> {
-        recover_lock(&self.links).notes_with_tag(&tag)
+        recover_read(&self.links).notes_with_tag(&tag)
     }
 
     pub fn resolve_link(&self, source_path: String, raw_target: String) -> LinkResolutionInfo {
-        recover_lock(&self.links)
+        recover_read(&self.links)
             .resolve(&source_path, &raw_target)
             .into()
     }
@@ -715,7 +729,7 @@ impl VaultHandle {
     }
 
     pub fn link_completions(&self, query: String, limit: u32) -> Vec<LinkCompletionInfo> {
-        recover_lock(&self.links)
+        recover_read(&self.links)
             .completions(&query, limit as usize)
             .into_iter()
             .map(|hit| LinkCompletionInfo {
@@ -728,7 +742,7 @@ impl VaultHandle {
     }
 
     pub fn plan_rename_links(&self, old_path: String, new_path: String) -> RenameLinkPlanInfo {
-        let index = recover_lock(&self.links);
+        let index = recover_read(&self.links);
         let mut plans = recover_lock(&self.rename_plans);
         let mut planned: BTreeMap<String, PlannedFile> = BTreeMap::new();
         if note::note_path(self.vault.root(), &old_path).is_ok()
@@ -830,7 +844,7 @@ impl VaultHandle {
         let normalized_source =
             hortus_links::normalize_note_path(&source_path).unwrap_or_else(|| source_path.clone());
         let (resolution, text) = {
-            let index = recover_lock(&self.links);
+            let index = recover_read(&self.links);
             let resolution = index.resolve(&normalized_source, &raw_target);
             let text = match &resolution {
                 LinkResolution::Note(path) => index.text(path).map(str::to_owned),
@@ -947,7 +961,7 @@ impl VaultHandle {
             };
         let mut document = Document::new(&content);
         let model = document.reading(false)?;
-        let (links, tags) = recover_lock(&self.links).markup(&resolved, &content);
+        let (links, tags) = recover_read(&self.links).markup(&resolved, &content);
         let links = resolved_links(&content, links);
         let mut tag_offsets = UTF16Offset::default();
         let tags = tags
@@ -1011,7 +1025,7 @@ impl VaultHandle {
     }
 
     pub fn plan_folder_rename_links(&self, old_dir: String, new_dir: String) -> RenameLinkPlanInfo {
-        let index = recover_lock(&self.links);
+        let index = recover_read(&self.links);
         let mut plans = recover_lock(&self.rename_plans);
         let plan = if note::note_path(self.vault.root(), &old_dir).is_ok()
             && note::note_path(self.vault.root(), &new_dir).is_ok()
@@ -1090,6 +1104,14 @@ mod tests {
         assert!(lock.is_poisoned());
     }
 
+    fn poison_rwlock<T>(lock: &RwLock<T>) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = lock.write().unwrap();
+            panic!("inject rwlock poison");
+        }));
+        assert!(lock.is_poisoned());
+    }
+
     #[test]
     fn poisoned_vault_locks_recover_for_queries_and_rename() {
         let temporary = tempfile::tempdir().unwrap();
@@ -1107,8 +1129,8 @@ mod tests {
             .unwrap();
         handle.update_search_index(vec!["a.md".into(), "b.md".into()], vec![]);
 
-        poison(&handle.search);
-        poison(&handle.links);
+        poison_rwlock(&handle.search);
+        poison_rwlock(&handle.links);
         poison(&handle.index_update);
         poison(&handle.rename_plans);
 

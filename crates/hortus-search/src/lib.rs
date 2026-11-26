@@ -42,13 +42,74 @@ pub struct FullTextResult {
 struct Note {
     title: String,
     text: String,
+    /// `true` when no non-ASCII char in `text` folds to an ASCII char under `char::to_lowercase`.
+    ascii_fold_safe: bool,
+    title_folded: PreFolded,
+    path_folded: PreFolded,
+    file_name_folded: PreFolded,
+    file_name_offset: usize,
 }
 
 #[derive(Clone, Debug)]
-struct Folded {
-    text: String,
+struct PreFolded {
+    chars: Vec<char>,
     /// Each folded character maps back to the UTF-8 byte range of its source char.
     map: Vec<(usize, usize)>,
+}
+
+enum CompiledPattern {
+    Ascii {
+        bytes: Vec<u8>,
+        first_lower: u8,
+        first_upper: u8,
+        prefix: Vec<usize>,
+    },
+    Unicode {
+        chars: Vec<char>,
+        prefix: Vec<usize>,
+    },
+}
+
+impl CompiledPattern {
+    fn new(query: &str) -> Option<Self> {
+        if query.is_empty() {
+            return None;
+        }
+        if query.is_ascii() {
+            let bytes: Vec<u8> = query.bytes().map(|b| b.to_ascii_lowercase()).collect();
+            let first_lower = bytes[0];
+            let first_upper = first_lower.to_ascii_uppercase();
+            let prefix = kmp_prefix(&bytes);
+            Some(Self::Ascii {
+                bytes,
+                first_lower,
+                first_upper,
+                prefix,
+            })
+        } else {
+            let chars: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+            if chars.is_empty() {
+                return None;
+            }
+            let prefix = kmp_prefix(&chars);
+            Some(Self::Unicode { chars, prefix })
+        }
+    }
+}
+
+fn kmp_prefix<T: Eq>(pattern: &[T]) -> Vec<usize> {
+    let mut prefix = vec![0; pattern.len()];
+    for index in 1..pattern.len() {
+        let mut matched = prefix[index - 1];
+        while matched > 0 && pattern[index] != pattern[matched] {
+            matched = prefix[matched - 1];
+        }
+        if pattern[index] == pattern[matched] {
+            matched += 1;
+        }
+        prefix[index] = matched;
+    }
+    prefix
 }
 
 #[derive(Clone, Debug)]
@@ -95,7 +156,30 @@ impl SearchIndex {
         let path = path.into();
         let text = text.into();
         let title = first_heading(&text).unwrap_or_else(|| file_name(&path));
-        self.notes.insert(path, Note { title, text });
+        let ascii_fold_safe = text.is_ascii()
+            || !text
+                .chars()
+                .any(|c| !c.is_ascii() && c.to_lowercase().any(|l| l.is_ascii()));
+        let file_name_slice = Path::new(&path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&path);
+        let file_name_offset = path.len() - file_name_slice.len();
+        let title_folded = pre_fold(&title);
+        let path_folded = pre_fold(&path);
+        let file_name_folded = pre_fold(file_name_slice);
+        self.notes.insert(
+            path,
+            Note {
+                title,
+                text,
+                ascii_fold_safe,
+                title_folded,
+                path_folded,
+                file_name_folded,
+                file_name_offset,
+            },
+        );
     }
 
     pub fn remove(&mut self, path: &str) {
@@ -122,17 +206,31 @@ impl SearchIndex {
                 .collect();
         }
 
+        let query_chars: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+        if query_chars.is_empty() {
+            return vec![];
+        }
+        let mut found_scratch = Vec::with_capacity(query_chars.len());
+
         let mut results = self
             .notes
             .iter()
             .filter_map(|(path, note)| {
-                let title = fuzzy_match(&note.title, query);
-                let path_match = fuzzy_match(path, query);
-                let file_name = Path::new(path)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or(path);
-                let file_name_match = fuzzy_match(file_name, query);
+                let title = fuzzy_match_folded(
+                    &note.title,
+                    &note.title_folded,
+                    &query_chars,
+                    &mut found_scratch,
+                );
+                let path_match =
+                    fuzzy_match_folded(path, &note.path_folded, &query_chars, &mut found_scratch);
+                let file_name = &path[note.file_name_offset..];
+                let file_name_match = fuzzy_match_folded(
+                    file_name,
+                    &note.file_name_folded,
+                    &query_chars,
+                    &mut found_scratch,
+                );
                 let candidate = [
                     file_name_match.as_ref().map(|value| QuickCandidate {
                         source: 0,
@@ -182,16 +280,71 @@ impl SearchIndex {
         max_matches_per_note: usize,
         cancelled: Option<&AtomicBool>,
     ) -> Option<Vec<FullTextResult>> {
-        if query.is_empty() {
+        let Some(pattern) = CompiledPattern::new(query) else {
             return Some(vec![]);
+        };
+        struct UnicodeScratch {
+            chars: Vec<char>,
+            prefix: Vec<usize>,
+            queue: std::collections::VecDeque<(usize, usize)>,
         }
         let mut results = Vec::new();
+        let mut unicode_scratch: Option<UnicodeScratch> = None;
         for (path, note) in &self.notes {
             if cancelled.is_some_and(|token| token.load(AtomicOrdering::Acquire)) {
                 return None;
             }
-            let (count, matches) =
-                substring_matches(&note.text, query, max_matches_per_note, cancelled)?;
+            let (count, matches) = match &pattern {
+                CompiledPattern::Ascii {
+                    bytes,
+                    first_lower,
+                    first_upper,
+                    prefix,
+                } if note.ascii_fold_safe => substring_matches_ascii(
+                    &note.text,
+                    bytes,
+                    *first_lower,
+                    *first_upper,
+                    prefix,
+                    max_matches_per_note,
+                    cancelled,
+                )?,
+                CompiledPattern::Ascii { bytes, .. } => {
+                    let scratch = unicode_scratch.get_or_insert_with(|| {
+                        let chars: Vec<char> = bytes.iter().map(|&b| b as char).collect();
+                        let prefix = kmp_prefix(&chars);
+                        let queue = std::collections::VecDeque::with_capacity(chars.len());
+                        UnicodeScratch {
+                            chars,
+                            prefix,
+                            queue,
+                        }
+                    });
+                    substring_matches_unicode(
+                        &note.text,
+                        &scratch.chars,
+                        &scratch.prefix,
+                        &mut scratch.queue,
+                        max_matches_per_note,
+                        cancelled,
+                    )?
+                }
+                CompiledPattern::Unicode { chars, prefix } => {
+                    let scratch = unicode_scratch.get_or_insert_with(|| UnicodeScratch {
+                        chars: Vec::new(),
+                        prefix: Vec::new(),
+                        queue: std::collections::VecDeque::with_capacity(chars.len()),
+                    });
+                    substring_matches_unicode(
+                        &note.text,
+                        chars,
+                        prefix,
+                        &mut scratch.queue,
+                        max_matches_per_note,
+                        cancelled,
+                    )?
+                }
+            };
             if count > 0 {
                 results.push(FullTextResult {
                     path: path.clone(),
@@ -253,17 +406,17 @@ fn first_heading(text: &str) -> Option<String> {
     None
 }
 
-fn folded(input: &str) -> Folded {
-    let mut text = String::new();
-    let mut map = Vec::new();
+fn pre_fold(input: &str) -> PreFolded {
+    let mut chars = Vec::with_capacity(input.len());
+    let mut map = Vec::with_capacity(input.len());
     for (start, character) in input.char_indices() {
         let end = start + character.len_utf8();
         for lowered in character.to_lowercase() {
-            text.push(lowered);
+            chars.push(lowered);
             map.push((start, end));
         }
     }
-    Folded { text, map }
+    PreFolded { chars, map }
 }
 
 fn utf16_offset(text: &str, byte: usize) -> usize {
@@ -278,28 +431,93 @@ fn range(text: &str, start: usize, end: usize) -> MatchRange {
     }
 }
 
-fn substring_matches(
+/// Pure ASCII case-insensitive fast-path using tight byte scanning + KMP fallback.
+/// Produces byte spans identical to `substring_matches_unicode` whenever `note.ascii_fold_safe`.
+fn substring_matches_ascii(
     text: &str,
-    query: &str,
+    pattern: &[u8],
+    first_lower: u8,
+    first_upper: u8,
+    prefix: &[usize],
     limit: usize,
     cancelled: Option<&AtomicBool>,
 ) -> Option<(u32, Vec<TextMatch>)> {
-    let pattern = folded(query).text.chars().collect::<Vec<_>>();
+    let bytes = text.as_bytes();
+    let pat_len = pattern.len();
+    if pat_len == 0 || bytes.len() < pat_len {
+        return Some((0, vec![]));
+    }
+    let mut matched = 0usize;
+    let mut count = 0u32;
+    let mut spans = Vec::new();
+    let mut index = 0usize;
+    let mut next_cancel_check = 4096usize;
+    while index < bytes.len() {
+        if index >= next_cancel_check {
+            if cancelled.is_some_and(|token| token.load(AtomicOrdering::Acquire)) {
+                return None;
+            }
+            next_cancel_check = index + 4096;
+        }
+        if matched == 0 {
+            // Tight skip loop until the first byte of the pattern matches.
+            let mut found = None;
+            for (offset, &byte) in bytes[index..].iter().enumerate() {
+                if byte == first_lower || byte == first_upper {
+                    found = Some(index + offset);
+                    break;
+                }
+            }
+            let Some(pos) = found else {
+                break;
+            };
+            index = pos;
+            if pat_len == 1 {
+                count = count.saturating_add(1);
+                if spans.len() < limit {
+                    spans.push(index..index + 1);
+                }
+                index += 1;
+                continue;
+            }
+            matched = 1;
+            index += 1;
+            continue;
+        }
+        let lowered = bytes[index].to_ascii_lowercase();
+        while matched > 0 && lowered != pattern[matched] {
+            matched = prefix[matched - 1];
+        }
+        if lowered == pattern[matched] {
+            matched += 1;
+        }
+        if matched == pat_len {
+            count = count.saturating_add(1);
+            if spans.len() < limit {
+                spans.push((index + 1 - pat_len)..(index + 1));
+            }
+            matched = prefix[matched - 1];
+        }
+        index += 1;
+    }
+    if count == 0 {
+        return Some((0, vec![]));
+    }
+    build_text_matches(text, count, spans, cancelled)
+}
+
+fn substring_matches_unicode(
+    text: &str,
+    pattern: &[char],
+    prefix: &[usize],
+    source_ranges: &mut std::collections::VecDeque<(usize, usize)>,
+    limit: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Option<(u32, Vec<TextMatch>)> {
     if pattern.is_empty() {
         return Some((0, vec![]));
     }
-    let mut prefix = vec![0; pattern.len()];
-    for index in 1..pattern.len() {
-        let mut matched = prefix[index - 1];
-        while matched > 0 && pattern[index] != pattern[matched] {
-            matched = prefix[matched - 1];
-        }
-        if pattern[index] == pattern[matched] {
-            matched += 1;
-        }
-        prefix[index] = matched;
-    }
-    let mut source_ranges = std::collections::VecDeque::with_capacity(pattern.len());
+    source_ranges.clear();
     let mut matched = 0;
     let mut count = 0u32;
     let mut spans = Vec::with_capacity(limit.min(8));
@@ -333,10 +551,33 @@ fn substring_matches(
     if count == 0 {
         return Some((0, vec![]));
     }
+    build_text_matches(text, count, spans, cancelled)
+}
+
+fn build_text_matches(
+    text: &str,
+    count: u32,
+    spans: Vec<std::ops::Range<usize>>,
+    cancelled: Option<&AtomicBool>,
+) -> Option<(u32, Vec<TextMatch>)> {
+    if spans.is_empty() {
+        return Some((count, vec![]));
+    }
     let graphemes: Vec<usize> = UnicodeSegmentation::grapheme_indices(text, true)
         .map(|(offset, _)| offset)
         .chain(std::iter::once(text.len()))
         .collect();
+    let mut last_byte = 0usize;
+    let mut last_utf16 = 0usize;
+    let mut utf16_at = |byte: usize| -> usize {
+        if byte >= last_byte {
+            last_utf16 += text[last_byte..byte].encode_utf16().count();
+            last_byte = byte;
+            last_utf16
+        } else {
+            utf16_offset(text, byte)
+        }
+    };
     let matches = spans
         .into_iter()
         .enumerate()
@@ -353,28 +594,34 @@ fn substring_matches(
                 .min(graphemes.len() - 1);
             let snippet_start = graphemes[start_index];
             let snippet_end = graphemes[end_index];
+            let snippet_start_utf16 = utf16_at(snippet_start) as u32;
+            let start_utf16 = utf16_at(span.start) as u32;
+            let end_utf16 = utf16_at(span.end) as u32;
             Some(TextMatch {
-                start: utf16_offset(text, span.start) as u32,
-                length: (utf16_offset(text, span.end) - utf16_offset(text, span.start)) as u32,
+                start: start_utf16,
+                length: end_utf16 - start_utf16,
                 snippet: text[snippet_start..snippet_end].to_owned(),
-                snippet_start: utf16_offset(text, snippet_start) as u32,
+                snippet_start: snippet_start_utf16,
             })
         })
         .collect::<Option<Vec<_>>>()?;
     Some((count, matches))
 }
 
-fn fuzzy_match(text: &str, query: &str) -> Option<FuzzyMatch> {
-    let folded_text = folded(text);
-    let text_chars: Vec<char> = folded_text.text.chars().collect();
-    let query_chars: Vec<char> = folded(query).text.chars().collect();
+fn fuzzy_match_folded(
+    text: &str,
+    folded_text: &PreFolded,
+    query_chars: &[char],
+    found: &mut Vec<usize>,
+) -> Option<FuzzyMatch> {
     if query_chars.is_empty() {
         return None;
     }
-    let mut found = Vec::with_capacity(query_chars.len());
+    found.clear();
     let mut cursor = 0;
-    for character in query_chars {
-        let index = text_chars
+    for &character in query_chars {
+        let index = folded_text
+            .chars
             .get(cursor..)?
             .iter()
             .position(|value| *value == character)?
@@ -487,6 +734,88 @@ mod tests {
             index
                 .search_cancelled("needle", 5, Some(&cancelled))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn ascii_fast_path_matches_unicode_edges_and_overlaps() {
+        let mut index = SearchIndex::new();
+        // Overlapping ASCII matches
+        index.upsert("overlap.md", "AbAbA ababa");
+        let overlap = &index.search("aba", 10)[0];
+        assert_eq!(overlap.count, 4);
+        assert_eq!(
+            overlap
+                .matches
+                .iter()
+                .map(|m| (m.start, m.length))
+                .collect::<Vec<_>>(),
+            vec![(0, 3), (2, 3), (6, 3), (8, 3)]
+        );
+
+        // Non-ASCII character that lowers to ASCII ('İ' -> 'i' + U+0307, 'K' -> 'k')
+        index.upsert("turkish.md", "İstanbul and Kelvin");
+        let i_hits = index.search("i", 10);
+        assert_eq!(i_hits.len(), 1);
+        assert_eq!(i_hits[0].path, "turkish.md");
+        assert_eq!(i_hits[0].count, 2); // 'İ' and 'i' in Kelvin
+        let k_hits = index.search("kelvin", 10);
+        assert_eq!(k_hits.len(), 1);
+        assert_eq!(k_hits[0].path, "turkish.md");
+        assert_eq!(k_hits[0].count, 1);
+
+        // Mixed CJK + ASCII note uses ASCII fast-path safely
+        index.upsert("cjk.md", "中文前段 HortusCore 中间 hortuscore 尾部");
+        let cjk_hits = index.search("hortuscore", 10);
+        assert_eq!(cjk_hits.len(), 1);
+        assert_eq!(cjk_hits[0].count, 2);
+        assert_eq!(
+            cjk_hits[0].matches[0].start,
+            "中文前段 ".encode_utf16().count() as u32
+        );
+    }
+
+    #[test]
+    fn large_vault_3000_notes_concurrent_reads_and_fast_search() {
+        use std::sync::{Arc, RwLock};
+        let mut index = SearchIndex::new();
+        for i in 0..3000 {
+            let body = if i % 100 == 0 {
+                format!(
+                    "# Note {i}\n\n这是一个包含中英文混合内容的长笔记，用于测试大库检索性能。TargetKeyword_{} 出现在这里。\n{}",
+                    i / 100,
+                    "普通段落文本与架构设计记录，确保每篇笔记具备真实正文长度。".repeat(8)
+                )
+            } else {
+                format!(
+                    "# Note {i}\n\n{}",
+                    "日常知识笔记内容，包含双链、流程图说明与复盘记录。".repeat(10)
+                )
+            };
+            index.upsert(format!("folder-{}/note-{i:04}.md", i % 30), body);
+        }
+        let shared = Arc::new(RwLock::new(index));
+        let start = std::time::Instant::now();
+        let handles: Vec<_> = (0..4)
+            .map(|worker| {
+                let shared = Arc::clone(&shared);
+                std::thread::spawn(move || {
+                    let guard = shared.read().unwrap();
+                    let full = guard.search("targetkeyword", 5);
+                    assert_eq!(full.len(), 30);
+                    let quick = guard.quick_open(&format!("note-{:04}", worker * 100), 20);
+                    assert!(!quick.is_empty());
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let elapsed = start.elapsed();
+        // Sanity bound: 4 concurrent 3,000-note searches should finish well under 5s even in debug mode.
+        assert!(
+            elapsed.as_secs() < 5,
+            "concurrent 3000-note search too slow: {elapsed:?}"
         );
     }
 }

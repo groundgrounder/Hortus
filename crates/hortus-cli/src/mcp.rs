@@ -5,8 +5,9 @@
 //! diagnostics go to stderr; stdout carries one JSON-RPC message per line.
 
 use crate::mermaid_check;
-use crate::query::{self, Vault};
+use crate::query::{self, CachedVault, Vault};
 use hortus_config::Directories;
+use hortus_links::KnowledgeIndex;
 use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
 use std::path::Path;
@@ -25,6 +26,7 @@ pub fn guide_text() -> Result<String, String> {
 /// 启动服务直到 stdin 结束；库根在建立连接前锁定。
 pub fn run(vault: Option<&Path>) -> Result<(), String> {
     let root = query::resolve_root(vault)?;
+    let mut cache = CachedVault::new(root);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut input = stdin.lock();
@@ -48,7 +50,7 @@ pub fn run(vault: Option<&Path>) -> Result<(), String> {
             if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
                 continue;
             }
-            let Some(response) = respond(&bytes, &root) else {
+            let Some(response) = respond(&bytes, &mut cache) else {
                 continue;
             };
             response
@@ -63,7 +65,7 @@ pub fn run(vault: Option<&Path>) -> Result<(), String> {
 }
 
 /// 解析一行 JSON-RPC；通知返回 `None`，其余错误也用 JSON-RPC 错误包回答。
-fn respond(line: &[u8], root: &Path) -> Option<Value> {
+fn respond(line: &[u8], cache: &mut CachedVault) -> Option<Value> {
     let message: Value = match serde_json::from_slice(line) {
         Ok(value) => value,
         Err(_) => return Some(error_response(Value::Null, -32700, "Parse error")),
@@ -84,7 +86,7 @@ fn respond(line: &[u8], root: &Path) -> Option<Value> {
         "initialize" => success_response(id, initialize_result(&params)),
         "ping" => success_response(id, json!({})),
         "tools/list" => success_response(id, json!({ "tools": tools() })),
-        "tools/call" => call_tool(id, &params, root),
+        "tools/call" => call_tool(id, &params, cache),
         "resources/list" => success_response(id, json!({ "resources": resources() })),
         "resources/read" => read_resource(id, &params),
         _ => error_response(id, -32601, "Method not found"),
@@ -222,7 +224,7 @@ enum CallError {
     Tool(String),
 }
 
-fn call_tool(id: Value, params: &Value, root: &Path) -> Value {
+fn call_tool(id: Value, params: &Value, cache: &mut CachedVault) -> Value {
     let Some(params) = params.as_object() else {
         return error_response(id, -32602, "Invalid params");
     };
@@ -240,32 +242,42 @@ fn call_tool(id: Value, params: &Value, root: &Path) -> Value {
     if !tools().iter().any(|tool| tool["name"] == name) {
         return error_response(id, -32602, &format!("Unknown tool: {name}"));
     }
-    let vault = match Vault::load(Some(root)) {
-        Ok(vault) => vault,
-        Err(error) => return tool_error(id, &error),
-    };
+    // `hortus_guide` 不依赖笔记内容，在载库前直接返回，零磁盘扫描。
+    if name == "hortus_guide" {
+        return match guide() {
+            Ok(result) => {
+                let text = result["guide"].as_str().map(str::to_owned);
+                success_response(id, tool_success(result, text.as_deref()))
+            }
+            Err(CallError::Invalid(message)) => error_response(id, -32602, &message),
+            Err(CallError::Tool(message)) => tool_error(id, &message),
+        };
+    }
+    if let Err(error) = cache.refresh() {
+        return tool_error(id, &error);
+    }
+    let vault = cache.vault();
+    let knowledge = cache.knowledge();
     let outcome = match name {
-        "hortus_search" => search(&vault, &arguments),
-        "hortus_backlinks" => note_query(&vault, &arguments, query::backlinks_value),
-        "hortus_links" => note_query(&vault, &arguments, query::links_value),
-        "hortus_tags" => tags(&vault, &arguments),
-        "hortus_outline" => note_query(&vault, &arguments, query::outline_value),
-        "hortus_orphans" => Ok(query::orphans_value(&vault)),
-        "hortus_broken_links" => Ok(query::broken_links_value(&vault)),
-        "hortus_mermaid_check" => mermaid(&vault, &arguments),
-        "hortus_guide" => guide(),
+        "hortus_search" => search(vault, cache.search(), &arguments),
+        "hortus_backlinks" => note_knowledge_query(
+            vault,
+            knowledge,
+            &arguments,
+            query::backlinks_value_with_index,
+        ),
+        "hortus_links" => {
+            note_knowledge_query(vault, knowledge, &arguments, query::links_value_with_index)
+        }
+        "hortus_tags" => tags(vault, knowledge, &arguments),
+        "hortus_outline" => note_query(vault, &arguments, query::outline_value),
+        "hortus_orphans" => Ok(query::orphans_value_with_index(vault, knowledge)),
+        "hortus_broken_links" => Ok(query::broken_links_value_with_index(vault, knowledge)),
+        "hortus_mermaid_check" => mermaid(vault, &arguments),
         _ => unreachable!("tool names are checked above"),
     };
     match outcome {
-        Ok(result) => {
-            // 指南以原文返回，结构化副本仍供程序读取。
-            let text = if name == "hortus_guide" {
-                result["guide"].as_str().map(str::to_owned)
-            } else {
-                None
-            };
-            success_response(id, tool_success(result, text.as_deref()))
-        }
+        Ok(result) => success_response(id, tool_success(result, None)),
         Err(CallError::Invalid(message)) => error_response(id, -32602, &message),
         Err(CallError::Tool(message)) => tool_error(id, &message),
     }
@@ -339,12 +351,16 @@ fn resolve_note(vault: &Vault, note: &str) -> Result<String, CallError> {
     })
 }
 
-fn search(vault: &Vault, arguments: &Value) -> Result<Value, CallError> {
+fn search(
+    vault: &Vault,
+    index: &hortus_search::SearchIndex,
+    arguments: &Value,
+) -> Result<Value, CallError> {
     let query = required_string(arguments, "query")?;
     let limit = optional_integer(arguments, "limit")?.unwrap_or(50);
     let limit = usize::try_from(limit)
         .map_err(|_| invalid_params("limit must be a non-negative integer"))?;
-    Ok(query::search_value(vault, &query, limit))
+    Ok(query::search_value_with_index(vault, index, &query, limit))
 }
 
 fn note_query(
@@ -357,9 +373,20 @@ fn note_query(
     operation(vault, &note).map_err(CallError::Tool)
 }
 
-fn tags(vault: &Vault, arguments: &Value) -> Result<Value, CallError> {
+fn note_knowledge_query(
+    vault: &Vault,
+    index: &KnowledgeIndex,
+    arguments: &Value,
+    operation: fn(&Vault, &KnowledgeIndex, &str) -> Result<Value, String>,
+) -> Result<Value, CallError> {
+    let note = required_string(arguments, "note")?;
+    let note = resolve_note(vault, &note)?;
+    operation(vault, index, &note).map_err(CallError::Tool)
+}
+
+fn tags(vault: &Vault, index: &KnowledgeIndex, arguments: &Value) -> Result<Value, CallError> {
     let tag = optional_string(arguments, "tag")?;
-    Ok(query::tags_value(vault, tag.as_deref()))
+    Ok(query::tags_value_with_index(vault, index, tag.as_deref()))
 }
 
 fn mermaid(vault: &Vault, arguments: &Value) -> Result<Value, CallError> {
@@ -403,5 +430,105 @@ fn read_resource(id: Value, params: &Value) -> Value {
             }),
         ),
         Err(error) => error_response(id, -32603, &error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn call(cache: &mut CachedVault, name: &str, arguments: Value) -> Value {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        });
+        let bytes = serde_json::to_vec(&req).unwrap();
+        respond(&bytes, cache).unwrap()
+    }
+
+    #[test]
+    fn guide_bypasses_vault_loading_even_for_missing_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing_vault = dir.path().join("does-not-exist");
+        let mut cache = CachedVault::new(missing_vault);
+        let resp = call(&mut cache, "hortus_guide", json!({}));
+        assert_eq!(resp["result"]["isError"], false);
+        assert!(
+            resp["result"]["structuredContent"]["guide"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
+        );
+        assert_eq!(cache.load_count(), 0);
+        assert_eq!(cache.reread_files(), 0);
+    }
+
+    #[test]
+    fn vault_cache_hits_across_tools_and_invalidates_incrementally() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("a.md"), "# Alpha\n\nLink [[b]] #tag1\n").unwrap();
+        fs::write(root.join("b.md"), "# Beta\n\nBody text.\n").unwrap();
+
+        let mut cache = CachedVault::new(root.clone());
+
+        // First tool call loads both files once.
+        let r1 = call(&mut cache, "hortus_search", json!({"query": "Alpha"}));
+        assert_eq!(r1["result"]["isError"], false);
+        assert_eq!(cache.load_count(), 1);
+        assert_eq!(cache.reread_files(), 2);
+        assert_eq!(cache.cache_hits(), 0);
+
+        // Subsequent calls across different tools hit cache without re-reading.
+        let r2 = call(&mut cache, "hortus_tags", json!({}));
+        assert_eq!(r2["result"]["structuredContent"]["count"], 1);
+        let r3 = call(&mut cache, "hortus_backlinks", json!({"note": "b.md"}));
+        assert_eq!(r3["result"]["structuredContent"]["count"], 1);
+        let r4 = call(&mut cache, "hortus_links", json!({"note": "a.md"}));
+        assert_eq!(r4["result"]["structuredContent"]["count"], 1);
+        let r5 = call(&mut cache, "hortus_orphans", json!({}));
+        assert_eq!(r5["result"]["structuredContent"]["count"], 0);
+        assert_eq!(cache.load_count(), 1);
+        assert_eq!(cache.reread_files(), 2);
+        assert_eq!(cache.cache_hits(), 4);
+
+        // External add: only the new file is read.
+        fs::write(root.join("c.md"), "# Gamma\n\nUniqueToken #tag2\n").unwrap();
+        let r6 = call(&mut cache, "hortus_search", json!({"query": "UniqueToken"}));
+        assert_eq!(
+            r6["result"]["structuredContent"]["results"][0]["path"],
+            "c.md"
+        );
+        assert_eq!(cache.load_count(), 2);
+        assert_eq!(cache.reread_files(), 3);
+
+        // External edit (size changes): only the edited file is re-read.
+        fs::write(root.join("b.md"), "# Beta\n\nUpdatedContentHere.\n").unwrap();
+        let r7 = call(
+            &mut cache,
+            "hortus_search",
+            json!({"query": "UpdatedContentHere"}),
+        );
+        assert_eq!(
+            r7["result"]["structuredContent"]["results"][0]["path"],
+            "b.md"
+        );
+        assert_eq!(cache.load_count(), 3);
+        assert_eq!(cache.reread_files(), 4);
+
+        // External delete: immediately removed without re-reading unchanged files.
+        fs::remove_file(root.join("c.md")).unwrap();
+        let r8 = call(&mut cache, "hortus_search", json!({"query": "UniqueToken"}));
+        assert_eq!(
+            r8["result"]["structuredContent"]["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(cache.load_count(), 4);
+        assert_eq!(cache.reread_files(), 4);
     }
 }
