@@ -58,7 +58,6 @@ struct TerminationTests {
             done()
         }) { outcome = $0 }
 
-        try await Task.sleep(for: .milliseconds(300))
         for _ in 0..<200 where outcome == nil { try await Task.sleep(for: .milliseconds(10)) }
         #expect(outcome == .blocked(unsaved: ["a.md", "b.md"]))
         #expect(!cleaned)
@@ -105,7 +104,6 @@ struct TerminationTests {
             done()
         }) { outcome = $0 }
 
-        try await Task.sleep(for: .milliseconds(50))
         for _ in 0..<200 where outcome == nil { try await Task.sleep(for: .milliseconds(10)) }
         #expect(outcome == .blocked(unsaved: ["b.md"]))
         #expect(!cleaned)

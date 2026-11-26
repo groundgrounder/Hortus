@@ -3,10 +3,10 @@ import PackageDescription
 
 let package = Package(
     name: "Hortus",
-    platforms: [.macOS("27.0")],
+    platforms: [.macOS("26.0")],
     dependencies: [
         .package(path: "../apple"),
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.99.1"),
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.99.1", traits: []),
     ],
     targets: [
         .executableTarget(name: "Hortus", dependencies: [

@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "${0:A:h:h}"
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
-export MACOSX_DEPLOYMENT_TARGET=27.0
+export MACOSX_DEPLOYMENT_TARGET=26.0
 # 绕过 macOS 27 上 Rust 剥离调试符号导致的 LINKEDIT 对齐问题。
 export CARGO_PROFILE_RELEASE_STRIP=none
 # 保留调用方的 Rust 参数，用分隔符传递，避免带空格的目录被拆开。
@@ -22,6 +22,7 @@ if [[ "${cargo_home:A}" != "${cargo_home:a}" ]]; then
   rust_flags+=("--remap-path-prefix=${cargo_home:A}=/cargo")
 fi
 export CARGO_ENCODED_RUSTFLAGS="${(pj:\x1f:)rust_flags}"
+unset RUSTFLAGS
 cargo build --release -p hortus-ffi
 cargo run --release -p hortus-ffi --features bindgen --bin hortus-bindgen -- generate \
   --library target/release/libhortus_ffi.dylib --language swift \
