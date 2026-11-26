@@ -1146,6 +1146,15 @@ impl WorkspaceCore {
             .color_scheme()?)
     }
 
+    /// 返回显式的顶层外观配色。键缺失时返回空值，显式非法时返回配置错误。
+    pub fn explicit_color_scheme(&self) -> Result<Option<String>, CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .explicit_color_scheme()?)
+    }
+
     /// 原地更新顶层外观配色至 `config.toml`，保留注释与未知字段。
     pub fn save_color_scheme(&self, scheme: String) -> Result<(), CoreError> {
         Ok(self

@@ -148,6 +148,17 @@ fn editable_config_round_trip_and_guide_management() {
     assert!(!core.reset_agent_guide().unwrap().overridden);
 
     assert_eq!(core.color_scheme().unwrap(), "system");
+    assert_eq!(core.explicit_color_scheme().unwrap(), None);
+    fs::write(&path, "\"color_scheme\" = \"system\"\n").unwrap();
+    assert_eq!(
+        core.explicit_color_scheme().unwrap().as_deref(),
+        Some("system")
+    );
+    fs::write(&path, "color_scheme = 1\n").unwrap();
+    assert_eq!(
+        error_kind(core.explicit_color_scheme()),
+        "config.color_scheme_invalid"
+    );
     core.save_color_scheme("dark".into()).unwrap();
     assert_eq!(core.color_scheme().unwrap(), "dark");
     core.save_color_scheme("light".into()).unwrap();

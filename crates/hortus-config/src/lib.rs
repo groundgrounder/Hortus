@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_CONFIG: &str = "# Hortus 通用设置；布局与会话分别保存在 layout.toml 和系统缓存目录。\n# 正文字号（单位：pt）。\nfont_size = 15.0\ndefault_view = \"reading\"\n\n# 终端等宽字体族；留空或删除跟随系统 SF Mono。\n# terminal_font = \"Menlo\"\n\n# Agent 启动模板（当前不启用）。command 是可执行文件；裸命令名按应用启动时的 PATH 查找。\n# args 的每个元素是一个 argv 元素，不做 shell 拆分；\"{guide}\" 会替换成完整的内置指南。\n# 含路径分隔符的 command 必须是绝对路径。\n# [agent]\n# command = \"codex\"\n# args = [\"{guide}\"]\n";
 
@@ -477,7 +479,10 @@ fn resolve_custom_agent_shell(env_shell: Option<&str>) -> String {
 
     env_shell
         .map(str::trim)
-        .filter(|value| !value.is_empty() && Path::new(value).exists())
+        .filter(|value| {
+            let path = Path::new(value);
+            path.is_absolute() && verified_executable(path).is_ok()
+        })
         .map(str::to_string)
         .unwrap_or_else(|| FALLBACK_SHELL.to_string())
 }
@@ -492,19 +497,88 @@ fn set_value(table: &mut toml_edit::Table, key: &str, value: toml_edit::Value) {
 }
 
 fn set_array(table: &mut toml_edit::Table, key: &str, values: &[String]) {
+    if table
+        .get(key)
+        .and_then(toml_edit::Item::as_array)
+        .is_some_and(|array| {
+            array
+                .iter()
+                .map(toml_edit::Value::as_str)
+                .eq(values.iter().map(|value| Some(value.as_str())))
+        })
+    {
+        return;
+    }
     let mut array = toml_edit::Array::new();
     for value in values {
         array.push(value.as_str());
     }
-    let mut value = toml_edit::Value::Array(array);
-    if let Some(old) = table
-        .get(key)
-        .and_then(toml_edit::Item::as_value)
-        .and_then(toml_edit::Value::as_array)
-    {
-        *value.decor_mut() = old.decor().clone();
+    set_value(table, key, toml_edit::Value::Array(array));
+}
+
+fn set_profile_position(table: &mut toml_edit::Table, position: usize) {
+    table.set_position(position);
+    // 档内子表要跟随所属配置档输出，否则 TOML 会将其关联到前一个同名数组表。
+    for (_, item) in table.iter_mut() {
+        match item {
+            toml_edit::Item::Table(child) => set_profile_position(child, position),
+            toml_edit::Item::ArrayOfTables(children) => {
+                for child in children.iter_mut() {
+                    set_profile_position(child, position);
+                }
+            }
+            _ => {}
+        }
     }
-    table[key] = toml_edit::Item::Value(value);
+}
+
+fn update_agent_profiles(table: &mut toml_edit::Table, profiles: &[AgentProfile]) {
+    fn profile_id(entry: &toml_edit::Table) -> Option<&str> {
+        entry
+            .get("id")
+            .and_then(toml_edit::Item::as_str)
+            .map(str::trim)
+    }
+
+    let original = table
+        .get_mut("profiles")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+        .map(std::mem::take)
+        .unwrap_or_default();
+    let reordered = original
+        .iter()
+        .map(profile_id)
+        .ne(profiles.iter().map(|profile| Some(profile.id.as_str())));
+    let positions: Vec<_> = original
+        .iter()
+        .filter_map(toml_edit::Table::position)
+        .collect();
+    let mut by_id = BTreeMap::new();
+    for entry in original {
+        if let Some(id) = profile_id(&entry) {
+            by_id.entry(id.to_owned()).or_insert(entry);
+        }
+    }
+
+    let mut entries = toml_edit::ArrayOfTables::new();
+    for (index, profile) in profiles.iter().enumerate() {
+        let mut entry = by_id.remove(&profile.id).unwrap_or_default();
+        for (key, value) in [
+            ("id", profile.id.as_str()),
+            ("name", profile.name.as_str()),
+            ("command", profile.command.as_str()),
+        ] {
+            if entry.get(key).and_then(toml_edit::Item::as_str) != Some(value) {
+                set_value(&mut entry, key, toml_edit::Value::from(value));
+            }
+        }
+        set_array(&mut entry, "args", &profile.args);
+        if reordered && let Some(&position) = positions.get(index).or_else(|| positions.last()) {
+            set_profile_position(&mut entry, position);
+        }
+        entries.push(entry);
+    }
+    table["profiles"] = toml_edit::Item::ArrayOfTables(entries);
 }
 
 #[derive(serde::Deserialize)]
@@ -753,18 +827,38 @@ impl Store {
 
     /// 读取顶层可选 `color_scheme`（`"system"` / `"light"` / `"dark"`，缺省或空白视为 `"system"`）。
     pub fn color_scheme(&self) -> io::Result<String> {
+        let raw = self.read_color_scheme()?.unwrap_or_default();
+        normalize_color_scheme(&raw).map(str::to_owned)
+    }
+
+    /// 缺少文件或顶层键时返回 `None`，显式有效时返回规范值。
+    /// 显式空白、非字符串和未知值返回 `config.color_scheme_invalid`，迁移时只应对 `None` 写入旧值。
+    pub fn explicit_color_scheme(&self) -> io::Result<Option<String>> {
+        match self.read_color_scheme() {
+            Ok(None) => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Ok(Some(raw)) if !raw.trim().is_empty() => {
+                normalize_color_scheme(&raw).map(|value| Some(value.to_owned()))
+            }
+            Ok(Some(_)) => Err(io::Error::other("config.color_scheme_invalid")),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn read_color_scheme(&self) -> io::Result<Option<String>> {
         let bytes = fs::read(self.config_path())?;
         let text = String::from_utf8(bytes).map_err(|_| io::Error::other("config.invalid_utf8"))?;
         let document = text
             .parse::<toml_edit::DocumentMut>()
             .map_err(|_| io::Error::other("config.invalid_toml"))?;
-        match document.get("color_scheme") {
-            None => Ok("system".to_string()),
-            Some(item) => match item.as_str() {
-                Some(raw) => normalize_color_scheme(raw).map(str::to_string),
-                None => Err(io::Error::other("config.color_scheme_invalid")),
-            },
-        }
+        document
+            .get("color_scheme")
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| io::Error::other("config.color_scheme_invalid"))
+            })
+            .transpose()
     }
 
     /// 原地更新顶层 `color_scheme`，完整保留用户注释、未知键与既有配置段。
@@ -927,6 +1021,9 @@ impl Store {
                                     });
                                 }
                             }
+                            None if profiles_item
+                                .as_array()
+                                .is_some_and(toml_edit::Array::is_empty) => {}
                             None => diagnostics.push("agent.config_invalid".into()),
                         }
                     }
@@ -948,10 +1045,12 @@ impl Store {
                     } else {
                         // 只有 command/args 组成启动模板；其它 [agent] 子键不算已配置。
                         agent_configured = agent_command.is_some() || !agent_args.is_empty();
-                        if let Err(key) = validate_agent_template(
-                            agent_command.as_deref().unwrap_or_default(),
-                            &agent_args,
-                        ) {
+                        if agent_configured
+                            && let Err(key) = validate_agent_template(
+                                agent_command.as_deref().unwrap_or_default(),
+                                &agent_args,
+                            )
+                        {
                             diagnostics.push(key.into());
                         }
                     }
@@ -1098,16 +1197,7 @@ impl Store {
                 toml_edit::Value::from(active.command.as_str()),
             );
             set_array(table, "args", &active.args);
-            let mut array_of_tables = toml_edit::ArrayOfTables::new();
-            for profile in &normalized_profiles {
-                let mut entry = toml_edit::Table::new();
-                entry["id"] = toml_edit::value(profile.id.as_str());
-                entry["name"] = toml_edit::value(profile.name.as_str());
-                entry["command"] = toml_edit::value(profile.command.as_str());
-                set_array(&mut entry, "args", &profile.args);
-                array_of_tables.push(entry);
-            }
-            table.insert("profiles", toml_edit::Item::ArrayOfTables(array_of_tables));
+            update_agent_profiles(table, &normalized_profiles);
         } else if legacy_cleared {
             if let Some(item) = document.get_mut("agent") {
                 let table = item
@@ -1577,9 +1667,10 @@ impl Store {
             return Err(io::Error::other("agent.invalid_argument"));
         }
         let guide = effective_guide(&self.directories.config)?;
-        fs::create_dir_all(&self.directories.cache)?;
-        let guide_path = self.directories.cache.join("agent-guide-active.md");
-        atomic_write_readonly(&guide_path, guide.as_bytes())?;
+        let guide_directory = self.directories.cache.join("agent-guides");
+        fs::create_dir_all(&guide_directory)?;
+        let guide_path = write_launch_guide(&guide_directory, guide.as_bytes())?;
+        prune_launch_guides(&guide_directory);
         let shell = resolve_custom_agent_shell(std::env::var("SHELL").ok().as_deref());
         let path = self
             .effective_agent_path(login_path)
@@ -1730,13 +1821,13 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::File::open(parent)?.sync_all()
 }
 
-fn atomic_write_readonly(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("config.path_invalid"))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+const RETAINED_LAUNCH_GUIDES: usize = 32;
+const RECENT_LAUNCH_GUIDE_AGE: Duration = Duration::from_secs(5 * 60);
+
+fn write_launch_guide(directory: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    static NEXT_GUIDE: AtomicU64 = AtomicU64::new(0);
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
     temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1750,8 +1841,60 @@ fn atomic_write_readonly(path: &Path, bytes: &[u8]) -> io::Result<()> {
         perms.set_readonly(true);
         temporary.as_file().set_permissions(perms)?;
     }
-    temporary.persist(path).map_err(io::Error::other)?;
-    fs::File::open(parent)?.sync_all()
+    temporary.as_file().sync_all()?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    let sequence = NEXT_GUIDE.fetch_add(1, Ordering::Relaxed);
+    let path = directory.join(format!("guide-{nanos}-{pid}-{sequence}.md"));
+    temporary
+        .persist_noclobber(&path)
+        .map_err(io::Error::other)?;
+    #[cfg(unix)]
+    fs::File::open(directory)?.sync_all()?;
+    Ok(path)
+}
+
+fn prune_launch_guides(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut guides: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !name.starts_with("guide-") || !name.ends_with(".md") {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() || !metadata.permissions().readonly() {
+                return None;
+            }
+            Some((metadata.modified().ok()?, entry.path()))
+        })
+        .collect();
+    guides.sort_unstable_by(|a, b| b.cmp(a));
+    let now = SystemTime::now();
+    for (modified, path) in guides.into_iter().skip(RETAINED_LAUNCH_GUIDES) {
+        // 并发准备或稍后才启动的进程仍可能需要最近发布的指南。
+        if now
+            .duration_since(modified)
+            .is_ok_and(|age| age >= RECENT_LAUNCH_GUIDE_AGE)
+        {
+            #[cfg(not(unix))]
+            if let Ok(metadata) = fs::symlink_metadata(&path)
+                && metadata.is_file()
+            {
+                let mut permissions = metadata.permissions();
+                permissions.set_readonly(false);
+                let _ = fs::set_permissions(&path, permissions);
+            }
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2249,6 +2392,140 @@ mod tests {
     }
 
     #[test]
+    fn saving_profiles_preserves_comments_and_unknown_keys_by_id() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        fs::write(
+            store.config_path(),
+            r#"font_size = 15.0
+
+[agent]
+default_profile = "alpha"
+
+# Alpha header
+[[agent.profiles]] # Alpha inline
+id = "alpha"
+name = "Alpha"
+command = "codex" # Alpha command
+args = [
+    "--alpha", # Keep argument note
+    "{guide}",
+] # Alpha arguments
+extra = "keep-alpha"
+
+[agent.profiles.extra_table] # Alpha custom section
+value = "belongs-to-alpha"
+
+# Beta header
+[[agent.profiles]]
+id = "beta"
+name = "Beta"
+command = "claude" # Beta command
+args = ["{guide}"]
+extra = "keep-beta"
+
+# Obsolete header
+[[agent.profiles]]
+id = "old"
+name = "Old"
+command = "old"
+args = ["{guide}"]
+
+[[vault]]
+path = "/tmp/example"
+"#,
+        )
+        .unwrap();
+        let save = |mut config: EditableConfig, profiles: &[AgentProfile]| {
+            config.settings.font_size += 1.0;
+            store
+                .save_config_with_profiles(
+                    &EditableConfigInput {
+                        settings: config.settings,
+                        agent_command: config.agent_command,
+                        agent_args: config.agent_args,
+                    },
+                    profiles,
+                    Some("alpha"),
+                    Some(&config.digest),
+                )
+                .unwrap()
+        };
+        let check_retained = |command: &str| {
+            let text = fs::read_to_string(store.config_path()).unwrap();
+            for expected in [
+                "# Alpha header\n[[agent.profiles]] # Alpha inline\nid = \"alpha\"",
+                "# Beta header\n[[agent.profiles]]\nid = \"beta\"",
+                "\"--alpha\", # Keep argument note",
+                "] # Alpha arguments",
+                "extra = \"keep-alpha\"",
+                "extra = \"keep-beta\"",
+                "command = \"claude\" # Beta command",
+                "[[vault]]\npath = \"/tmp/example\"",
+            ] {
+                assert!(text.contains(expected), "missing {expected:?} in {text}");
+            }
+            assert!(text.contains(&format!("command = \"{command}\" # Alpha command")));
+            let parsed = text.parse::<toml_edit::DocumentMut>().unwrap();
+            let entries = parsed["agent"]["profiles"].as_array_of_tables().unwrap();
+            for entry in entries {
+                if entry["id"].as_str() == Some("alpha") {
+                    assert_eq!(
+                        entry["extra_table"]["value"].as_str(),
+                        Some("belongs-to-alpha")
+                    );
+                } else {
+                    assert!(entry.get("extra_table").is_none());
+                }
+            }
+            assert!(text.contains("[agent.profiles.extra_table] # Alpha custom section"));
+            text
+        };
+        let initial = store.editable_config().unwrap();
+        let mut profiles = initial.agent_profiles.clone();
+        let saved = save(initial, &profiles);
+        check_retained("codex");
+
+        profiles[0].command = "codex-next".into();
+        let saved = save(saved, &profiles);
+        check_retained("codex-next");
+
+        profiles.pop();
+        profiles.swap(0, 1);
+        profiles.push(AgentProfile {
+            id: "new".into(),
+            name: "New".into(),
+            command: "new-agent".into(),
+            args: vec!["{guide}".into()],
+        });
+        let saved = save(saved, &profiles);
+        assert_eq!(
+            saved
+                .agent_profiles
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "alpha", "new"]
+        );
+        assert!(!check_retained("codex-next").contains("# Obsolete header"));
+    }
+
+    #[test]
+    fn empty_agent_table_has_no_command_diagnostic() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        for text in [
+            "[agent]\n# No command\n",
+            "[agent]\nextra = true\nprofiles = []\n",
+        ] {
+            fs::write(store.config_path(), format!("font_size = 15.0\n{text}")).unwrap();
+            let config = store.editable_config().unwrap();
+            assert!(!config.agent_configured);
+            assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        }
+    }
+
+    #[test]
     fn custom_agent_launch_writes_readonly_guide_in_cache_and_tracks_history() {
         let root = tempfile::TempDir::new().unwrap();
         let store = diagram_store(&root);
@@ -2286,11 +2563,25 @@ mod tests {
             let mode = fs::metadata(&guide_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o444, "guide file must be read-only");
         }
-        // Calling a second time can still atomically replace the read-only guide file.
+        let override_guide = "# Alternate guide\n";
+        store.save_agent_guide(override_guide).unwrap();
         let second = store
             .prepare_custom_agent_launch("claude --print", None)
             .unwrap();
-        assert_eq!(second.guide_file, launch.guide_file);
+        assert_ne!(second.guide_file, launch.guide_file);
+        assert_eq!(fs::read_to_string(&guide_path).unwrap(), AGENT_GUIDE);
+        assert_eq!(
+            fs::read_to_string(&second.guide_file).unwrap(),
+            override_guide
+        );
+        assert_eq!(
+            fs::metadata(&second.guide_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
 
         // History deduplicates and caps at 12 entries (most recent first).
         for i in 1..=15 {
@@ -2316,6 +2607,84 @@ mod tests {
                 .join("agent-custom-history.json")
                 .exists()
         );
+    }
+
+    #[test]
+    fn launch_guide_cleanup_retains_newest_and_protects_recent_files() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        let directory = store.directories.cache.join("agent-guides");
+        fs::create_dir_all(&directory).unwrap();
+        for i in 0..40 {
+            let path = directory.join(format!("guide-old-{i}.md"));
+            let mut file = fs::File::create(path).unwrap();
+            file.write_all(b"# Old guide\n").unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(i + 10))
+                .unwrap();
+            file.set_permissions(fs::Permissions::from_mode(0o444))
+                .unwrap();
+        }
+        let extra = directory.join("unrelated.md");
+        fs::write(&extra, "Keep").unwrap();
+        fs::set_permissions(&extra, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let launch = store.prepare_custom_agent_launch("first", None).unwrap();
+        assert_eq!(
+            fs::read_dir(&directory).unwrap().count(),
+            RETAINED_LAUNCH_GUIDES + 1
+        );
+        assert!(!directory.join("guide-old-0.md").exists());
+        assert!(directory.join("guide-old-39.md").exists());
+        assert_eq!(fs::read_to_string(&extra).unwrap(), "Keep");
+
+        let recent: Vec<_> = (0..RETAINED_LAUNCH_GUIDES)
+            .map(|_| write_launch_guide(&directory, b"# Recent guide\n").unwrap())
+            .collect();
+        store.prepare_custom_agent_launch("next", None).unwrap();
+        assert!(Path::new(&launch.guide_file).exists());
+        assert!(recent.iter().all(|path| path.exists()));
+        assert!(!directory.join("guide-old-39.md").exists());
+    }
+
+    #[test]
+    fn explicit_color_scheme_distinguishes_absent_valid_and_invalid() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        let path = store.config_path();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(store.explicit_color_scheme().unwrap(), None);
+        for text in [
+            "font_size = 15.0",
+            "# color_scheme = \"dark\"",
+            "[extra]\ncolor_scheme = \"dark\"",
+        ] {
+            fs::write(&path, text).unwrap();
+            assert_eq!(store.explicit_color_scheme().unwrap(), None, "{text}");
+        }
+        for (text, value) in [
+            ("color_scheme = \"system\"", "system"),
+            ("\"color_scheme\" = \"system\"", "system"),
+            ("color_scheme = \" dark \"", "dark"),
+            ("color_scheme = \"light\"", "light"),
+        ] {
+            fs::write(&path, text).unwrap();
+            assert_eq!(
+                store.explicit_color_scheme().unwrap().as_deref(),
+                Some(value)
+            );
+        }
+        for text in [
+            "color_scheme = \"neon\"",
+            "color_scheme = \" \"",
+            "color_scheme = false",
+        ] {
+            fs::write(&path, text).unwrap();
+            assert_eq!(
+                store.explicit_color_scheme().unwrap_err().to_string(),
+                "config.color_scheme_invalid"
+            );
+        }
+        assert!(store.color_scheme().is_err());
     }
 
     #[test]
@@ -2380,6 +2749,16 @@ font_size = 17.0
             resolve_custom_agent_shell(Some("/nonexistent/hortus-missing-shell")),
             expected
         );
+        let root = tempfile::TempDir::new().unwrap();
+        let nonexecutable = root.path().join("not-executable");
+        fs::write(&nonexecutable, b"data").unwrap();
+        for value in [
+            ".",
+            root.path().to_str().unwrap(),
+            nonexecutable.to_str().unwrap(),
+        ] {
+            assert_eq!(resolve_custom_agent_shell(Some(value)), expected);
+        }
         if Path::new("/bin/sh").exists() {
             assert_eq!(resolve_custom_agent_shell(Some("/bin/sh")), "/bin/sh");
         }
