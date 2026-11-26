@@ -671,7 +671,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::OpenFolderBtn => ("Open Folder", "打开文件夹"),
         Key::OpenFolderEllipsis => ("Open Folder…", "打开文件夹…"),
         Key::TooltipOpenFolder => ("Open Folder (Ctrl+O)", "打开文件夹 (Ctrl+O)"),
-        Key::EditBadge => ("Editing · Ctrl+S to save", "编辑中 · Ctrl+S 保存"),
+        Key::EditBadge => ("Editing", "编辑中"),
         Key::TooltipToggleEditMode => (
             "Switch Reading / Editing (Ctrl+E)",
             "切换阅读 / 编辑视图 (Ctrl+E)",
@@ -751,14 +751,11 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::DockToolMoveHere => ("{0} (Move here)", "{0}（移至此处）"),
         Key::DockToolsSection => ("Tools", "工具面板"),
 
-        Key::CompletionHeader => (
-            "Insert link · Enter to accept · Esc to close",
-            "插入双链 · Enter 确认 · Esc 关闭",
-        ),
-        Key::FindPlaceholder => ("Find (Ctrl+F)", "查找 (Ctrl+F)"),
+        Key::CompletionHeader => ("Insert link", "插入双链"),
+        Key::FindPlaceholder => ("Find", "查找"),
         Key::FindPrevTooltip => ("Previous match (Shift+Enter)", "上一个匹配 (Shift+Enter)"),
         Key::FindNextTooltip => ("Next match (Enter)", "下一个匹配 (Enter)"),
-        Key::ReplacePlaceholder => ("Replace with (Ctrl+H)", "替换为 (Ctrl+H)"),
+        Key::ReplacePlaceholder => ("Replace", "替换为"),
         Key::ReplaceOne => ("Replace", "替换"),
         Key::ReplaceAll => ("Replace All", "全部替换"),
         Key::FindNoMatches => ("No matches", "无匹配"),
@@ -778,10 +775,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::BacklinkKindEmbed => ("Embed", "嵌入"),
         Key::BacklinkKindLink => ("Link", "双链"),
         Key::QuickOpenTitle => ("Quick Open", "快速打开"),
-        Key::QuickOpenPlaceholder => (
-            "Type a note title or path, Enter to open",
-            "输入标题或路径，Enter 打开",
-        ),
+        Key::QuickOpenPlaceholder => ("Title or path", "标题或路径"),
         Key::SearchPlaceholder => ("Search folder", "搜索文件夹"),
         Key::SearchPrompt => ("Type to search", "输入关键字开始搜索"),
         Key::SearchInProgress => ("Searching…", "正在搜索…"),
@@ -803,10 +797,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::LocationRoot => ("Location: Root folder", "位置：根文件夹"),
         Key::LocationSub => ("Location: {0}", "位置：{0}"),
         Key::FolderNamePlaceholder => ("Folder name", "文件夹名称"),
-        Key::NoteNamePlaceholder => (
-            "Note name (.md added automatically)",
-            "笔记名称（自动补 .md）",
-        ),
+        Key::NoteNamePlaceholder => ("Note name", "笔记名称"),
         Key::Cancel => ("Cancel", "取消"),
         Key::CreateFolder => ("New Folder", "新建文件夹"),
         Key::CreateNote => ("New Note", "新建笔记"),
@@ -975,10 +966,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "Selection contains only control characters",
             "当前选区仅含控制字符，已忽略发送",
         ),
-        Key::ToastAgentExited => (
-            "Agent exited (code {0}); review or restore in Session Changes",
-            "Agent 已退出（状态码 {0}）：可在「本次会话改动」查看或恢复更改",
-        ),
+        Key::ToastAgentExited => ("Agent exited (code {0})", "Agent 已退出（{0}）"),
         Key::TermTabShellTitle => ("Terminal {0}", "终端 {0}"),
         Key::TermTabAgentPreparing => ("Agent (Preparing)", "Agent（准备中）"),
         Key::TermPreparingMsg => (
@@ -1022,7 +1010,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::SnapshotFailedPrefix => ("Snapshot failed: {0}", "快照失败：{0}"),
         Key::SnapshotBlockedToast => (
             "Snapshot failed; Agent launch cancelled: {0}",
-            "建立安全快照失败，已取消启动 Agent：{0}",
+            "快照失败，已取消启动 Agent：{0}",
         ),
 
         Key::ChangesTitle => ("Session Changes", "本次会话改动"),
@@ -1045,8 +1033,8 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::ChangesLoadingSummary => ("Comparing changes…", "正在对比本次会话改动…"),
         Key::ChangesReviewFailed => ("Couldn’t load changes: {0}", "加载改动失败：{0}"),
         Key::ChangesSummaryStats => (
-            "Status: {0} · +{1} / ~{2} / -{3} / renamed {4}",
-            "状态：{0} · +{1} / ~{2} / -{3} / 重命名 {4}",
+            "{0} · +{1} / ~{2} / -{3} / renamed {4}",
+            "{0} · +{1} / ~{2} / -{3} / 重命名 {4}",
         ),
         Key::ChangesNoneInSession => ("No changes in this session.", "本次会话暂无改动。"),
         Key::ChangesNoDetails => ("No changes", "无更改详情"),
@@ -1833,6 +1821,10 @@ mod tests {
             "独立磁盘挂载根",
             "全景网格",
             "多父节点关系",
+            "Ctrl+S to save",
+            "Ctrl+S 保存",
+            "Enter to accept",
+            "安全快照",
         ];
         for &key in ALL_KEYS {
             let en = tr_for(Lang::En, key);
@@ -1843,6 +1835,12 @@ mod tests {
                 !zh.contains('“') && !zh.contains('”'),
                 "curly quote in zh {key:?}: {zh}"
             );
+            if matches!(key, Key::FindPlaceholder | Key::ReplacePlaceholder) {
+                assert!(
+                    !en.contains("(Ctrl+") && !zh.contains("(Ctrl+"),
+                    "shortcut hint in placeholder {key:?}: en={en:?}, zh={zh:?}"
+                );
+            }
             if format!("{key:?}").starts_with("Menu") {
                 assert!(
                     !en.contains("(Ctrl+")

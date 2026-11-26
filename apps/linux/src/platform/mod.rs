@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 pub mod fonts;
+pub mod icons;
 pub mod pangocairo;
 pub mod source_styles;
 pub mod style;

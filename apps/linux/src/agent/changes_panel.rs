@@ -357,7 +357,8 @@ impl ChangesPanel {
             .set_model(Some(&gtk4::StringList::new(&[tr(Key::ChangesNoSessions)])));
         inner.session_combo.set_selected(0);
         inner.state.borrow_mut().suppress_combo = false;
-        inner.session_meta.set_text(msg);
+        inner.session_meta.set_text("");
+        inner.session_meta.set_visible(false);
         inner.delete_btn.set_sensitive(false);
         inner.rollback_all_btn.set_sensitive(false);
         clear_box(&inner.entries_box);
@@ -401,6 +402,7 @@ impl ChangesPanel {
                 state_label(&info.state),
                 info.entries,
             ));
+            inner.session_meta.set_visible(true);
             if !info.usable {
                 inner.rollback_all_btn.set_sensitive(false);
                 clear_box(&inner.entries_box);
@@ -464,6 +466,7 @@ impl ChangesPanel {
             c.deleted,
             c.renamed,
         ));
+        inner.session_meta.set_visible(true);
         inner
             .rollback_all_btn
             .set_sensitive(!summary.entries.is_empty());

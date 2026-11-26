@@ -161,11 +161,9 @@ impl HortusWindow {
             .primary(true)
             .menu_model(&build_primary_menu(&[]))
             .build();
-        let bottom_toggle = gtk4::ToggleButton::builder()
-            .icon_name("utilities-terminal-symbolic")
-            .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipToggleBottomPanel))
-            .active(false)
-            .build();
+        let bottom_toggle = crate::platform::icons::create_bottom_panel_toggle(crate::i18n::tr(
+            crate::i18n::Key::TooltipToggleBottomPanel,
+        ));
         let right_toggle = gtk4::ToggleButton::builder()
             .icon_name("sidebar-show-right-symbolic")
             .tooltip_text(crate::i18n::tr(crate::i18n::Key::TooltipToggleRightSidebar))
