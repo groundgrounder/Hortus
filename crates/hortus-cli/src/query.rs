@@ -5,9 +5,12 @@ use hortus_search::SearchIndex;
 use hortus_vault::note::Format;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::fs::{self, Metadata};
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 pub struct NoteFile {
     pub text: String,
@@ -19,24 +22,85 @@ pub struct Vault {
     pub notes: BTreeMap<String, NoteFile>,
 }
 
-type FileStamp = (u64, Option<SystemTime>);
+#[derive(PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    changed: (i64, i64),
+    #[cfg(unix)]
+    identity: (u64, u64),
+}
 
-/// 轻量只读内存缓存：跨 MCP 请求复用已解码笔记与知识/搜索索引，
-/// 每次调用仅检查目录元数据 `(len, modified)`，外部增删改立即可见且零写盘。
+impl FileStamp {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+            #[cfg(unix)]
+            identity: (metadata.dev(), metadata.ino()),
+        }
+    }
+
+    fn stable_at(&self, scan_started: SystemTime) -> bool {
+        self.modified
+            .and_then(|modified| scan_started.duration_since(modified).ok())
+            .is_some_and(|age| age >= Duration::from_secs(2))
+    }
+
+    fn matches_file(&self, metadata: &Metadata) -> bool {
+        #[cfg(unix)]
+        if self.identity != (metadata.dev(), metadata.ino()) {
+            return false;
+        }
+        metadata.is_file()
+    }
+}
+
+/// 跨 MCP 请求复用已解码笔记与知识/搜索索引；元数据有变化或时间戳过近时重读。
 pub struct CachedVault {
     vault: Vault,
     meta: BTreeMap<String, FileStamp>,
     knowledge: KnowledgeIndex,
     search: SearchIndex,
-    loaded: bool,
+    #[cfg(unix)]
+    root_identity: (u64, u64),
+    #[cfg(unix)]
+    _root_handle: fs::File,
+    scan_started: Option<SystemTime>,
     load_count: u64,
     cache_hits: u64,
     reread_files: u64,
 }
 
 impl CachedVault {
-    pub fn new(root: PathBuf) -> Self {
-        Self {
+    pub fn bind(explicit: Option<&Path>) -> Result<Self, String> {
+        // 移除尾部斜杠和 `/.`，避免 symlink_metadata 在检查末级时跟随软链。
+        let requested: PathBuf = requested_root(explicit)?.components().collect();
+        let original = vault_directory_metadata(&requested)?;
+        let root = requested
+            .canonicalize()
+            .map_err(|error| format!("unable to read vault root: {error}"))?;
+        let bound = vault_directory_metadata(&root)?;
+        #[cfg(unix)]
+        let (root_identity, root_handle) = {
+            let identity = (original.dev(), original.ino());
+            // 保留打开的目录，避免删除后复用 inode 的新目录冒充原根。
+            let handle = fs::File::open(&root)
+                .map_err(|error| format!("unable to open vault root: {error}"))?;
+            let opened = handle
+                .metadata()
+                .map_err(|error| format!("unable to read vault root: {error}"))?;
+            if identity != (bound.dev(), bound.ino()) || identity != (opened.dev(), opened.ino()) {
+                return Err("vault root changed while binding".into());
+            }
+            (identity, handle)
+        };
+        #[cfg(not(unix))]
+        let _ = (original, bound);
+        Ok(Self {
             vault: Vault {
                 root,
                 notes: BTreeMap::new(),
@@ -44,17 +108,54 @@ impl CachedVault {
             meta: BTreeMap::new(),
             knowledge: KnowledgeIndex::new(),
             search: SearchIndex::new(),
-            loaded: false,
+            #[cfg(unix)]
+            root_identity,
+            #[cfg(unix)]
+            _root_handle: root_handle,
+            scan_started: None,
             load_count: 0,
             cache_hits: 0,
             reread_files: 0,
+        })
+    }
+
+    fn verify_root(&mut self) -> Result<(), String> {
+        let checked = (|| {
+            let metadata = vault_directory_metadata(&self.vault.root)?;
+            #[cfg(unix)]
+            if self.root_identity != (metadata.dev(), metadata.ino()) {
+                return Err("vault root directory identity changed".into());
+            }
+            #[cfg(not(unix))]
+            let _ = metadata;
+            if self.vault.root.canonicalize().as_ref().ok() != Some(&self.vault.root) {
+                return Err("vault root canonical path changed".into());
+            }
+            Ok(())
+        })();
+        if checked.is_err() {
+            self.vault.notes.clear();
+            self.meta.clear();
+            self.knowledge = KnowledgeIndex::new();
+            self.search = SearchIndex::new();
+            self.scan_started = None;
         }
+        checked
     }
 
     pub fn refresh(&mut self) -> Result<(), String> {
+        self.verify_root()?;
+        let started = SystemTime::now();
         let mut current = BTreeMap::new();
-        scan_metadata(&self.vault.root, &self.vault.root, true, &mut current)?;
-        if self.loaded && current == self.meta {
+        let scan = scan_metadata(&self.vault.root, &self.vault.root, true, &mut current);
+        self.verify_root()?;
+        scan?;
+        // 用上次扫描的时间判断稳定性：上次扫描时仍可能同刻度改写的文件，
+        // 即使两次请求相隔很久，也需再读一次才能进入缓存。
+        let previous_scan = self.scan_started;
+        let stable =
+            |stamp: &FileStamp| previous_scan.is_some_and(|previous| stamp.stable_at(previous));
+        if self.scan_started.is_some() && current == self.meta && current.values().all(stable) {
             self.cache_hits += 1;
             return Ok(());
         }
@@ -71,13 +172,13 @@ impl CachedVault {
         }
         let mut next_meta = BTreeMap::new();
         for (relative, stamp) in current {
-            let unchanged = self.loaded && self.meta.get(&relative) == Some(&stamp);
+            let unchanged = stable(&stamp) && self.meta.get(&relative) == Some(&stamp);
             if unchanged {
                 next_meta.insert(relative, stamp);
                 continue;
             }
             let full_path = self.vault.root.join(&relative);
-            let Ok(bytes) = std::fs::read(&full_path) else {
+            let Ok(bytes) = read_stamped_note(&full_path, &stamp) else {
                 self.vault.notes.remove(&relative);
                 self.knowledge.remove(&relative);
                 self.search.remove(&relative);
@@ -85,16 +186,24 @@ impl CachedVault {
             };
             let (_format, text, _valid) = Format::decode(&bytes);
             let mmd = hortus_links::is_mmd_path(&relative);
-            self.knowledge.upsert(relative.clone(), text.clone());
-            self.search.upsert(relative.clone(), text.clone());
-            self.vault
+            if self
+                .vault
                 .notes
-                .insert(relative.clone(), NoteFile { text, mmd });
+                .get(&relative)
+                .is_none_or(|note| note.text != text)
+            {
+                self.knowledge.upsert(relative.clone(), text.clone());
+                self.search.upsert(relative.clone(), text.clone());
+                self.vault
+                    .notes
+                    .insert(relative.clone(), NoteFile { text, mmd });
+            }
             next_meta.insert(relative, stamp);
             self.reread_files += 1;
         }
+        self.verify_root()?;
         self.meta = next_meta;
-        self.loaded = true;
+        self.scan_started = Some(started);
         self.load_count += 1;
         Ok(())
     }
@@ -218,22 +327,49 @@ impl Vault {
 }
 
 /// 锁定库根：显式参数优先，其次 HORTUS_VAULT，最后当前目录；始终返回规范路径。
-pub fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, String> {
-    let root = match explicit {
-        Some(path) => path.to_path_buf(),
-        None => match std::env::var_os("HORTUS_VAULT").filter(|value| !value.is_empty()) {
-            Some(value) => PathBuf::from(value),
-            None => std::env::current_dir()
-                .map_err(|error| format!("unable to read current directory: {error}"))?,
-        },
-    };
-    let root = root
+fn resolve_root(explicit: Option<&Path>) -> Result<PathBuf, String> {
+    let root = requested_root(explicit)?
         .canonicalize()
         .map_err(|error| format!("unable to read vault: {error}"))?;
     if !root.is_dir() {
         return Err(format!("vault is not a directory: {}", root.display()));
     }
     Ok(root)
+}
+
+fn requested_root(explicit: Option<&Path>) -> Result<PathBuf, String> {
+    Ok(match explicit {
+        Some(path) => path.to_path_buf(),
+        None => match std::env::var_os("HORTUS_VAULT").filter(|value| !value.is_empty()) {
+            Some(value) => PathBuf::from(value),
+            None => std::env::current_dir()
+                .map_err(|error| format!("unable to read current directory: {error}"))?,
+        },
+    })
+}
+
+fn vault_directory_metadata(root: &Path) -> Result<Metadata, String> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|error| format!("unable to read vault root: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("vault root must not be a symbolic link".into());
+    }
+    if !metadata.is_dir() {
+        return Err(format!("vault root is not a directory: {}", root.display()));
+    }
+    Ok(metadata)
+}
+
+fn read_stamped_note(path: &Path, stamp: &FileStamp) -> std::io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    if !stamp.matches_file(&file.metadata()?) {
+        return Err(std::io::Error::other(
+            "note identity changed during vault scan",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn scan(
@@ -341,7 +477,7 @@ fn scan_metadata(
             continue;
         };
         let relative = relative.to_string_lossy().replace('\\', "/");
-        meta.insert(relative, (metadata.len(), metadata.modified().ok()));
+        meta.insert(relative, FileStamp::from_metadata(&metadata));
     }
     Ok(())
 }

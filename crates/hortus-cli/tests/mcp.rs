@@ -372,6 +372,38 @@ fn vault_falls_back_to_the_environment_and_current_directory() {
 }
 
 #[test]
+fn offline_vault_keeps_mcp_and_guide_available() {
+    let fixture = Fixture::new();
+    let missing = fixture.dir.path().join("offline");
+    let guide = "# Offline guide\n";
+    write(&fixture.config.join("agent-guide.md"), guide);
+    let mut command = fixture.command();
+    command.args(["mcp", "--vault"]).arg(&missing);
+    let mut server = Server::spawn(command);
+
+    for method in ["initialize", "ping", "tools/list", "resources/list"] {
+        let response = server.request(method, json!({}));
+        assert!(response.get("result").is_some(), "{response}");
+    }
+    let response = server.call("hortus_guide", json!({}));
+    structured(&response);
+    assert_eq!(tool_text(&response), guide);
+    let read = server.request("resources/read", json!({"uri": "hortus://guide"}));
+    assert_eq!(read["result"]["contents"][0]["text"], guide);
+    let error = server.call("hortus_search", json!({"query": "Index"}));
+    assert_eq!(error["result"]["isError"], true);
+    assert!(
+        tool_text(&error).contains("unable to read vault"),
+        "{error}"
+    );
+
+    write(&missing.join("index.md"), "# Index\n");
+    let search = server.call("hortus_search", json!({"query": "Index"}));
+    assert_eq!(structured(&search)["results"][0]["path"], "index.md");
+    assert!(server.finish().0.success());
+}
+
+#[test]
 fn user_guide_override_is_shared_by_tool_and_resource() {
     let fixture = Fixture::new();
     fs::create_dir_all(&fixture.config).unwrap();

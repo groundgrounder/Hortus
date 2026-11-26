@@ -1,6 +1,6 @@
 //! `hortus mcp`: a read-only Model Context Protocol server over stdio.
 //!
-//! Every call loads the vault from disk again, so notes created or edited
+//! Vault tools refresh the cache on each call, so notes created or edited
 //! outside Hortus are visible immediately. Nothing is written to the vault and
 //! diagnostics go to stderr; stdout carries one JSON-RPC message per line.
 
@@ -23,10 +23,32 @@ pub fn guide_text() -> Result<String, String> {
     hortus_config::effective_guide(&directories.config).map_err(|error| crate::describe(&error))
 }
 
-/// 启动服务直到 stdin 结束；库根在建立连接前锁定。
+struct VaultState<'a> {
+    requested: Option<&'a Path>,
+    cached: Option<CachedVault>,
+}
+
+impl<'a> VaultState<'a> {
+    fn new(requested: Option<&'a Path>) -> Self {
+        Self {
+            requested,
+            cached: None,
+        }
+    }
+
+    fn refresh(&mut self) -> Result<&CachedVault, String> {
+        if self.cached.is_none() {
+            self.cached = Some(CachedVault::bind(self.requested)?);
+        }
+        let cache = self.cached.as_mut().unwrap();
+        cache.refresh()?;
+        Ok(cache)
+    }
+}
+
+/// 启动服务直到 stdin 结束；首个需要读取笔记的工具调用才锁定库根。
 pub fn run(vault: Option<&Path>) -> Result<(), String> {
-    let root = query::resolve_root(vault)?;
-    let mut cache = CachedVault::new(root);
+    let mut cache = VaultState::new(vault);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut input = stdin.lock();
@@ -65,7 +87,7 @@ pub fn run(vault: Option<&Path>) -> Result<(), String> {
 }
 
 /// 解析一行 JSON-RPC；通知返回 `None`，其余错误也用 JSON-RPC 错误包回答。
-fn respond(line: &[u8], cache: &mut CachedVault) -> Option<Value> {
+fn respond(line: &[u8], cache: &mut VaultState<'_>) -> Option<Value> {
     let message: Value = match serde_json::from_slice(line) {
         Ok(value) => value,
         Err(_) => return Some(error_response(Value::Null, -32700, "Parse error")),
@@ -224,7 +246,7 @@ enum CallError {
     Tool(String),
 }
 
-fn call_tool(id: Value, params: &Value, cache: &mut CachedVault) -> Value {
+fn call_tool(id: Value, params: &Value, cache: &mut VaultState<'_>) -> Value {
     let Some(params) = params.as_object() else {
         return error_response(id, -32602, "Invalid params");
     };
@@ -253,9 +275,10 @@ fn call_tool(id: Value, params: &Value, cache: &mut CachedVault) -> Value {
             Err(CallError::Tool(message)) => tool_error(id, &message),
         };
     }
-    if let Err(error) = cache.refresh() {
-        return tool_error(id, &error);
-    }
+    let cache = match cache.refresh() {
+        Ok(cache) => cache,
+        Err(error) => return tool_error(id, &error),
+    };
     let vault = cache.vault();
     let knowledge = cache.knowledge();
     let outcome = match name {
@@ -438,7 +461,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn call(cache: &mut CachedVault, name: &str, arguments: Value) -> Value {
+    fn call(cache: &mut VaultState<'_>, name: &str, arguments: Value) -> Value {
         let req = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -453,7 +476,7 @@ mod tests {
     fn guide_bypasses_vault_loading_even_for_missing_directory() {
         let dir = tempfile::TempDir::new().unwrap();
         let missing_vault = dir.path().join("does-not-exist");
-        let mut cache = CachedVault::new(missing_vault);
+        let mut cache = VaultState::new(Some(&missing_vault));
         let resp = call(&mut cache, "hortus_guide", json!({}));
         assert_eq!(resp["result"]["isError"], false);
         assert!(
@@ -461,25 +484,113 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| !text.is_empty())
         );
-        assert_eq!(cache.load_count(), 0);
-        assert_eq!(cache.reread_files(), 0);
+        assert!(cache.cached.is_none());
+    }
+
+    #[test]
+    fn same_size_and_mtime_edits_refresh_search_and_knowledge() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("task.md");
+        let before = "- [ ] Pending [[one]]\n";
+        let after = "- [x] DoneYet [[two]]\n";
+        assert_eq!(before.len(), after.len());
+        fs::write(&path, before).unwrap();
+        for note in ["one.md", "two.md"] {
+            fs::write(dir.path().join(note), "").unwrap();
+        }
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut cache = VaultState::new(Some(dir.path()));
+        let first = call(&mut cache, "hortus_search", json!({"query": "Pending"}));
+        assert_eq!(
+            first["result"]["structuredContent"]["results"][0]["path"],
+            "task.md"
+        );
+
+        // 即使印记完全相同，本轮写入的笔记仍须保守重读。
+        let first_reads = cache.cached.as_ref().unwrap().reread_files();
+        call(&mut cache, "hortus_search", json!({"query": "Pending"}));
+        assert!(cache.cached.as_ref().unwrap().reread_files() > first_reads);
+
+        fs::write(&path, after).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        let result = call(&mut cache, "hortus_search", json!({"query": "DoneYet"}));
+        assert_eq!(
+            result["result"]["structuredContent"]["results"][0]["path"],
+            "task.md"
+        );
+        assert_eq!(
+            cache.cached.as_ref().unwrap().vault().notes["task.md"].text,
+            after
+        );
+        let old = call(&mut cache, "hortus_backlinks", json!({"note": "one.md"}));
+        let new = call(&mut cache, "hortus_backlinks", json!({"note": "two.md"}));
+        assert_eq!(old["result"]["structuredContent"]["count"], 0);
+        assert_eq!(new["result"]["structuredContent"]["count"], 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_vault_root_clears_all_cached_notes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("vault");
+        let exterior = dir.path().join("unrelated");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&exterior).unwrap();
+        fs::write(root.join("note.md"), "Inside").unwrap();
+        fs::write(exterior.join("note.md"), "Outside").unwrap();
+        let mut cache = CachedVault::bind(Some(&root)).unwrap();
+        cache.refresh().unwrap();
+        fs::rename(&root, dir.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(&exterior, &root).unwrap();
+
+        let error = cache.refresh().unwrap_err();
+        assert!(error.contains("vault root"), "{error}");
+        assert!(cache.vault().notes.is_empty());
+        assert!(cache.knowledge().note("note.md").is_none());
+        assert!(cache.search().search("Inside", 1).is_empty());
+        assert_eq!(cache.reread_files(), 1);
+        assert!(CachedVault::bind(Some(&root.join("."))).is_err());
+
+        fs::remove_file(&root).unwrap();
+        fs::rename(&exterior, &root).unwrap();
+        assert!(cache.refresh().unwrap_err().contains("identity changed"));
+        assert!(cache.vault().notes.is_empty());
+        assert_eq!(cache.reread_files(), 1);
     }
 
     #[test]
     fn vault_cache_hits_across_tools_and_invalidates_incrementally() {
         let dir = tempfile::TempDir::new().unwrap();
-        let root = dir.path().to_path_buf();
-        fs::write(root.join("a.md"), "# Alpha\n\nLink [[b]] #tag1\n").unwrap();
-        fs::write(root.join("b.md"), "# Beta\n\nBody text.\n").unwrap();
+        let root = dir.path();
+        let write_stable_note = |name: &str, content: &str| {
+            let path = root.join(name);
+            fs::write(&path, content).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(10))
+                .unwrap();
+        };
+        write_stable_note("a.md", "# Alpha\n\nLink [[b]] #tag1\n");
+        write_stable_note("b.md", "# Beta\n\nBody text.\n");
 
-        let mut cache = CachedVault::new(root.clone());
+        let mut cache = VaultState::new(Some(root));
+        let counts = |state: &VaultState<'_>| {
+            let cache = state.cached.as_ref().unwrap();
+            (cache.load_count(), cache.reread_files(), cache.cache_hits())
+        };
 
         // First tool call loads both files once.
         let r1 = call(&mut cache, "hortus_search", json!({"query": "Alpha"}));
         assert_eq!(r1["result"]["isError"], false);
-        assert_eq!(cache.load_count(), 1);
-        assert_eq!(cache.reread_files(), 2);
-        assert_eq!(cache.cache_hits(), 0);
+        assert_eq!(counts(&cache), (1, 2, 0));
 
         // Subsequent calls across different tools hit cache without re-reading.
         let r2 = call(&mut cache, "hortus_tags", json!({}));
@@ -490,22 +601,19 @@ mod tests {
         assert_eq!(r4["result"]["structuredContent"]["count"], 1);
         let r5 = call(&mut cache, "hortus_orphans", json!({}));
         assert_eq!(r5["result"]["structuredContent"]["count"], 0);
-        assert_eq!(cache.load_count(), 1);
-        assert_eq!(cache.reread_files(), 2);
-        assert_eq!(cache.cache_hits(), 4);
+        assert_eq!(counts(&cache), (1, 2, 4));
 
         // External add: only the new file is read.
-        fs::write(root.join("c.md"), "# Gamma\n\nUniqueToken #tag2\n").unwrap();
+        write_stable_note("c.md", "# Gamma\n\nUniqueToken #tag2\n");
         let r6 = call(&mut cache, "hortus_search", json!({"query": "UniqueToken"}));
         assert_eq!(
             r6["result"]["structuredContent"]["results"][0]["path"],
             "c.md"
         );
-        assert_eq!(cache.load_count(), 2);
-        assert_eq!(cache.reread_files(), 3);
+        assert_eq!(counts(&cache), (2, 3, 4));
 
         // External edit (size changes): only the edited file is re-read.
-        fs::write(root.join("b.md"), "# Beta\n\nUpdatedContentHere.\n").unwrap();
+        write_stable_note("b.md", "# Beta\n\nUpdatedContentHere.\n");
         let r7 = call(
             &mut cache,
             "hortus_search",
@@ -515,8 +623,7 @@ mod tests {
             r7["result"]["structuredContent"]["results"][0]["path"],
             "b.md"
         );
-        assert_eq!(cache.load_count(), 3);
-        assert_eq!(cache.reread_files(), 4);
+        assert_eq!(counts(&cache), (3, 4, 4));
 
         // External delete: immediately removed without re-reading unchanged files.
         fs::remove_file(root.join("c.md")).unwrap();
@@ -528,7 +635,6 @@ mod tests {
                 .len(),
             0
         );
-        assert_eq!(cache.load_count(), 4);
-        assert_eq!(cache.reread_files(), 4);
+        assert_eq!(counts(&cache), (4, 4, 4));
     }
 }
