@@ -85,6 +85,18 @@ actor EmbedRenderer {
         vaultVersions.removeAll(keepingCapacity: false)
     }
 
+    /// 驱逐包含失败媒体（如缺失图片或嵌套嵌入）的缓存项，以便外部补齐附件后重新准备。
+    func invalidateFailedMedia() {
+        let failed = order.filter { key in
+            cache[key]?.media.contains(where: { !$0.reason.isEmpty }) == true
+        }
+        for key in failed {
+            cache.removeValue(forKey: key)
+        }
+        let failedSet = Set(failed)
+        order.removeAll { failedSet.contains($0) }
+    }
+
     #if DEBUG
     func resetMetrics() {
         prepareCallCount = 0
@@ -265,6 +277,15 @@ final class EmbeddedNoteView: NSView {
         task?.cancel(); task = nil
         diagramTask?.cancel(); diagramTask = nil
         (body as? EmbeddedReadingView)?.cancel()
+    }
+
+    var hasMissingImageMedia: Bool {
+        (body as? EmbeddedReadingView)?.hasMissingImageMedia == true
+    }
+
+    func reload() {
+        cancel()
+        load()
     }
 
     private func load() {
@@ -609,6 +630,10 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
         diagramTasks.values.forEach { $0.cancel() }
         diagramTasks.removeAll()
         for media in textView.mediaViews { media.detach() }
+    }
+
+    var hasMissingImageMedia: Bool {
+        textView.mediaViews.contains { $0.hasMissingImageMedia }
     }
 
     private func toggle(ordinal: UInt32, id: String) {

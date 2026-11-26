@@ -83,7 +83,8 @@ public actor LocalImageCache {
     }
 
     private func checkedURL(_ path: String, vault: String) -> URL? {
-        let root = URL(fileURLWithPath: vault).resolvingSymlinksInPath().standardizedFileURL.path
+        let rootURL = URL(fileURLWithPath: vault).resolvingSymlinksInPath().standardizedFileURL
+        let root = rootURL.path
         let prefix = root == "/" ? root : root + "/"
         func inside(_ candidate: URL) -> URL? {
             let resolved = candidate.resolvingSymlinksInPath().standardizedFileURL
@@ -97,7 +98,8 @@ public actor LocalImageCache {
         if let resolved = inside(direct), FileManager.default.fileExists(atPath: resolved.path) {
             return resolved
         }
-        for variant in [path.precomposedStringWithCanonicalMapping, path.decomposedStringWithCanonicalMapping] where variant != path {
+        for variant in [path.precomposedStringWithCanonicalMapping, path.decomposedStringWithCanonicalMapping]
+            where !variant.utf8.elementsEqual(path.utf8) {
             if let resolved = inside(URL(fileURLWithPath: variant)), FileManager.default.fileExists(atPath: resolved.path) {
                 return resolved
             }
@@ -105,12 +107,62 @@ public actor LocalImageCache {
         // 同目录内按 NFC 规范化文件名回退，兼容 APFS/HFS+ 与跨平台同步导致的 NFC/NFD 差异。
         let targetName = direct.lastPathComponent.precomposedStringWithCanonicalMapping
         let parentPath = direct.deletingLastPathComponent().path
-        for parentVariant in [parentPath, parentPath.precomposedStringWithCanonicalMapping, parentPath.decomposedStringWithCanonicalMapping] {
+        var parentVariants = [parentPath]
+        for candidate in [parentPath.precomposedStringWithCanonicalMapping, parentPath.decomposedStringWithCanonicalMapping]
+            where !parentVariants.contains(where: { $0.utf8.elementsEqual(candidate.utf8) }) {
+            parentVariants.append(candidate)
+        }
+        for parentVariant in parentVariants {
             guard let parentURL = insideOrRoot(URL(fileURLWithPath: parentVariant)),
                   let items = try? FileManager.default.contentsOfDirectory(atPath: parentURL.path) else { continue }
             if let match = items.first(where: { $0.precomposedStringWithCanonicalMapping == targetName }),
                let resolved = inside(parentURL.appendingPathComponent(match)),
                FileManager.default.fileExists(atPath: resolved.path) {
+                return resolved
+            }
+        }
+        // 多级混合 NFC/NFD 目录与文件名：在已校验的库根内逐级按规范等价匹配组件，每级严防符号链接逃逸。
+        let relativeComponents: [String]? = {
+            let resolvedCandidate = direct.resolvingSymlinksInPath().standardizedFileURL.path
+            if resolvedCandidate.hasPrefix(prefix) {
+                return String(resolvedCandidate.dropFirst(prefix.count)).split(separator: "/").map(String.init)
+            }
+            let rawRoot = URL(fileURLWithPath: vault).standardizedFileURL.path
+            let rawPrefix = rawRoot == "/" ? rawRoot : rawRoot + "/"
+            let stdCandidate = direct.standardizedFileURL.path
+            if stdCandidate.hasPrefix(rawPrefix) {
+                return String(stdCandidate.dropFirst(rawPrefix.count)).split(separator: "/").map(String.init)
+            }
+            return nil
+        }()
+        if let components = relativeComponents, !components.isEmpty {
+            var current = rootURL
+            var matchedAll = true
+            for component in components {
+                if component == "." || component == ".." {
+                    matchedAll = false
+                    break
+                }
+                let directChild = current.appendingPathComponent(component)
+                if FileManager.default.fileExists(atPath: directChild.path),
+                   let safeChild = inside(directChild) {
+                    current = safeChild
+                    continue
+                }
+                guard let items = try? FileManager.default.contentsOfDirectory(atPath: current.path) else {
+                    matchedAll = false
+                    break
+                }
+                let targetNFC = component.precomposedStringWithCanonicalMapping
+                if let match = items.first(where: { $0.precomposedStringWithCanonicalMapping == targetNFC }),
+                   let safeChild = inside(current.appendingPathComponent(match)) {
+                    current = safeChild
+                } else {
+                    matchedAll = false
+                    break
+                }
+            }
+            if matchedAll, let resolved = inside(current), FileManager.default.fileExists(atPath: resolved.path) {
                 return resolved
             }
         }

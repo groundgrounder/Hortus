@@ -219,15 +219,8 @@ struct IOSDiagramFocusView: View {
 
     private func exportDiagram(_ format: DiagramExportFormat) {
         guard let prepared else { return }
-        let source = session.document.text
-        let mmd = session.note.lowercased().hasSuffix(".mmd")
-        let dark = colorScheme == .dark
         let ordinal = session.ordinal
-        let collapsedList = collapsed.sorted()
-        let request = DiagramExportRequest(prepared: prepared, note: session.note, ordinal: ordinal) {
-            try await DiagramExport.renderSVG(source: source, mmd: mmd, block: ordinal,
-                                              width: prepared.scene.width, dark: dark, collapsed: collapsedList)
-        }
+        let request = Self.makeExportRequest(prepared: prepared, note: session.note, ordinal: ordinal)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hortus-exports", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent(DiagramExport.defaultName(note: session.note, ordinal: ordinal, format: format))
@@ -238,6 +231,14 @@ struct IOSDiagramFocusView: View {
             } catch {
                 exportError = error.localizedDescription
             }
+        }
+    }
+
+    static func makeExportRequest(prepared: PreparedScene, note: String, ordinal: UInt32) -> DiagramExportRequest {
+        DiagramExportRequest(prepared: prepared, note: note, ordinal: ordinal) {
+            try await Task.detached(priority: .userInitiated) {
+                try DiagramExport.renderSVG(prepared: prepared)
+            }.value
         }
     }
 }

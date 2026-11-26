@@ -40,9 +40,20 @@ final class ReadingTextFinderClient: NSObject, NSTextFinderClient, @unchecked Se
     }
 
     @MainActor
-    func invalidate() {
+    func willChangeContent() {
         dirty = true
         finder.noteClientStringWillChange()
+    }
+
+    @MainActor
+    func didUpdateContent() {
+        dirty = true
+        ensureIndex()
+    }
+
+    @MainActor
+    func invalidate() {
+        willChangeContent()
     }
 
     @MainActor

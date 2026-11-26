@@ -907,8 +907,12 @@ final class DiagramTextView: NSTextView {
         return client
     }
 
+    func readingFinderWillChangeContent() {
+        readingFinder?.willChangeContent()
+    }
+
     func readingFinderDidUpdateContent() {
-        readingFinder?.invalidate()
+        readingFinder?.didUpdateContent()
     }
     var representedPath = ""
     var representedDocument: ObjectIdentifier?
