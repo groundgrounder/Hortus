@@ -893,9 +893,6 @@ impl FocusController {
                 DiagramExportMeta {
                     note_path: st.note_path.clone(),
                     ordinal: st.ordinal,
-                    source: st.source.clone(),
-                    mmd: st.mmd,
-                    collapsed: st.collapsed.clone(),
                     scene: st.scene.clone(),
                 },
                 st.callbacks.on_export.clone(),

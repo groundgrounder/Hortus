@@ -344,21 +344,12 @@ impl WindowInner {
             .initial_name(default_export_filename(&meta.note_path, meta.ordinal, kind))
             .modal(true)
             .build();
-        let Some(engine) = self
-            .state
-            .borrow()
-            .services
-            .as_ref()
-            .map(|svcs| Arc::clone(&svcs.diagram_engine))
-        else {
-            return;
-        };
         let weak = Rc::downgrade(self);
         dialog.save(Some(&self.window), gio::Cancellable::NONE, move |res| {
             let Ok(file) = res else { return };
             let Some(out_path) = file.path() else { return };
             let weak_done = weak.clone();
-            export_diagram_to_file(engine, meta, kind, out_path, move |res| match res {
+            export_diagram_to_file(meta, kind, out_path, move |res| match res {
                 Ok(saved_path) => {
                     let name = saved_path
                         .file_name()

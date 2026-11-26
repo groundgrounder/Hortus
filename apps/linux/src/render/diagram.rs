@@ -11,12 +11,10 @@ use gtk4::glib;
 use gtk4::pango;
 use hortus_ffi::{
     DiagramEngine, DiagramFailure, DiagramIdentity, DiagramPrevious, SceneColor, SceneData,
-    SceneHit, ScenePoint, ScenePrimitive, SceneRect, SceneText,
+    SceneHit, ScenePoint, ScenePrimitive, SceneRect, SceneText, scene_svg,
 };
-use libadwaita as adw;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct DiagramHighlight {
@@ -442,6 +440,11 @@ pub fn render_scene_to_pdf_bytes(scene: &SceneData) -> Result<Vec<u8>, String> {
         .map_err(|_| crate::i18n::fmt1(crate::i18n::Key::ExportImageFailed, "pdf stream"))
 }
 
+/// 直接从已排版的 `SceneData` 导出矢量 SVG（零重排，保留当前折叠态与深浅色）。
+pub fn render_scene_to_svg_string(scene: SceneData) -> Result<String, String> {
+    scene_svg(scene).map_err(|e| format_diagram_failure(&e))
+}
+
 #[derive(Clone, Copy)]
 pub enum DiagramExportKind {
     Svg,
@@ -462,9 +465,6 @@ impl DiagramExportKind {
 pub struct DiagramExportMeta {
     pub note_path: String,
     pub ordinal: u32,
-    pub source: String,
-    pub mmd: bool,
-    pub collapsed: Vec<String>,
     pub scene: SceneData,
 }
 
@@ -479,26 +479,15 @@ pub fn default_export_filename(note: &str, ordinal: u32, kind: DiagramExportKind
 }
 
 pub fn export_diagram_to_file(
-    engine: Arc<DiagramEngine>,
     meta: DiagramExportMeta,
     kind: DiagramExportKind,
     dest: PathBuf,
     on_done: impl FnOnce(Result<PathBuf, String>) + 'static,
 ) {
-    let dark = adw::StyleManager::default().is_dark();
     glib::MainContext::default().spawn_local(async move {
         let res = gio::spawn_blocking(move || match kind {
             DiagramExportKind::Svg => {
-                let svg = engine
-                    .render_svg(
-                        meta.source,
-                        meta.mmd,
-                        meta.ordinal,
-                        meta.scene.width.max(120.0),
-                        dark,
-                        meta.collapsed,
-                    )
-                    .map_err(|e| format_diagram_failure(&e))?;
+                let svg = render_scene_to_svg_string(meta.scene)?;
                 std::fs::write(&dest, svg.as_bytes())
                     .map_err(|e| crate::i18n::fmt1(crate::i18n::Key::WriteFileFailed, e))?;
                 Ok(dest)
@@ -520,4 +509,41 @@ pub fn export_diagram_to_file(
         .unwrap_or_else(|_| Err(crate::i18n::tr(crate::i18n::Key::ErrThread).into()));
         on_done(res);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_svg_export_produces_valid_svg_matching_scene_dimensions() {
+        let engine = DiagramEngine::new().expect("diagram engine");
+        let source = "flowchart TD\n    A[Start] --> B[Finish]\n";
+        let identity = DiagramIdentity {
+            document: "test.md".into(),
+            revision: 1,
+            block: 1,
+            dark: false,
+            font_generation: 0,
+            request_generation: 1,
+        };
+        let scene = render_block_with_engine(&engine, source, true, 640.0, &[], identity, None)
+            .expect("render scene");
+        let expected_w = scene.width;
+        let expected_h = scene.height;
+        let svg = render_scene_to_svg_string(scene).expect("scene_svg");
+        assert!(svg.starts_with("<svg "), "missing <svg header: {svg}");
+        assert!(svg.trim_end().ends_with("</svg>"));
+        assert!(svg.contains("Start"));
+        assert!(svg.contains("Finish"));
+        let expected_vb = format!("viewBox=\"0 0 {:.2} {:.2}\"", expected_w, expected_h);
+        let expected_vb_int = format!("viewBox=\"0 0 {} {}\"", expected_w, expected_h);
+        assert!(
+            svg.contains(&expected_vb)
+                || svg.contains(&expected_vb_int)
+                || svg.contains(&format!("width=\"{}", expected_w.round() as i64))
+                || svg.contains(&format!("width=\"{expected_w:.1}")),
+            "SVG dimensions did not match SceneData ({expected_w}x{expected_h}): {svg}"
+        );
+    }
 }

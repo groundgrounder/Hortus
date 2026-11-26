@@ -439,9 +439,6 @@ pub fn build_diagram_card(
             let meta = DiagramExportMeta {
                 note_path: st.note_path.clone(),
                 ordinal: st.ordinal,
-                source: st.source.to_string(),
-                mmd: st.mmd,
-                collapsed: st.collapsed.borrow().clone(),
                 scene: st.scene.borrow().clone(),
             };
             (st.callbacks.on_export)(kind, meta);
