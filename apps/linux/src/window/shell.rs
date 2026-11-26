@@ -2,7 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 主窗口外壳、生命周期解环（C-01/C-02/C-03）、库切换与关闭保护。
+//! 主窗口外壳、关闭解环（C-01/C-02/C-03）、库切换与关闭保护。
 
 use crate::agent::ChangesPanel;
 use crate::core::{CliOptions, CommandQueue, PanelRegion, StaticToolKind};

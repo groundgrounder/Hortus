@@ -2,7 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 多窗口生命周期协调、跨窗口同库/配置桥接与会话持久化恢复（不持久化动态终端 PTY）。
+//! 多窗口协调、跨窗口同库/配置桥接与会话持久化恢复（不持久化动态终端 PTY）。
 
 use crate::core::CliOptions;
 use crate::services::{AppServices, ConfigSnapshot, WindowBridge, WindowSessionEntry};

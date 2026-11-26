@@ -2,7 +2,7 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! 每标签独立文档会话状态：增量编辑同步、世代防竞态与定时器生命周期管理。
+//! 每标签独立文档会话状态：增量编辑同步、世代防竞态与定时器管理。
 
 use gtk4::glib;
 use hortus_ffi::{DocumentIssue, SaveChoice};

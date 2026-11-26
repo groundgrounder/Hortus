@@ -44,15 +44,22 @@ struct PreparedAgentSpec {
 }
 
 fn friendly_spec_error(err: &str) -> String {
+    friendly_spec_error_for(crate::i18n::current_lang(), err)
+}
+
+fn friendly_spec_error_for(lang: crate::i18n::Lang, err: &str) -> String {
     match err {
-        "agent.not_configured" => tr(Key::AgentNotConfigured).into(),
-        "agent.command_missing" => tr(Key::AgentCmdMissing).into(),
-        "agent.guide_missing" => tr(Key::AgentGuideMissing).into(),
-        "agent.command_not_absolute" => tr(Key::AgentCmdNotAbsolute).into(),
-        "agent.not_found" => tr(Key::AgentNotFound).into(),
-        "agent.not_executable" => tr(Key::AgentNotExecutable).into(),
-        "agent.profile_not_found" => tr(Key::AgentProfileNotFound).into(),
-        other => fmt1(Key::AgentInvalidConfig, other),
+        "agent.not_configured" => crate::i18n::tr_for(lang, Key::AgentNotConfigured).into(),
+        "agent.command_missing" => crate::i18n::tr_for(lang, Key::AgentCmdMissing).into(),
+        "agent.guide_missing" => crate::i18n::tr_for(lang, Key::AgentGuideMissing).into(),
+        "agent.command_not_absolute" => crate::i18n::tr_for(lang, Key::AgentCmdNotAbsolute).into(),
+        "agent.not_found" => crate::i18n::tr_for(lang, Key::AgentNotFound).into(),
+        "agent.not_executable" => crate::i18n::tr_for(lang, Key::AgentNotExecutable).into(),
+        "agent.profile_not_found" => crate::i18n::tr_for(lang, Key::AgentProfileNotFound).into(),
+        "guide.empty" => crate::i18n::tr_for(lang, Key::GuideEmpty).into(),
+        "guide.invalid_utf8" => crate::i18n::tr_for(lang, Key::GuideInvalidUtf8).into(),
+        "guide.read_failed" => crate::i18n::tr_for(lang, Key::GuideReadFailed).into(),
+        other => crate::i18n::fmt1_for(lang, Key::AgentInvalidConfig, other),
     }
 }
 
@@ -208,7 +215,7 @@ pub fn launch_agent_with_snapshot_gate(
         );
         let sid = info.id.clone();
 
-        // 在启动进程之前先把快照状态推进到 running，避免短生命周期 Agent 竞态退出。
+        // 在启动进程之前先把快照状态推进到 running，避免短时运行的 Agent 竞态退出。
         let core_mark = Arc::clone(&core);
         let sid_run = sid.clone();
         let _ = gio::spawn_blocking(move || {
@@ -250,4 +257,29 @@ pub fn launch_agent_with_snapshot_gate(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    #[test]
+    fn friendly_spec_error_maps_guide_keys_in_both_languages() {
+        let keys = ["guide.empty", "guide.invalid_utf8", "guide.read_failed"];
+        for lang in [Lang::En, Lang::ZhHans] {
+            for key in keys {
+                let msg = friendly_spec_error_for(lang, key);
+                assert!(!msg.trim().is_empty(), "empty message for {key}");
+                assert!(
+                    !msg.contains(key),
+                    "raw key leaked for {key} ({lang:?}): {msg}"
+                );
+                assert!(
+                    msg.contains("agent-guide.md"),
+                    "expected guide file name in message for {key} ({lang:?}): {msg}"
+                );
+            }
+        }
+    }
 }

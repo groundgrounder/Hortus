@@ -63,7 +63,6 @@ fn is_executable_file(path: &Path) -> bool {
 /// 生成与 macOS `M10-2` 一致的标准 MCP JSON 配置。
 pub fn build_mcp_config_json(vault_path: Option<&str>, command: &str) -> String {
     let resolved_vault = vault_path
-        .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or(DEFAULT_VAULT_PLACEHOLDER);
     let payload = serde_json::json!({
@@ -136,5 +135,33 @@ mod tests {
             parsed_empty["mcpServers"]["hortus"]["args"],
             serde_json::json!(["mcp", "--vault", "/path/to/folder"])
         );
+
+        let empty_str = build_mcp_config_json(Some(""), "hortus");
+        let parsed_blank: serde_json::Value = serde_json::from_str(&empty_str).expect("valid json");
+        assert_eq!(
+            parsed_blank["mcpServers"]["hortus"]["args"],
+            serde_json::json!(["mcp", "--vault", "/path/to/folder"])
+        );
+    }
+
+    #[test]
+    fn preserves_vault_path_boundary_spaces_and_special_chars() {
+        let samples = [
+            " /tmp/leading-space",
+            "/tmp/trailing-space ",
+            " /tmp/both spaces ",
+            "/tmp/my \"notes\" \\ dir ",
+        ];
+        for sample in samples {
+            let json = build_mcp_config_json(Some(sample), "/usr/bin/hortus");
+            let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+            let args = parsed["mcpServers"]["hortus"]["args"]
+                .as_array()
+                .expect("args array");
+            assert_eq!(args.len(), 3);
+            assert_eq!(args[0].as_str(), Some("mcp"));
+            assert_eq!(args[1].as_str(), Some("--vault"));
+            assert_eq!(args[2].as_str(), Some(sample));
+        }
     }
 }

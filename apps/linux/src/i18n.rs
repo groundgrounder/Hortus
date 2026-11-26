@@ -283,7 +283,7 @@ pub enum Key {
     TagsNoNotes,
     TagsLoadingNotes,
 
-    // 文件与保存生命周期
+    // 文件与保存流程
     LocationRoot,
     LocationSub,
     FolderNamePlaceholder,
@@ -402,6 +402,9 @@ pub enum Key {
     AgentNotFound,
     AgentNotExecutable,
     AgentInvalidConfig,
+    GuideEmpty,
+    GuideInvalidUtf8,
+    GuideReadFailed,
     ToastOpenFolderBeforeAgent,
     CannotStartAgentHeading,
     OpenAgentSettingsBtn,
@@ -1001,6 +1004,15 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "目标文件不可执行。",
         ),
         Key::AgentInvalidConfig => ("Invalid Agent configuration: {0}", "Agent 配置无效：{0}"),
+        Key::GuideEmpty => ("agent-guide.md is empty.", "agent-guide.md 内容为空。"),
+        Key::GuideInvalidUtf8 => (
+            "agent-guide.md is not valid UTF-8.",
+            "agent-guide.md 不是有效的 UTF-8 文本。",
+        ),
+        Key::GuideReadFailed => (
+            "Unable to read agent-guide.md.",
+            "无法读取 agent-guide.md。",
+        ),
         Key::ToastOpenFolderBeforeAgent => (
             "Open a folder before starting Agent",
             "请先打开文件夹后再启动 Agent",
@@ -1556,6 +1568,9 @@ mod tests {
         Key::AgentNotFound,
         Key::AgentNotExecutable,
         Key::AgentInvalidConfig,
+        Key::GuideEmpty,
+        Key::GuideInvalidUtf8,
+        Key::GuideReadFailed,
         Key::ToastOpenFolderBeforeAgent,
         Key::CannotStartAgentHeading,
         Key::OpenAgentSettingsBtn,

@@ -9,32 +9,66 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub(crate) fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+        CString::new(path.as_os_str().as_bytes())
+            .is_ok_and(|cstr| unsafe { libc::access(cstr.as_ptr(), libc::X_OK) == 0 })
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 /// 发现可用 `hortus` CLI 目录：先查同级可执行文件目录，再查 `HORTUS_CLI_DIR`。
 pub fn discover_hortus_cli_dir() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
         let sibling = dir.join("hortus");
-        if sibling.is_file() {
+        if is_executable_file(&sibling) {
             return Some(dir.to_path_buf());
         }
     }
     if let Some(dir) = std::env::var_os("HORTUS_CLI_DIR").filter(|v| !v.is_empty()) {
         let path = PathBuf::from(dir);
-        if path.join("hortus").is_file() {
+        if is_executable_file(&path.join("hortus")) {
             return Some(path);
         }
     }
     None
 }
 
+/// 校验并解析用户默认 Shell：必须为绝对路径且指向可执行普通文件，否则回退 `/bin/sh`。
+pub fn resolve_shell_program(shell_env: Option<&str>) -> String {
+    shell_env
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            let path = Path::new(s);
+            path.is_absolute() && is_executable_file(path)
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| "/bin/sh".to_string())
+}
+
 /// 解析用户默认 Shell（读取 `$SHELL`，兜底 `/bin/sh`）。
 pub fn user_shell_program() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && Path::new(s).exists())
-        .unwrap_or_else(|| "/bin/sh".to_string())
+    let env_shell = std::env::var("SHELL").ok();
+    resolve_shell_program(env_shell.as_deref())
 }
 
 /// 带超时的子进程标准输出读取：超时后主动 `kill()` 并 `wait()` 回收，避免启动阻塞。
@@ -356,5 +390,45 @@ mod tests {
             run_command_with_timeout(&mut slow_cmd, std::time::Duration::from_millis(120));
         assert!(slow_out.is_none());
         assert!(started.elapsed() < std::time::Duration::from_millis(1000));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_shell_program_validates_absolute_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(resolve_shell_program(None), "/bin/sh");
+        assert_eq!(resolve_shell_program(Some("")), "/bin/sh");
+        assert_eq!(resolve_shell_program(Some("   ")), "/bin/sh");
+        assert_eq!(resolve_shell_program(Some("sh")), "/bin/sh");
+        assert_eq!(resolve_shell_program(Some("./custom-sh")), "/bin/sh");
+        assert_eq!(
+            resolve_shell_program(Some("/nonexistent/hortus-shell-bin")),
+            "/bin/sh"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        // 目录路径不得作为 shell
+        assert_eq!(resolve_shell_program(dir.path().to_str()), "/bin/sh");
+
+        // 不可执行普通文件不得作为 shell
+        let non_exec = dir.path().join("plain-file");
+        std::fs::write(&non_exec, "#!/bin/sh\n").expect("write non_exec");
+        std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod 644");
+        assert_eq!(resolve_shell_program(non_exec.to_str()), "/bin/sh");
+
+        // 有效绝对可执行路径应保留
+        let exec_bin = dir.path().join("ok-sh");
+        std::fs::write(&exec_bin, "#!/bin/sh\n").expect("write exec_bin");
+        std::fs::set_permissions(&exec_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 755");
+        assert_eq!(
+            resolve_shell_program(exec_bin.to_str()),
+            exec_bin.to_string_lossy()
+        );
+        if Path::new("/bin/sh").exists() {
+            assert_eq!(resolve_shell_program(Some(" /bin/sh ")), "/bin/sh");
+        }
     }
 }
