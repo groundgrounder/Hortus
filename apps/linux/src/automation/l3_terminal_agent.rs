@@ -831,8 +831,16 @@ async fn run_suite(
         modified_toml.push_str("\n# external bump\n");
     }
     let _ = std::fs::write(&config_path, &modified_toml);
+    // 外部修改后先在设置窗内切主题、再经主窗口切主题，验证不静默覆写外部改动
+    dlg.select_color_scheme(crate::core::ColorSchemeChoice::Light);
+    win.apply_color_scheme_and_sync(crate::core::ColorSchemeChoice::Dark);
     dlg.save_config_now(false);
     let conflict_detected = wait_for(2500, || dlg.last_conflict()).await;
+    let theme_switch_preserves_external_conflict_ok = conflict_detected
+        && services
+            .core
+            .editable_config()
+            .is_ok_and(|c| (c.font_size - 17.0).abs() < 0.01);
 
     dlg.set_default_view(false);
     dlg.set_font_size(16.0);
@@ -854,6 +862,23 @@ async fn run_suite(
     dlg.close();
     drop(dlg);
     let dlg_cleared_after_close = wait_for(2500, || win.settings_dialog().is_none()).await;
+    // 连续重开设置与自定义命令弹窗：验证无 RefCell 重入 panic 且新弹窗可正常关闭
+    win.open_settings_dialog(Some(SettingsPage::Appearance));
+    win.open_settings_dialog(Some(SettingsPage::Agent));
+    let reopen_settings_ok = wait_for(2000, || win.settings_dialog().is_some()).await;
+    if let Some(d2) = win.settings_dialog() {
+        d2.close();
+    }
+    let reopen_settings_closed = wait_for(2000, || win.settings_dialog().is_none()).await;
+    win.open_custom_agent_dialog(Some(PanelRegion::Bottom));
+    win.open_custom_agent_dialog(Some(PanelRegion::Right));
+    let reopen_custom_ok = wait_for(2000, || win.custom_agent_dialog().is_some()).await;
+    if let Some(c2) = win.custom_agent_dialog() {
+        c2.force_close();
+    }
+    let reopen_custom_closed = wait_for(2000, || win.custom_agent_dialog().is_none()).await;
+    let reopen_dialogs_no_panic_ok =
+        reopen_settings_ok && reopen_settings_closed && reopen_custom_ok && reopen_custom_closed;
     glib::timeout_future(Duration::from_millis(200)).await;
 
     let disk_edit = std::fs::read_to_string(&config_path)
@@ -1511,9 +1536,38 @@ async fn run_suite(
         })
         .await;
     let custom_probe_txt = std::fs::read_to_string(&custom_probe).unwrap_or_default();
-    let custom_guide_env_ok = custom_probe_txt.contains("GUIDE=")
-        && custom_probe_txt.contains("agent-guide-active.md")
-        && custom_probe_txt.contains("SESSION=")
+    let custom_guide_path = custom_probe_txt
+        .lines()
+        .find_map(|line| line.strip_prefix("GUIDE="))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let custom_guide_env_ok = custom_guide_path.is_some_and(|raw| {
+        let path = std::path::Path::new(raw);
+        let in_agent_guides = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            == Some("agent-guides");
+        let file_name_ok = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("guide-") && n.ends_with(".md"));
+        let readonly_ok = std::fs::metadata(path).is_ok_and(|meta| {
+            if !meta.is_file() {
+                return false;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                meta.permissions().mode() & 0o222 == 0
+            }
+            #[cfg(not(unix))]
+            {
+                meta.permissions().readonly()
+            }
+        });
+        in_agent_guides && file_name_ok && readonly_ok
+    }) && custom_probe_txt.contains("SESSION=")
         && !custom_cmd.contains('\n');
     let custom_history_ok = services
         .core
@@ -1802,6 +1856,8 @@ async fn run_suite(
             "config_saved": config_saved,
             "comments_preserved": comments_preserved,
             "conflict_detected": conflict_detected,
+            "theme_switch_preserves_external_conflict_ok": theme_switch_preserves_external_conflict_ok,
+            "reopen_dialogs_no_panic_ok": reopen_dialogs_no_panic_ok,
             "force_saved": force_saved,
             "guide_overridden": guide_overridden,
             "guide_reset": guide_reset,
