@@ -242,6 +242,118 @@ struct PolishTests {
         await fixture.close()
     }
 
+    @Test func inlineCommentFoldPreservesInlineMathOffsetsAndFinderMatches() async throws {
+        let source = "foo %%hidden%% bar $x^2$\n\na %%c1%% b $y^2$ c <!-- c2 --> d $z^3$ end\n"
+        let fixture = try ReadingTests.Fixture(source)
+        try await fixture.start(mathService: Self.mathService())
+        let display = fixture.view.string as NSString
+        #expect(!fixture.view.string.contains("foo  bar"))
+        #expect(!fixture.view.string.contains("a  b"))
+        #expect(!fixture.view.string.contains("c  d"))
+        #expect(fixture.view.inlineMath.count == 3)
+
+        var matchedLatex: [String] = []
+        for (location, attachment) in fixture.view.inlineMath.sorted(by: { $0.key < $1.key }) {
+            let range = attachment.item.range
+            #expect(range.location == location)
+            #expect(range.length == 1)
+            #expect(NSMaxRange(range) <= display.length)
+            #expect(display.character(at: range.location) == 0xFFFC)
+            matchedLatex.append(attachment.item.prepared.block.latex)
+        }
+        #expect(matchedLatex == ["x^2", "y^2", "z^3"])
+
+        let finder = fixture.view.ensureReadingFinder()
+        for query in ["x^2", "y^2", "z^3"] {
+            let hits = finder.matches(for: query)
+            #expect(hits.count == 1)
+            let hit = try #require(hits.first)
+            #expect(hit.isFormula)
+            #expect(hit.realRange.length == 1)
+            #expect(NSMaxRange(hit.realRange) <= display.length)
+            #expect(display.character(at: hit.realRange.location) == 0xFFFC)
+        }
+        await fixture.close()
+    }
+
+    @Test func embedAsyncHeightGrowthPreservesScrollAnchorBelowEmbed() async throws {
+        let body = (0..<24).map { "## Section \($0)\n\nParagraph text for section \($0) with enough length to occupy vertical space.\n\n" }.joined()
+        let source = "![[child]]\n\n" + body
+        let fixture = try ReadingTests.Fixture(source)
+        try "# Child\n\nEmbedded body paragraph.\n".write(
+            to: fixture.editing.vault.appendingPathComponent("child.md"),
+            atomically: true, encoding: .utf8
+        )
+        let handle = try fixture.editing.core.openVault(path: fixture.editing.vault.path)
+        handle.updateSearchIndex(upserted: ["note.md", "child.md"], removed: [])
+        defer { handle.close() }
+
+        try await fixture.start(mathService: Self.mathService(), knowledgeHandle: handle)
+        let media = try #require(fixture.view.mediaViews.first)
+        // 等待嵌入卡片完成初次异步加载，确保后续滚动测试不受初始装载竞态干扰。
+        for _ in 0..<200 where media.inspectionEmbeddedCard == nil || media.preferredSize.height <= 48 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(media.inspectionEmbeddedCard != nil)
+        for _ in 0..<200 where fixture.document.outlineRevision != fixture.document.revision {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(fixture.document.headings.count == 24)
+
+        let targetHeading = fixture.document.headings[12]
+        let displayPos = fixture.coordinator.displayPosition(source: Int(targetHeading.start))
+        if let manager = fixture.view.textLayoutManager,
+           let content = manager.textContentManager,
+           let endLoc = content.location(content.documentRange.location, offsetBy: displayPos),
+           let prefixRange = NSTextRange(location: content.documentRange.location, end: endLoc) {
+            manager.ensureLayout(for: prefixRange)
+        }
+        let targetRect = fixture.coordinator.rect(at: displayPos)
+        fixture.editing.scroll.contentView.scroll(to: CGPoint(x: 0, y: max(0, targetRect.minY)))
+        fixture.editing.scroll.reflectScrolledClipView(fixture.editing.scroll.contentView)
+        fixture.view.layoutSubtreeIfNeeded()
+
+        let beforeVisibleMinY = fixture.view.visibleRect.minY
+        let beforeAnchor = try #require(fixture.coordinator.visibleAnchor())
+        let beforeAnchorPos = fixture.coordinator.displayPosition(source: beforeAnchor.source)
+        let beforeOffset = fixture.coordinator.rect(at: beforeAnchorPos).minY - beforeVisibleMinY
+
+        let oldHeight = media.preferredSize.height
+        let growth: CGFloat = 240
+        media.simulateEmbedHeightGrowthForTesting(oldHeight + growth)
+        fixture.view.layoutSubtreeIfNeeded()
+
+        let afterVisibleMinY = fixture.view.visibleRect.minY
+        let afterAnchor = try #require(fixture.coordinator.visibleAnchor())
+        let afterOffset = fixture.coordinator.rect(at: beforeAnchorPos).minY - afterVisibleMinY
+        #expect(abs(media.preferredSize.height - (oldHeight + growth)) <= 0.5)
+        #expect(afterAnchor.id == beforeAnchor.id)
+        #expect(abs(afterOffset - beforeOffset) <= 1.0)
+        await fixture.close()
+    }
+
+    @Test func tableMediaViewRejectsReuseWhenAppearanceOrContrastChanges() async throws {
+        let source = "| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+        let fixture = try ReadingTests.Fixture(source)
+        try await fixture.start(mathService: Self.mathService())
+        let media = try #require(fixture.view.mediaViews.first)
+        let prepared = media.prepared
+        let width = media.renderWidth
+        let size = media.renderSize
+        let vault = media.vault
+        let version = media.knowledgeVersion
+        let dark = media.renderDark
+        let contrast = media.renderIncreasedContrast
+
+        #expect(media.canReuse(for: prepared, width: width, size: size, vault: vault,
+                               knowledgeVersion: version, dark: dark, increasedContrast: contrast))
+        #expect(!media.canReuse(for: prepared, width: width, size: size, vault: vault,
+                                knowledgeVersion: version, dark: !dark, increasedContrast: contrast))
+        #expect(!media.canReuse(for: prepared, width: width, size: size, vault: vault,
+                                knowledgeVersion: version, dark: dark, increasedContrast: !contrast))
+        await fixture.close()
+    }
+
     @Test func terminalSessionClearsPendingSendsOnVaultSwitchAndStop() async {
         let session = TerminalSession()
         session.setInitialRoot("/tmp/vault-a")

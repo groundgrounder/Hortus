@@ -363,6 +363,8 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
     let renderWidth: Double
     let renderSize: Double
     let knowledgeVersion: Int
+    let renderDark: Bool
+    let renderIncreasedContrast: Bool
     private(set) var preferredSize: CGSize
     var onEdit: (() -> Void)?
     var onOpenLink: ((String, String?) -> Void)? {
@@ -385,9 +387,11 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
     var hasDecodedImage: Bool { image != nil }
 
     init(_ prepared: PreparedMedia, width: Double, size: Double, vault: String,
-         knowledge: KnowledgeMarkupInfo? = nil, knowledgeVersion: Int = 0) {
+         knowledge: KnowledgeMarkupInfo? = nil, knowledgeVersion: Int = 0,
+         dark: Bool = false, increasedContrast: Bool = false) {
         self.prepared = prepared; self.vault = vault
         self.renderWidth = width; self.renderSize = size; self.knowledgeVersion = knowledgeVersion
+        self.renderDark = dark; self.renderIncreasedContrast = increasedContrast
         let block = prepared.block
         var table: TableCanvas?
         if !block.columns.isEmpty {
@@ -421,7 +425,8 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func canReuse(for next: PreparedMedia, width: Double, size: Double, vault: String, knowledgeVersion: Int) -> Bool {
+    func canReuse(for next: PreparedMedia, width: Double, size: Double, vault: String,
+                  knowledgeVersion: Int, dark: Bool = false, increasedContrast: Bool = false) -> Bool {
         guard self.vault == vault, abs(renderWidth - width) < 0.25, renderSize == size else { return false }
         guard prepared.reason == next.reason, prepared.version == next.version,
               prepared.imageSize == next.imageSize else { return false }
@@ -431,6 +436,8 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
               a.columns == b.columns, a.rows == b.rows else { return false }
         if !a.columns.isEmpty {
             guard self.knowledgeVersion == knowledgeVersion,
+                  renderDark == dark,
+                  renderIncreasedContrast == increasedContrast,
                   a.cells == b.cells,
                   prepared.math.map({ $0.map(\.block.latex) }) == next.math.map({ $0.map(\.block.latex) }) else {
                 return false
@@ -478,6 +485,15 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
 
     #if DEBUG
     var inspectionEmbeddedCard: EmbeddedNoteView? { embeddedCard }
+    func simulateEmbedHeightGrowthForTesting(_ height: CGFloat) {
+        guard let card = embeddedCard else { return }
+        let nextHeight = max(36, height)
+        guard abs(preferredSize.height - nextHeight) > 0.5 else { return }
+        preferredSize = CGSize(width: preferredSize.width, height: nextHeight)
+        card.frame = CGRect(origin: .zero, size: preferredSize)
+        frame.size = preferredSize
+        onSizeChange?()
+    }
     #endif
 
     var tableCanvasView: NSView? { tableCanvas }
@@ -602,18 +618,22 @@ extension DiagramTextView {
                       prepare: ((NoteMedia, MediaView) -> Void)? = nil) {
         guard !next.isEmpty || !mediaBlocks.isEmpty else { return }
         let oldSizes = mediaViews.map(\.preferredSize), oldProjection = mediaProjection
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let contrast = increasedContrast
         var reusable = mediaViews
         mediaPaintedAt = 0
         mediaBlocks = next
         mediaViews = next.map { item in
             let media: MediaView
             if let matchIndex = reusable.firstIndex(where: {
-                $0.canReuse(for: item.prepared, width: width, size: size, vault: vault, knowledgeVersion: knowledgeVersion)
+                $0.canReuse(for: item.prepared, width: width, size: size, vault: vault,
+                            knowledgeVersion: knowledgeVersion, dark: dark, increasedContrast: contrast)
             }) {
                 media = reusable.remove(at: matchIndex)
             } else {
                 media = MediaView(item.prepared, width: width, size: size, vault: vault,
-                                  knowledge: knowledge, knowledgeVersion: knowledgeVersion)
+                                  knowledge: knowledge, knowledgeVersion: knowledgeVersion,
+                                  dark: dark, increasedContrast: contrast)
                 media.isHidden = true
                 addSubview(media)
             }

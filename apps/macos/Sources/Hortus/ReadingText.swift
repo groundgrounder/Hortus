@@ -56,6 +56,7 @@ struct ReadingText: NSViewRepresentable {
             let revision: UInt64
             let width: Double
             let dark: Bool
+            let increasedContrast: Bool
             let size: Double
             let scrollerStyle: Int
             let forcedGeneration: UInt64
@@ -83,6 +84,7 @@ struct ReadingText: NSViewRepresentable {
         private var forcedGeneration: UInt64 = 0
         private var width = 0.0
         private var dark = false
+        private var increasedContrast = false
         private var size = 0.0
         private var scrollerStyle: NSScroller.Style?
         private var source = ""
@@ -127,8 +129,9 @@ struct ReadingText: NSViewRepresentable {
             view.onWidthOrThemeChange = { [weak self, weak view] in
                 guard let self, let view else { return }
                 let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                let contrast = view.increasedContrast
                 let widthChanged = abs(width - view.layoutContentWidth) > 0.25
-                let themeOrScrollerChanged = self.dark != dark || scrollerStyle != view.formulaScrollerStyle
+                let themeOrScrollerChanged = self.dark != dark || self.increasedContrast != contrast || scrollerStyle != view.formulaScrollerStyle
                 let hasEmbeds = view.mediaBlocks.contains { $0.prepared.reason.hasPrefix("embed.") }
                 if themeOrScrollerChanged || (widthChanged && (model == nil || !hasEmbeds)) {
                     refresh()
@@ -248,13 +251,14 @@ struct ReadingText: NSViewRepresentable {
             let width = view.layoutContentWidth
             guard view.hasSettledContentWidth else { return }
             let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let contrast = view.increasedContrast
             if force { forcedGeneration &+= 1 }
             let sourceText = input.document.text
             // 编辑后镜像正文可能落后于 Rust 会话；此时不能按旧正文剪枝知识扫描。
             let staleText = input.document.textRevision != input.document.revision
             let hasLinks = staleText || sourceText.contains("[[")
             let version = hasLinks ? input.knowledgeVersion : 0
-            let key = RefreshKey(revision: input.document.revision, width: width, dark: dark,
+            let key = RefreshKey(revision: input.document.revision, width: width, dark: dark, increasedContrast: contrast,
                                  size: input.fontSize, scrollerStyle: view.formulaScrollerStyle.rawValue, forcedGeneration: forcedGeneration, knowledgeVersion: version)
             if let inFlightKey {
                 guard key != inFlightKey, !refreshQueued else { return }
@@ -270,7 +274,7 @@ struct ReadingText: NSViewRepresentable {
             pending = true; view.diagramPending = true
             let began = ProcessInfo.processInfo.systemUptime
             if firstRefreshStartedAt == 0 { firstRefreshStartedAt = began }
-            let themeChanged = self.dark != dark || size != input.fontSize || scrollerStyle != view.formulaScrollerStyle
+            let themeChanged = self.dark != dark || self.increasedContrast != contrast || size != input.fontSize || scrollerStyle != view.formulaScrollerStyle
             let oldRendered = rendered
             let oldMath = size == input.fontSize ? preparedMath : []
             let oldTableMath = size == input.fontSize ? view.mediaBlocks.flatMap { $0.prepared.math.flatMap { $0 } } : []
@@ -397,7 +401,7 @@ struct ReadingText: NSViewRepresentable {
             }
             // 阅读模型的 text 是显示文本；源码、任务与知识偏移必须用同一修订的快照原文。
             let live = result.snapshot?.text ?? input.document.text
-            self.width = width; self.dark = dark; size = input.fontSize; source = live
+            self.width = width; self.dark = dark; self.increasedContrast = view.increasedContrast; size = input.fontSize; source = live
             input.document.adoptReadingText(live, revision: result.model.revision)
             scrollerStyle = view.formulaScrollerStyle
             let installStart = ProcessInfo.processInfo.systemUptime
@@ -411,7 +415,8 @@ struct ReadingText: NSViewRepresentable {
             let items = result.media.compactMap { item -> NoteMedia? in
                 guard let index = blockIndices[item.block.blockId], index < ranges.count else { return nil }
                 let block = result.model.blocks[index]
-                let local = Int(item.block.displayStart - block.displayStart)
+                let rawLocal = Int(item.block.displayStart - block.displayStart)
+                let local = rawLocal - (collapsedSpaceOffsets[index]?.filter { $0 < rawLocal }.count ?? 0)
                 return NoteMedia(range: NSRange(location: ranges[index].location + local, length: Int(item.block.displayLength)), prepared: item)
             }
             view.installMedia(items, width: width, size: input.fontSize, vault: input.vault,
@@ -658,7 +663,8 @@ struct ReadingText: NSViewRepresentable {
             let indices = Dictionary(uniqueKeysWithValues: next.blocks.enumerated().map { ($0.element.id, $0.offset) })
             let formulas = math.compactMap { item -> NoteMath? in
                 guard let index = indices[item.block.blockId] else { return nil }
-                let local = Int(item.block.displayStart - next.blocks[index].displayStart)
+                let rawLocal = Int(item.block.displayStart - next.blocks[index].displayStart)
+                let local = rawLocal - (nextCollapsedSpaces[index]?.filter { $0 < rawLocal }.count ?? 0)
                 return NoteMath(range: NSRange(location: nextRanges[index].location + local, length: Int(item.block.displayLength)),
                                 prepared: item, offset: local)
             }
