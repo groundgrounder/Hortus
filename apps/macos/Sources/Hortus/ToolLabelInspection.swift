@@ -209,14 +209,15 @@ enum ToolLabelInspection {
                 "menu_screenshot": path, "closed": closed]
     }
 
-    /// 静态工具关闭后从 + 菜单重加；菜单顺序是 Files、Search、Outline。
+    /// 静态工具关闭后从 + 菜单重加；按 StaticTool.allCases 顺序定位菜单项。
     private static func addViaPlus(_ tool: StaticTool, groupID: UUID, layout: Layout,
                                    window: NSWindow) async throws -> Bool {
         guard try await ToolDragInspection.click("group-add-" + groupID.uuidString, window: window) else {
             return false
         }
         try await Task.sleep(for: .milliseconds(500))
-        for _ in 0..<3 {
+        let steps = (StaticTool.allCases.firstIndex(of: tool) ?? 0) + 1
+        for _ in 0..<steps {
             press(125)
             try await Task.sleep(for: .milliseconds(90))
         }

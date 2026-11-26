@@ -83,7 +83,7 @@ final class TerminalSession {
 
     var statusText: String {
         switch state {
-        case .empty: return L10n.string("Open a knowledge base to use the terminal")
+        case .empty: return L10n.string("Open a folder to use the terminal")
         case .starting, .startingAgent, .running: return ""
         case .exited: return L10n.string("Process exited")
         case .failed: return L10n.string("Unable to start the shell")
@@ -233,6 +233,7 @@ final class TerminalSession {
         // 再次打开同一个库保留正在运行的 shell。
         if self.root == root, state == .running { return }
         if self.root != root {
+            pendingSends.removeAll()
             await stopAndWait()
         }
         self.root = root
@@ -247,6 +248,7 @@ final class TerminalSession {
         default: return
         }
         guard let view, !view.process.running, !view.process.windingDown else { return }
+        pendingSends.removeAll()
         state = .starting
         startIfPossible()
     }
@@ -263,6 +265,7 @@ final class TerminalSession {
 
     func stopAndWait() async {
         pendingAgent = nil
+        pendingSends.removeAll()
         if state == .startingAgent {
             state = .empty
             return
@@ -283,6 +286,7 @@ final class TerminalSession {
         killTask?.cancel()
         killTask = nil
         pendingAgent = nil
+        pendingSends.removeAll()
         guard let pid = view?.process.shellPid, pid > 0 else {
             state = .empty
             completion()

@@ -142,7 +142,7 @@ extension DiagramTextView {
         if !editorActions.indent(in: self, backwards: true) { super.insertBacktab(sender) }
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.option, .command],
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.shift, .option, .command],
            event.charactersIgnoringModifiers?.lowercased() == "t", isEditable {
             alignTableSource(nil); return true
         }
@@ -154,7 +154,11 @@ extension DiagramTextView {
     override func performFindPanelAction(_ sender: Any?) {
         findPanelActionCount += 1
         let wasVisible = enclosingScrollView?.isFindBarVisible ?? false
-        super.performFindPanelAction(sender)
+        if isReading {
+            ensureReadingFinder().performAction(sender)
+        } else {
+            super.performFindPanelAction(sender)
+        }
         let isVisible = enclosingScrollView?.isFindBarVisible ?? false
         if isVisible {
             // 显隐刚变化时容器回调已经建立监视；⌘G 这类原栏内命令才需要替换旧任务。

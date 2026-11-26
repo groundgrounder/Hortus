@@ -4,22 +4,99 @@ import HortusApple
 import ImageIO
 import Quartz
 
+private struct TableCellLink {
+    let range: NSRange
+    let target: String
+    let heading: String?
+    let broken: Bool
+}
+
+private struct TableCellTag {
+    let range: NSRange
+    let tag: String
+}
+
+private final class TableCellAccessibilityElement: NSAccessibilityElement {
+    private let frameProvider: @MainActor @Sendable () -> NSRect
+
+    @MainActor init(owner: TableCanvas, row: Int, column: Int, label: String) {
+        frameProvider = { [weak owner] in
+            guard let owner, let window = owner.window else { return .zero }
+            let rect = owner.cellFrame(row: row, column: column)
+            guard !rect.isEmpty else { return .zero }
+            return window.convertToScreen(owner.convert(rect, to: nil))
+        }
+        super.init()
+        setAccessibilityParent(owner)
+        setAccessibilityRole(.cell)
+        setAccessibilityLabel(label)
+        setAccessibilityRowIndexRange(NSRange(location: row, length: 1))
+        setAccessibilityColumnIndexRange(NSRange(location: column, length: 1))
+    }
+
+    override func accessibilityFrame() -> NSRect {
+        let provider = frameProvider
+        return MainActor.assumeIsolated { provider() }
+    }
+}
+
+@MainActor
 private final class TableCanvas: NSView {
     override var isFlipped: Bool { true }
     let columns: [Double]
     private let texts: [NSAttributedString]
     let heights: [CGFloat]
+    private let cellLinks: [[TableCellLink]]
+    private let cellTags: [[TableCellTag]]
+    private var cellElements: [TableCellAccessibilityElement] = []
     private var layoutCache: [Int: (storage: NSTextStorage, layout: NSLayoutManager, container: NSTextContainer)] = [:]
     var edit: (() -> Void)?
-    init(_ block: MediaBlock, size: Double, math: [[PreparedMathBlock]]) {
+    var onOpenLink: ((String, String?) -> Void)?
+    var onShowTag: ((String) -> Void)?
+
+    init(_ block: MediaBlock, size: Double, math: [[PreparedMathBlock]], knowledge: KnowledgeMarkupInfo? = nil) {
         columns = block.columns
         let styling = SourceStyling(); styling.installReading([], size: size)
+        var resolvedLookup: [String: Bool] = [:]
+        if let links = knowledge?.links {
+            for link in links where !link.inDiagram && !link.attachment {
+                let key = Self.linkLookupKey(target: link.target, heading: link.heading)
+                resolvedLookup[key] = link.resolvedPath != nil
+            }
+        }
+        var allLinks: [[TableCellLink]] = []
+        var allTags: [[TableCellTag]] = []
+        var cellLabels: [String] = []
         let texts = block.cells.enumerated().map { index, cell -> NSAttributedString in
             let header: UInt32 = index < block.columns.count ? 2 : 0
+            let parsedLinks = Self.extractWikilinks(from: cell.source)
+            var linkCursor = 0
+            var linksForCell: [TableCellLink] = []
+            var tagsForCell: [TableCellTag] = []
             let text = NSMutableAttributedString(string: cell.text, attributes: styling.style(header))
             for run in cell.runs {
                 let range = NSRange(location: Int(run.start), length: Int(run.length))
-                if NSMaxRange(range) <= text.length { text.setAttributes(styling.style(run.mask | header), range: range) }
+                guard NSMaxRange(range) <= text.length else { continue }
+                var mask = run.mask | header
+                if run.mask & (1 << 18) != 0 {
+                    let parsed = linkCursor < parsedLinks.count ? parsedLinks[linkCursor] : nil
+                    linkCursor += 1
+                    if let parsed {
+                        let key = Self.linkLookupKey(target: parsed.target, heading: parsed.heading)
+                        let resolved = resolvedLookup[key] ?? true
+                        let broken = knowledge != nil && !resolved
+                        if broken { mask |= (1 << 19) }
+                        linksForCell.append(TableCellLink(range: range, target: parsed.target,
+                                                          heading: parsed.heading, broken: broken))
+                    }
+                } else if run.mask & 512 != 0 {
+                    let raw = (cell.text as NSString).substring(with: range)
+                    let tag = raw.hasPrefix("#") ? String(raw.dropFirst()) : raw
+                    if !tag.isEmpty {
+                        tagsForCell.append(TableCellTag(range: range, tag: tag))
+                    }
+                }
+                text.setAttributes(styling.style(mask), range: range)
             }
             if index < math.count {
                 for formula in math[index] {
@@ -38,9 +115,14 @@ private final class TableCanvas: NSView {
             // 列宽已保证放得下最长的词；按词换行，超长网址系统会自己按字符断
             paragraph.lineBreakMode = .byWordWrapping
             text.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: text.length))
+            allLinks.append(linksForCell)
+            allTags.append(tagsForCell)
+            cellLabels.append(Self.accessibleText(for: cell))
             return text
         }
         self.texts = texts
+        self.cellLinks = allLinks
+        self.cellTags = allTags
         heights = (0..<Int(block.rows)).map { row in
             (0..<block.columns.count).map { column in
                 let text = texts[row * block.columns.count + column]
@@ -50,20 +132,73 @@ private final class TableCanvas: NSView {
         }
         super.init(frame: CGRect(x: 0, y: 0, width: columns.reduce(0, +), height: heights.reduce(0, +)))
         setAccessibilityElement(true); setAccessibilityRole(.table)
-        setAccessibilityLabel(block.cells.map { cell in
-            let label = NSMutableString(string: cell.text)
-            for formula in cell.math.reversed() where !formula.latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                label.replaceCharacters(in: NSRange(location: Int(formula.displayStart), length: Int(formula.displayLength)),
-                    with: L10n.string("Formula: %@", formula.latex))
-            }
-            return label as String
-        }.joined(separator: ", "))
+        setAccessibilityLabel(cellLabels.joined(separator: ", "))
         toolTip = math.flatMap { $0 }.compactMap(\.reason).joined(separator: "\n")
         setAccessibilityHelp(toolTip)
+        if !columns.isEmpty {
+            cellElements = cellLabels.enumerated().map { index, label in
+                TableCellAccessibilityElement(owner: self, row: index / columns.count,
+                                              column: index % columns.count, label: label)
+            }
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private static func accessibleText(for cell: TableCell) -> String {
+        let label = NSMutableString(string: cell.text)
+        for formula in cell.math.reversed() where !formula.latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let range = NSRange(location: Int(formula.displayStart), length: Int(formula.displayLength))
+            if NSMaxRange(range) <= label.length {
+                label.replaceCharacters(in: range, with: L10n.string("Formula: %@", formula.latex))
+            }
+        }
+        return label as String
+    }
+
+    private static func linkLookupKey(target: String, heading: String?) -> String {
+        target.lowercased() + "\u{0}" + (heading?.lowercased() ?? "")
+    }
+
+    /// 按源码顺序提取单元格内的非嵌入双链目标与标题片段，与 Rust 生成的双链 run 一一对应。
+    private static func extractWikilinks(from source: String) -> [(target: String, heading: String?)] {
+        var result: [(target: String, heading: String?)] = []
+        let chars = Array(source)
+        var i = 0
+        var inCode = false
+        while i < chars.count {
+            if chars[i] == "\\" && i + 1 < chars.count {
+                i += 2; continue
+            }
+            if chars[i] == "`" {
+                inCode.toggle(); i += 1; continue
+            }
+            if !inCode && i + 1 < chars.count && chars[i] == "[" && chars[i + 1] == "[" {
+                let isEmbed = i > 0 && chars[i - 1] == "!"
+                var j = i + 2
+                while j + 1 < chars.count && !(chars[j] == "]" && chars[j + 1] == "]") { j += 1 }
+                if j + 1 < chars.count {
+                    if !isEmbed {
+                        let inner = String(chars[(i + 2)..<j])
+                        let rawBeforeAlias = inner.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? inner
+                        let beforeAlias = rawBeforeAlias.hasSuffix("\\") ? String(rawBeforeAlias.dropLast()) : rawBeforeAlias
+                        let parts = beforeAlias.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
+                        let target = String(parts[0]).trimmingCharacters(in: .whitespaces)
+                        let heading = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : nil
+                        if !target.isEmpty || (heading?.isEmpty == false) {
+                            result.append((target, heading?.isEmpty == true ? nil : heading))
+                        }
+                    }
+                    i = j + 2
+                    continue
+                }
+            }
+            i += 1
+        }
+        return result
+    }
+
     var inspectionCells: [[String: Any]] {
-        texts.map { text in
+        texts.enumerated().map { index, text in
             var sizes: [Double] = [], bold: [Bool] = []
             text.enumerateAttribute(.font, in: NSRange(location: 0, length: text.length)) { value, _, _ in
                 if let font = value as? NSFont {
@@ -71,13 +206,38 @@ private final class TableCanvas: NSView {
                     bold.append(NSFontManager.shared.traits(of: font).contains(.boldFontMask))
                 }
             }
-            return ["text": text.string, "font_sizes": sizes, "bold": bold]
+            let links = index < cellLinks.count ? cellLinks[index].map {
+                ["target": $0.target, "heading": $0.heading ?? "", "broken": $0.broken] as [String: Any]
+            } : []
+            return ["text": text.string, "font_sizes": sizes, "bold": bold, "links": links]
         }
     }
+
+    func cellFrame(row: Int, column: Int) -> NSRect {
+        guard row >= 0, row < heights.count, column >= 0, column < columns.count else { return .zero }
+        let x = columns.prefix(column).reduce(0, +)
+        let y = heights.prefix(row).reduce(0, +)
+        return NSRect(x: x, y: y, width: columns[column], height: heights[row])
+    }
+
+    override func accessibilityChildren() -> [Any]? { cellElements }
+
     override func accessibilityHitTest(_ point: NSPoint) -> Any? {
-        let hit = MainActor.assumeIsolated { AccessibilityHitResult(value: cachedFormulaAccessibility(at: point)) }
+        let hit = MainActor.assumeIsolated { () -> AccessibilityHitResult in
+            if let formula = cachedFormulaAccessibility(at: point) {
+                return AccessibilityHitResult(value: formula)
+            }
+            for cell in cellElements {
+                let frame = cell.accessibilityFrame()
+                if !frame.isEmpty && frame.contains(point) {
+                    return AccessibilityHitResult(value: cell)
+                }
+            }
+            return AccessibilityHitResult(value: nil)
+        }
         return hit.value ?? super.accessibilityHitTest(point)
     }
+
     override func draw(_ dirtyRect: NSRect) {
         // 只画行线不画竖线：列之间靠内边距分开，界面少线
         var y: CGFloat = 0
@@ -95,7 +255,74 @@ private final class TableCanvas: NSView {
         }
         lines.stroke()
     }
-    override func mouseDown(with event: NSEvent) { edit?() }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard onOpenLink != nil || onShowTag != nil, !columns.isEmpty else { return }
+        for cellIndex in texts.indices {
+            let links = cellLinks[cellIndex]
+            let tags = cellTags[cellIndex]
+            guard !links.isEmpty || !tags.isEmpty, let cached = layout(for: cellIndex) else { continue }
+            let row = cellIndex / columns.count
+            let column = cellIndex % columns.count
+            let originX = columns.prefix(column).reduce(0, +) + 10
+            let originY = heights.prefix(row).reduce(0, +) + 8
+            for range in links.map(\.range) + tags.map(\.range) {
+                let glyphs = cached.layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+                let rect = cached.layout.boundingRect(forGlyphRange: glyphs, in: cached.container)
+                    .offsetBy(dx: originX, dy: originY)
+                if !rect.isEmpty { addCursorRect(rect, cursor: .pointingHand) }
+            }
+        }
+    }
+
+    private func hitTestCell(at point: CGPoint) -> (cell: Int, character: Int)? {
+        guard !columns.isEmpty, !heights.isEmpty else { return nil }
+        var y: CGFloat = 0
+        var matchedRow: Int?
+        for (row, height) in heights.enumerated() {
+            if point.y >= y && point.y < y + height { matchedRow = row; break }
+            y += height
+        }
+        var x: CGFloat = 0
+        var matchedCol: Int?
+        for (col, width) in columns.enumerated() {
+            if point.x >= x && point.x < x + width { matchedCol = col; break }
+            x += width
+        }
+        guard let row = matchedRow, let col = matchedCol else { return nil }
+        let cell = row * columns.count + col
+        guard let cached = layout(for: cell) else { return nil }
+        let local = CGPoint(x: point.x - (x + 10), y: point.y - (y + 8))
+        guard local.x >= 0, local.y >= 0 else { return nil }
+        var fraction: CGFloat = 0
+        let index = cached.layout.characterIndex(for: local, in: cached.container,
+                                                 fractionOfDistanceBetweenInsertionPoints: &fraction)
+        guard index < texts[cell].length else { return nil }
+        let glyphIndex = cached.layout.glyphIndexForCharacter(at: index)
+        let rect = cached.layout.boundingRect(forGlyphRange: NSRange(location: glyphIndex, length: 1), in: cached.container)
+        guard rect.insetBy(dx: -2, dy: -2).contains(local) else { return nil }
+        return (cell, index)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if onOpenLink != nil || onShowTag != nil {
+            let point = convert(event.locationInWindow, from: nil)
+            if let (cell, index) = hitTestCell(at: point) {
+                if let link = cellLinks[cell].first(where: { NSLocationInRange(index, $0.range) }),
+                   let onOpenLink {
+                    onOpenLink(link.target, link.heading)
+                    return
+                }
+                if let tag = cellTags[cell].first(where: { NSLocationInRange(index, $0.range) }),
+                   let onShowTag {
+                    onShowTag(tag.tag)
+                    return
+                }
+            }
+        }
+        edit?()
+    }
 
     private func layout(for cell: Int) -> (layout: NSLayoutManager, container: NSTextContainer)? {
         guard cell >= 0, cell < texts.count, !columns.isEmpty else { return nil }
@@ -133,8 +360,17 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
     override var isFlipped: Bool { true }
     let prepared: PreparedMedia
     let vault: String
+    let renderWidth: Double
+    let renderSize: Double
+    let knowledgeVersion: Int
     private(set) var preferredSize: CGSize
     var onEdit: (() -> Void)?
+    var onOpenLink: ((String, String?) -> Void)? {
+        didSet { tableCanvas?.onOpenLink = onOpenLink }
+    }
+    var onShowTag: ((String) -> Void)? {
+        didSet { tableCanvas?.onShowTag = onShowTag }
+    }
     var onSizeChange: (() -> Void)?
     private var embeddedCard: EmbeddedNoteView?
     var onRefresh: (() -> Void)?
@@ -148,12 +384,14 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
     var imagePending: Bool { decoding != nil }
     var hasDecodedImage: Bool { image != nil }
 
-    init(_ prepared: PreparedMedia, width: Double, size: Double, vault: String) {
+    init(_ prepared: PreparedMedia, width: Double, size: Double, vault: String,
+         knowledge: KnowledgeMarkupInfo? = nil, knowledgeVersion: Int = 0) {
         self.prepared = prepared; self.vault = vault
+        self.renderWidth = width; self.renderSize = size; self.knowledgeVersion = knowledgeVersion
         let block = prepared.block
         var table: TableCanvas?
         if !block.columns.isEmpty {
-            let canvas = TableCanvas(block, size: size, math: prepared.math); table = canvas
+            let canvas = TableCanvas(block, size: size, math: prepared.math, knowledge: knowledge); table = canvas
             let scrolls = canvas.frame.width > width + 0.5
             preferredSize = CGSize(width: min(width, canvas.frame.width), height: canvas.frame.height + (scrolls ? 15 : 0) + 12)
         } else if prepared.imageSize.width > 0 {
@@ -179,9 +417,37 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
             setAccessibilityLabel(prepared.reason.hasPrefix("embed.") ? L10n.string(prepared.reason, block.imageTarget) : block.imageAlt)
         }
         if !block.imagePath.isEmpty { watch() }
+        else if prepared.reason == "image.missing" { watchVaultForMissingImage() }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func canReuse(for next: PreparedMedia, width: Double, size: Double, vault: String, knowledgeVersion: Int) -> Bool {
+        guard self.vault == vault, abs(renderWidth - width) < 0.25, renderSize == size else { return false }
+        guard prepared.reason == next.reason, prepared.version == next.version,
+              prepared.imageSize == next.imageSize else { return false }
+        let a = prepared.block, b = next.block
+        guard a.imagePath == b.imagePath, a.imageTarget == b.imageTarget, a.imageAlt == b.imageAlt,
+              a.imageWidth == b.imageWidth, a.imageWiki == b.imageWiki,
+              a.columns == b.columns, a.rows == b.rows else { return false }
+        if !a.columns.isEmpty {
+            guard self.knowledgeVersion == knowledgeVersion,
+                  a.cells == b.cells,
+                  prepared.math.map({ $0.map(\.block.latex) }) == next.math.map({ $0.map(\.block.latex) }) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    func existingEmbed(matching key: EmbedRequest.ReuseKey) -> EmbeddedNoteView? {
+        guard let card = embeddedCard, card.request.reuseKey == key else { return nil }
+        return card
+    }
+
     func installEmbed(_ card: EmbeddedNoteView) {
+        if embeddedCard === card { return }
+        embeddedCard?.cancel()
+        embeddedCard?.removeFromSuperview()
         embeddedCard = card
         card.onHeightChange = { [weak self] in self?.resizeEmbed() }
         addSubview(card)
@@ -250,6 +516,27 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
             source.resume(); watchers.append(source)
         }
     }
+    /// 缺失图片尚未在库中解析出实体路径时，监听库根与常见附件目录，新增图片后自动清缓存并刷新。
+    private func watchVaultForMissingImage() {
+        var directories = [vault]
+        let attachments = URL(fileURLWithPath: vault).appendingPathComponent("attachments").path
+        if FileManager.default.fileExists(atPath: attachments) { directories.append(attachments) }
+        for path in directories {
+            let fd = open(path, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd,
+                eventMask: [.write, .rename, .extend], queue: .main)
+            source.setEventHandler { [weak self] in
+                guard let self else { return }
+                Task { [weak self] in
+                    await LocalImageCache.shared.invalidateFailed()
+                    self?.onRefresh?()
+                }
+            }
+            source.setCancelHandler { close(fd) }
+            source.resume(); watchers.append(source)
+        }
+    }
     override func draw(_ dirtyRect: NSRect) {
         guard prepared.block.columns.isEmpty, embeddedCard == nil else { return }
         if let image, let context = NSGraphicsContext.current?.cgContext {
@@ -307,17 +594,33 @@ extension DiagramTextView {
     var inspectionEmbeddedCards: [EmbeddedNoteView] { mediaViews.compactMap(\.inspectionEmbeddedCard) }
     #endif
 
-    func installMedia(_ next: [NoteMedia], width: Double, size: Double, vault: String, refresh: @escaping () -> Void,
+    func installMedia(_ next: [NoteMedia], width: Double, size: Double, vault: String,
+                      knowledge: KnowledgeMarkupInfo? = nil, knowledgeVersion: Int = 0,
+                      onOpenLink: ((String, String?) -> Void)? = nil,
+                      onShowTag: ((String) -> Void)? = nil,
+                      refresh: @escaping () -> Void,
                       prepare: ((NoteMedia, MediaView) -> Void)? = nil) {
         guard !next.isEmpty || !mediaBlocks.isEmpty else { return }
         let oldSizes = mediaViews.map(\.preferredSize), oldProjection = mediaProjection
-        mediaViews.forEach { $0.detach(); $0.removeFromSuperview() }
+        var reusable = mediaViews
         mediaPaintedAt = 0
         mediaBlocks = next
         mediaViews = next.map { item in
-            let media = MediaView(item.prepared, width: width, size: size, vault: vault)
-            media.isHidden = true; media.onRefresh = refresh
-            media.onSizeChange = { [weak self] in self?.invalidateMediaLayout() }
+            let media: MediaView
+            if let matchIndex = reusable.firstIndex(where: {
+                $0.canReuse(for: item.prepared, width: width, size: size, vault: vault, knowledgeVersion: knowledgeVersion)
+            }) {
+                media = reusable.remove(at: matchIndex)
+            } else {
+                media = MediaView(item.prepared, width: width, size: size, vault: vault,
+                                  knowledge: knowledge, knowledgeVersion: knowledgeVersion)
+                media.isHidden = true
+                addSubview(media)
+            }
+            media.onRefresh = refresh
+            media.onOpenLink = isReading ? onOpenLink : nil
+            media.onShowTag = isReading ? onShowTag : nil
+            media.onSizeChange = { [weak self, weak media] in self?.invalidateMediaLayout(for: media) }
             media.onImageDisplayed = { [weak self] in self?.recordMediaDisplay() }
             prepare?(item, media)
             if !isReading {
@@ -328,9 +631,12 @@ extension DiagramTextView {
                     setSelectedRange(NSRange(location: mediaBlocks[index].range.location, length: 0))
                     editingCoordinator?.mediaSelectionChanged()
                 }
+            } else {
+                media.onEdit = nil
             }
-            addSubview(media); return media
+            return media
         }
+        reusable.forEach { $0.detach(); $0.removeFromSuperview() }
         updateMediaProjection()
         if oldProjection == mediaProjection, oldSizes != mediaViews.map(\.preferredSize) { invalidateMediaLayout() }
         needsLayout = true; needsDisplay = true
@@ -378,12 +684,31 @@ extension DiagramTextView {
                 && (isReading ? mediaBlocks[$0].range.location : paragraphRange(mediaBlocks[$0].range).location) == offset
         }
     }
-    func invalidateMediaLayout() {
+    func invalidateMediaLayout(for media: MediaView? = nil) {
         guard let content = textLayoutManager?.textContentManager else { return }
-        if let storage = textStorage, storage.length > 0 {
-            content.performEditingTransaction { storage.edited(.editedAttributes, range: NSRange(location: 0, length: storage.length), changeInLength: 0) }
+        let anchor = (media != nil && isReading && !isEmbedded) ? readingCoordinator?.visibleAnchor() : nil
+        let localStart: Int? = media.flatMap { target in
+            mediaViews.firstIndex(where: { $0 === target }).flatMap { index in
+                index < mediaBlocks.count ? mediaBlocks[index].range.location : nil
+            }
         }
-        textLayoutManager?.invalidateLayout(for: content.documentRange)
+        if let localStart, let storage = textStorage, localStart < storage.length,
+           let startLocation = content.location(content.documentRange.location, offsetBy: localStart),
+           let invalidRange = NSTextRange(location: startLocation, end: content.documentRange.endLocation) {
+            content.performEditingTransaction {
+                storage.edited(.editedAttributes, range: NSRange(location: localStart, length: storage.length - localStart), changeInLength: 0)
+            }
+            textLayoutManager?.invalidateLayout(for: invalidRange)
+        } else {
+            if let storage = textStorage, storage.length > 0 {
+                content.performEditingTransaction { storage.edited(.editedAttributes, range: NSRange(location: 0, length: storage.length), changeInLength: 0) }
+            }
+            textLayoutManager?.invalidateLayout(for: content.documentRange)
+        }
         needsLayout = true; needsDisplay = true
+        if let anchor {
+            layoutSubtreeIfNeeded()
+            readingCoordinator?.restore(anchor)
+        }
     }
 }

@@ -204,7 +204,7 @@ private struct HortusCommands: Commands {
         }
         CommandGroup(after: .textEditing) {
             Button("Align Table Source") { NSApp.sendAction(#selector(DiagramTextView.alignTableSource(_:)), to: nil, from: nil) }
-                .keyboardShortcut("t", modifiers: [.option, .command])
+                .keyboardShortcut("t", modifiers: [.shift, .option, .command])
                 .disabled(workspace.current?.document?.reading != false)
             Button("Find…") { EditorFind.perform(.showFindInterface) }.keyboardShortcut("f", modifiers: .command)
             Button("Find Next") { EditorFind.perform(.nextMatch) }.keyboardShortcut("g", modifiers: .command)
@@ -353,7 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ]
         let repository = "https://github.com/groundgrounder/Hortus"
         let credits = NSMutableAttributedString(
-            string: "\(L10n.string("A native Markdown knowledge base for people and agents."))\n\n\(L10n.string("GPL-3.0-only application; MIT OR Apache-2.0 core."))\n",
+            string: "\(L10n.string("GPL-3.0-only application; MIT OR Apache-2.0 core."))\n",
             attributes: attributes)
         var link = attributes
         link[.link] = URL(string: repository)

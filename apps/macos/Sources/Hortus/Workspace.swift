@@ -341,6 +341,22 @@ final class Workspace {
             if let document = tabs.first(where: { $0.path == path })?.document { document.refresh() }
             else { load(path) }
         }
+        // 外部向库中新增图片等附件时，刷新已开笔记里的缺失图片占位符并清理失败缓存。
+        let hasMissingMedia = tabs.contains { tab in
+            tab.document?.mountedTextView?.mediaViews.contains(where: { $0.prepared.reason == "image.missing" }) == true
+        }
+        if hasMissingMedia {
+            Task { @MainActor [weak self] in
+                await LocalImageCache.shared.invalidateFailed()
+                guard let self else { return }
+                for tab in self.tabs {
+                    guard let view = tab.document?.mountedTextView,
+                          view.mediaViews.contains(where: { $0.prepared.reason == "image.missing" }) else { continue }
+                    if view.isReading { view.readingCoordinator?.refresh(force: true) }
+                    else { view.editingCoordinator?.schedule(force: true) }
+                }
+            }
+        }
     }
 
     /// 回滚后只刷新受影响的干净标签；脏编辑、组合输入和活动冲突由面板预先阻止。
@@ -621,6 +637,7 @@ final class Workspace {
         let owner = application?.owner(of: path, from: self)?.workspace ?? self
         guard let document = owner.tabs.first(where: { $0.path == path })?.document,
               document.outlineRevision == document.revision else { return }
+        document.activeHeadingStart = Int(heading.start)
         openSearchResult(path: path, start: Int(heading.start), length: 0)
     }
 

@@ -99,6 +99,40 @@ public final class PreparedScene: @unchecked Sendable {
         acceptsInteraction = false
     }
     public func withoutSourceInteraction() -> PreparedScene { PreparedScene(previous: self) }
+
+    /// 优先返回命中点的非容器节点区域，仅在无具体子元素命中时才考虑容器。
+    public func topHit(at point: CGPoint, includeContainer: Bool = true) -> SceneHit? {
+        let containerRects = scene.primitives.compactMap { primitive -> CGRect? in
+            guard case let .graphShape(rect, shape, _, _, _, _, _) = primitive, shape == "Container" else { return nil }
+            return rect.cgRect
+        }
+        var containerMatch: SceneHit?
+        for hit in scene.hitRegions where hit.rect.cgRect.contains(point) {
+            if !containerRects.contains(hit.rect.cgRect) { return hit }
+            if containerMatch == nil { containerMatch = hit }
+        }
+        return includeContainer ? containerMatch : nil
+    }
+
+    /// 命中连线标签或折线段（含点击容差），返回对应边的源码范围。
+    public func edgeRange(at point: CGPoint, tolerance: CGFloat = 5) -> NSRange? {
+        for primitive in scene.primitives.reversed() {
+            if case let .labelBackground(id, rect, _) = primitive, rect.cgRect.contains(point) {
+                return edgeRanges[id]
+            }
+            if case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive {
+                for (a, b) in zip(points, points.dropFirst()) {
+                    let dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy
+                    guard length > 0 else { continue }
+                    let t = min(1, max(0, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length))
+                    if hypot(point.x - a.x - t * dx, point.y - a.y - t * dy) <= tolerance {
+                        return edgeRanges[id]
+                    }
+                }
+            }
+        }
+        return nil
+    }
 }
 
 /// 不访问视图、文件或全局状态；所有坐标来自内核，原点为左上角。

@@ -84,8 +84,44 @@ public actor LocalImageCache {
 
     private func checkedURL(_ path: String, vault: String) -> URL? {
         let root = URL(fileURLWithPath: vault).resolvingSymlinksInPath().standardizedFileURL.path
-        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
-        return url.path.hasPrefix(root == "/" ? root : root + "/") ? url : nil
+        let prefix = root == "/" ? root : root + "/"
+        func inside(_ candidate: URL) -> URL? {
+            let resolved = candidate.resolvingSymlinksInPath().standardizedFileURL
+            return resolved.path.hasPrefix(prefix) ? resolved : nil
+        }
+        func insideOrRoot(_ candidate: URL) -> URL? {
+            let resolved = candidate.resolvingSymlinksInPath().standardizedFileURL
+            return (resolved.path == root || resolved.path.hasPrefix(prefix)) ? resolved : nil
+        }
+        let direct = URL(fileURLWithPath: path)
+        if let resolved = inside(direct), FileManager.default.fileExists(atPath: resolved.path) {
+            return resolved
+        }
+        for variant in [path.precomposedStringWithCanonicalMapping, path.decomposedStringWithCanonicalMapping] where variant != path {
+            if let resolved = inside(URL(fileURLWithPath: variant)), FileManager.default.fileExists(atPath: resolved.path) {
+                return resolved
+            }
+        }
+        // 同目录内按 NFC 规范化文件名回退，兼容 APFS/HFS+ 与跨平台同步导致的 NFC/NFD 差异。
+        let targetName = direct.lastPathComponent.precomposedStringWithCanonicalMapping
+        let parentPath = direct.deletingLastPathComponent().path
+        for parentVariant in [parentPath, parentPath.precomposedStringWithCanonicalMapping, parentPath.decomposedStringWithCanonicalMapping] {
+            guard let parentURL = insideOrRoot(URL(fileURLWithPath: parentVariant)),
+                  let items = try? FileManager.default.contentsOfDirectory(atPath: parentURL.path) else { continue }
+            if let match = items.first(where: { $0.precomposedStringWithCanonicalMapping == targetName }),
+               let resolved = inside(parentURL.appendingPathComponent(match)),
+               FileManager.default.fileExists(atPath: resolved.path) {
+                return resolved
+            }
+        }
+        return inside(direct)
+    }
+
+    public func invalidateFailed() {
+        for (key, entry) in entries where !entry.reason.isEmpty {
+            entries.removeValue(forKey: key)
+            order.removeAll { $0 == key }
+        }
     }
     private func stamp(_ url: URL) -> String? {
         guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .fileResourceIdentifierKey]),
