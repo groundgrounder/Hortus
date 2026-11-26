@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import HortusApple
 
@@ -70,7 +71,23 @@ enum CLIHelper {
         return .conflictFile
     }
 
-    /// 创建或更新 `~/.local/bin/hortus` 软链指向当前 App 内置 CLI；若存在非软链普通文件/目录则拒绝覆盖。
+    private enum ExistingEntry {
+        case absent
+        case symlink
+        case conflict
+    }
+
+    private nonisolated static func inspectEntry(atPath path: String) throws -> ExistingEntry {
+        var st = stat()
+        if lstat(path, &st) != 0 {
+            let code = errno
+            if code == ENOENT { return .absent }
+            throw HelperError.operationFailed(String(cString: strerror(code)))
+        }
+        return (st.st_mode & S_IFMT) == S_IFLNK ? .symlink : .conflict
+    }
+
+    /// 创建或原子更新 `~/.local/bin/hortus` 软链指向当前 App 内置 CLI；若存在非软链普通文件/目录则拒绝覆盖。
     @discardableResult
     nonisolated static func installSymlink(
         bundleURL: URL = Bundle.main.bundleURL,
@@ -88,24 +105,43 @@ enum CLIHelper {
         } catch {
             throw HelperError.operationFailed(error.localizedDescription)
         }
-        if let attrs = try? fm.attributesOfItem(atPath: destination.path) {
-            let type = attrs[.type] as? FileAttributeType
-            if type == .typeSymbolicLink {
-                do {
-                    try fm.removeItem(at: destination)
-                } catch {
-                    throw HelperError.operationFailed(error.localizedDescription)
+        switch try inspectEntry(atPath: destination.path) {
+        case .conflict:
+            throw HelperError.conflictExists(destination.path)
+        case .absent:
+            if symlink(helper.path, destination.path) != 0 {
+                let code = errno
+                if code == EEXIST {
+                    throw HelperError.conflictExists(destination.path)
                 }
-            } else {
-                throw HelperError.conflictExists(destination.path)
+                throw HelperError.operationFailed(String(cString: strerror(code)))
             }
+            return destination
+        case .symlink:
+            let tempLink = parent.appendingPathComponent(".hortus-link-\(UUID().uuidString).tmp", isDirectory: false)
+            if symlink(helper.path, tempLink.path) != 0 {
+                throw HelperError.operationFailed(String(cString: strerror(errno)))
+            }
+            do {
+                let recheck = try inspectEntry(atPath: destination.path)
+                guard recheck == .symlink else {
+                    unlink(tempLink.path)
+                    throw HelperError.conflictExists(destination.path)
+                }
+            } catch {
+                unlink(tempLink.path)
+                throw error
+            }
+            if rename(tempLink.path, destination.path) != 0 {
+                let code = errno
+                unlink(tempLink.path)
+                if code == EISDIR || code == ENOTEMPTY || code == EEXIST {
+                    throw HelperError.conflictExists(destination.path)
+                }
+                throw HelperError.operationFailed(String(cString: strerror(code)))
+            }
+            return destination
         }
-        do {
-            try fm.createSymbolicLink(atPath: destination.path, withDestinationPath: helper.path)
-        } catch {
-            throw HelperError.operationFailed(error.localizedDescription)
-        }
-        return destination
     }
 
     /// 生成标准 MCP JSON 配置；优先使用已有效连接的 `~/.local/bin/hortus`，否则回退内置绝对路径。
@@ -121,8 +157,12 @@ enum CLIHelper {
         } else {
             command = bundledCLIURL(bundleURL: bundleURL).standardizedFileURL.path
         }
-        let vault = vaultPath?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedVault = (vault?.isEmpty == false) ? vault! : "/path/to/folder"
+        let resolvedVault: String
+        if let vaultPath, !vaultPath.isEmpty {
+            resolvedVault = vaultPath
+        } else {
+            resolvedVault = "/path/to/folder"
+        }
         let payload: [String: Any] = [
             "mcpServers": [
                 "hortus": [

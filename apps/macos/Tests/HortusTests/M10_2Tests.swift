@@ -137,6 +137,28 @@ struct M10_2Tests {
             try CLIHelper.installSymlink(bundleURL: fakeApp, linkURL: linkURL)
         }
         #expect(try String(contentsOf: linkURL, encoding: .utf8) == "user binary")
+
+        // 悬空软链可原子更新且不留临时软链
+        try FileManager.default.removeItem(at: linkURL)
+        try FileManager.default.createSymbolicLink(
+            atPath: linkURL.path,
+            withDestinationPath: root.appendingPathComponent("missing/hortus").path
+        )
+        _ = try CLIHelper.installSymlink(bundleURL: fakeApp, linkURL: linkURL)
+        #expect(CLIHelper.symlinkStatus(bundleURL: fakeApp, linkURL: linkURL) == .linked)
+        let binItems = try FileManager.default.contentsOfDirectory(atPath: linkURL.deletingLastPathComponent().path)
+        #expect(binItems == ["hortus"])
+
+        // 目录冲突必须拒绝覆盖并完整保留目录与内部文件
+        try FileManager.default.removeItem(at: linkURL)
+        try FileManager.default.createDirectory(at: linkURL, withIntermediateDirectories: true)
+        let nestedFile = linkURL.appendingPathComponent("keep.txt")
+        try "important".write(to: nestedFile, atomically: true, encoding: .utf8)
+        #expect(CLIHelper.symlinkStatus(bundleURL: fakeApp, linkURL: linkURL) == .conflictFile)
+        #expect(throws: CLIHelper.HelperError.conflictExists(linkURL.path)) {
+            try CLIHelper.installSymlink(bundleURL: fakeApp, linkURL: linkURL)
+        }
+        #expect(try String(contentsOf: nestedFile, encoding: .utf8) == "important")
     }
 
     @Test func terminalAppendsBundledHelpersToPathTailWithoutPreempting() throws {
@@ -193,6 +215,35 @@ struct M10_2Tests {
         let linkedServers = try #require(linkedObj["mcpServers"] as? [String: Any])
         let linkedHortus = try #require(linkedServers["hortus"] as? [String: Any])
         #expect(linkedHortus["command"] as? String == linkURL.path)
+    }
+
+    @Test func mcpConfigurationJSONPreservesWhitespaceQuotesAndBackslashesInVaultPath() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fakeApp = root.appendingPathComponent("Hortus.app", isDirectory: true)
+        let helper = fakeApp.appendingPathComponent("Contents/Helpers/hortus")
+        try makeExecutable(at: helper)
+        let linkURL = root.appendingPathComponent("home/.local/bin/hortus")
+        let trickyVault = root.appendingPathComponent("Notes \"quoted\"\\slash ").path
+
+        let json = CLIHelper.mcpConfigurationJSON(
+            vaultPath: trickyVault,
+            bundleURL: fakeApp,
+            linkURL: linkURL
+        )
+        let obj = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let servers = try #require(obj["mcpServers"] as? [String: Any])
+        let hortus = try #require(servers["hortus"] as? [String: Any])
+        #expect(hortus["args"] as? [String] == ["mcp", "--vault", trickyVault])
+
+        // 仅当 vaultPath 为 nil 或空串时回退占位路径。
+        for empty in [nil, ""] as [String?] {
+            let emptyJSON = CLIHelper.mcpConfigurationJSON(vaultPath: empty, bundleURL: fakeApp, linkURL: linkURL)
+            let emptyObj = try #require(JSONSerialization.jsonObject(with: Data(emptyJSON.utf8)) as? [String: Any])
+            let emptyServers = try #require(emptyObj["mcpServers"] as? [String: Any])
+            let emptyHortus = try #require(emptyServers["hortus"] as? [String: Any])
+            #expect(emptyHortus["args"] as? [String] == ["mcp", "--vault", "/path/to/folder"])
+        }
     }
 
     // MARK: - 3.3 scene_svg Screen-Consistent Export
