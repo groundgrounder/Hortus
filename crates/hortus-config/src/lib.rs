@@ -861,10 +861,12 @@ impl Store {
             .transpose()
     }
 
-    /// 原地更新顶层 `color_scheme`，完整保留用户注释、未知键与既有配置段。
-    pub fn save_color_scheme(&self, scheme: &str) -> io::Result<()> {
+    /// 原地更新顶层 `color_scheme` 并返回写前/写后摘要 `(before_digest, after_digest)`，
+    /// 完整保留用户注释、未知键与既有配置段。
+    pub fn save_color_scheme_with_digests(&self, scheme: &str) -> io::Result<(String, String)> {
         let normalized = normalize_color_scheme(scheme)?;
         let bytes = fs::read(self.config_path())?;
+        let before_digest = sha256::digest(&bytes);
         let text = String::from_utf8(bytes).map_err(|_| io::Error::other("config.invalid_utf8"))?;
         let mut document = text
             .parse::<toml_edit::DocumentMut>()
@@ -874,7 +876,15 @@ impl Store {
             "color_scheme",
             toml_edit::Value::from(normalized),
         );
-        atomic_write(&self.config_path(), document.to_string().as_bytes())
+        let updated = document.to_string();
+        let after_digest = sha256::digest(updated.as_bytes());
+        atomic_write(&self.config_path(), updated.as_bytes())?;
+        Ok((before_digest, after_digest))
+    }
+
+    /// 原地更新顶层 `color_scheme`，完整保留用户注释、未知键与既有配置段。
+    pub fn save_color_scheme(&self, scheme: &str) -> io::Result<()> {
+        self.save_color_scheme_with_digests(scheme).map(|_| ())
     }
 
     /// 读取设置界面的完整快照；语法损坏以外的字段问题返回诊断而不是整体失败。
@@ -2733,6 +2743,33 @@ font_size = 17.0
         assert!(raw.contains("[[agent.profiles]]"));
         assert!(raw.contains("[[vault]]"));
         assert!(raw.contains("color_scheme = \"system\""));
+    }
+
+    #[test]
+    fn save_color_scheme_with_digests_matches_before_and_after_editable_config() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        let initial = store.editable_config().unwrap();
+
+        let (before_dark, after_dark) = store.save_color_scheme_with_digests("dark").unwrap();
+        assert_eq!(before_dark, initial.digest);
+        let after_dark_cfg = store.editable_config().unwrap();
+        assert_eq!(after_dark, after_dark_cfg.digest);
+        assert_ne!(before_dark, after_dark);
+
+        let (before_same, after_same) = store.save_color_scheme_with_digests("dark").unwrap();
+        assert_eq!(before_same, after_dark);
+        assert_eq!(after_same, after_dark);
+
+        let (before_light, after_light) = store.save_color_scheme_with_digests("light").unwrap();
+        assert_eq!(before_light, after_dark);
+        let after_light_cfg = store.editable_config().unwrap();
+        assert_eq!(after_light, after_light_cfg.digest);
+        assert_ne!(before_light, after_light);
+
+        let err = store.save_color_scheme_with_digests("neon").unwrap_err();
+        assert_eq!(err.to_string(), "config.color_scheme_invalid");
+        assert_eq!(store.editable_config().unwrap().digest, after_light);
     }
 
     #[test]

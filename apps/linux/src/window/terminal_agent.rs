@@ -255,7 +255,8 @@ impl WindowInner {
             self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastCoreNotReady));
             return;
         };
-        if let Some(old) = self.state.borrow_mut().custom_agent_dialog.take() {
+        let old = self.state.borrow_mut().custom_agent_dialog.take();
+        if let Some(old) = old {
             old.force_close();
         }
         let region = target_region.unwrap_or_else(|| self.tool_dock.preferred_terminal_region());
@@ -389,11 +390,13 @@ impl WindowInner {
             }),
             Rc::new(move |choice| {
                 apply_color_scheme(choice);
-                let _ =
-                    crate::services::ui_prefs::save_color_scheme_with_core(&core_scheme, choice);
+                let digests =
+                    crate::services::ui_prefs::save_color_scheme_with_digests(&core_scheme, choice)
+                        .ok();
                 if let Some(win) = weak_scheme.upgrade() {
-                    win.sync_color_scheme_action(choice);
+                    win.sync_color_scheme_action_with_digests(choice, digests.as_ref());
                 }
+                digests
             }),
             Rc::new(move || {
                 weak_vault
@@ -404,7 +407,8 @@ impl WindowInner {
     }
 
     pub fn open_settings_dialog(self: &Rc<Self>, page: Option<SettingsPage>) {
-        if let Some(old) = self.state.borrow_mut().settings_dialog.take() {
+        let old = self.state.borrow_mut().settings_dialog.take();
+        if let Some(old) = old {
             old.force_close();
         }
         if let Some(dlg) = self.build_settings_dialog() {
@@ -569,5 +573,110 @@ impl WindowInner {
         if let (Some(svcs), Some(root)) = (services, vault_root) {
             svcs.windows.notify_vault_renamed(reg_id, &root, renames);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::CliOptions;
+    use crate::window::HortusWindow;
+    use std::cell::RefCell;
+
+    #[test]
+    fn reopening_settings_and_custom_agent_dialogs_avoids_refcell_panic_and_cycles() {
+        if !crate::platform::style::ensure_gtk_test_thread() {
+            eprintln!("skipping reopen dialogs test: GTK 初始化失败或非主线程");
+            return;
+        }
+        let app = adw::Application::builder()
+            .application_id("org.hortus.test.ReopenDialogs")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        let weak_slot: Rc<RefCell<Option<std::rc::Weak<WindowInner>>>> =
+            Rc::new(RefCell::new(None));
+        let weak_slot_act = Rc::clone(&weak_slot);
+        app.connect_activate(move |app| {
+            let win = HortusWindow::new(app, CliOptions::default());
+            if let Ok((services, _)) = crate::services::AppServices::init_blocking() {
+                win.inner.state.borrow_mut().services = Some(services);
+            }
+            *weak_slot_act.borrow_mut() = Some(win.downgrade());
+            win.present();
+
+            // 连续两次打开设置弹窗：旧弹窗关闭、新弹窗可用且无 RefCell 重入 panic
+            win.inner
+                .open_settings_dialog(Some(SettingsPage::Appearance));
+            let first_settings = win
+                .inner
+                .state
+                .borrow()
+                .settings_dialog
+                .clone()
+                .expect("first settings dialog");
+            win.inner.open_settings_dialog(Some(SettingsPage::Agent));
+            let second_settings = win
+                .inner
+                .state
+                .borrow()
+                .settings_dialog
+                .clone()
+                .expect("second settings dialog");
+            assert!(
+                !first_settings.same_instance(&second_settings),
+                "second settings dialog should replace the first"
+            );
+            second_settings.select_page(SettingsPage::Terminal);
+            drop(first_settings);
+            drop(second_settings);
+
+            // 连续两次打开自定义 Agent 弹窗：旧弹窗关闭、新弹窗可用且无 RefCell 重入 panic
+            win.inner
+                .open_custom_agent_dialog(Some(PanelRegion::Bottom));
+            let first_custom = win
+                .inner
+                .state
+                .borrow()
+                .custom_agent_dialog
+                .clone()
+                .expect("first custom dialog");
+            win.inner.open_custom_agent_dialog(Some(PanelRegion::Right));
+            let second_custom = win
+                .inner
+                .state
+                .borrow()
+                .custom_agent_dialog
+                .clone()
+                .expect("second custom dialog");
+            assert!(
+                !first_custom.same_instance(&second_custom),
+                "second custom dialog should replace the first"
+            );
+            drop(first_custom);
+            drop(second_custom);
+
+            let gtk_win = win.inner.window.clone();
+            drop(win);
+            let app_on_close = app.clone();
+            let app_timeout = app.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(3000), move || {
+                app_timeout.quit();
+            });
+            glib::idle_add_local_once(move || {
+                gtk_win.close();
+                glib::idle_add_local_once(move || app_on_close.quit());
+            });
+        });
+        app.run_with_args(&Vec::<String>::new());
+        let weak = weak_slot
+            .borrow()
+            .as_ref()
+            .expect("activate should construct HortusWindow")
+            .clone();
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "WindowInner remained strongly referenced after reopening dialogs and closing"
+        );
     }
 }

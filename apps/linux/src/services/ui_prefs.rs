@@ -38,41 +38,49 @@ pub fn ui_prefs_path() -> Option<PathBuf> {
 }
 
 /// 经 `WorkspaceCore` 读取外观配色；若 `config.toml` 尚未显式设置 `color_scheme` 且旧 `linux-ui.toml`
-/// 存在有效非 `system` 值，则一次性迁移写回 `config.toml`。
+/// 存在有效非 `system` 值，则一次性迁移写回 `config.toml`。写入失败时返回错误供调用方处理。
+pub fn load_color_scheme_with_core_result(
+    core: &WorkspaceCore,
+) -> Result<ColorSchemeChoice, String> {
+    match core.explicit_color_scheme() {
+        Ok(Some(scheme)) => {
+            Ok(ColorSchemeChoice::parse(scheme.trim()).unwrap_or(ColorSchemeChoice::System))
+        }
+        Ok(None) => {
+            let Some(config_path) = core
+                .editable_config()
+                .ok()
+                .map(|info| PathBuf::from(info.config_path))
+            else {
+                return Ok(ColorSchemeChoice::System);
+            };
+            let Some(legacy_path) = config_path
+                .parent()
+                .map(|dir| dir.join(LEGACY_UI_PREFS_FILE))
+            else {
+                return Ok(ColorSchemeChoice::System);
+            };
+            let legacy = load_color_scheme_from(&legacy_path);
+            if legacy != ColorSchemeChoice::System {
+                core.save_color_scheme(legacy.as_str().to_string())
+                    .map_err(|e| e.to_string())?;
+                return Ok(legacy);
+            }
+            Ok(ColorSchemeChoice::System)
+        }
+        Err(_) => Ok(ColorSchemeChoice::System),
+    }
+}
+
+/// 经 `WorkspaceCore` 读取外观配色；迁移写回失败时记录日志并安全回退 `System`，不静默伪装已迁移。
 pub fn load_color_scheme_with_core(core: &WorkspaceCore) -> ColorSchemeChoice {
-    let current = core
-        .color_scheme()
-        .ok()
-        .and_then(|s| ColorSchemeChoice::parse(s.trim()).ok())
-        .unwrap_or(ColorSchemeChoice::System);
-
-    if current != ColorSchemeChoice::System {
-        return current;
+    match load_color_scheme_with_core_result(core) {
+        Ok(choice) => choice,
+        Err(err) => {
+            eprintln!("hortus: failed to migrate legacy color_scheme: {err}");
+            ColorSchemeChoice::System
+        }
     }
-
-    let config_path = core
-        .editable_config()
-        .ok()
-        .map(|info| PathBuf::from(info.config_path));
-    let Some(config_path) = config_path else {
-        return current;
-    };
-    if config_has_explicit_color_scheme(&config_path) {
-        return current;
-    }
-
-    let Some(legacy_path) = config_path
-        .parent()
-        .map(|dir| dir.join(LEGACY_UI_PREFS_FILE))
-    else {
-        return current;
-    };
-    let legacy = load_color_scheme_from(&legacy_path);
-    if legacy != ColorSchemeChoice::System {
-        let _ = core.save_color_scheme(legacy.as_str().to_string());
-        return legacy;
-    }
-    current
 }
 
 /// 在尚无共享 `WorkspaceCore` 实例时读取（并按需迁移）外观配色。
@@ -94,29 +102,19 @@ pub fn save_color_scheme_with_core(
         .map_err(|e| e.to_string())
 }
 
+/// 经 `WorkspaceCore` 原子持久化外观配色并返回写前/写后摘要 `(before_digest, after_digest)`。
+pub fn save_color_scheme_with_digests(
+    core: &WorkspaceCore,
+    choice: ColorSchemeChoice,
+) -> Result<(String, String), String> {
+    core.save_color_scheme_with_digests(choice.as_str().to_string())
+        .map_err(|e| e.to_string())
+}
+
 /// 在无现成 `WorkspaceCore` 时打开默认配置并保存外观配色至 `config.toml`。
 pub fn save_color_scheme(choice: ColorSchemeChoice) -> Result<(), String> {
     let core = WorkspaceCore::new().map_err(|e| e.to_string())?;
     save_color_scheme_with_core(&core, choice)
-}
-
-fn config_has_explicit_color_scheme(path: &Path) -> bool {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    for line in raw.lines() {
-        let trimmed = strip_unquoted_comment(line).trim();
-        if trimmed.starts_with('[') {
-            // 顶层键必须在首个表头之前
-            break;
-        }
-        if let Some((key, _)) = trimmed.split_once('=')
-            && key.trim() == "color_scheme"
-        {
-            return true;
-        }
-    }
-    false
 }
 
 pub fn load_color_scheme_from(path: &Path) -> ColorSchemeChoice {
@@ -269,5 +267,125 @@ mod tests {
             parse_color_scheme_toml("other_key = 'keep'\ncolor_scheme = 'dark' # valid"),
             ColorSchemeChoice::Dark
         );
+    }
+
+    #[test]
+    fn explicit_quoted_key_blocks_legacy_migration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = tmp.path().join("cfg");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&cfg).expect("mkdir cfg");
+        let initial_toml = "\"color_scheme\" = \"system\"\nfont_size = 15.0\n";
+        std::fs::write(cfg.join("config.toml"), initial_toml).expect("write config");
+        std::fs::write(cfg.join("linux-ui.toml"), "color_scheme = \"dark\"\n")
+            .expect("write legacy");
+
+        let core = WorkspaceCore::in_directories(
+            cfg.to_string_lossy().into_owned(),
+            cache.to_string_lossy().into_owned(),
+        )
+        .expect("core");
+
+        assert_eq!(
+            load_color_scheme_with_core(&core),
+            ColorSchemeChoice::System
+        );
+        assert_eq!(
+            std::fs::read_to_string(cfg.join("config.toml")).expect("read config"),
+            initial_toml
+        );
+    }
+
+    #[test]
+    fn commented_color_scheme_migrates_once_and_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = tmp.path().join("cfg");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&cfg).expect("mkdir cfg");
+        std::fs::write(
+            cfg.join("config.toml"),
+            "# color_scheme = \"dark\"\nfont_size = 15.0\n",
+        )
+        .expect("write config");
+        std::fs::write(cfg.join("linux-ui.toml"), "color_scheme = \"dark\"\n")
+            .expect("write legacy");
+
+        let core = WorkspaceCore::in_directories(
+            cfg.to_string_lossy().into_owned(),
+            cache.to_string_lossy().into_owned(),
+        )
+        .expect("core");
+
+        assert_eq!(load_color_scheme_with_core(&core), ColorSchemeChoice::Dark);
+        let after_first = std::fs::read_to_string(cfg.join("config.toml")).expect("read config");
+        assert!(after_first.contains("color_scheme = \"dark\""));
+
+        // 连续两次加载幂等
+        assert_eq!(load_color_scheme_with_core(&core), ColorSchemeChoice::Dark);
+        let after_second = std::fs::read_to_string(cfg.join("config.toml")).expect("read config");
+        assert_eq!(after_first, after_second);
+    }
+
+    #[test]
+    fn explicit_invalid_color_scheme_falls_back_without_legacy_overwrite() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = tmp.path().join("cfg");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&cfg).expect("mkdir cfg");
+        let initial_toml = "color_scheme = \"neon\"\nfont_size = 15.0\n";
+        std::fs::write(cfg.join("config.toml"), initial_toml).expect("write config");
+        std::fs::write(cfg.join("linux-ui.toml"), "color_scheme = \"dark\"\n")
+            .expect("write legacy");
+
+        let core = WorkspaceCore::in_directories(
+            cfg.to_string_lossy().into_owned(),
+            cache.to_string_lossy().into_owned(),
+        )
+        .expect("core");
+
+        assert_eq!(
+            load_color_scheme_with_core(&core),
+            ColorSchemeChoice::System
+        );
+        assert_eq!(
+            std::fs::read_to_string(cfg.join("config.toml")).expect("read config"),
+            initial_toml
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_write_failure_surfaces_error_and_falls_back_to_system() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = tmp.path().join("cfg");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&cfg).expect("mkdir cfg");
+        std::fs::write(cfg.join("config.toml"), "font_size = 15.0\n").expect("write config");
+        std::fs::write(cfg.join("linux-ui.toml"), "color_scheme = \"dark\"\n")
+            .expect("write legacy");
+
+        let core = WorkspaceCore::in_directories(
+            cfg.to_string_lossy().into_owned(),
+            cache.to_string_lossy().into_owned(),
+        )
+        .expect("core");
+
+        // 设为只读目录以触发原子写回失败（root 用户不受 chmod 限制时跳过断言）
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o555))
+            .expect("chmod readonly");
+        let probe_writable = std::fs::write(cfg.join(".probe"), b"x").is_ok();
+        if probe_writable {
+            let _ = std::fs::remove_file(cfg.join(".probe"));
+        } else {
+            assert!(load_color_scheme_with_core_result(&core).is_err());
+            assert_eq!(
+                load_color_scheme_with_core(&core),
+                ColorSchemeChoice::System
+            );
+        }
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o755))
+            .expect("restore perms");
     }
 }

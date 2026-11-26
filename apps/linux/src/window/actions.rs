@@ -741,7 +741,11 @@ impl WindowInner {
         }
     }
 
-    pub fn sync_color_scheme_action(&self, choice: ColorSchemeChoice) {
+    pub fn sync_color_scheme_action_with_digests(
+        &self,
+        choice: ColorSchemeChoice,
+        digests: Option<&(String, String)>,
+    ) {
         if let Some(action) = self
             .window
             .lookup_action("color-scheme")
@@ -750,7 +754,10 @@ impl WindowInner {
             action.set_state(&choice.as_str().to_variant());
         }
         if let Some(dlg) = self.state.borrow().settings_dialog.clone() {
-            dlg.sync_color_scheme(choice);
+            dlg.sync_color_scheme_with_digests(
+                choice,
+                digests.map(|(before, after)| (before.as_str(), after.as_str())),
+            );
         }
     }
 
@@ -762,11 +769,12 @@ impl WindowInner {
             .services
             .as_ref()
             .map(|s| Arc::clone(&s.core));
-        if let Some(core) = core {
-            let _ = crate::services::ui_prefs::save_color_scheme_with_core(&core, choice);
+        let digests = if let Some(core) = core {
+            crate::services::ui_prefs::save_color_scheme_with_digests(&core, choice).ok()
         } else {
             let _ = crate::services::ui_prefs::save_color_scheme(choice);
-        }
-        self.sync_color_scheme_action(choice);
+            None
+        };
+        self.sync_color_scheme_action_with_digests(choice, digests.as_ref());
     }
 }

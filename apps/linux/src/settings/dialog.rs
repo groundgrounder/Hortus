@@ -47,7 +47,7 @@ struct SettingsState {
     probe_gen: u64,
     last_conflict: bool,
     on_toast: Rc<dyn Fn(String)>,
-    on_scheme: Rc<dyn Fn(ColorSchemeChoice)>,
+    on_scheme: Rc<dyn Fn(ColorSchemeChoice) -> Option<(String, String)>>,
     current_vault_root: Rc<dyn Fn() -> Option<String>>,
     suppress_probe: bool,
     suppress_scheme: bool,
@@ -98,7 +98,7 @@ impl SettingsDialog {
         login_path: Option<String>,
         initial_scheme: ColorSchemeChoice,
         on_toast: Rc<dyn Fn(String)>,
-        on_scheme: Rc<dyn Fn(ColorSchemeChoice)>,
+        on_scheme: Rc<dyn Fn(ColorSchemeChoice) -> Option<(String, String)>>,
         current_vault_root: Rc<dyn Fn() -> Option<String>>,
     ) -> Self {
         let dialog = adw::PreferencesDialog::builder()
@@ -474,8 +474,11 @@ impl SettingsDialog {
                     _ => ColorSchemeChoice::System,
                 };
                 let cb = this.state.borrow().on_scheme.clone();
-                cb(choice);
-                Self::refresh_digest_from_core(&this);
+                let digests = cb(choice);
+                Self::advance_digest_if_matching(
+                    &this,
+                    digests.as_ref().map(|(b, a)| (b.as_str(), a.as_str())),
+                );
             });
         }
 
@@ -536,10 +539,12 @@ impl SettingsDialog {
         }
     }
 
-    fn refresh_digest_from_core(inner: &Rc<SettingsInner>) {
-        let core = Arc::clone(&inner.state.borrow().services.core);
-        if let Ok(info) = core.editable_config() {
-            inner.state.borrow_mut().digest = info.digest;
+    fn advance_digest_if_matching(inner: &Rc<SettingsInner>, digests: Option<(&str, &str)>) {
+        if let Some((before, after)) = digests {
+            let mut st = inner.state.borrow_mut();
+            if st.digest == before {
+                st.digest = after.to_string();
+            }
         }
     }
 
@@ -565,8 +570,30 @@ impl SettingsDialog {
     }
 
     fn add_profile_impl(inner: &Rc<SettingsInner>) {
+        Self::sync_selected_profile_from_fields(inner, false);
         let idx = {
             let mut st = inner.state.borrow_mut();
+            // 首次从旧单 [agent] 配置升级为多配置档时，先自动保留当前命令与参数为默认配置档。
+            if st.profiles.is_empty() {
+                let raw_cmd = inner.command_entry.text().to_string();
+                let trimmed_cmd = raw_cmd.trim();
+                if !trimmed_cmd.is_empty() {
+                    let first_name = std::path::Path::new(trimmed_cmd)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or("Default")
+                        .to_string();
+                    let first_args = Self::collect_args(&inner.args_buffer);
+                    st.profiles.push(AgentProfileInfo {
+                        id: "default".to_string(),
+                        name: first_name,
+                        command: raw_cmd,
+                        args: first_args,
+                    });
+                    st.default_profile = Some("default".to_string());
+                }
+            }
             let id = Self::next_unique_profile_id(&st.profiles);
             let name = fmt1(Key::SettingsProfileUntitled, st.profiles.len() + 1);
             let profile = AgentProfileInfo {
@@ -801,8 +828,12 @@ impl SettingsDialog {
         });
     }
 
-    pub fn sync_color_scheme(&self, choice: ColorSchemeChoice) {
-        Self::refresh_digest_from_core(&self.inner);
+    pub fn sync_color_scheme_with_digests(
+        &self,
+        choice: ColorSchemeChoice,
+        digests: Option<(&str, &str)>,
+    ) {
+        Self::advance_digest_if_matching(&self.inner, digests);
         let target = match choice {
             ColorSchemeChoice::System => 0,
             ColorSchemeChoice::Light => 1,
@@ -814,6 +845,16 @@ impl SettingsDialog {
         self.inner.state.borrow_mut().suppress_scheme = true;
         self.inner.scheme_combo.set_selected(target);
         self.inner.state.borrow_mut().suppress_scheme = false;
+    }
+
+    #[cfg(any(test, feature = "automation"))]
+    pub fn select_color_scheme(&self, choice: ColorSchemeChoice) {
+        let target = match choice {
+            ColorSchemeChoice::System => 0,
+            ColorSchemeChoice::Light => 1,
+            ColorSchemeChoice::Dark => 2,
+        };
+        self.inner.scheme_combo.set_selected(target);
     }
 
     #[cfg(feature = "automation")]
@@ -1457,12 +1498,187 @@ mod tests {
             None,
             ColorSchemeChoice::System,
             Rc::new(|_| {}),
-            Rc::new(|_| {}),
+            Rc::new(|_| None),
             Rc::new(|| None),
         );
         let weak = Rc::downgrade(&dlg.inner);
         assert_eq!(weak.strong_count(), 1);
         drop(dlg);
         assert_eq!(weak.strong_count(), 0);
+    }
+
+    fn make_test_services(tmp: &tempfile::TempDir) -> Arc<AppServices> {
+        let cfg = tmp.path().join("cfg");
+        let cache = tmp.path().join("cache");
+        let core = WorkspaceCore::in_directories(
+            cfg.to_string_lossy().into_owned(),
+            cache.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let windows = Arc::new(WindowRegistry::new());
+        let config = ConfigService::new(Arc::clone(&core), Arc::clone(&windows));
+        Arc::new(AppServices {
+            core,
+            diagram_engine: hortus_ffi::DiagramEngine::new().unwrap(),
+            math_service: Arc::new(crate::render::math::MathRenderService::new()),
+            vaults: Arc::new(VaultRegistry::new()),
+            windows,
+            config,
+        })
+    }
+
+    fn pump_until(timeout_ms: u64, cond: impl Fn() -> bool) -> bool {
+        let ctx = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        while std::time::Instant::now() < deadline {
+            while ctx.iteration(false) {}
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        while ctx.iteration(false) {}
+        cond()
+    }
+
+    #[test]
+    fn add_profile_migrates_legacy_agent_config_without_data_loss() {
+        if !crate::platform::style::ensure_gtk_test_thread() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let services = make_test_services(&tmp);
+        let cfg_path =
+            std::path::PathBuf::from(services.core.editable_config().unwrap().config_path);
+        std::fs::write(
+            &cfg_path,
+            "font_size = 15.0\ndefault_view = \"reading\"\n\n[agent]\ncommand = \"/usr/local/bin/claude\"\nargs = [\"--print\", \"{guide}\"]\n",
+        )
+        .unwrap();
+
+        let dlg = SettingsDialog::new(
+            Arc::clone(&services),
+            None,
+            ColorSchemeChoice::System,
+            Rc::new(|_| {}),
+            Rc::new(|_| None),
+            Rc::new(|| None),
+        );
+        assert!(
+            pump_until(2000, || !dlg.inner.state.borrow().digest.is_empty()),
+            "settings dialog should load initial config"
+        );
+        assert_eq!(dlg.inner.command_entry.text(), "/usr/local/bin/claude");
+        assert!(dlg.inner.state.borrow().profiles.is_empty());
+
+        SettingsDialog::add_profile_impl(&dlg.inner);
+
+        {
+            let st = dlg.inner.state.borrow();
+            assert_eq!(st.profiles.len(), 2);
+            assert_eq!(st.profiles[0].id, "default");
+            assert_eq!(st.profiles[0].name, "claude");
+            assert_eq!(st.profiles[0].command, "/usr/local/bin/claude");
+            assert_eq!(st.profiles[0].args, vec!["--print", "{guide}"]);
+            assert_eq!(st.default_profile.as_deref(), Some("default"));
+            assert_eq!(st.selected_profile, Some(1));
+        }
+
+        // 填写第二个配置档并保存，验证原默认配置档完整保留
+        dlg.inner.profile_name_entry.set_text("Codex");
+        dlg.inner.command_entry.set_text("codex");
+        dlg.inner.args_buffer.set_text("{guide}");
+        SettingsDialog::save_config_impl(&dlg.inner, false);
+        assert!(
+            pump_until(2500, || {
+                services
+                    .core
+                    .editable_config()
+                    .is_ok_and(|c| c.agent_profiles.len() == 2)
+            }),
+            "saving migrated profiles should persist both profiles"
+        );
+        let saved = services.core.editable_config().unwrap();
+        assert_eq!(saved.agent_default_profile.as_deref(), Some("default"));
+        assert_eq!(saved.agent_profiles[0].id, "default");
+        assert_eq!(saved.agent_profiles[0].command, "/usr/local/bin/claude");
+        assert_eq!(saved.agent_profiles[0].args, vec!["--print", "{guide}"]);
+        assert_eq!(saved.agent_profiles[1].command, "codex");
+    }
+
+    #[test]
+    fn color_scheme_switch_preserves_external_conflict_and_allows_clean_saves() {
+        if !crate::platform::style::ensure_gtk_test_thread() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let services = make_test_services(&tmp);
+        let core_scheme = Arc::clone(&services.core);
+        let dlg = SettingsDialog::new(
+            Arc::clone(&services),
+            None,
+            ColorSchemeChoice::System,
+            Rc::new(|_| {}),
+            Rc::new(move |choice| {
+                crate::services::ui_prefs::save_color_scheme_with_digests(&core_scheme, choice).ok()
+            }),
+            Rc::new(|| None),
+        );
+        assert!(
+            pump_until(2000, || !dlg.inner.state.borrow().digest.is_empty()),
+            "settings dialog should load initial config"
+        );
+
+        // (c) 无外部改动时连续切换主题两次再点保存，应正常保存且无冲突
+        dlg.select_color_scheme(ColorSchemeChoice::Dark);
+        dlg.select_color_scheme(ColorSchemeChoice::Light);
+        dlg.inner.font_spin.set_value(17.0);
+        SettingsDialog::save_config_impl(&dlg.inner, false);
+        assert!(
+            pump_until(2500, || {
+                services
+                    .core
+                    .editable_config()
+                    .is_ok_and(|c| (c.font_size - 17.0).abs() < 0.01)
+            }),
+            "clean save after repeated scheme switches should succeed"
+        );
+        assert!(!dlg.inner.state.borrow().last_conflict);
+        assert_eq!(services.core.color_scheme().unwrap(), "light");
+
+        // (b) 外部修改 config.toml 为配置 B -> 窗内切主题 + 主菜单切主题 -> 点保存，必须触发冲突并保留配置 B
+        let cfg_path =
+            std::path::PathBuf::from(services.core.editable_config().unwrap().config_path);
+        let raw = std::fs::read_to_string(&cfg_path).unwrap();
+        let external_b = raw.replace("font_size = 17", "font_size = 19");
+        assert_ne!(raw, external_b);
+        std::fs::write(&cfg_path, &external_b).unwrap();
+
+        // 1) 窗内切主题
+        dlg.select_color_scheme(ColorSchemeChoice::Dark);
+        // 2) 模拟主菜单切主题
+        let menu_digests = crate::services::ui_prefs::save_color_scheme_with_digests(
+            &services.core,
+            ColorSchemeChoice::System,
+        )
+        .ok();
+        dlg.sync_color_scheme_with_digests(
+            ColorSchemeChoice::System,
+            menu_digests.as_ref().map(|(b, a)| (b.as_str(), a.as_str())),
+        );
+
+        dlg.inner.font_spin.set_value(15.0);
+        SettingsDialog::save_config_impl(&dlg.inner, false);
+        assert!(
+            pump_until(2500, || dlg.inner.state.borrow().last_conflict),
+            "external modification before scheme switch must still trigger conflict"
+        );
+        let on_disk = services.core.editable_config().unwrap();
+        assert!(
+            (on_disk.font_size - 19.0).abs() < 0.01,
+            "external config B must remain intact on disk, got {}",
+            on_disk.font_size
+        );
+        dlg.force_close();
     }
 }

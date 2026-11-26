@@ -1539,3 +1539,17 @@ impl VaultHandle {
         self.vault.close();
     }
 }
+
+impl WorkspaceCore {
+    /// 原地更新顶层外观配色并返回写前/写后摘要，在单次配置锁内原子完成（仅供 Rust 侧使用，不改变 UniFFI 导出）。
+    pub fn save_color_scheme_with_digests(
+        &self,
+        scheme: String,
+    ) -> Result<(String, String), CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_color_scheme_with_digests(&scheme)?)
+    }
+}
