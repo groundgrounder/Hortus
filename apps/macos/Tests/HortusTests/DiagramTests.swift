@@ -250,7 +250,8 @@ struct DiagramTests {
             let data = SceneData(schemaVersion: 2, identity: prepared.scene.identity, previous: nil,
                                  graphMetrics: prepared.scene.graphMetrics, width: prepared.scene.width,
                                  height: prepared.scene.height, primitives: prepared.scene.primitives,
-                                 hitRegions: hits, wireBytes: 0, layoutMs: 0, semanticJson: nil)
+                                 hitRegions: hits, wireBytes: 0, layoutMs: 0, semanticJson: nil,
+                                 diagramKind: prepared.scene.sceneData.diagramKind)
             return PreparedScene(scene: try DiagramScene(data), sourceRanges: prepared.sourceRanges,
                                  edgeRanges: prepared.edgeRanges, edgeLabels: prepared.edgeLabels)
         }

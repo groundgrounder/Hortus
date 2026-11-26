@@ -57,6 +57,7 @@ pub use sequence::{
     SequenceRow, SequenceText,
 };
 pub use sequence_layout::layout_sequence;
+pub use shape::outline as shape_outline;
 pub use state::{
     StateDiagram, StateKind, StateNode, StateNote, StateNoteSide, StateRegion, StateTransition,
 };

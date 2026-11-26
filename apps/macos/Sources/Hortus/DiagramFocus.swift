@@ -418,18 +418,14 @@ final class FocusCanvasView: NSView {
     var onReady: (() -> Void)?
     var canExport: Bool { prepared != nil }
 
-    /// 当前画布只含一张图，导出请求直接复用已排好的场景与当前折叠状态。
+    /// 当前画布只含一张图，导出请求直接复用已排好的场景。
     func exportRequest() -> DiagramExportRequest? {
         guard let prepared else { return nil }
-        let source = self.source
-        let mmd = self.mmd
         let ordinal = session.ordinal
-        let width = prepared.scene.width
-        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let collapsed = collapsed.sorted()
         return DiagramExportRequest(prepared: prepared, note: session.note, ordinal: ordinal) {
-            try await DiagramExport.renderSVG(source: source, mmd: mmd, block: ordinal,
-                                              width: width, dark: dark, collapsed: collapsed)
+            try await Task.detached(priority: .userInitiated) {
+                try DiagramExport.renderSVG(prepared: prepared)
+            }.value
         }
     }
 

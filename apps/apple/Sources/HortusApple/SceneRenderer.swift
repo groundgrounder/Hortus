@@ -29,6 +29,7 @@ public enum DiagramSceneFailure: Error {
 }
 
 public struct DiagramScene: Sendable {
+    public let sceneData: SceneData
     public let identity: DiagramIdentity
     public let graphMetrics: DiagramGraphMetrics?
     public let width, height: Double
@@ -36,6 +37,7 @@ public struct DiagramScene: Sendable {
     public let hitRegions: [SceneHit]
     public init(_ scene: SceneData) throws {
         guard scene.schemaVersion == 2 else { throw DiagramSceneFailure.schema(scene.schemaVersion) }
+        sceneData = scene
         identity = scene.identity; graphMetrics = scene.graphMetrics
         width = scene.width; height = scene.height
         primitives = scene.primitives; hitRegions = scene.hitRegions

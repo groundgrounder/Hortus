@@ -799,4 +799,79 @@ mod graph_wire_tests {
             }
         }
     }
+
+    #[test]
+    fn scene_svg_matches_scene_to_svg_byte_for_byte_across_all_six_diagram_types() {
+        let engine = DiagramEngine::new().unwrap();
+        let cases: &[(&str, &str, bool, Vec<String>)] = &[
+            (
+                "mindmap",
+                "mindmap\n  Root\n    Branch A\n      Leaf 1\n    Branch B\n      Leaf 2\n",
+                false,
+                vec!["Branch A".into()],
+            ),
+            (
+                "flowchart",
+                "flowchart TB\nsubgraph Group\nA[Start] --> B{Check}\nB -->|yes| C([Done])\nend\n",
+                true,
+                vec![],
+            ),
+            (
+                "sequence",
+                "sequenceDiagram\nAlice->>Bob: Hello\nBob-->>Alice: Hi\n",
+                false,
+                vec![],
+            ),
+            (
+                "state",
+                "stateDiagram-v2\n[*] --> Idle\nIdle --> Active : start\nActive --> [*]\n",
+                true,
+                vec![],
+            ),
+            (
+                "class",
+                "classDiagram\nclass Order {\n  +id: UUID\n}\nOrder \"1\" *-- \"1..*\" LineItem : contains\n",
+                false,
+                vec![],
+            ),
+            (
+                "er",
+                "erDiagram\nUSER ||--o{ ORDER : places\n",
+                true,
+                vec![],
+            ),
+        ];
+        for (name, source, dark, collapsed) in cases {
+            let identity = crate::DiagramIdentity {
+                document: format!("svg-parity-{name}"),
+                block: 1,
+                revision: 1,
+                dark: *dark,
+                ..Default::default()
+            };
+            let data = engine
+                .render_request(
+                    (*source).into(),
+                    true,
+                    700.0,
+                    collapsed.clone(),
+                    identity,
+                    None,
+                    vec![],
+                )
+                .unwrap();
+            let from_scene = crate::scene_svg(data).unwrap();
+            let direct = engine
+                .render_svg((*source).into(), true, 1, 700.0, *dark, collapsed.clone())
+                .unwrap();
+            assert!(
+                from_scene.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""),
+                "{name}: invalid svg header"
+            );
+            assert_eq!(
+                from_scene, direct,
+                "{name}: scene_svg must match Scene::to_svg() byte-for-byte"
+            );
+        }
+    }
 }

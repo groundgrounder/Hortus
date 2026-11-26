@@ -1,7 +1,7 @@
 //! 图元轮廓与正交端口共用同一份几何；平台不再推导节点形状。
 use crate::{Point, Rect, Shape};
 
-pub(crate) fn outline(shape: Shape, r: Rect) -> Vec<Point> {
+pub fn outline(shape: Shape, r: Rect) -> Vec<Point> {
     let (x, y, w, h) = (r.x, r.y, r.width, r.height);
     let point = |a: f64, b: f64| Point {
         x: x + a * w,

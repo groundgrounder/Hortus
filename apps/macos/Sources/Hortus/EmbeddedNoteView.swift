@@ -51,8 +51,9 @@ struct EmbedRequest: Sendable {
     func diagramExport(info: EmbedContentInfo, block: NoteDiagram) -> DiagramExportRequest? {
         guard let path = info.resolvedPath, let scene = block.prepared else { return nil }
         return DiagramExportRequest(prepared: scene, note: path, ordinal: block.ordinal) {
-            try await DiagramExport.renderSVG(source: info.content, mmd: info.isMmd, block: block.ordinal,
-                                              width: scene.scene.width, dark: dark, collapsed: block.collapsed.sorted())
+            try await Task.detached(priority: .userInitiated) {
+                try DiagramExport.renderSVG(prepared: scene)
+            }.value
         }
     }
 }

@@ -86,6 +86,11 @@ public actor DiagramSVGEngine {
 public enum DiagramExport {
     private static let svgEngine = DiagramSVGEngine()
 
+    /// 直接从屏幕已排好的 `PreparedScene` 导出 SVG，不重新解析或重排，保证三端及三格式完全一致。
+    nonisolated public static func renderSVG(prepared: PreparedScene) throws -> String {
+        try sceneSvg(scene: prepared.scene.sceneData)
+    }
+
     /// 与屏幕同一套 Rust 布局；在导出引擎上运行，点击菜单后不阻塞主线程。
     nonisolated public static func renderSVG(source: String, mmd: Bool, block: UInt32,
                                              width: Double, dark: Bool, collapsed: [String]) async throws -> String {

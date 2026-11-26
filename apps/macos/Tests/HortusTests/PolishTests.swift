@@ -385,7 +385,7 @@ struct PolishTests {
                 SceneHit(nodeId: "n1", label: "Node", prefix: nil, rect: nodeRect,
                          canCollapse: false, collapsed: false, sourceStart: 6, sourceEnd: 10, linkTarget: nil, linkHeading: nil),
             ],
-            wireBytes: 0, layoutMs: 0, semanticJson: "{}"
+            wireBytes: 0, layoutMs: 0, semanticJson: "{}", diagramKind: "flowchart"
         )
         let prepared = PreparedScene(scene: try DiagramScene(sceneData))
         #expect(prepared.topHit(at: CGPoint(x: 60, y: 60))?.nodeId == "n1")

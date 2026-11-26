@@ -161,18 +161,14 @@ struct ReadingText: NSViewRepresentable {
             view.onOpenLink = { [weak self] _, target, heading in
                 self?.input?.openLink?(target, heading)
             }
-            view.exportRequestProvider = { [weak self, weak view] ordinal in
-                guard let self, let view, let input = self.input,
+            view.exportRequestProvider = { [weak self] ordinal in
+                guard let self, let input = self.input,
                       let block = self.rendered.first(where: { $0.ordinal == ordinal }),
-                      let prepared = block.prepared, !self.source.isEmpty else { return nil }
-                let source = self.source
-                let mmd = input.path.lowercased().hasSuffix(".mmd")
-                let width = prepared.scene.width
-                let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                let collapsed = block.collapsed.sorted()
+                      let prepared = block.prepared else { return nil }
                 return DiagramExportRequest(prepared: prepared, note: input.path, ordinal: ordinal) {
-                    try await DiagramExport.renderSVG(source: source, mmd: mmd, block: ordinal,
-                                                      width: width, dark: dark, collapsed: collapsed)
+                    try await Task.detached(priority: .userInitiated) {
+                        try DiagramExport.renderSVG(prepared: prepared)
+                    }.value
                 }
             }
             installScrollObserver(for: view)
