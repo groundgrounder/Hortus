@@ -11,6 +11,7 @@ final class NoteDocument {
     private(set) var textRevision: UInt64
     var revision: UInt64 { didSet { if revision != oldValue { scheduleOutline() } } }
     var headings: [DocumentHeading] = []
+    var activeHeadingStart: Int?
     var outlineRevision: UInt64?
     @ObservationIgnored var outlineReadyAt = 0.0
     @ObservationIgnored var outlineDisplayedAt = 0.0
@@ -80,9 +81,33 @@ final class NoteDocument {
                 }
                 guard !Task.isCancelled, let self, !closed, revision == expected, value.0.revision == expected else { return }
                 headings = value.0.headings; outlineRevision = expected
+                if let current = activeHeadingStart, !headings.contains(where: { Int($0.start) == current }) {
+                    activeHeadingStart = headings.first.map { Int($0.start) }
+                } else if activeHeadingStart == nil {
+                    activeHeadingStart = headings.first.map { Int($0.start) }
+                }
                 outlineMilliseconds = value.1; outlineReadyAt = ProcessInfo.processInfo.systemUptime
                 onOutlineReady?()
             } catch {}
+        }
+    }
+
+    /// 根据当前视口顶部或光标对应的源码偏移更新大纲活跃小节。
+    func updateActiveHeading(for sourceOffset: Int) {
+        guard !headings.isEmpty else {
+            if activeHeadingStart != nil { activeHeadingStart = nil }
+            return
+        }
+        var active = Int(headings[0].start)
+        for heading in headings {
+            if Int(heading.start) <= sourceOffset {
+                active = Int(heading.start)
+            } else {
+                break
+            }
+        }
+        if activeHeadingStart != active {
+            activeHeadingStart = active
         }
     }
     /// 阅读视图拿到的权威正文与当前修订对齐时回填镜像，供复制源码与任务点击使用。

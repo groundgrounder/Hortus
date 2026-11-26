@@ -2,6 +2,27 @@ import AppKit
 import SwiftUI
 import HortusCore
 
+/// 阅读与编辑共享的舒适最大列宽计算：保持滚动容器铺满窗口，通过动态水平内边距居中正文。
+enum ReadingColumnLayout {
+    static let minimumInset: CGFloat = 30
+    static let minimumTargetWidth: CGFloat = 760
+    static let maximumTargetWidth: CGFloat = 960
+    static let defaultTargetWidth: CGFloat = 840
+
+    static func targetWidth(fontSize: Double) -> CGFloat {
+        min(maximumTargetWidth, max(minimumTargetWidth, (defaultTargetWidth * CGFloat(fontSize) / 15.0).rounded()))
+    }
+
+    static func horizontalInset(availableWidth: CGFloat, fontSize: Double, isMmd: Bool, isEmbedded: Bool) -> CGFloat {
+        guard !isEmbedded, !isMmd else { return minimumInset }
+        let target = targetWidth(fontSize: fontSize)
+        if availableWidth > target + minimumInset * 2 {
+            return floor((availableWidth - target) / 2)
+        }
+        return minimumInset
+    }
+}
+
 /// 阅读与编辑共享的滚动容器：legacy 滚动条始终预留同一宽度，文档宽度不随其显隐变化。
 final class DiagramScrollView: NSScrollView {
     /// NSTextFinder 通过容器属性显隐查找栏；把真实变化交给正文，替代轮询。
@@ -109,6 +130,7 @@ struct NoteText: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
+        scroll.contentView.postsBoundsChangedNotifications = true
         let view = DiagramTextView(diagramLayout: true)
         view.isSelectable = true
         view.isRichText = false
@@ -160,11 +182,15 @@ struct NoteText: NSViewRepresentable {
         private var loading = false
         private var suppressSelection = false
         private var changeScheduled = false
+        private var scrollObserver: NSObjectProtocol?
+        private var outlineScrollTask: Task<Void, Never>?
 
         func detach() {
             view?.linkCompletion.close()
             view?.finishComposition()
             task?.cancel(); task = nil; generation += 1
+            outlineScrollTask?.cancel(); outlineScrollTask = nil
+            if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver); self.scrollObserver = nil }
             styling.reset()
             document?.hasPreparedDiagrams = false
             if document?.viewOwner === self {
@@ -193,6 +219,9 @@ struct NoteText: NSViewRepresentable {
             input.document?.viewOwner = self
             guard let view else { return }
             view.representedPath = input.path
+            view.bodyFontSize = input.fontSize
+            view.updateColumnInset()
+            installScrollObserver(for: view)
             view.sourceStyling = styling
             view.representedDocument = input.document.map(ObjectIdentifier.init)
             view.delegate = self; view.textStorage?.delegate = self; view.textLayoutManager?.delegate = self
@@ -366,6 +395,37 @@ struct NoteText: NSViewRepresentable {
                 suppressSelection = true; view.expanded = expanded; view.install(view.blocks); suppressSelection = false
             }
             view.applySourceHighlight(caret: selections.first?.location ?? NSNotFound)
+            if let caret = selections.first?.location, caret != NSNotFound {
+                document?.updateActiveHeading(for: caret)
+            }
+        }
+        private func installScrollObserver(for view: DiagramTextView) {
+            guard scrollObserver == nil, let clip = view.enclosingScrollView?.contentView else { return }
+            clip.postsBoundsChangedNotifications = true
+            scrollObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleActiveHeadingSync() }
+            }
+        }
+        private func scheduleActiveHeadingSync() {
+            guard outlineScrollTask == nil else { return }
+            outlineScrollTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(60))
+                guard let self, !Task.isCancelled else { return }
+                self.outlineScrollTask = nil
+                self.syncActiveHeading()
+            }
+        }
+        func syncActiveHeading() {
+            guard let view, let document else { return }
+            let visible = view.visibleRect
+            let x = view.textContainerInset.width + 1
+            let y = max(visible.minY + 18, view.textContainerInset.height + 1)
+            let position = view.characterIndexForInsertion(at: CGPoint(x: x, y: y))
+            if position != NSNotFound, position >= 0, position <= view.sourceUTF16Length {
+                document.updateActiveHeading(for: position)
+            }
         }
         func mediaSelectionChanged() { selectionChanged() }
 
@@ -623,8 +683,36 @@ extension NSView {
     }
 }
 
-/// 原生滚动区可能直接接到窗口的命中查询，转给宿主缓存的公式对象。
+/// 原生滚动区可能直接接到窗口的命中查询，转给宿主缓存的公式对象；
+/// 垂直滚轮或无横向溢出时将事件透传给外层文档滚动视图，避免吞掉正文上下滚动。
 final class FormulaScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        let documentWidth = documentView?.bounds.width ?? 0
+        let visibleWidth = contentView.bounds.width
+        let canScrollHorizontally = documentWidth > visibleWidth + 0.5
+        let dx = abs(event.scrollingDeltaX)
+        let dy = abs(event.scrollingDeltaY)
+        if !canScrollHorizontally {
+            nextResponder?.scrollWheel(with: event)
+            return
+        }
+        if dy > 0 && dy >= dx {
+            nextResponder?.scrollWheel(with: event)
+            return
+        }
+        if dy > 0 {
+            let originX = contentView.bounds.origin.x
+            let maxX = max(0, documentWidth - visibleWidth)
+            let atLeadingEdge = originX <= 0.5 && event.scrollingDeltaX > 0
+            let atTrailingEdge = originX >= maxX - 0.5 && event.scrollingDeltaX < 0
+            if atLeadingEdge || atTrailingEdge {
+                nextResponder?.scrollWheel(with: event)
+                return
+            }
+        }
+        super.scrollWheel(with: event)
+    }
+
     override func accessibilityHitTest(_ point: NSPoint) -> Any? {
         let hit = MainActor.assumeIsolated { AccessibilityHitResult(value: cachedFormulaAccessibility(at: point)) }
         return hit.value ?? super.accessibilityHitTest(point)
@@ -781,6 +869,22 @@ final class DiagramTextView: NSTextView {
         isEmbedded ? NSScroller.preferredScrollerStyle
             : enclosingScrollView?.scrollerStyle ?? NSScroller.preferredScrollerStyle
     }
+    var bodyFontSize: Double = 15
+
+    func updateColumnInset(availableWidth: CGFloat? = nil) {
+        guard !isEmbedded else { return }
+        let available = availableWidth ?? hostScroll?.stableContentWidth ?? bounds.width
+        guard available > 0.5 else { return }
+        let isMmd = representedPath.lowercased().hasSuffix(".mmd")
+        let inset = ReadingColumnLayout.horizontalInset(
+            availableWidth: available, fontSize: bodyFontSize, isMmd: isMmd, isEmbedded: isEmbedded)
+        if abs(textContainerInset.width - inset) > 0.25 {
+            textContainerInset = NSSize(width: inset, height: textContainerInset.height)
+            needsLayout = true
+            needsDisplay = true
+        }
+    }
+
     var layoutContentWidth: CGFloat {
         let available = isEmbedded ? bounds.width
             : (enclosingScrollView as? DiagramScrollView)?.stableContentWidth ?? bounds.width
@@ -798,6 +902,18 @@ final class DiagramTextView: NSTextView {
     var isReading = false
     weak var readingCoordinator: ReadingText.Coordinator?
     weak var editingCoordinator: NoteText.EditorCoordinator?
+    var readingFinder: ReadingTextFinderClient?
+
+    func ensureReadingFinder() -> ReadingTextFinderClient {
+        if let readingFinder { return readingFinder }
+        let client = ReadingTextFinderClient(textView: self)
+        readingFinder = client
+        return client
+    }
+
+    func readingFinderDidUpdateContent() {
+        readingFinder?.invalidate()
+    }
     var representedPath = ""
     var representedDocument: ObjectIdentifier?
     private var diagramViewportAnchor: (ordinal: UInt32, nodeID: String, screen: ScenePoint)?
@@ -1048,6 +1164,7 @@ final class DiagramTextView: NSTextView {
         let changed = abs(stableWidth - lastStableContentWidth) > 0.25
         let frameChanged = abs(frame.width - newSize.width) > 0.25
         super.setFrameSize(newSize)
+        updateColumnInset(availableWidth: stableWidth)
         if frameChanged {
             DiagramInspection.recordScrollStability(event: "frame_width", view: self,
                                                      details: ["new_width": newSize.width,
@@ -1429,7 +1546,8 @@ final class DiagramTextView: NSTextView {
         if let math = mathViews.first(where: { $0.item.identity == item.identity }),
            !math.isHidden, math.superview === self, !math.frame.isEmpty,
            visibleRect.intersects(math.frame) {
-            return window.convertToScreen(math.convert(math.bounds, to: nil))
+            let visible = math.frame.intersection(visibleRect)
+            return window.convertToScreen(convert(visible, to: nil))
         }
         guard let manager = textLayoutManager, let content = manager.textContentManager,
               let location = content.location(content.documentRange.location, offsetBy: item.range.location),
@@ -1488,6 +1606,7 @@ final class DiagramTextView: NSTextView {
         diagramIssue = nil
         diagramStorage?.diagrams = []
         diagramStorage?.inlineMedia = []
+        readingFinder?.invalidate()
     }
 
     /// 彻底销毁前的收尾：清空附加内容，并解除存储、委托、回调、查找栏与通知观察者。
@@ -1502,6 +1621,8 @@ final class DiagramTextView: NSTextView {
         onFreshRender = nil; onCompositionState = nil; onCommit = nil
         delegate = nil; textStorage?.delegate = nil
         editingCoordinator = nil; readingCoordinator = nil
+        readingFinder?.finder.findBarContainer = nil
+        readingFinder = nil
         string = ""
         textLayoutManager?.delegate = nil
         if let manager = textLayoutManager { manager.textContentManager?.removeTextLayoutManager(manager) }

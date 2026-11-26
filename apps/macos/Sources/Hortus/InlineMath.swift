@@ -188,6 +188,7 @@ extension DiagramTextView {
                 let local = NSRange(location: item.range.location - range.location, length: item.range.length)
                 result.replaceCharacters(in: local, with: item.prepared.block.displaySource)
             }
+            result.replaceOccurrences(of: "\u{e000}", with: L10n.string("Properties"), options: [], range: NSRange(location: 0, length: result.length))
             return result as String
         }
         return pieces.isEmpty ? nil : pieces.joined(separator: "\n")

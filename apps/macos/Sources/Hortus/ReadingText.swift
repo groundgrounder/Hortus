@@ -33,6 +33,7 @@ struct ReadingText: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = DiagramScrollView()
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
+        scroll.contentView.postsBoundsChangedNotifications = true
         let view = DiagramTextView(diagramLayout: true)
         view.isReading = true; view.isEditable = false; view.isSelectable = true; view.isRichText = true
         view.drawsBackground = false; view.usesFindBar = true; view.allowsUndo = false
@@ -66,7 +67,11 @@ struct ReadingText: NSViewRepresentable {
         var model: ReadingViewModel?
         private var preparedMath: [PreparedMathBlock] = []
         var ranges: [NSRange] = []
+        private var collapsedSpaceOffsets: [Int: [Int]] = [:]
         var task: Task<Void, Never>?
+        private var debounceTask: Task<Void, Never>?
+        private var scrollObserver: NSObjectProtocol?
+        private var outlineScrollTask: Task<Void, Never>?
         let styling = SourceStyling()
         var pending = false
         var submittedRequests = 0
@@ -111,6 +116,8 @@ struct ReadingText: NSViewRepresentable {
             self.input = input
             guard let view else { return }
             view.representedPath = input.path; view.representedDocument = ObjectIdentifier(input.document)
+            view.bodyFontSize = input.fontSize
+            view.updateColumnInset()
             view.sourceStyling = styling; view.textLayoutManager?.delegate = self
             view.setAccessibilityLabel(L10n.string("Note, Reading"))
             input.document.viewOwner = self
@@ -120,8 +127,14 @@ struct ReadingText: NSViewRepresentable {
             view.onWidthOrThemeChange = { [weak self, weak view] in
                 guard let self, let view else { return }
                 let dark = view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                if abs(width - view.layoutContentWidth) > 0.25 || self.dark != dark
-                    || scrollerStyle != view.formulaScrollerStyle { refresh() }
+                let widthChanged = abs(width - view.layoutContentWidth) > 0.25
+                let themeOrScrollerChanged = self.dark != dark || scrollerStyle != view.formulaScrollerStyle
+                let hasEmbeds = view.mediaBlocks.contains { $0.prepared.reason.hasPrefix("embed.") }
+                if themeOrScrollerChanged || (widthChanged && (model == nil || !hasEmbeds)) {
+                    refresh()
+                } else if widthChanged {
+                    scheduleDebouncedRefresh()
+                }
             }
             view.onFreshRender = { [weak self] in
                 guard let self else { return }
@@ -159,12 +172,63 @@ struct ReadingText: NSViewRepresentable {
                                                       width: width, dark: dark, collapsed: collapsed)
                 }
             }
+            installScrollObserver(for: view)
             if tokenChanged, view.window != nil, view.hasSettledContentWidth { refresh(force: true) }
-            else if (changed || indexChanged || model?.revision != input.document.revision || size != input.fontSize),
+            else if (changed || model?.revision != input.document.revision || size != input.fontSize),
                view.window != nil, view.hasSettledContentWidth { refresh() }
+            else if indexChanged, view.window != nil, view.hasSettledContentWidth { scheduleDebouncedRefresh() }
+        }
+        private func installScrollObserver(for view: DiagramTextView) {
+            guard scrollObserver == nil, let clip = view.enclosingScrollView?.contentView else { return }
+            clip.postsBoundsChangedNotifications = true
+            scrollObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleActiveHeadingSync() }
+            }
+        }
+        private func scheduleActiveHeadingSync() {
+            guard outlineScrollTask == nil, let input, !input.document.headings.isEmpty else { return }
+            outlineScrollTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(60))
+                guard let self, !Task.isCancelled else { return }
+                self.outlineScrollTask = nil
+                self.syncActiveHeading()
+            }
+        }
+        func syncActiveHeading() {
+            guard let view, let input, !ranges.isEmpty, !input.document.headings.isEmpty else { return }
+            let visible = view.visibleRect
+            let x = view.textContainerInset.width + 1
+            let y = max(visible.minY + 18, view.textContainerInset.height + 1)
+            let rawPos = view.characterIndexForInsertion(at: CGPoint(x: x, y: y))
+            let position: Int?
+            if rawPos != NSNotFound, rawPos >= 0, rawPos < view.sourceUTF16Length {
+                position = rawPos
+            } else {
+                position = visibleInsertionPosition()
+            }
+            if let position, let sourceOffset = sourcePosition(at: position) {
+                input.document.updateActiveHeading(for: sourceOffset)
+            }
+        }
+        func scheduleDebouncedRefresh(delay: Duration = .milliseconds(75)) {
+            guard let view, view.hasSettledContentWidth else { return }
+            debounceTask?.cancel()
+            pending = true
+            view.diagramPending = true
+            debounceTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled, let self else { return }
+                self.debounceTask = nil
+                self.refresh()
+            }
         }
         func detach() {
             generation += 1; task?.cancel(); task = nil
+            debounceTask?.cancel(); debounceTask = nil
+            outlineScrollTask?.cancel(); outlineScrollTask = nil
+            if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver); self.scrollObserver = nil }
             inFlightToken = nil; inFlightKey = nil; refreshQueued = false
             styling.reset()
             view?.clearAttachedContent()
@@ -173,12 +237,13 @@ struct ReadingText: NSViewRepresentable {
                 input?.document.onReload = nil; input?.document.onClosing = nil
                 input?.document.onStateChange = nil; input?.document.viewOwner = nil
             }
-            input = nil; model = nil; ranges = []; fallbacks = []; rendered = []; source = ""
+            input = nil; model = nil; ranges = []; collapsedSpaceOffsets = [:]; fallbacks = []; rendered = []; source = ""
             preparedMath = []; knowledge = nil
             pendingInitialSource = nil; pendingAnchor = nil
             pendingRevealSource = nil
         }
         func refresh(force: Bool = false) {
+            debounceTask?.cancel(); debounceTask = nil
             guard let input, let view else { return }
             let width = view.layoutContentWidth
             guard view.hasSettledContentWidth else { return }
@@ -349,7 +414,11 @@ struct ReadingText: NSViewRepresentable {
                 let local = Int(item.block.displayStart - block.displayStart)
                 return NoteMedia(range: NSRange(location: ranges[index].location + local, length: Int(item.block.displayLength)), prepared: item)
             }
-            view.installMedia(items, width: width, size: input.fontSize, vault: input.vault, refresh: { [weak self] in self?.refresh(force: true) })
+            view.installMedia(items, width: width, size: input.fontSize, vault: input.vault,
+                              knowledge: knowledge, knowledgeVersion: installedKnowledgeVersion,
+                              onOpenLink: { [weak self] target, heading in self?.input?.openLink?(target, heading) },
+                              onShowTag: { [weak self] tag in self?.input?.showTag?(tag) },
+                              refresh: { [weak self] in self?.refresh(force: true) })
             let embeds = (knowledge?.links ?? []).filter {
                 $0.embed && !$0.attachment && !$0.inDiagram
             }
@@ -363,7 +432,14 @@ struct ReadingText: NSViewRepresentable {
                 let request = EmbedRequest(source: input.path, target: link.target, heading: link.heading,
                                            alias: link.alias, ancestors: [input.path], depth: 0,
                                            handle: handle, vault: input.vault, width: width, size: input.fontSize,
-                                           dark: dark, service: input.service, mathService: input.mathService)
+                                           dark: dark, service: input.service, mathService: input.mathService,
+                                           knowledgeVersion: installedKnowledgeVersion)
+                if let existing = media.existingEmbed(matching: request.reuseKey) {
+                    existing.onOpen = { [weak self] path, heading in self?.input?.openResolvedLink?(path, heading) }
+                    existing.onOpenLink = { [weak self] path, heading in self?.input?.openResolvedLink?(path, heading) }
+                    existing.onShowTag = { [weak self] tag in self?.input?.showTag?(tag) }
+                    continue
+                }
                 let card = EmbeddedNoteView(request)
                 card.onOpen = { [weak self] path, heading in self?.input?.openResolvedLink?(path, heading) }
                 card.onOpenLink = { [weak self] path, heading in self?.input?.openResolvedLink?(path, heading) }
@@ -372,6 +448,7 @@ struct ReadingText: NSViewRepresentable {
             }
             view.installMath(formulas, width: width, size: input.fontSize)
             view.installFormulaAccessibility(formulas)
+            view.readingFinderDidUpdateContent()
             preparedMath = result.math
             phaseMilliseconds = result.phases
             phaseMilliseconds["install_ms"] = (ProcessInfo.processInfo.systemUptime - installStart) * 1000
@@ -413,6 +490,7 @@ struct ReadingText: NSViewRepresentable {
             phaseMilliseconds["main_block_ms"] = (ProcessInfo.processInfo.systemUptime - installStart) * 1000
             displayedAt = ProcessInfo.processInfo.systemUptime
             latencyMilliseconds = (displayedAt - began) * 1000
+            syncActiveHeading()
             (NSApp.delegate as? AppDelegate)?.inspectWhenReady()
             finishRefresh(token)
         }
@@ -429,20 +507,33 @@ struct ReadingText: NSViewRepresentable {
             let assemblyStart = ProcessInfo.processInfo.systemUptime
             let anchor = visibleAnchor()
             let old = model
-            let sourceText = source as NSString
             let hasProperties = next.text.hasPrefix("\u{e000}")
             var fallback = [Bool](repeating: false, count: next.blocks.count)
+            var hasFallback = false
             var ordinal: UInt32 = 0
             for (index, block) in next.blocks.enumerated() where block.diagram {
                 ordinal += 1
                 if diagrams.first(where: { $0.ordinal == ordinal })?.prepared == nil {
                     fallback[index] = true
+                    hasFallback = true
                 }
             }
             var mutableDisplayText: NSMutableString?
             var blockLengths = [Int](repeating: 0, count: next.blocks.count)
             var labelDeltas = [Int](repeating: 0, count: next.blocks.count)
+            var nextCollapsedSpaces: [Int: [Int]] = [:]
             var displayShift = 0
+            let mayHaveInlineComments: Bool = {
+                let utf8 = source.utf8
+                var prev: UInt8 = 0
+                for byte in utf8 {
+                    if (prev == 0x25 && byte == 0x25) || (prev == 0x3C && byte == 0x21) { return true }
+                    prev = byte
+                }
+                return false
+            }()
+            let sourceText: NSString = (hasFallback || mayHaveInlineComments) ? (source as NSString) : ""
+            let nextNSString: NSString? = mayHaveInlineComments ? (next.text as NSString) : nil
             for (index, block) in next.blocks.enumerated() {
                 let originalLength = Int(block.displayLength)
                 let displayStart = Int(block.displayStart) + displayShift
@@ -465,7 +556,47 @@ struct ReadingText: NSViewRepresentable {
                     mutable.replaceCharacters(in: NSRange(location: displayStart, length: 1), with: label)
                     blockLengths[index] = originalLength + labelDeltas[index]
                 } else {
-                    blockLengths[index] = originalLength
+                    var removedLocal: [Int] = []
+                    if let nextNSString, !block.diagram && block.runRange.count >= 2 {
+                        let firstRun = next.run(at: block.runRange.lowerBound)
+                        if firstRun.mask & 32 == 0 {
+                            var prev = firstRun
+                            for runIndex in (block.runRange.lowerBound + 1)..<block.runRange.upperBound {
+                                let curr = next.run(at: runIndex)
+                                let prevEnd = Int(block.displayStart + prev.start + prev.length)
+                                let currStart = Int(block.displayStart + curr.start)
+                                if prev.length > 0 && curr.length > 0 && prevEnd == currStart
+                                    && prevEnd > 0 && currStart < nextNSString.length
+                                    && nextNSString.character(at: prevEnd - 1) == 0x20
+                                    && nextNSString.character(at: currStart) == 0x20 {
+                                    let gapStart = Int(block.sourceStart + prev.sourceStart + prev.sourceLength)
+                                    let gapEnd = Int(block.sourceStart + curr.sourceStart)
+                                    if gapEnd > gapStart && gapEnd <= sourceText.length {
+                                        let gap = sourceText.substring(with: NSRange(location: gapStart, length: gapEnd - gapStart))
+                                        if gap.contains("%%") || gap.contains("<!--") {
+                                            removedLocal.append(Int(curr.start))
+                                        }
+                                    }
+                                }
+                                prev = curr
+                            }
+                        }
+                    }
+                    if !removedLocal.isEmpty {
+                        let mutable: NSMutableString
+                        if let existing = mutableDisplayText { mutable = existing }
+                        else { mutable = NSMutableString(string: next.text); mutableDisplayText = mutable }
+                        for localOffset in removedLocal.reversed() {
+                            let pos = displayStart + localOffset
+                            if pos >= 0 && pos < mutable.length {
+                                mutable.deleteCharacters(in: NSRange(location: pos, length: 1))
+                            }
+                        }
+                        nextCollapsedSpaces[index] = removedLocal
+                        blockLengths[index] = originalLength - removedLocal.count
+                    } else {
+                        blockLengths[index] = originalLength
+                    }
                 }
                 displayShift += blockLengths[index] - originalLength
             }
@@ -495,7 +626,13 @@ struct ReadingText: NSViewRepresentable {
                             } else if start >= 1 {
                                 start += labelDeltas[index]
                             }
+                        } else if !nextCollapsedSpaces.isEmpty, let removed = nextCollapsedSpaces[index] {
+                            let removedBefore = removed.filter { $0 < start }.count
+                            let removedInside = removed.filter { $0 >= start && $0 < start + runLength }.count
+                            start -= removedBefore
+                            runLength = max(0, runLength - removedInside)
                         }
+                        if runLength == 0 { continue }
                         let sourceStart = Int(block.sourceStart + run.sourceStart)
                         var mask = run.mask
                         if mask & (1 << 18) != 0, let index = unresolved.firstIndex(endingAfter: sourceStart),
@@ -545,7 +682,7 @@ struct ReadingText: NSViewRepresentable {
             view.invalidateInlineMath()
             phaseMilliseconds["swift_assembly_ms"] = assemblyMilliseconds
             phaseMilliseconds["text_storage_ms"] = (ProcessInfo.processInfo.systemUptime - assemblyStart) * 1000 - assemblyMilliseconds
-            model = next; ranges = nextRanges; fallbacks = fallback; view.sourceUTF16Length = storage.length
+            model = next; ranges = nextRanges; collapsedSpaceOffsets = nextCollapsedSpaces; fallbacks = fallback; view.sourceUTF16Length = storage.length
             view.install(nextDiagrams)
             input.document.hasPreparedDiagrams = view.blocks.contains { $0.prepared != nil }
             view.needsLayout = true
@@ -556,7 +693,7 @@ struct ReadingText: NSViewRepresentable {
             }
             return formulas
         }
-        private func restore(_ anchor: (id: UInt64, source: Int, offset: Double)) {
+        func restore(_ anchor: (id: UInt64, source: Int, offset: Double)) {
             guard let view, let clip = view.enclosingScrollView?.contentView, let model else { return }
             let index = model.blocks.firstIndex(where: { $0.id == anchor.id })
                 ?? model.blocks.firstIndex(where: { Int($0.sourceStart + $0.sourceLength) > anchor.source })
@@ -616,7 +753,11 @@ struct ReadingText: NSViewRepresentable {
             guard let model, !ranges.isEmpty, let view,
                   position != NSNotFound, position >= 0, position <= view.sourceUTF16Length else { return nil }
             if let index = ranges.firstIndex(where: { NSLocationInRange(position, $0) }) {
-                let block = model.blocks[index], local = position - ranges[index].location
+                let block = model.blocks[index]
+                var local = position - ranges[index].location
+                if let removed = collapsedSpaceOffsets[index] {
+                    for offset in removed where offset <= local { local += 1 }
+                }
                 guard let run = model.firstRun(in: block.runRange, matching: {
                     local >= Int($0.start) && local < Int($0.start + $0.length)
                 }) else { return Int(block.sourceStart) }
@@ -637,7 +778,11 @@ struct ReadingText: NSViewRepresentable {
                 local < Int($0.sourceStart + $0.sourceLength)
             })
             let adjustment = run.map { $0.length == $0.sourceLength ? max(0, local - Int($0.sourceStart)) : 0 } ?? 0
-            return min(view.sourceUTF16Length, ranges[index].location + Int(run?.start ?? 0) + adjustment)
+            var displayLocal = Int(run?.start ?? 0) + adjustment
+            if let removed = collapsedSpaceOffsets[index] {
+                displayLocal -= removed.filter { $0 < displayLocal }.count
+            }
+            return min(view.sourceUTF16Length, ranges[index].location + max(0, displayLocal))
         }
         func reveal(source: Int, length: Int = 0) {
             guard let view else { return }
@@ -685,6 +830,7 @@ struct ReadingText: NSViewRepresentable {
                 let end = min(view.sourceUTF16Length, max(position + 1, displayPosition(source: source + length)))
                 if end > position { view.showFindIndicator(for: NSRange(location: position, length: end - position)) }
             }
+            input?.document.updateActiveHeading(for: source)
             if inspect {
                 var details = AnchorInspection.snapshot(view, document: input?.document)
                 details["source"] = source
