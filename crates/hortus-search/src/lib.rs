@@ -431,6 +431,12 @@ fn range(text: &str, start: usize, end: usize) -> MatchRange {
     }
 }
 
+const CANCEL_CHECK_BYTES: usize = 64 * 1024;
+
+fn is_cancelled(cancelled: Option<&AtomicBool>) -> bool {
+    cancelled.is_some_and(|token| token.load(AtomicOrdering::Relaxed))
+}
+
 /// Pure ASCII case-insensitive fast-path using tight byte scanning + KMP fallback.
 /// Produces byte spans identical to `substring_matches_unicode` whenever `note.ascii_fold_safe`.
 fn substring_matches_ascii(
@@ -445,33 +451,30 @@ fn substring_matches_ascii(
     let bytes = text.as_bytes();
     let pat_len = pattern.len();
     if pat_len == 0 || bytes.len() < pat_len {
-        return Some((0, vec![]));
+        return (!is_cancelled(cancelled)).then(|| (0, Vec::new()));
     }
     let mut matched = 0usize;
     let mut count = 0u32;
     let mut spans = Vec::new();
     let mut index = 0usize;
-    let mut next_cancel_check = 4096usize;
+    let mut chunk_end = 0;
     while index < bytes.len() {
-        if index >= next_cancel_check {
-            if cancelled.is_some_and(|token| token.load(AtomicOrdering::Acquire)) {
+        if index == chunk_end {
+            if is_cancelled(cancelled) {
                 return None;
             }
-            next_cancel_check = index + 4096;
+            chunk_end = index.saturating_add(CANCEL_CHECK_BYTES).min(bytes.len());
         }
         if matched == 0 {
-            // Tight skip loop until the first byte of the pattern matches.
-            let mut found = None;
-            for (offset, &byte) in bytes[index..].iter().enumerate() {
-                if byte == first_lower || byte == first_upper {
-                    found = Some(index + offset);
-                    break;
-                }
-            }
-            let Some(pos) = found else {
-                break;
+            // Bound each skip so long runs without the pattern's first byte still check cancellation.
+            let found = bytes[index..chunk_end]
+                .iter()
+                .position(|&byte| byte == first_lower || byte == first_upper);
+            let Some(offset) = found else {
+                index = chunk_end;
+                continue;
             };
-            index = pos;
+            index += offset;
             if pat_len == 1 {
                 count = count.saturating_add(1);
                 if spans.len() < limit {
@@ -499,9 +502,6 @@ fn substring_matches_ascii(
             matched = prefix[matched - 1];
         }
         index += 1;
-    }
-    if count == 0 {
-        return Some((0, vec![]));
     }
     build_text_matches(text, count, spans, cancelled)
 }
@@ -548,9 +548,6 @@ fn substring_matches_unicode(
             }
         }
     }
-    if count == 0 {
-        return Some((0, vec![]));
-    }
     build_text_matches(text, count, spans, cancelled)
 }
 
@@ -560,13 +557,24 @@ fn build_text_matches(
     spans: Vec<std::ops::Range<usize>>,
     cancelled: Option<&AtomicBool>,
 ) -> Option<(u32, Vec<TextMatch>)> {
+    if is_cancelled(cancelled) {
+        return None;
+    }
     if spans.is_empty() {
         return Some((count, vec![]));
     }
-    let graphemes: Vec<usize> = UnicodeSegmentation::grapheme_indices(text, true)
-        .map(|(offset, _)| offset)
-        .chain(std::iter::once(text.len()))
-        .collect();
+    let mut graphemes = Vec::new();
+    let mut next_cancel_check = CANCEL_CHECK_BYTES;
+    for (offset, _) in UnicodeSegmentation::grapheme_indices(text, true) {
+        if offset >= next_cancel_check {
+            if is_cancelled(cancelled) {
+                return None;
+            }
+            next_cancel_check = offset.saturating_add(CANCEL_CHECK_BYTES);
+        }
+        graphemes.push(offset);
+    }
+    graphemes.push(text.len());
     let mut last_byte = 0usize;
     let mut last_utf16 = 0usize;
     let mut utf16_at = |byte: usize| -> usize {
@@ -582,8 +590,7 @@ fn build_text_matches(
         .into_iter()
         .enumerate()
         .map(|(index, span)| {
-            if index % 16 == 0 && cancelled.is_some_and(|token| token.load(AtomicOrdering::Acquire))
-            {
+            if index % 16 == 0 && is_cancelled(cancelled) {
                 return None;
             }
             let start_index = graphemes
@@ -605,7 +612,7 @@ fn build_text_matches(
             })
         })
         .collect::<Option<Vec<_>>>()?;
-    Some((count, matches))
+    (!is_cancelled(cancelled)).then_some((count, matches))
 }
 
 fn fuzzy_match_folded(
@@ -666,6 +673,27 @@ fn quick_candidate_order(a: &QuickCandidate, b: &QuickCandidate) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_ascii_skip_returns_none_without_a_match() {
+        let text = "x".repeat(4 * 1024 * 1024);
+        let cancelled = AtomicBool::new(true);
+        assert!(
+            substring_matches_ascii(&text, b"z", b'z', b'Z', &[0], 1, Some(&cancelled)).is_none()
+        );
+    }
+
+    #[test]
+    fn ascii_skip_keeps_matches_across_cancel_check_boundaries() {
+        let text = format!("{}Aba", "x".repeat(CANCEL_CHECK_BYTES - 1));
+        let cancelled = AtomicBool::new(false);
+        let (count, matches) =
+            substring_matches_ascii(&text, b"aba", b'a', b'A', &[0, 0, 1], 1, Some(&cancelled))
+                .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(matches[0].start as usize, CANCEL_CHECK_BYTES - 1);
+        assert_eq!(matches[0].length, 3);
+    }
 
     #[test]
     fn fuzzy_sort_prefers_contiguous_word_start_and_file_name() {
