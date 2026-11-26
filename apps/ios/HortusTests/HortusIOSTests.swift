@@ -238,6 +238,61 @@ final class HortusIOSTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(fit.offset.height, 0)
     }
 
+    func testFocusModeExportSVGMatchesPreparedSceneCollapsedStateAndTheme() async throws {
+        let source = """
+        mindmap
+          root((Hortus))
+            Branch
+              LeafA
+              LeafB
+            Other
+        
+        """
+        let service = DiagramService()
+        let width = IOSDiagramFocusView.renderWidth(for: CGSize(width: 430, height: 932))
+
+        let expandedBlock = NoteDiagram(
+            ordinal: 1,
+            sourceStart: 0,
+            range: NSRange(location: 0, length: (source as NSString).length),
+            collapsed: [],
+            documentIdentity: "focus-svg-expanded",
+            revision: 1
+        )
+        let expandedRendered = await service.render(source: source, mmd: true, blocks: [expandedBlock], width: width, dark: false)
+        let expandedPrepared = try XCTUnwrap(expandedRendered.first?.prepared, "render reason: \(expandedRendered.first?.reason ?? "nil")")
+        let collapsibleId = try XCTUnwrap(expandedPrepared.scene.hitRegions.first(where: { $0.canCollapse })?.nodeId)
+
+        let collapsedBlock = NoteDiagram(
+            ordinal: 1,
+            sourceStart: 0,
+            range: NSRange(location: 0, length: (source as NSString).length),
+            collapsed: [collapsibleId],
+            documentIdentity: "focus-svg-collapsed",
+            revision: 2
+        )
+        let collapsedLightRendered = await service.render(source: source, mmd: true, blocks: [collapsedBlock], width: width, dark: false)
+        let collapsedLight = try XCTUnwrap(collapsedLightRendered.first?.prepared)
+
+        let collapsedDarkRendered = await service.render(source: source, mmd: true, blocks: [collapsedBlock], width: width, dark: true)
+        let collapsedDark = try XCTUnwrap(collapsedDarkRendered.first?.prepared)
+
+        let expandedRequest = IOSDiagramFocusView.makeExportRequest(prepared: expandedPrepared, note: "Flow.mmd", ordinal: 1)
+        let collapsedLightRequest = IOSDiagramFocusView.makeExportRequest(prepared: collapsedLight, note: "Flow.mmd", ordinal: 1)
+        let collapsedDarkRequest = IOSDiagramFocusView.makeExportRequest(prepared: collapsedDark, note: "Flow.mmd", ordinal: 1)
+
+        let expandedSVG = try await expandedRequest.svg()
+        let collapsedLightSVG = try await collapsedLightRequest.svg()
+        let collapsedDarkSVG = try await collapsedDarkRequest.svg()
+
+        XCTAssertEqual(expandedSVG, try DiagramExport.renderSVG(prepared: expandedPrepared))
+        XCTAssertEqual(collapsedLightSVG, try DiagramExport.renderSVG(prepared: collapsedLight))
+        XCTAssertEqual(collapsedDarkSVG, try DiagramExport.renderSVG(prepared: collapsedDark))
+        XCTAssertNotEqual(expandedSVG, collapsedLightSVG)
+        XCTAssertNotEqual(collapsedLightSVG, collapsedDarkSVG)
+        XCTAssertTrue(collapsedLightSVG.contains("viewBox=\"0 0 "))
+    }
+
     func testStudyLoopEmbedAndMmdEmbedRendering() async throws {
         let bundled = try XCTUnwrap(Bundle.main.url(forResource: "demo-vault", withExtension: nil))
         let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("hortus-ios-embed-\(UUID().uuidString)", isDirectory: true)
