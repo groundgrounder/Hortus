@@ -390,17 +390,21 @@ final class Workspace {
             if let document = tabs.first(where: { $0.path == path })?.document { document.refresh() }
             else { load(path) }
         }
-        // 外部向库中新增图片等附件时，刷新已开笔记里的缺失图片占位符并清理失败缓存。
+        // 外部向库中新增图片等附件时，刷新已开笔记及嵌入卡片里的缺失图片占位符并清理失败缓存。
         let hasMissingMedia = tabs.contains { tab in
-            tab.document?.mountedTextView?.mediaViews.contains(where: { $0.prepared.reason == "image.missing" }) == true
+            tab.document?.mountedTextView?.mediaViews.contains(where: { $0.hasMissingImageMedia }) == true
         }
         if hasMissingMedia {
             Task { @MainActor [weak self] in
                 await LocalImageCache.shared.invalidateFailed()
+                await EmbedRenderer.shared.invalidateFailedMedia()
                 guard let self else { return }
                 for tab in self.tabs {
                     guard let view = tab.document?.mountedTextView,
-                          view.mediaViews.contains(where: { $0.prepared.reason == "image.missing" }) else { continue }
+                          view.mediaViews.contains(where: { $0.hasMissingImageMedia }) else { continue }
+                    for media in view.mediaViews {
+                        media.reloadEmbeddedMediaIfNeeded()
+                    }
                     if view.isReading { view.readingCoordinator?.refresh(force: true) }
                     else { view.editingCoordinator?.schedule(force: true) }
                 }

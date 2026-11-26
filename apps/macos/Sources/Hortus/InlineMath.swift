@@ -180,6 +180,9 @@ extension DiagramTextView {
     func selectionPlainText() -> String? {
         guard let storage = textStorage else { return nil }
         let items = (inlineMath.values.map { $0.item } + mathViews.map { $0.item }).sorted { $0.range.location > $1.range.location }
+        let hasLeadingPropertiesPlaceholder = storage.length > 0
+            && (storage.string as NSString).character(at: 0) == 0xE000
+            && (((sourceStyling?.mask(at: 0) ?? 0) & 16384 != 0) || readingCoordinator?.hasPropertiesBlock == true)
         let pieces = selectedRanges.compactMap { value -> String? in
             let range = value.rangeValue
             guard range.length > 0, NSMaxRange(range) <= storage.length else { return nil }
@@ -188,7 +191,9 @@ extension DiagramTextView {
                 let local = NSRange(location: item.range.location - range.location, length: item.range.length)
                 result.replaceCharacters(in: local, with: item.prepared.block.displaySource)
             }
-            result.replaceOccurrences(of: "\u{e000}", with: L10n.string("Properties"), options: [], range: NSRange(location: 0, length: result.length))
+            if hasLeadingPropertiesPlaceholder && range.location == 0 && result.length > 0 && result.character(at: 0) == 0xE000 {
+                result.replaceCharacters(in: NSRange(location: 0, length: 1), with: L10n.string("Properties"))
+            }
             return result as String
         }
         return pieces.isEmpty ? nil : pieces.joined(separator: "\n")

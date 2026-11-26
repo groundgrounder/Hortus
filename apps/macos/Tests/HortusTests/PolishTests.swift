@@ -415,4 +415,177 @@ struct PolishTests {
         #expect(!element.accessibilityFrame().isEmpty)
         await fixture.close()
     }
+
+    // MARK: 3.10 FIX-10B 联合盲审清零回归
+
+    @Test func copyMarkdownAfterInlineCommentsPreservesExactSource() async throws {
+        let source = "foo %%c1%% bar baz\n\nalpha %%c1%% beta <!-- c2 --> gamma delta\n"
+        let fixture = try ReadingTests.Fixture(source)
+        try await fixture.start()
+        let displayed = fixture.view.string as NSString
+
+        let singleRange1 = displayed.range(of: "b", range: displayed.range(of: "bar"))
+        try #require(singleRange1.location != NSNotFound)
+        fixture.view.setSelectedRange(singleRange1)
+        fixture.coordinator.copyMarkdown()
+        #expect(NSPasteboard.general.string(forType: .string) == "b")
+
+        let multiRange1 = displayed.range(of: "bar")
+        try #require(multiRange1.location != NSNotFound)
+        fixture.view.setSelectedRange(multiRange1)
+        fixture.coordinator.copyMarkdown()
+        #expect(NSPasteboard.general.string(forType: .string) == "bar")
+
+        let gammaRange = displayed.range(of: "gamma")
+        try #require(gammaRange.location != NSNotFound)
+        fixture.view.setSelectedRange(NSRange(location: gammaRange.location, length: 1))
+        fixture.coordinator.copyMarkdown()
+        #expect(NSPasteboard.general.string(forType: .string) == "g")
+
+        fixture.view.setSelectedRange(gammaRange)
+        fixture.coordinator.copyMarkdown()
+        #expect(NSPasteboard.general.string(forType: .string) == "gamma")
+        await fixture.close()
+    }
+
+    @Test func readingFinderPublishesSameGenerationSnapshotAfterFormulaUpdate() async throws {
+        let fixture = try ReadingTests.Fixture("Intro $\\alpha$ tail\n")
+        try await fixture.start(mathService: Self.mathService())
+        let finder = fixture.view.ensureReadingFinder()
+        #expect(finder.matches(for: "\\alpha").count == 1)
+
+        let updated = "Intro $\\gamma + \\delta$ and\n\n$$\\int_0^1 x\\,dx$$\n\ntail\n"
+        let oldLength = (fixture.document.text as NSString).length
+        let prevCount = fixture.view.layoutRenderCount
+        fixture.document.edited(range: NSRange(location: 0, length: oldLength), replacement: updated)
+        fixture.coordinator.refresh(force: true)
+        for _ in 0..<200 where fixture.view.layoutRenderCount == prevCount {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        // 不先在主线程调 matches(for:)，直接从后台线程读取 NSTextFinderClient 快照，验证已同步发布最新同代文本。
+        let backgroundSnapshot = await Task.detached { () -> String in
+            var effective = NSRange(location: 0, length: 0)
+            var boundary: ObjCBool = false
+            return finder.string(at: 0, effectiveRange: &effective, endsWithSearchBoundary: &boundary)
+        }.value
+        #expect(backgroundSnapshot.contains("\\gamma + \\delta"))
+        #expect(backgroundSnapshot.contains("\\int_0^1 x\\,dx"))
+        #expect(!backgroundSnapshot.contains("\\alpha"))
+
+        let display = fixture.view.string as NSString
+        let inlineHits = finder.matches(for: "\\gamma + \\delta")
+        #expect(inlineHits.count == 1 && inlineHits[0].isFormula)
+        #expect(inlineHits[0].realRange.length == 1)
+        #expect(display.character(at: inlineHits[0].realRange.location) == 0xFFFC)
+
+        let blockHits = finder.matches(for: "\\int_0^1")
+        #expect(blockHits.count == 1 && blockHits[0].isFormula)
+        #expect(NSMaxRange(blockHits[0].realRange) <= display.length)
+        await fixture.close()
+    }
+
+    @Test func tableCellStyledWikilinkDoesNotShiftSubsequentLinkCursor() async throws {
+        let source = "| Links |\n| --- |\n| [[NoteA\\|**bold** text]] and [[NoteB]] |\n"
+        let fixture = try ReadingTests.Fixture(source)
+        try "# NoteA\n".write(to: fixture.editing.vault.appendingPathComponent("NoteA.md"), atomically: true, encoding: .utf8)
+        try "# NoteB\n".write(to: fixture.editing.vault.appendingPathComponent("NoteB.md"), atomically: true, encoding: .utf8)
+        let handle = try fixture.editing.core.openVault(path: fixture.editing.vault.path)
+        handle.updateSearchIndex(upserted: ["note.md", "NoteA.md", "NoteB.md"], removed: [])
+        defer { handle.close() }
+
+        try await fixture.start(mathService: Self.mathService(), knowledgeHandle: handle)
+        let media = try #require(fixture.view.mediaViews.first)
+        let allLinks = media.inspectionTableCellLinks
+        try #require(allLinks.count == 2)
+        let bodyLinks = allLinks[1]
+        #expect(bodyLinks.count >= 2)
+        let noteALinks = bodyLinks.filter { $0.target == "NoteA" }
+        let noteBLinks = bodyLinks.filter { $0.target == "NoteB" }
+        #expect(!noteALinks.isEmpty)
+        #expect(noteBLinks.count == 1)
+        #expect(noteALinks.allSatisfy { !$0.broken })
+        #expect(noteBLinks.allSatisfy { !$0.broken })
+        await fixture.close()
+    }
+
+    @Test func embedRendererInvalidateFailedMediaRecoversMissingImage() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hortus-embed-img-\(UUID().uuidString)")
+        let vault = dir.appendingPathComponent("vault")
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        try "# Host\n\n![[child]]\n".write(to: vault.appendingPathComponent("host.md"), atomically: true, encoding: .utf8)
+        try "# Child\n\n![[recovered.png]]\n".write(to: vault.appendingPathComponent("child.md"), atomically: true, encoding: .utf8)
+        let core = try WorkspaceCore.inDirectories(config: dir.appendingPathComponent("config").path,
+                                                   cache: dir.appendingPathComponent("cache").path)
+        let handle = try core.openVault(path: vault.path)
+        handle.updateSearchIndex(upserted: ["host.md", "child.md"], removed: [])
+        defer { handle.close(); try? FileManager.default.removeItem(at: dir) }
+
+        let renderer = EmbedRenderer()
+        let request = EmbedRequest(source: "host.md", target: "child", heading: nil, alias: nil,
+                                   ancestors: ["host.md"], depth: 0, handle: handle, vault: vault.path,
+                                   width: 500, size: 15, dark: false, service: DiagramService(),
+                                   mathService: Self.mathService(), knowledgeVersion: 1)
+        let first = try #require(await renderer.prepare(request))
+        #expect(first.media.first?.reason == "image.missing")
+
+        // 外部补齐图片（不改 .md，knowledgeVersion 保持不变），清理失败缓存后重准备应恢复。
+        try MediaTests.writeImage(vault.appendingPathComponent("recovered.png"), width: 48, height: 32)
+        await LocalImageCache.shared.invalidateFailed()
+        await renderer.invalidateFailedMedia()
+        let recovered = try #require(await renderer.prepare(request))
+        #expect(recovered.media.first?.reason == "")
+        #expect(recovered.media.first?.imageSize == CGSize(width: 48, height: 32))
+    }
+
+    @Test func selectionPlainTextPreservesBodyPrivateUseCharacter() async throws {
+        let source = "---\ntitle: Demo\n---\n\nBody with \u{e000} glyph.\n"
+        let fixture = try ReadingTests.Fixture(source)
+        try await fixture.start()
+        fixture.view.setSelectedRange(NSRange(location: 0, length: fixture.view.sourceUTF16Length))
+        let plain = try #require(fixture.view.selectionPlainText())
+        #expect(plain.hasPrefix(L10n.string("Properties")))
+        #expect(plain.contains("Body with \u{e000} glyph."))
+        await fixture.close()
+
+        let noProps = try ReadingTests.Fixture("\u{e000} leading glyph\n")
+        try await noProps.start()
+        noProps.view.setSelectedRange(NSRange(location: 0, length: noProps.view.sourceUTF16Length))
+        let noPropsPlain = try #require(noProps.view.selectionPlainText())
+        #expect(noPropsPlain.hasPrefix("\u{e000} leading glyph"))
+        await noProps.close()
+    }
+
+    @Test func localImageCacheResolvesMixedMultiLevelNfcNfdAndRejectsOutsideVault() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hortus-nfc-nfd-\(UUID().uuidString)")
+        let vault = dir.appendingPathComponent("vault")
+        let outside = dir.appendingPathComponent("outside")
+        let nestedDir = vault
+            .appendingPathComponent("cafe\u{0301}", isDirectory: true)
+            .appendingPathComponent("re\u{0301}sume\u{0301}", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let imageURL = nestedDir.appendingPathComponent("na\u{00EF}ve.png")
+        try MediaTests.writeImage(imageURL, width: 40, height: 20)
+        let outsideImg = outside.appendingPathComponent("secret.png")
+        try MediaTests.writeImage(outsideImg, width: 24, height: 24)
+        let escapeLink = vault.appendingPathComponent("escape.png")
+        try FileManager.default.createSymbolicLink(atPath: escapeLink.path, withDestinationPath: outsideImg.path)
+
+        let cache = LocalImageCache()
+        let mixedQuery = vault
+            .appendingPathComponent("caf\u{00E9}", isDirectory: true)
+            .appendingPathComponent("r\u{00E9}sum\u{00E9}", isDirectory: true)
+            .appendingPathComponent("nai\u{0308}ve.png").path
+        let decoded = await cache.decode(mixedQuery, vault: vault.path)
+        #expect(decoded != nil)
+        #expect(decoded?.width == 40)
+        #expect(decoded?.height == 20)
+
+        // 库外符号链接逃逸必须拒绝。
+        #expect(await cache.decode(escapeLink.path, vault: vault.path) == nil)
+        #expect(await cache.decode(outsideImg.path, vault: vault.path) == nil)
+    }
 }

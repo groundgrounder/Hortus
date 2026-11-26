@@ -71,6 +71,8 @@ private final class TableCanvas: NSView {
             let header: UInt32 = index < block.columns.count ? 2 : 0
             let parsedLinks = Self.extractWikilinks(from: cell.source)
             var linkCursor = 0
+            var lastLinkEnd: Int?
+            var currentParsed: (target: String, heading: String?)?
             var linksForCell: [TableCellLink] = []
             var tagsForCell: [TableCellTag] = []
             let text = NSMutableAttributedString(string: cell.text, attributes: styling.style(header))
@@ -79,8 +81,15 @@ private final class TableCanvas: NSView {
                 guard NSMaxRange(range) <= text.length else { continue }
                 var mask = run.mask | header
                 if run.mask & (1 << 18) != 0 {
-                    let parsed = linkCursor < parsedLinks.count ? parsedLinks[linkCursor] : nil
-                    linkCursor += 1
+                    let parsed: (target: String, heading: String?)?
+                    if let prevEnd = lastLinkEnd, prevEnd == range.location {
+                        parsed = currentParsed
+                    } else {
+                        parsed = linkCursor < parsedLinks.count ? parsedLinks[linkCursor] : nil
+                        linkCursor += 1
+                        currentParsed = parsed
+                    }
+                    lastLinkEnd = NSMaxRange(range)
                     if let parsed {
                         let key = Self.linkLookupKey(target: parsed.target, heading: parsed.heading)
                         let resolved = resolvedLookup[key] ?? true
@@ -89,11 +98,15 @@ private final class TableCanvas: NSView {
                         linksForCell.append(TableCellLink(range: range, target: parsed.target,
                                                           heading: parsed.heading, broken: broken))
                     }
-                } else if run.mask & 512 != 0 {
-                    let raw = (cell.text as NSString).substring(with: range)
-                    let tag = raw.hasPrefix("#") ? String(raw.dropFirst()) : raw
-                    if !tag.isEmpty {
-                        tagsForCell.append(TableCellTag(range: range, tag: tag))
+                } else {
+                    lastLinkEnd = nil
+                    currentParsed = nil
+                    if run.mask & 512 != 0 {
+                        let raw = (cell.text as NSString).substring(with: range)
+                        let tag = raw.hasPrefix("#") ? String(raw.dropFirst()) : raw
+                        if !tag.isEmpty {
+                            tagsForCell.append(TableCellTag(range: range, tag: tag))
+                        }
                     }
                 }
                 text.setAttributes(styling.style(mask), range: range)
@@ -353,6 +366,14 @@ private final class TableCanvas: NSView {
         let y = heights.prefix(row).reduce(0, +) + 8
         return rect.offsetBy(dx: x, dy: y)
     }
+
+    #if DEBUG
+    var inspectionLinks: [[(range: NSRange, target: String, heading: String?, broken: Bool)]] {
+        cellLinks.map { links in
+            links.map { ($0.range, $0.target, $0.heading, $0.broken) }
+        }
+    }
+    #endif
 }
 
 /// 表格的局部滚动和图片的快速查看均使用原生控件。
@@ -483,8 +504,21 @@ final class MediaView: NSView, @preconcurrency QLPreviewPanelDataSource {
         }
     }
 
+    var hasMissingImageMedia: Bool {
+        if prepared.reason == "image.missing" { return true }
+        return embeddedCard?.hasMissingImageMedia == true
+    }
+
+    func reloadEmbeddedMediaIfNeeded() {
+        guard let card = embeddedCard, card.hasMissingImageMedia else { return }
+        card.reload()
+    }
+
     #if DEBUG
     var inspectionEmbeddedCard: EmbeddedNoteView? { embeddedCard }
+    var inspectionTableCellLinks: [[(range: NSRange, target: String, heading: String?, broken: Bool)]] {
+        tableCanvas?.inspectionLinks ?? []
+    }
     func simulateEmbedHeightGrowthForTesting(_ height: CGFloat) {
         guard let card = embeddedCard else { return }
         let nextHeight = max(36, height)

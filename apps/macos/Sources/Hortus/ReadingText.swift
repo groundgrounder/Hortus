@@ -405,6 +405,7 @@ struct ReadingText: NSViewRepresentable {
             knowledge = result.knowledge
             installedKnowledgeVersion = inFlightKey?.knowledgeVersion ?? 0
             let restyle = oldUnresolved != unresolvedRanges(knowledge) && model?.revision == result.model.revision
+            view.readingFinderWillChangeContent()
             let formulas = install(result.model, diagrams: diagrams, math: result.math, width: width,
                                    themeChanged: themeChanged || restyle)
             let blockIndices = Dictionary(uniqueKeysWithValues: result.model.blocks.enumerated().map { ($0.element.id, $0.offset) })
@@ -508,7 +509,14 @@ struct ReadingText: NSViewRepresentable {
             let assemblyStart = ProcessInfo.processInfo.systemUptime
             let anchor = visibleAnchor()
             let old = model
-            let hasProperties = next.text.hasPrefix("\u{e000}")
+            let hasProperties: Bool = {
+                guard next.text.hasPrefix("\u{e000}"),
+                      let firstBlock = next.blocks.first,
+                      firstBlock.displayStart == 0,
+                      !firstBlock.runRange.isEmpty else { return false }
+                let firstRun = next.run(at: firstBlock.runRange.lowerBound)
+                return firstRun.start == 0 && (firstRun.mask & 16384) != 0
+            }()
             var fallback = [Bool](repeating: false, count: next.blocks.count)
             var hasFallback = false
             var ordinal: UInt32 = 0
@@ -717,6 +725,14 @@ struct ReadingText: NSViewRepresentable {
             }
         }
         var sourceLength: Int { source.utf16.count }
+        var hasPropertiesBlock: Bool {
+            guard let model, model.text.hasPrefix("\u{e000}"),
+                  let firstBlock = model.blocks.first,
+                  firstBlock.displayStart == 0,
+                  !firstBlock.runRange.isEmpty else { return false }
+            let firstRun = model.run(at: firstBlock.runRange.lowerBound)
+            return firstRun.start == 0 && (firstRun.mask & 16384) != 0
+        }
 
         /// 文末只在滚动视口确实到达底部时才是有效锚点；首次打开时视图高度尚小于内容高度。
         func atDocumentBottom() -> Bool {
@@ -891,7 +907,11 @@ struct ReadingText: NSViewRepresentable {
         }
         private func sourceEnd(at position: Int) -> Int {
             guard let model, let i = ranges.firstIndex(where: { NSLocationInRange(position, $0) }) else { return source.utf16.count }
-            let block = model.blocks[i], local = position - ranges[i].location
+            let block = model.blocks[i]
+            var local = position - ranges[i].location
+            if let removed = collapsedSpaceOffsets[i] {
+                for offset in removed where offset <= local { local += 1 }
+            }
             guard let run = model.firstRun(in: block.runRange, matching: {
                 local >= Int($0.start) && local < Int($0.start + $0.length)
             }) else { return Int(block.sourceStart + block.sourceLength) }
@@ -937,12 +957,17 @@ struct ReadingText: NSViewRepresentable {
         func clickTask(_ event: NSEvent) -> Bool {
             guard let view, let input, input.document.readOnlyReason == nil, !input.document.dirty, !pending, let model else { return false }
             let position = view.characterIndexForInsertion(at: view.convert(event.locationInWindow, from: nil))
-            guard let i = ranges.firstIndex(where: { NSLocationInRange(position, $0) }),
-                  let run = model.firstRun(in: model.blocks[i].runRange, matching: {
-                      $0.mask & 131072 != 0 && position - ranges[i].location >= Int($0.start)
-                          && position - ranges[i].location < Int($0.start + $0.length)
+            guard let i = ranges.firstIndex(where: { NSLocationInRange(position, $0) }) else { return false }
+            var local = position - ranges[i].location
+            if let removed = collapsedSpaceOffsets[i] {
+                for offset in removed where offset <= local { local += 1 }
+            }
+            guard let run = model.firstRun(in: model.blocks[i].runRange, matching: {
+                      $0.mask & 131072 != 0 && local >= Int($0.start)
+                          && local < Int($0.start + $0.length)
                   }) else { return false }
-            let checkRange = NSRange(location: ranges[i].location + Int(run.start), length: 1)
+            let displayRunStart = Int(run.start) - (collapsedSpaceOffsets[i]?.filter { $0 < Int(run.start) }.count ?? 0)
+            let checkRange = NSRange(location: ranges[i].location + displayRunStart, length: 1)
             let rect = view.firstRect(forCharacterRange: checkRange, actualRange: nil)
             guard let window = view.window, rect.insetBy(dx: -2, dy: -2).contains(window.convertPoint(toScreen: event.locationInWindow)) else { return false }
             let sourcePosition = Int(model.blocks[i].sourceStart + run.sourceStart) + 1
