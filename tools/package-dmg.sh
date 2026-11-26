@@ -65,6 +65,8 @@ fi
 $skip_build || ./tools/build-macos.sh
 [[ -f "$app/Contents/MacOS/Hortus" ]] || fail "Missing Hortus application: $app"
 [[ "$(lipo -archs "$app/Contents/MacOS/Hortus")" == arm64 ]] || fail "Hortus must contain only arm64"
+[[ -f "$app/Contents/Helpers/hortus" ]] || fail "Missing bundled hortus CLI: $app/Contents/Helpers/hortus"
+[[ "$(lipo -archs "$app/Contents/Helpers/hortus")" == arm64 ]] || fail "Bundled hortus CLI must contain only arm64"
 if [[ -n "$identity" ]]; then
   identities="$(security find-identity -v -p codesigning)"
   [[ "$identities" == *"\"$identity\""* ]] || fail "Signing identity not found: $identity"
@@ -85,12 +87,14 @@ mkdir "$work/staging"
 ditto "$app" "$work/staging/Hortus.app"
 ln -s /Applications "$work/staging/Applications"
 if [[ -n "$identity" ]]; then
+  codesign --force --sign "$identity" --options runtime --timestamp "$work/staging/Hortus.app/Contents/Helpers/hortus"
   codesign --force --sign "$identity" --options runtime --timestamp "$work/staging/Hortus.app"
   ditto -c -k --keepParent "$work/staging/Hortus.app" "$work/Hortus.zip"
   notarize "$work/Hortus.zip" app
   xcrun stapler staple "$work/staging/Hortus.app"
   xcrun stapler validate "$work/staging/Hortus.app"
 else
+  codesign --force --sign - "$work/staging/Hortus.app/Contents/Helpers/hortus"
   codesign --force --sign - "$work/staging/Hortus.app"
 fi
 codesign --verify --deep --strict --verbose=2 "$work/staging/Hortus.app"

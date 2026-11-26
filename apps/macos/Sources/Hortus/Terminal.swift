@@ -65,6 +65,8 @@ final class TerminalSession {
         let session: String
         /// 核心补强后的子进程 PATH；Finder 启动下也能找到 Homebrew 与工具链。
         let path: String
+        /// 自定义命令模式写入缓存目录的只读指南文件路径；模板模式为空。
+        let guideFile: String?
     }
 
     private let kind: Kind
@@ -255,9 +257,11 @@ final class TerminalSession {
 
     /// Agent 的 exec 在模板校验和快照完成后才开始；视图尚未挂载时排队。
     @discardableResult
-    func startAgent(executable: String, args: [String], session: String, path: String) -> Bool {
+    func startAgent(executable: String, args: [String], session: String, path: String,
+                    guideFile: String? = nil) -> Bool {
         guard root != nil else { return false }
-        pendingAgent = AgentStart(executable: executable, args: args, session: session, path: path)
+        pendingAgent = AgentStart(executable: executable, args: args, session: session,
+                                  path: path, guideFile: guideFile)
         state = .startingAgent
         startPendingAgent()
         return true
@@ -318,8 +322,10 @@ final class TerminalSession {
         var environment = ProcessInfo.processInfo.environment
         environment["TERM"] = "xterm-256color"
         environment["HORTUS_VAULT"] = root
+        environment["PATH"] = Self.appendingBundledHelpers(to: environment["PATH"])
         // 普通 shell 不是 Agent 会话，不能继承可能残留的会话标识。
         environment.removeValue(forKey: "HORTUS_AGENT_SESSION")
+        environment.removeValue(forKey: "HORTUS_AGENT_GUIDE_FILE")
         // 从 Finder 或程序坞启动时没有 locale；缺省会把中文文件名和输出当成 ASCII。
         if ["LANG", "LC_ALL", "LC_CTYPE"].allSatisfy({ environment[$0]?.isEmpty ?? true }) {
             environment["LANG"] = Self.utf8Locale()
@@ -340,7 +346,12 @@ final class TerminalSession {
         environment["TERM"] = "xterm-256color"
         environment["HORTUS_VAULT"] = root
         environment["HORTUS_AGENT_SESSION"] = pending.session
-        environment["PATH"] = pending.path
+        environment["PATH"] = Self.appendingBundledHelpers(to: pending.path)
+        if let guideFile = pending.guideFile, !guideFile.isEmpty {
+            environment["HORTUS_AGENT_GUIDE_FILE"] = guideFile
+        } else {
+            environment.removeValue(forKey: "HORTUS_AGENT_GUIDE_FILE")
+        }
         if ["LANG", "LC_ALL", "LC_CTYPE"].allSatisfy({ environment[$0]?.isEmpty ?? true }) {
             environment["LANG"] = Self.utf8Locale()
         }
@@ -350,6 +361,23 @@ final class TerminalSession {
         view.startProcess(executable: pending.executable, args: pending.args,
                           environment: variables, currentDirectory: root)
         flushPendingSends()
+    }
+
+    /// 若应用包内存在 `Contents/Helpers/hortus`，将 `Contents/Helpers` 追加到 PATH 尾部（去重、不抢占用户前置路径）。
+    nonisolated static func appendingBundledHelpers(
+        to path: String?,
+        bundleURL: URL = Bundle.main.bundleURL
+    ) -> String {
+        let existing = (path ?? "").split(separator: ":", omittingEmptySubsequences: true).map(String.init)
+        let helper = CLIHelper.bundledCLIURL(bundleURL: bundleURL)
+        guard FileManager.default.fileExists(atPath: helper.path) else {
+            return existing.joined(separator: ":")
+        }
+        let helpersDir = CLIHelper.bundledHelpersDirectory(bundleURL: bundleURL).standardizedFileURL.path
+        if existing.contains(helpersDir) {
+            return existing.joined(separator: ":")
+        }
+        return (existing + [helpersDir]).joined(separator: ":")
     }
 
     private func sendTerminationSignals(for view: HortusTerminalView) {

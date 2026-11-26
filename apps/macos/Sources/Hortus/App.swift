@@ -243,6 +243,24 @@ private struct HortusCommands: Commands {
             Button(L10n.string("New Agent")) { workspace.addAgent(to: layout.defaultTerminalGroupID) }
                 .keyboardShortcut("t", modifiers: [.command, .option])
                 .disabled(workspace.root == nil)
+            if application.agentProfiles.count > 1 {
+                Menu(L10n.string("New Agent Profile")) {
+                    ForEach(application.agentProfiles, id: \.id) { profile in
+                        Button(profile.name) {
+                            workspace.addAgent(to: layout.defaultTerminalGroupID,
+                                               launchMode: .profile(id: profile.id, name: profile.name))
+                        }
+                    }
+                }
+                .disabled(workspace.root == nil)
+            }
+            Button(L10n.string("Custom Agent Command…")) {
+                workspace.presentCustomAgentSheet(for: layout.defaultTerminalGroupID)
+            }
+            .disabled(workspace.root == nil)
+            Divider()
+            Button(L10n.string("Link Command Line Tool")) { workspace.installCLISymlinkFromMenu() }
+            Button(L10n.string("Copy MCP Configuration")) { workspace.copyMCPConfigurationFromMenu() }
         }
         CommandMenu("Panels") {
             Toggle("Left Sidebar", isOn: shown(.left)).keyboardShortcut("s", modifiers: [.control, .command])

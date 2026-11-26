@@ -24,6 +24,7 @@ fi
 export CARGO_ENCODED_RUSTFLAGS="${(pj:\x1f:)rust_flags}"
 unset RUSTFLAGS
 cargo build --release -p hortus-ffi
+cargo build --release -p hortus-cli
 cargo run --release -p hortus-ffi --features bindgen --bin hortus-bindgen -- generate \
   --library target/release/libhortus_ffi.dylib --language swift \
   --config crates/hortus-ffi/uniffi.toml --out-dir apps/apple/Generated/bindings
@@ -35,10 +36,13 @@ swift build --package-path apps/macos -c release \
   -Xswiftc -warnings-as-errors -Xlinker "$PWD/target/release/libhortus_ffi.a" \
   -Xlinker -framework -Xlinker CoreFoundation -Xlinker -framework -Xlinker CoreServices \
   -Xlinker -framework -Xlinker Security -Xlinker -liconv
-mkdir -p build/Hortus.app/Contents/MacOS build/Hortus.app/Contents/Resources
+mkdir -p build/Hortus.app/Contents/MacOS build/Hortus.app/Contents/Helpers build/Hortus.app/Contents/Resources
 cp apps/macos/.build/release/Hortus build/Hortus.app/Contents/MacOS/
 # 最终链接后再剥离本地符号，保留全局符号供崩溃报告使用。
 strip -x build/Hortus.app/Contents/MacOS/Hortus
+cp target/release/hortus build/Hortus.app/Contents/Helpers/hortus
+strip -x build/Hortus.app/Contents/Helpers/hortus
+chmod 755 build/Hortus.app/Contents/Helpers/hortus
 cp apps/macos/Info.plist build/Hortus.app/Contents/
 ./tools/build-app-icon.sh build/Hortus.app/Contents/Resources
 rm -rf build/Hortus.app/Contents/Resources/en.lproj build/Hortus.app/Contents/Resources/zh-Hans.lproj
@@ -56,5 +60,6 @@ python3 -B tools/third-party-notices.py --output build/Hortus.app/Contents/Resou
 # 用当前提交的历史提交数生成纯数字构建号。
 build_number="$(git rev-list --count HEAD)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" build/Hortus.app/Contents/Info.plist
+codesign --force --sign - build/Hortus.app/Contents/Helpers/hortus
 codesign --force --sign - build/Hortus.app
 print "构建完成：$PWD/build/Hortus.app"
