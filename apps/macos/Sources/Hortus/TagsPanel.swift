@@ -1,30 +1,6 @@
 import SwiftUI
 import HortusCore
-
-struct TagPanelRow: Identifiable {
-    let id: String
-    let name: String
-    let count: Int
-    var depth: Int { id.split(separator: "/").count - 1 }
-
-    static func rows(_ summaries: [TagSummaryInfo]) -> [Self] {
-        var names: [String: String] = [:]
-        var notes: [String: Set<String>] = [:]
-        for summary in summaries {
-            var prefix = ""
-            var raw = ""
-            for (key, label) in zip(summary.tag.split(separator: "/"), summary.raw.split(separator: "/")) {
-                if !prefix.isEmpty { prefix += "/"; raw += "/" }
-                prefix += key
-                raw += label
-                if names[prefix] == nil { names[prefix] = raw }
-                notes[prefix, default: []].formUnion(summary.notes)
-            }
-        }
-        return notes.keys.sorted { $0.split(separator: "/").lexicographicallyPrecedes($1.split(separator: "/")) }
-            .map { Self(id: $0, name: names[$0] ?? $0, count: notes[$0]?.count ?? 0) }
-    }
-}
+import HortusApple
 
 struct TagsPanel: View {
     @Environment(Workspace.self) private var workspace

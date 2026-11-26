@@ -3,6 +3,20 @@ import HortusCore
 
 /// 一次嵌入解析所需的全部只读上下文；卡片只会向后追加祖先路径。
 struct EmbedRequest: Sendable {
+    struct ReuseKey: Hashable, Sendable {
+        let source: String
+        let target: String
+        let heading: String?
+        let alias: String?
+        let ancestors: [String]
+        let depth: Int
+        let vault: String
+        let widthBucket: Int
+        let sizeBitPattern: UInt64
+        let dark: Bool
+        let knowledgeVersion: Int
+    }
+
     let source: String
     let target: String
     let heading: String?
@@ -16,6 +30,13 @@ struct EmbedRequest: Sendable {
     let dark: Bool
     let service: DiagramService
     let mathService: MathService
+    var knowledgeVersion: Int = 0
+
+    var reuseKey: ReuseKey {
+        ReuseKey(source: source, target: target, heading: heading, alias: alias, ancestors: ancestors,
+                 depth: depth, vault: vault, widthBucket: Int((width * 2).rounded()),
+                 sizeBitPattern: size.bitPattern, dark: dark, knowledgeVersion: knowledgeVersion)
+    }
 
     var maxDepth: Int { 3 }
     static func bodyWidth(_ width: Double) -> Double { max(120, width - 24) }
@@ -30,8 +51,9 @@ struct EmbedRequest: Sendable {
     func diagramExport(info: EmbedContentInfo, block: NoteDiagram) -> DiagramExportRequest? {
         guard let path = info.resolvedPath, let scene = block.prepared else { return nil }
         return DiagramExportRequest(prepared: scene, note: path, ordinal: block.ordinal) {
-            try await DiagramExport.renderSVG(source: info.content, mmd: info.isMmd, block: block.ordinal,
-                                              width: scene.scene.width, dark: dark, collapsed: block.collapsed.sorted())
+            try await Task.detached(priority: .userInitiated) {
+                try DiagramExport.renderSVG(prepared: scene)
+            }.value
         }
     }
 }
@@ -48,9 +70,72 @@ struct PreparedEmbed: Sendable {
 /// 嵌入内容在主线程之外准备：解析、切片、图片探测、公式和 Mermaid 布局都不占用窗口线程。
 actor EmbedRenderer {
     static let shared = EmbedRenderer()
+    private static let maxCachedEntries = 32
+    private var cache: [EmbedRequest.ReuseKey: PreparedEmbed] = [:]
+    private var order: [EmbedRequest.ReuseKey] = []
+    private var vaultVersions: [String: Int] = [:]
+    #if DEBUG
+    private(set) var prepareCallCount = 0
+    private(set) var cacheHitCount = 0
+    #endif
+
+    func clearCache() {
+        cache.removeAll(keepingCapacity: false)
+        order.removeAll(keepingCapacity: false)
+        vaultVersions.removeAll(keepingCapacity: false)
+    }
+
+    #if DEBUG
+    func resetMetrics() {
+        prepareCallCount = 0
+        cacheHitCount = 0
+    }
+    #endif
+
+    private func touch(_ key: EmbedRequest.ReuseKey, value: PreparedEmbed) {
+        cache[key] = value
+        order.removeAll { $0 == key }
+        order.append(key)
+        while order.count > Self.maxCachedEntries {
+            let evicted = order.removeFirst()
+            cache.removeValue(forKey: evicted)
+        }
+    }
+
+    private func invalidateStaleVault(_ vault: String, version: Int) {
+        if let previous = vaultVersions[vault], previous != version {
+            let stale = order.filter { $0.vault == vault && $0.knowledgeVersion != version }
+            for key in stale { cache.removeValue(forKey: key) }
+            order.removeAll { $0.vault == vault && $0.knowledgeVersion != version }
+        }
+        vaultVersions[vault] = version
+    }
+
+    /// 64 位 FNV-1a 内容指纹：避免同路径不同 heading/修订的嵌入在 DiagramService 中发生身份碰撞。
+    static func contentFingerprint(_ text: String) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100000001b3
+        }
+        return String(hash, radix: 16)
+    }
 
     func prepare(_ request: EmbedRequest) async -> PreparedEmbed? {
         guard request.width > 0, !Task.isCancelled else { return nil }
+        #if DEBUG
+        prepareCallCount += 1
+        #endif
+        invalidateStaleVault(request.vault, version: request.knowledgeVersion)
+        let key = request.reuseKey
+        if let cached = cache[key] {
+            order.removeAll { $0 == key }
+            order.append(key)
+            #if DEBUG
+            cacheHitCount += 1
+            #endif
+            return cached
+        }
         do {
             let width = EmbedRequest.contentWidth(request.width)
             let info = try request.handle.resolveEmbed(
@@ -70,30 +155,35 @@ actor EmbedRenderer {
                                                          width: width, displayText: info.text)
             }
             guard !Task.isCancelled else { return nil }
+            let sliceIdentity = "embed:" + (info.resolvedPath ?? "") + "#" + (request.heading ?? "")
+                + ":" + Self.contentFingerprint(info.content)
             var diagrams: [NoteDiagram] = []
             if info.kind == "diagram" {
                 diagrams = [NoteDiagram(ordinal: 1, sourceStart: 0,
                                         range: NSRange(location: 0, length: (info.content as NSString).length),
                                         collapsed: [], tailStart: 0,
-                                        documentIdentity: "embed:" + (info.resolvedPath ?? info.content.hashValue.description),
+                                        documentIdentity: sliceIdentity,
                                         revision: 1)]
             } else if info.kind == "note", !info.diagrams.isEmpty {
                 diagrams = info.diagrams.map { item in
                     NoteDiagram(ordinal: item.ordinal, sourceStart: item.startUtf16,
                                 range: NSRange(location: Int(item.startUtf16), length: Int(item.lengthUtf16)),
                                 collapsed: [], tailStart: 0,
-                                documentIdentity: "embed:" + (info.resolvedPath ?? ""), revision: 1)
+                                documentIdentity: sliceIdentity, revision: 1)
                 }
             }
             if !diagrams.isEmpty {
+                guard !Task.isCancelled else { return nil }
                 diagrams = await request.service.render(source: info.content, mmd: info.isMmd, blocks: diagrams,
                     width: info.isMmd ? EmbedRequest.bodyWidth(request.width) : width, dark: request.dark)
             }
             guard !Task.isCancelled else { return nil }
             let precedingLines = info.kind == "note" ? self.precedingLines(for: info, request: request) : nil
             guard !Task.isCancelled else { return nil }
-            return PreparedEmbed(info: info, media: media, math: math, diagrams: diagrams,
-                                 precedingLines: precedingLines)
+            let prepared = PreparedEmbed(info: info, media: media, math: math, diagrams: diagrams,
+                                         precedingLines: precedingLines)
+            touch(key, value: prepared)
+            return prepared
         } catch {
             return nil
         }
@@ -450,12 +540,14 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
         let info = prepared.info
         let source = info.content as NSString
         let display = NSMutableString(string: info.text)
+        let hasProperties = info.text.hasPrefix("\u{e000}")
         var runs: [SourceStyleRun] = []
         var ordinal: UInt32 = 0
         var shift = 0
         for (index, block) in info.blocks.enumerated() {
             let original = NSRange(location: Int(block.displayStart) + shift, length: Int(block.displayLength))
             var range = original
+            var labelDelta = 0
             if block.diagram {
                 ordinal += 1
                 if var diagram = prepared.diagrams.first(where: { $0.ordinal == ordinal }), diagram.prepared != nil {
@@ -470,13 +562,25 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
                     shift += range.length - original.length
                     fallbackBlocks.insert(index)
                 }
+            } else if hasProperties && block.displayStart == 0 && original.location < display.length {
+                let label = L10n.string("Properties")
+                labelDelta = (label as NSString).length - 1
+                display.replaceCharacters(in: NSRange(location: original.location, length: 1), with: label)
+                range.length += labelDelta
+                shift += labelDelta
             }
             displayRanges.append(range)
             if fallbackBlocks.contains(index) {
                 runs.append(SourceStyleRun(start: UInt64(range.location), length: UInt64(range.length), mask: 32))
             } else {
                 for run in block.runs {
-                    runs.append(SourceStyleRun(start: UInt64(range.location) + run.start, length: run.length, mask: run.mask))
+                    var start = Int(run.start)
+                    var length = Int(run.length)
+                    if labelDelta != 0 {
+                        if start == 0 && run.mask == 16384 { length += labelDelta }
+                        else if start >= 1 { start += labelDelta }
+                    }
+                    runs.append(SourceStyleRun(start: UInt64(range.location + start), length: UInt64(length), mask: run.mask))
                 }
             }
         }
@@ -579,7 +683,14 @@ final class EmbeddedReadingView: NSView, @preconcurrency NSTextLayoutManagerDele
         let nested = EmbedRequest(source: path, target: link.target, heading: link.heading, alias: link.alias,
                                   ancestors: ancestors, depth: request.depth + 1, handle: request.handle,
                                   vault: request.vault, width: textView.layoutContentWidth, size: request.size,
-                                  dark: request.dark, service: request.service, mathService: request.mathService)
+                                  dark: request.dark, service: request.service, mathService: request.mathService,
+                                  knowledgeVersion: request.knowledgeVersion)
+        if let existing = media.existingEmbed(matching: nested.reuseKey) {
+            existing.onOpen = { [weak self] target, heading in self?.onOpenLink?(target, heading) }
+            existing.onOpenLink = { [weak self] target, heading in self?.onOpenLink?(target, heading) }
+            existing.onShowTag = { [weak self] tag in self?.onShowTag?(tag) }
+            return
+        }
         let card = EmbeddedNoteView(nested)
         card.onOpen = { [weak self] target, heading in self?.onOpenLink?(target, heading) }
         card.onOpenLink = { [weak self] target, heading in self?.onOpenLink?(target, heading) }

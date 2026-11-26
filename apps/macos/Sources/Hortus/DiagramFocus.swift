@@ -418,18 +418,14 @@ final class FocusCanvasView: NSView {
     var onReady: (() -> Void)?
     var canExport: Bool { prepared != nil }
 
-    /// 当前画布只含一张图，导出请求直接复用已排好的场景与当前折叠状态。
+    /// 当前画布只含一张图，导出请求直接复用已排好的场景。
     func exportRequest() -> DiagramExportRequest? {
         guard let prepared else { return nil }
-        let source = self.source
-        let mmd = self.mmd
         let ordinal = session.ordinal
-        let width = prepared.scene.width
-        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let collapsed = collapsed.sorted()
         return DiagramExportRequest(prepared: prepared, note: session.note, ordinal: ordinal) {
-            try await DiagramExport.renderSVG(source: source, mmd: mmd, block: ordinal,
-                                              width: width, dark: dark, collapsed: collapsed)
+            try await Task.detached(priority: .userInitiated) {
+                try DiagramExport.renderSVG(prepared: prepared)
+            }.value
         }
     }
 
@@ -763,6 +759,23 @@ final class FocusCanvasView: NSView {
         addCursorRect(bounds, cursor: spaceHeld ? .openHand : .arrow)
         if !minimapHidden { addCursorRect(minimapRect, cursor: .pointingHand) }
         guard let prepared, !spaceHeld else { return }
+        for primitive in prepared.scene.primitives {
+            if case let .labelBackground(id, rect, _) = primitive, prepared.edgeRanges[id] != nil {
+                let r = rect.cgRect
+                addCursorRect(CGRect(x: r.minX * scale + offset.x, y: r.minY * scale + offset.y,
+                                     width: r.width * scale, height: r.height * scale),
+                              cursor: .pointingHand)
+            } else if case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive,
+                      prepared.edgeRanges[id] != nil {
+                for (a, b) in zip(points, points.dropFirst()) {
+                    let minX = min(a.x, b.x) * scale + offset.x - 4
+                    let minY = min(a.y, b.y) * scale + offset.y - 4
+                    let width = abs(b.x - a.x) * scale + 8
+                    let height = abs(b.y - a.y) * scale + 8
+                    addCursorRect(CGRect(x: minX, y: minY, width: width, height: height), cursor: .pointingHand)
+                }
+            }
+        }
         for hit in prepared.scene.hitRegions where hit.canCollapse || hit.linkTarget != nil {
             let rect = hit.rect.cgRect
             addCursorRect(CGRect(x: rect.minX * scale + offset.x, y: rect.minY * scale + offset.y,
@@ -774,7 +787,7 @@ final class FocusCanvasView: NSView {
         guard let prepared else { return nil }
         let point = convert(event.locationInWindow, from: nil)
         let scenePoint = CGPoint(x: (point.x - offset.x) / scale, y: (point.y - offset.y) / scale)
-        guard let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(scenePoint) }),
+        guard let hit = prepared.topHit(at: scenePoint),
               let target = hit.linkTarget else { return nil }
         let menu = NSMenu()
         let item = NSMenuItem(title: DiagramExportStrings.openLinkedNote,
@@ -807,26 +820,36 @@ final class FocusCanvasView: NSView {
         }
         guard let prepared else { return }
         let scenePoint = CGPoint(x: (point.x - offset.x) / scale, y: (point.y - offset.y) / scale)
-        guard let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(scenePoint) }) else { return }
+        let nodeHit = prepared.topHit(at: scenePoint, includeContainer: false)
+        let edgeRange = nodeHit == nil ? prepared.edgeRange(at: scenePoint, tolerance: max(5, 6 / scale)) : nil
+        let containerHit = (nodeHit == nil && edgeRange == nil) ? prepared.topHit(at: scenePoint) : nil
+        let hit = nodeHit ?? containerHit
         if event.modifierFlags.contains(.command) {
+            if let hit, let range = prepared.sourceRanges[hit.nodeId] { onJump?(range) }
+            else if let edgeRange { onJump?(edgeRange) }
+            return
+        }
+        if let hit {
+            if hit.canCollapse {
+                // 可折叠节点单击继续折叠；⌥-点击才打开节点内双链。
+                if event.modifierFlags.contains(.option), let target = hit.linkTarget, let open = onOpenLink {
+                    open(target, hit.linkHeading)
+                } else {
+                    toggleNode(hit.nodeId, anchor: CGPoint(x: hit.rect.cgRect.midX * scale + offset.x,
+                                                           y: hit.rect.cgRect.midY * scale + offset.y))
+                }
+                return
+            }
+            if let target = hit.linkTarget, let open = onOpenLink {
+                open(target, hit.linkHeading)
+                return
+            }
             if let range = prepared.sourceRanges[hit.nodeId] { onJump?(range) }
             return
         }
-        if hit.canCollapse {
-            // 可折叠节点单击继续折叠；⌥-点击才打开节点内双链。
-            if event.modifierFlags.contains(.option), let target = hit.linkTarget, let open = onOpenLink {
-                open(target, hit.linkHeading)
-            } else {
-                toggleNode(hit.nodeId, anchor: CGPoint(x: hit.rect.cgRect.midX * scale + offset.x,
-                                                       y: hit.rect.cgRect.midY * scale + offset.y))
-            }
-            return
+        if let edgeRange {
+            onJump?(edgeRange)
         }
-        if let target = hit.linkTarget, let open = onOpenLink {
-            open(target, hit.linkHeading)
-            return
-        }
-        if let range = prepared.sourceRanges[hit.nodeId] { onJump?(range) }
     }
     private func toggleNode(_ id: String, anchor: CGPoint?) {
         anchorScreen = anchor

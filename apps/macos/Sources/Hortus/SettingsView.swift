@@ -70,7 +70,6 @@ struct SettingsView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!model.canSave)
                 .accessibilityLabel(L10n.string("Save settings"))
-                .accessibilityHint(L10n.string("Writes known values to config.toml and keeps your comments."))
         }
         .padding(12)
     }
@@ -106,9 +105,6 @@ private struct GeneralSettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .accessibilityLabel(L10n.string("Default view"))
-                Text(L10n.string("Notes opened after saving use this view. Open notes keep their current view."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -142,12 +138,6 @@ private struct TerminalSettingsView: View {
                           systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
                 }
-                Text(L10n.string("Nerd Font icon fallback stays available for installed Nerd Fonts."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(L10n.string("Changing the font keeps running shells and Agent sessions alive."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -164,7 +154,63 @@ private struct AgentSettingsView: View {
             Section(L10n.string("Detected Agents")) {
                 detectedAgents
             }
+            Section(L10n.string("Profiles")) {
+                if !model.agentProfiles.isEmpty {
+                    ForEach(model.agentProfiles) { profile in
+                        let isSelected = model.selectedProfileID == profile.id
+                        let isDefault = (model.agentDefaultProfile ?? model.agentProfiles.first?.id) == profile.id
+                        HStack(spacing: 8) {
+                            Button {
+                                model.selectProfile(profile.id)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                                    Text(profile.name)
+                                        .font(.body.weight(isSelected ? .medium : .regular))
+                                    if isDefault {
+                                        Text(L10n.string("Default"))
+                                            .font(.caption2)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                                    }
+                                    Spacer(minLength: 4)
+                                }
+                                .contentShape(.rect)
+                            }
+                            .buttonStyle(.plain)
+
+                            if !isDefault {
+                                Button(L10n.string("Set Default")) {
+                                    model.setDefaultProfile(profile.id)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            Button(role: .destructive) {
+                                model.deleteProfile(profile.id)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel(L10n.string("Delete %@", profile.name))
+                        }
+                    }
+                }
+                Button {
+                    model.addProfile()
+                } label: {
+                    Label(L10n.string("Add Profile"), systemImage: "plus")
+                }
+                .accessibilityLabel(L10n.string("Add Profile"))
+            }
             Section(L10n.string("Agent Launch")) {
+                if model.selectedProfileID != nil {
+                    LabeledContent(L10n.string("Profile Name")) {
+                        TextField("", text: $model.selectedProfileName, prompt: Text("Codex"))
+                            .accessibilityLabel(L10n.string("Profile Name"))
+                    }
+                }
                 LabeledContent(L10n.string("Command")) {
                     HStack(spacing: 8) {
                         TextField("", text: $model.agentCommand, prompt: Text("codex"))
@@ -188,9 +234,6 @@ private struct AgentSettingsView: View {
                         : L10n.string("Arguments must include {guide}"),
                       systemImage: model.guideIncludesPlaceholder ? "checkmark.circle" : "exclamationmark.triangle")
                     .foregroundStyle(model.guideIncludesPlaceholder ? Color.secondary : Color.orange)
-                Text(L10n.string("Each item is one argv element; Hortus does not use a shell to split arguments."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section(L10n.string("Agent Guide")) {
@@ -219,8 +262,14 @@ private struct AgentSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onChange(of: model.agentArgs) { model.scheduleProbe() }
-        .onChange(of: model.agentCommand) { model.scheduleProbe() }
+        .onChange(of: model.agentArgs) {
+            model.syncCurrentProfileFromFields()
+            model.scheduleProbe()
+        }
+        .onChange(of: model.agentCommand) {
+            model.syncCurrentProfileFromFields()
+            model.scheduleProbe()
+        }
         .alert(L10n.string("Restore the built-in guide?"), isPresented: $confirmResetGuide) {
             Button(L10n.string("Restore"), role: .destructive) { Task { await model.resetGuide() } }
             Button(L10n.string("Cancel"), role: .cancel) {}
@@ -262,7 +311,6 @@ private struct AgentSettingsView: View {
                     .accessibilityLabel(model.isAgentSelected(agent)
                                             ? L10n.string("Selected %@", agent.displayName)
                                             : L10n.string("Use %@", agent.displayName))
-                    .accessibilityHint(L10n.string("Fills the command and arguments without saving."))
                 }
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel(agent.displayName)
@@ -360,9 +408,22 @@ private struct ConfigurationSettingsView: View {
                     Button(L10n.string("Reload from Disk")) { Task { await model.load() } }
                         .accessibilityLabel(L10n.string("Reload configuration from disk"))
                 }
-                Text(L10n.string("Hortus updates known values in place and keeps your comments, unknown keys, and [[vault]] overrides."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            }
+            Section(L10n.string("Command Line & MCP")) {
+                LabeledContent(L10n.string("Command Line Tool")) {
+                    cliStatusView
+                }
+                HStack(spacing: 10) {
+                    Button(L10n.string("Link Command Line Tool")) { model.installCLISymlink() }
+                        .accessibilityLabel(L10n.string("Link Command Line Tool"))
+                    Button(L10n.string("Copy MCP Configuration")) { model.copyMCPConfiguration() }
+                        .accessibilityLabel(L10n.string("Copy MCP Configuration"))
+                }
+                if let message = model.cliMessage {
+                    Label(message, systemImage: model.cliMessageIsError ? "exclamationmark.triangle" : "checkmark.circle")
+                        .foregroundStyle(model.cliMessageIsError ? Color.red : Color.secondary)
+                        .lineLimit(2)
+                }
             }
             if !model.diagnostics.isEmpty {
                 Section(L10n.string("Diagnostics")) {
@@ -374,5 +435,24 @@ private struct ConfigurationSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { model.refreshCLIStatus() }
+    }
+
+    @ViewBuilder private var cliStatusView: some View {
+        switch model.cliStatus {
+        case .notInstalled:
+            Text(L10n.string("Not linked")).foregroundStyle(.secondary)
+        case .linked:
+            Label(L10n.string("Linked"), systemImage: "checkmark.circle").foregroundStyle(.green)
+        case let .linkedElsewhere(target):
+            Text(L10n.string("Linked elsewhere: %@", target))
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        case .conflictFile:
+            Label(L10n.string("Existing file blocks ~/.local/bin/hortus"), systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+        }
     }
 }

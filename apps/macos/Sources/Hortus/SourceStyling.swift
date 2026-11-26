@@ -1,20 +1,6 @@
 import AppKit
 import HortusCore
-
-struct SourceStyleRun: Sendable {
-    var start, length: UInt64
-    var mask: UInt32
-}
-struct StyleBatch: Sendable {
-    let revision: UInt64
-    let runs: [SourceStyleRun]
-    let coreMilliseconds, ffiMilliseconds: Double
-    let queuedMilliseconds, decodedAt: Double
-}
-
-extension NSAttributedString.Key {
-    static let sourceStyle = NSAttributedString.Key("HortusSourceStyle")
-}
+import HortusApple
 
 /// 仅为原生显示设置属性。文档会话始终只接收字符变更，保存不序列化属性。
 @MainActor
@@ -113,16 +99,7 @@ final class SourceStyling {
                 let start = ProcessInfo.processInfo.systemUptime
                 let wire = try session.sourceStyles(since: since, force: force)
                 let ffi = (ProcessInfo.processInfo.systemUptime - start) * 1000
-                let runs = wire.packedRuns.withUnsafeBytes { buffer in
-                    var result: [SourceStyleRun] = []
-                    result.reserveCapacity(buffer.count / 20)
-                    for offset in stride(from: 0, to: buffer.count, by: 20) {
-                        result.append(SourceStyleRun(start: UInt64(littleEndian: buffer.loadUnaligned(fromByteOffset: offset, as: UInt64.self)),
-                            length: UInt64(littleEndian: buffer.loadUnaligned(fromByteOffset: offset + 8, as: UInt64.self)),
-                            mask: UInt32(littleEndian: buffer.loadUnaligned(fromByteOffset: offset + 16, as: UInt32.self))))
-                    }
-                    return result
-                }
+                let runs = StyleBatch.decodeRuns(wire.packedRuns)
                 return StyleBatch(revision: wire.revision, runs: runs, coreMilliseconds: Double(wire.analysisMicros) / 1000, ffiMilliseconds: ffi,
                     queuedMilliseconds: (start - queuedAt) * 1000, decodedAt: ProcessInfo.processInfo.systemUptime)
             }
@@ -232,30 +209,7 @@ final class SourceStyling {
     }
     func style(_ mask: UInt32) -> [NSAttributedString.Key: Any] {
         if let cached = attributes[mask] { return cached }
-        let heading = Int(mask >> 24)
-        let code = mask & 48 != 0
-        let size = fontSize * ([1: 1.6, 2: 1.35, 3: 1.15][heading] ?? 1)
-        var font = code ? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-            : NSFont.systemFont(ofSize: size, weight: heading > 0 || mask & 2 != 0 ? .bold : .regular)
-        if mask & 4 != 0 { font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) }
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 4
-        paragraph.paragraphSpacing = heading > 0 ? 6 : 0
-        paragraph.paragraphSpacingBefore = heading > 0 ? 10 : 0
-        var color = NSColor.textColor
-        if mask & (128 | 256 | 512 | 8192) != 0 { color = .controlAccentColor }
-        if mask & (64 | 2048 | 16384) != 0 { color = .secondaryLabelColor }
-        if mask & 512 != 0 { color = .secondaryLabelColor }
-        if mask & (1 << 18) != 0 { color = .linkColor }
-        if mask & (1 << 19) != 0 { color = .secondaryLabelColor }
-        if mask & 1 != 0 { color = contrast ? .secondaryLabelColor : .tertiaryLabelColor }
-        var result: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color,
-            .paragraphStyle: paragraph, .sourceStyle: mask]
-        if mask & 4 != 0 && !font.fontDescriptor.symbolicTraits.contains(.italic) { result[.obliqueness] = 0.12 }
-        if mask & 8 != 0 { result[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
-        if mask & 16 != 0 { result[.backgroundColor] = NSColor.quaternaryLabelColor.withAlphaComponent(0.10) }
-        if mask & 512 != 0 { result[.backgroundColor] = NSColor.controlAccentColor.withAlphaComponent(0.08) }
-        if mask & 1024 != 0 { result[.backgroundColor] = NSColor.systemYellow.withAlphaComponent(0.19) }
+        let result = SourceStylePalette.attributes(for: mask, fontSize: fontSize, contrast: contrast)
         attributes[mask] = result
         return result
     }

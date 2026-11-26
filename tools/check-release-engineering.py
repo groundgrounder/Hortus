@@ -34,6 +34,13 @@ def main():
                                 text=True, capture_output=True, cwd=ROOT, check=False)
         assert result.returncode == expected, (arguments, result.stdout, result.stderr)
         checks.append({'arguments': arguments, 'exit_code': result.returncode})
+    cli_package = ROOT / 'tools/package-cli.sh'
+    cli_cases = [([], 0), (['--output', 'bad.zip'], 2), (['--unknown'], 2)]
+    for arguments, expected in cli_cases:
+        result = subprocess.run([str(cli_package), *arguments, '--validate-only'],
+                                text=True, capture_output=True, cwd=ROOT, check=False)
+        assert result.returncode == expected, (arguments, result.stdout, result.stderr)
+        checks.append({'script': 'package-cli.sh', 'arguments': arguments, 'exit_code': result.returncode})
     vault = ROOT / 'fixtures/demo-vault'
     notes = sorted(vault.rglob('*.md'))
     names = {note.stem for note in notes}

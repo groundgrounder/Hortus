@@ -88,23 +88,19 @@ pub struct DiagramEngine {
 impl DiagramEngine {
     #[uniffi::constructor]
     pub fn new() -> Result<Arc<Self>, DiagramFailure> {
-        let mut fonts = SystemFonts::new().map_err(|_| DiagramFailure::Engine {
+        let fonts = SystemFonts::new().map_err(|_| DiagramFailure::Engine {
             kind: "font".into(),
         })?;
-        // 覆盖首张图要用的字体和字重，文件读取与整形均在后台预热。
-        for weight in [400, 500, 600, 650] {
-            fonts.measure("Hortus 笔记阅读 +0123456789", 15.0, weight);
-        }
-        Ok(Arc::new(Self {
-            state: Mutex::new(EngineState {
-                fonts,
-                source: String::new(),
-                mmd: false,
-                diagrams: Vec::new(),
-                document: String::new(),
-                revision: 0,
-            }),
-        }))
+        Ok(Self::from_fonts(fonts))
+    }
+
+    #[uniffi::constructor]
+    pub fn with_font_paths(paths: Vec<String>) -> Result<Arc<Self>, DiagramFailure> {
+        let paths: Vec<std::path::PathBuf> = paths.into_iter().map(Into::into).collect();
+        let fonts = SystemFonts::from_paths(&paths).map_err(|_| DiagramFailure::Engine {
+            kind: "font".into(),
+        })?;
+        Ok(Self::from_fonts(fonts))
     }
 
     pub fn render(
@@ -187,6 +183,23 @@ impl DiagramEngine {
 }
 
 impl DiagramEngine {
+    fn from_fonts(mut fonts: SystemFonts) -> Arc<Self> {
+        // 覆盖首张图要用的字体和字重，文件读取与整形均在后台预热。
+        for weight in [400, 500, 600, 650] {
+            fonts.measure("Hortus 笔记阅读 +0123456789", 15.0, weight);
+        }
+        Arc::new(Self {
+            state: Mutex::new(EngineState {
+                fonts,
+                source: String::new(),
+                mmd: false,
+                diagrams: Vec::new(),
+                document: String::new(),
+                revision: 0,
+            }),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_request_impl(
         &self,
@@ -614,6 +627,40 @@ mod tests {
             .any(|primitive| primitive["kind"] == "graph_path"
                 && primitive["line"] == "dotted"));
     }
+
+    #[test]
+    fn with_font_paths_handles_invalid_and_valid_font_files() {
+        assert!(matches!(
+            DiagramEngine::with_font_paths(vec![]),
+            Err(DiagramFailure::Engine { ref kind }) if kind == "font"
+        ));
+        assert!(matches!(
+            DiagramEngine::with_font_paths(vec!["/nonexistent/hortus-missing-font.ttf".into()]),
+            Err(DiagramFailure::Engine { ref kind }) if kind == "font"
+        ));
+
+        let katex_font = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/macos/Resources/Fonts/KaTeX/KaTeX_Main-Regular.ttf");
+        let engine = DiagramEngine::with_font_paths(vec![
+            "/nonexistent/hortus-ignored-font.ttf".into(),
+            katex_font.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let scene = engine
+            .render(
+                "flowchart TB\nA[Start] --> B[End]".into(),
+                true,
+                1,
+                700.0,
+                false,
+                vec![],
+            )
+            .unwrap();
+        assert!(scene.width > 0.0);
+        assert!(scene.height > 0.0);
+        assert!(!scene.primitives.is_empty());
+        assert_eq!(scene.hit_regions.len(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -750,6 +797,81 @@ mod graph_wire_tests {
                 assert_eq!(scene.schema_version, 2);
                 assert!(scene.graph_metrics.is_some());
             }
+        }
+    }
+
+    #[test]
+    fn scene_svg_matches_scene_to_svg_byte_for_byte_across_all_six_diagram_types() {
+        let engine = DiagramEngine::new().unwrap();
+        let cases: &[(&str, &str, bool, Vec<String>)] = &[
+            (
+                "mindmap",
+                "mindmap\n  Root\n    Branch A\n      Leaf 1\n    Branch B\n      Leaf 2\n",
+                false,
+                vec!["Branch A".into()],
+            ),
+            (
+                "flowchart",
+                "flowchart TB\nsubgraph Group\nA[Start] --> B{Check}\nB -->|yes| C([Done])\nend\n",
+                true,
+                vec![],
+            ),
+            (
+                "sequence",
+                "sequenceDiagram\nAlice->>Bob: Hello\nBob-->>Alice: Hi\n",
+                false,
+                vec![],
+            ),
+            (
+                "state",
+                "stateDiagram-v2\n[*] --> Idle\nIdle --> Active : start\nActive --> [*]\n",
+                true,
+                vec![],
+            ),
+            (
+                "class",
+                "classDiagram\nclass Order {\n  +id: UUID\n}\nOrder \"1\" *-- \"1..*\" LineItem : contains\n",
+                false,
+                vec![],
+            ),
+            (
+                "er",
+                "erDiagram\nUSER ||--o{ ORDER : places\n",
+                true,
+                vec![],
+            ),
+        ];
+        for (name, source, dark, collapsed) in cases {
+            let identity = crate::DiagramIdentity {
+                document: format!("svg-parity-{name}"),
+                block: 1,
+                revision: 1,
+                dark: *dark,
+                ..Default::default()
+            };
+            let data = engine
+                .render_request(
+                    (*source).into(),
+                    true,
+                    700.0,
+                    collapsed.clone(),
+                    identity,
+                    None,
+                    vec![],
+                )
+                .unwrap();
+            let from_scene = crate::scene_svg(data).unwrap();
+            let direct = engine
+                .render_svg((*source).into(), true, 1, 700.0, *dark, collapsed.clone())
+                .unwrap();
+            assert!(
+                from_scene.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""),
+                "{name}: invalid svg header"
+            );
+            assert_eq!(
+                from_scene, direct,
+                "{name}: scene_svg must match Scene::to_svg() byte-for-byte"
+            );
         }
     }
 }

@@ -43,6 +43,8 @@ final class ApplicationWorkspace {
     var fontSize = 15.0
     var terminalFont: String?
     var defaultView = "reading"
+    var agentProfiles: [AgentProfileInfo] = []
+    var agentDefaultProfile: String?
     var defaultVisible: [String: Bool] = ["left": true, "right": true, "bottom": false]
     var latestSize: [Region: CGFloat] = [.left: 260, .right: 250, .bottom: 230]
     @ObservationIgnored var core: WorkspaceCore?
@@ -85,9 +87,13 @@ final class ApplicationWorkspace {
             // 上次退出时仍是运行中的会话不能假装进程还受管理。
             recoveredSessions = Int((try? await Task.detached { try service.recoverAgentSessions() }.value) ?? 0)
             let values = try await Task.detached {
-                (try service.layoutJson(), try service.sessionJson(), try service.fontSize(), try service.defaultView(), try service.terminalFont())
+                (try service.layoutJson(), try service.sessionJson(), try service.fontSize(), try service.defaultView(), try service.terminalFont(), try? service.editableConfig())
             }.value
             fontSize = values.2; defaultView = values.3; terminalFont = values.4
+            if let editable = values.5 {
+                agentProfiles = editable.agentProfiles
+                agentDefaultProfile = editable.agentDefaultProfile
+            }
             let session = try JSONDecoder().decode(SessionState.self, from: Data(values.1.utf8))
             recent = session.recent
             if let json = values.0 {
@@ -276,6 +282,11 @@ final class ApplicationWorkspace {
         for record in records where !record.closing {
             record.workspace.applySettings(fontSize: fontSize, defaultView: defaultView, terminalFont: terminalFont)
         }
+    }
+
+    func applyAgentProfiles(_ profiles: [AgentProfileInfo], defaultProfile: String?) {
+        self.agentProfiles = profiles
+        self.agentDefaultProfile = defaultProfile
     }
 
     func becameActive(_ record: WindowRecord) {

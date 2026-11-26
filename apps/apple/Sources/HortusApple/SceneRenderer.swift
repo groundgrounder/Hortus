@@ -1,40 +1,43 @@
-import AppKit
+import CoreGraphics
 import CoreText
+import Foundation
 import HortusCore
 
-typealias DiagramText = SceneText
+public typealias DiagramText = SceneText
 
-extension ScenePoint {
+public extension ScenePoint {
     var cgPoint: CGPoint { CGPoint(x: x, y: y) }
 }
-extension SceneRect {
+public extension SceneRect {
     var cgRect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 }
-extension SceneColor {
+public extension SceneColor {
     var cgColor: CGColor { CGColor(srgbRed: r, green: g, blue: b, alpha: a) }
 }
-extension SceneHit {
+public extension SceneHit {
     var accessibilityLabel: String {
         [prefix, label.replacingOccurrences(of: "<br\\s*/?>", with: "，", options: [.regularExpression, .caseInsensitive])]
             .compactMap { $0 }.joined(separator: "，")
     }
 }
-typealias DiagramHit = SceneHit
+public typealias DiagramHit = SceneHit
 
-enum DiagramSceneFailure: Error {
+public enum DiagramSceneFailure: Error {
     case schema(UInt32)
     case sourceRange
     case staleRequest
 }
 
-struct DiagramScene: Sendable {
-    let identity: DiagramIdentity
-    let graphMetrics: DiagramGraphMetrics?
-    let width, height: Double
-    let primitives: [ScenePrimitive]
-    let hitRegions: [SceneHit]
-    init(_ scene: SceneData) throws {
+public struct DiagramScene: Sendable {
+    public let sceneData: SceneData
+    public let identity: DiagramIdentity
+    public let graphMetrics: DiagramGraphMetrics?
+    public let width, height: Double
+    public let primitives: [ScenePrimitive]
+    public let hitRegions: [SceneHit]
+    public init(_ scene: SceneData) throws {
         guard scene.schemaVersion == 2 else { throw DiagramSceneFailure.schema(scene.schemaVersion) }
+        sceneData = scene
         identity = scene.identity; graphMetrics = scene.graphMetrics
         width = scene.width; height = scene.height
         primitives = scene.primitives; hitRegions = scene.hitRegions
@@ -42,41 +45,46 @@ struct DiagramScene: Sendable {
 }
 
 /// 缓存键不含排版坐标；同一段文字改变位置后继续复用不可变 CTLine。
-struct DiagramLineKey: Hashable {
-    let text, family: String
-    let size: Double
-    let weight: UInt16
-    let color: SceneColor
-    init(_ span: SceneText) {
+public struct DiagramLineKey: Hashable {
+    public let text, family: String
+    public let size: Double
+    public let weight: UInt16
+    public let color: SceneColor
+    public init(_ span: SceneText) {
         text = span.text; family = span.fontFamily; size = span.fontSize; weight = span.fontWeight; color = span.color
     }
 }
 
-struct DiagramDrawing {
-    let bounds: CGRect
-    let paths: [CGPath]
+public struct DiagramDrawing {
+    public let bounds: CGRect
+    public let paths: [CGPath]
 }
 
 /// 光标定位高亮：淡底与细边框都在图元之前绘制，文字始终保持原色。
-extension SceneRenderer {
+public extension SceneRenderer {
     struct Highlight {
-        let rect: CGRect
-        let color: CGColor
-        let border: CGColor
+        public let rect: CGRect
+        public let color: CGColor
+        public let border: CGColor
+        public init(rect: CGRect, color: CGColor, border: CGColor) {
+            self.rect = rect
+            self.color = color
+            self.border = border
+        }
     }
 }
 
 /// CoreText 对象不可变，可在后台准备，主线程只提交绘制指令。
-final class PreparedScene: @unchecked Sendable {
-    let scene: DiagramScene
-    let lines: [(DiagramText, CTLine)]
-    let drawings: [DiagramDrawing?]
-    let payloadBytes: Int
-    let sourceRanges: [String: NSRange]
-    let edgeRanges: [UInt64: NSRange]
-    let edgeLabels: [UInt64: String]
-    let acceptsInteraction: Bool
-    init(scene: DiagramScene, payloadBytes: Int = 0, sourceRanges: [String: NSRange] = [:], edgeRanges: [UInt64: NSRange] = [:], edgeLabels: [UInt64: String] = [:], lineProvider: (SceneText) -> CTLine = SceneRenderer.line) {
+public final class PreparedScene: @unchecked Sendable {
+    public let scene: DiagramScene
+    public let lines: [(DiagramText, CTLine)]
+    public let drawings: [DiagramDrawing?]
+    public let payloadBytes: Int
+    public let sourceRanges: [String: NSRange]
+    public let edgeRanges: [UInt64: NSRange]
+    public let edgeLabels: [UInt64: String]
+    public let acceptsInteraction: Bool
+    public init(scene: DiagramScene, payloadBytes: Int = 0, sourceRanges: [String: NSRange] = [:], edgeRanges: [UInt64: NSRange] = [:], edgeLabels: [UInt64: String] = [:], lineProvider: (SceneText) -> CTLine = SceneRenderer.line) {
         self.scene = scene
         self.payloadBytes = payloadBytes
         self.sourceRanges = sourceRanges; self.edgeRanges = edgeRanges; self.edgeLabels = edgeLabels
@@ -92,12 +100,46 @@ final class PreparedScene: @unchecked Sendable {
         sourceRanges = [:]; edgeRanges = [:]; edgeLabels = previous.edgeLabels
         acceptsInteraction = false
     }
-    func withoutSourceInteraction() -> PreparedScene { PreparedScene(previous: self) }
+    public func withoutSourceInteraction() -> PreparedScene { PreparedScene(previous: self) }
+
+    /// 优先返回命中点的非容器节点区域，仅在无具体子元素命中时才考虑容器。
+    public func topHit(at point: CGPoint, includeContainer: Bool = true) -> SceneHit? {
+        let containerRects = scene.primitives.compactMap { primitive -> CGRect? in
+            guard case let .graphShape(rect, shape, _, _, _, _, _) = primitive, shape == "Container" else { return nil }
+            return rect.cgRect
+        }
+        var containerMatch: SceneHit?
+        for hit in scene.hitRegions where hit.rect.cgRect.contains(point) {
+            if !containerRects.contains(hit.rect.cgRect) { return hit }
+            if containerMatch == nil { containerMatch = hit }
+        }
+        return includeContainer ? containerMatch : nil
+    }
+
+    /// 命中连线标签或折线段（含点击容差），返回对应边的源码范围。
+    public func edgeRange(at point: CGPoint, tolerance: CGFloat = 5) -> NSRange? {
+        for primitive in scene.primitives.reversed() {
+            if case let .labelBackground(id, rect, _) = primitive, rect.cgRect.contains(point) {
+                return edgeRanges[id]
+            }
+            if case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive {
+                for (a, b) in zip(points, points.dropFirst()) {
+                    let dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy
+                    guard length > 0 else { continue }
+                    let t = min(1, max(0, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length))
+                    if hypot(point.x - a.x - t * dx, point.y - a.y - t * dy) <= tolerance {
+                        return edgeRanges[id]
+                    }
+                }
+            }
+        }
+        return nil
+    }
 }
 
 /// 不访问视图、文件或全局状态；所有坐标来自内核，原点为左上角。
-enum SceneRenderer {
-    static func font(for span: DiagramText) -> CTFont {
+public enum SceneRenderer {
+    public static func font(for span: DiagramText) -> CTFont {
         let font: CTFont
         if span.fontFamily == "System Font" || span.fontFamily == ".AppleSystemUIFont" {
             font = CTFontCreateUIFontForLanguage(.system, span.fontSize, nil)!
@@ -119,7 +161,7 @@ enum SceneRenderer {
         return CTFontCreateCopyWithAttributes(font, span.fontSize, nil, descriptor)
     }
 
-    static func line(for span: DiagramText) -> CTLine {
+    public static func line(for span: DiagramText) -> CTLine {
         let font = font(for: span)
         var attributes: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
@@ -197,7 +239,7 @@ enum SceneRenderer {
     }
 
     /// CGPath 与裁剪包络在后台准备；窗口绘制只提交不可变几何。
-    static func prepare(_ primitive: ScenePrimitive) -> DiagramDrawing? {
+    public static func prepare(_ primitive: ScenePrimitive) -> DiagramDrawing? {
         switch primitive {
         case let .roundedRect(rect, radius, _):
             return DiagramDrawing(bounds: rect.cgRect, paths: [CGPath(roundedRect: rect.cgRect, cornerWidth: radius, cornerHeight: radius, transform: nil)])
@@ -223,8 +265,8 @@ enum SceneRenderer {
         }
     }
 
-    static func draw(_ prepared: PreparedScene, in context: CGContext, highlight: Highlight? = nil,
-                     matches: [Highlight] = [], currentMatch: Highlight? = nil, includeText: Bool = true) {
+    public static func draw(_ prepared: PreparedScene, in context: CGContext, highlight: Highlight? = nil,
+                            matches: [Highlight] = [], currentMatch: Highlight? = nil, includeText: Bool = true) {
         context.saveGState()
         let clip = context.boundingBoxOfClipPath
         for (index, primitive) in prepared.scene.primitives.enumerated() {

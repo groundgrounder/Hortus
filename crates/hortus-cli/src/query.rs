@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 pub struct NoteFile {
     pub text: String,
@@ -16,6 +17,114 @@ pub struct NoteFile {
 pub struct Vault {
     pub root: PathBuf,
     pub notes: BTreeMap<String, NoteFile>,
+}
+
+type FileStamp = (u64, Option<SystemTime>);
+
+/// 轻量只读内存缓存：跨 MCP 请求复用已解码笔记与知识/搜索索引，
+/// 每次调用仅检查目录元数据 `(len, modified)`，外部增删改立即可见且零写盘。
+pub struct CachedVault {
+    vault: Vault,
+    meta: BTreeMap<String, FileStamp>,
+    knowledge: KnowledgeIndex,
+    search: SearchIndex,
+    loaded: bool,
+    load_count: u64,
+    cache_hits: u64,
+    reread_files: u64,
+}
+
+impl CachedVault {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            vault: Vault {
+                root,
+                notes: BTreeMap::new(),
+            },
+            meta: BTreeMap::new(),
+            knowledge: KnowledgeIndex::new(),
+            search: SearchIndex::new(),
+            loaded: false,
+            load_count: 0,
+            cache_hits: 0,
+            reread_files: 0,
+        }
+    }
+
+    pub fn refresh(&mut self) -> Result<(), String> {
+        let mut current = BTreeMap::new();
+        scan_metadata(&self.vault.root, &self.vault.root, true, &mut current)?;
+        if self.loaded && current == self.meta {
+            self.cache_hits += 1;
+            return Ok(());
+        }
+        let removed: Vec<String> = self
+            .meta
+            .keys()
+            .filter(|path| !current.contains_key(*path))
+            .cloned()
+            .collect();
+        for path in removed {
+            self.vault.notes.remove(&path);
+            self.knowledge.remove(&path);
+            self.search.remove(&path);
+        }
+        let mut next_meta = BTreeMap::new();
+        for (relative, stamp) in current {
+            let unchanged = self.loaded && self.meta.get(&relative) == Some(&stamp);
+            if unchanged {
+                next_meta.insert(relative, stamp);
+                continue;
+            }
+            let full_path = self.vault.root.join(&relative);
+            let Ok(bytes) = std::fs::read(&full_path) else {
+                self.vault.notes.remove(&relative);
+                self.knowledge.remove(&relative);
+                self.search.remove(&relative);
+                continue;
+            };
+            let (_format, text, _valid) = Format::decode(&bytes);
+            let mmd = hortus_links::is_mmd_path(&relative);
+            self.knowledge.upsert(relative.clone(), text.clone());
+            self.search.upsert(relative.clone(), text.clone());
+            self.vault
+                .notes
+                .insert(relative.clone(), NoteFile { text, mmd });
+            next_meta.insert(relative, stamp);
+            self.reread_files += 1;
+        }
+        self.meta = next_meta;
+        self.loaded = true;
+        self.load_count += 1;
+        Ok(())
+    }
+
+    pub fn vault(&self) -> &Vault {
+        &self.vault
+    }
+
+    pub fn knowledge(&self) -> &KnowledgeIndex {
+        &self.knowledge
+    }
+
+    pub fn search(&self) -> &SearchIndex {
+        &self.search
+    }
+
+    #[cfg(test)]
+    pub fn load_count(&self) -> u64 {
+        self.load_count
+    }
+
+    #[cfg(test)]
+    pub fn cache_hits(&self) -> u64 {
+        self.cache_hits
+    }
+
+    #[cfg(test)]
+    pub fn reread_files(&self) -> u64 {
+        self.reread_files
+    }
 }
 
 impl Vault {
@@ -184,6 +293,59 @@ fn scan(
     Ok(())
 }
 
+fn scan_metadata(
+    root: &Path,
+    directory: &Path,
+    is_root: bool,
+    meta: &mut BTreeMap<String, FileStamp>,
+) -> Result<(), String> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if is_root => return Err(format!("unable to read vault: {error}")),
+        Err(_) => return Ok(()),
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if name == "node_modules" {
+                continue;
+            }
+            scan_metadata(root, &entry.path(), false, meta)?;
+            continue;
+        }
+        if !file_type.is_file() || !has_note_extension(name) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        meta.insert(relative, (metadata.len(), metadata.modified().ok()));
+    }
+    Ok(())
+}
+
 fn has_note_extension(name: &str) -> bool {
     let Some((_, extension)) = name.rsplit_once('.') else {
         return false;
@@ -256,6 +418,15 @@ pub fn search_value(vault: &Vault, query: &str, limit: usize) -> Value {
     for (path, note) in &vault.notes {
         index.upsert(path.clone(), note.text.clone());
     }
+    search_value_with_index(vault, &index, query, limit)
+}
+
+pub fn search_value_with_index(
+    vault: &Vault,
+    index: &SearchIndex,
+    query: &str,
+    limit: usize,
+) -> Value {
     let total_notes = index.len();
     let results = index
         .search(query, 50)
@@ -289,8 +460,16 @@ pub fn backlinks(explicit: Option<&Path>, note: &str) -> Result<(), String> {
 }
 
 pub fn backlinks_value(vault: &Vault, note: &str) -> Result<Value, String> {
-    let note = vault.resolve_note(note)?;
     let index = knowledge(vault);
+    backlinks_value_with_index(vault, &index, note)
+}
+
+pub fn backlinks_value_with_index(
+    vault: &Vault,
+    index: &KnowledgeIndex,
+    note: &str,
+) -> Result<Value, String> {
+    let note = vault.resolve_note(note)?;
     let backlinks = index
         .backlinks(&note)
         .ok_or_else(|| format!("note not found: {note}"))?;
@@ -323,8 +502,16 @@ pub fn links(explicit: Option<&Path>, note: &str) -> Result<(), String> {
 }
 
 pub fn links_value(vault: &Vault, note: &str) -> Result<Value, String> {
-    let note = vault.resolve_note(note)?;
     let index = knowledge(vault);
+    links_value_with_index(vault, &index, note)
+}
+
+pub fn links_value_with_index(
+    vault: &Vault,
+    index: &KnowledgeIndex,
+    note: &str,
+) -> Result<Value, String> {
+    let note = vault.resolve_note(note)?;
     let links = index
         .links(&note)
         .ok_or_else(|| format!("note not found: {note}"))?;
@@ -359,6 +546,10 @@ pub fn tags(explicit: Option<&Path>, tag: Option<&str>) -> Result<(), String> {
 
 pub fn tags_value(vault: &Vault, tag: Option<&str>) -> Value {
     let index = knowledge(vault);
+    tags_value_with_index(vault, &index, tag)
+}
+
+pub fn tags_value_with_index(vault: &Vault, index: &KnowledgeIndex, tag: Option<&str>) -> Value {
     if let Some(tag) = tag {
         let notes = index.notes_with_tag(tag);
         return json!({
@@ -447,6 +638,10 @@ pub fn orphans(explicit: Option<&Path>) -> Result<(), String> {
 
 pub fn orphans_value(vault: &Vault) -> Value {
     let index = knowledge(vault);
+    orphans_value_with_index(vault, &index)
+}
+
+pub fn orphans_value_with_index(vault: &Vault, index: &KnowledgeIndex) -> Value {
     let orphans = index.orphans();
     json!({
         "vault": vault_path(vault),
@@ -462,6 +657,10 @@ pub fn broken_links(explicit: Option<&Path>) -> Result<(), String> {
 
 pub fn broken_links_value(vault: &Vault) -> Value {
     let index = knowledge(vault);
+    broken_links_value_with_index(vault, &index)
+}
+
+pub fn broken_links_value_with_index(vault: &Vault, index: &KnowledgeIndex) -> Value {
     let broken = index.broken_links();
     let items = broken
         .into_iter()

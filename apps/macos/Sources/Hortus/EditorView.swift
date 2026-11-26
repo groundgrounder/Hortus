@@ -185,9 +185,9 @@ private struct EmptyWorkspace: View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Hortus").font(.largeTitle.weight(.semibold))
-                Text("Open a knowledge base to start reading.").foregroundStyle(.secondary)
+                Text("Open a folder to start reading.").foregroundStyle(.secondary)
             }
-            Button("Open Knowledge Base…") { workspace.chooseFolder() }
+            Button("Open Folder…") { workspace.chooseFolder() }
                 .buttonStyle(.borderedProminent).controlSize(.large)
                 .disabled(workspace.opening)
             if !workspace.recent.isEmpty {

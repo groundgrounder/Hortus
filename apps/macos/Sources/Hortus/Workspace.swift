@@ -77,6 +77,11 @@ final class Workspace {
     var tabs: [NoteTab] = []
     var selected: String?
     var recent: [VaultState] { application?.recent ?? [] }
+    var agentProfiles: [AgentProfileInfo] { application?.agentProfiles ?? [] }
+    var agentDefaultProfile: String? { application?.agentDefaultProfile }
+    var customAgentSheetPresented = false
+    var customAgentTargetGroupID: UUID?
+    var customAgentHistory: [String] = []
     var scanning: Bool { context?.scanning ?? false }
     var opening = false
     var error: String?
@@ -209,13 +214,57 @@ final class Workspace {
     }
 
     @discardableResult
-    func addAgent(to groupID: UUID? = nil) -> TerminalTab? {
-        guard root != nil, let layout, let tab = terminals.createAgent() else { return nil }
+    func addAgent(to groupID: UUID? = nil, launchMode: AgentLaunchMode = .defaultProfile) -> TerminalTab? {
+        guard root != nil, let layout, let tab = terminals.createAgent(launchMode: launchMode) else { return nil }
         layout.add(.terminal(tab.id), to: groupID ?? layout.defaultTerminalGroupID)
         layout.reveal(.terminal(tab.id))
         terminals.start(tab)
         terminals.focusSoon()
         return tab
+    }
+
+    func presentCustomAgentSheet(for groupID: UUID? = nil) {
+        guard root != nil else { return }
+        customAgentTargetGroupID = groupID ?? layout?.defaultTerminalGroupID
+        customAgentSheetPresented = true
+        guard let core else { return }
+        Task { [weak self] in
+            let history = (try? await Task.detached { try core.customAgentHistory() }.value) ?? []
+            self?.customAgentHistory = history
+        }
+    }
+
+    @discardableResult
+    func launchCustomAgent(_ command: String) -> TerminalTab? {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let targetGroup = customAgentTargetGroupID
+        customAgentSheetPresented = false
+        customAgentTargetGroupID = nil
+        return addAgent(to: targetGroup, launchMode: .customCommand(trimmed))
+    }
+
+    func installCLISymlinkFromMenu() {
+        do {
+            let destination = try CLIHelper.installSymlink()
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = L10n.string("Command Line Tool Linked")
+            alert.informativeText = destination.path
+            alert.addButton(withTitle: L10n.string("OK"))
+            alert.runModal()
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = L10n.string("Unable to Link Command Line Tool")
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: L10n.string("OK"))
+            alert.runModal()
+        }
+    }
+
+    func copyMCPConfigurationFromMenu() {
+        _ = CLIHelper.copyMCPConfiguration(vaultPath: root)
     }
 
     func addStaticTool(_ tool: StaticTool, to groupID: UUID?) {
@@ -340,6 +389,22 @@ final class Workspace {
         for path in refresh {
             if let document = tabs.first(where: { $0.path == path })?.document { document.refresh() }
             else { load(path) }
+        }
+        // 外部向库中新增图片等附件时，刷新已开笔记里的缺失图片占位符并清理失败缓存。
+        let hasMissingMedia = tabs.contains { tab in
+            tab.document?.mountedTextView?.mediaViews.contains(where: { $0.prepared.reason == "image.missing" }) == true
+        }
+        if hasMissingMedia {
+            Task { @MainActor [weak self] in
+                await LocalImageCache.shared.invalidateFailed()
+                guard let self else { return }
+                for tab in self.tabs {
+                    guard let view = tab.document?.mountedTextView,
+                          view.mediaViews.contains(where: { $0.prepared.reason == "image.missing" }) else { continue }
+                    if view.isReading { view.readingCoordinator?.refresh(force: true) }
+                    else { view.editingCoordinator?.schedule(force: true) }
+                }
+            }
         }
     }
 
@@ -621,6 +686,7 @@ final class Workspace {
         let owner = application?.owner(of: path, from: self)?.workspace ?? self
         guard let document = owner.tabs.first(where: { $0.path == path })?.document,
               document.outlineRevision == document.revision else { return }
+        document.activeHeadingStart = Int(heading.start)
         openSearchResult(path: path, start: Int(heading.start), length: 0)
     }
 

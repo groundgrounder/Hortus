@@ -204,7 +204,7 @@ private struct HortusCommands: Commands {
         }
         CommandGroup(after: .textEditing) {
             Button("Align Table Source") { NSApp.sendAction(#selector(DiagramTextView.alignTableSource(_:)), to: nil, from: nil) }
-                .keyboardShortcut("t", modifiers: [.option, .command])
+                .keyboardShortcut("t", modifiers: [.shift, .option, .command])
                 .disabled(workspace.current?.document?.reading != false)
             Button("Find…") { EditorFind.perform(.showFindInterface) }.keyboardShortcut("f", modifiers: .command)
             Button("Find Next") { EditorFind.perform(.nextMatch) }.keyboardShortcut("g", modifiers: .command)
@@ -243,6 +243,24 @@ private struct HortusCommands: Commands {
             Button(L10n.string("New Agent")) { workspace.addAgent(to: layout.defaultTerminalGroupID) }
                 .keyboardShortcut("t", modifiers: [.command, .option])
                 .disabled(workspace.root == nil)
+            if application.agentProfiles.count > 1 {
+                Menu(L10n.string("New Agent Profile")) {
+                    ForEach(application.agentProfiles, id: \.id) { profile in
+                        Button(profile.name) {
+                            workspace.addAgent(to: layout.defaultTerminalGroupID,
+                                               launchMode: .profile(id: profile.id, name: profile.name))
+                        }
+                    }
+                }
+                .disabled(workspace.root == nil)
+            }
+            Button(L10n.string("Custom Agent Command…")) {
+                workspace.presentCustomAgentSheet(for: layout.defaultTerminalGroupID)
+            }
+            .disabled(workspace.root == nil)
+            Divider()
+            Button(L10n.string("Link Command Line Tool")) { workspace.installCLISymlinkFromMenu() }
+            Button(L10n.string("Copy MCP Configuration")) { workspace.copyMCPConfigurationFromMenu() }
         }
         CommandMenu("Panels") {
             Toggle("Left Sidebar", isOn: shown(.left)).keyboardShortcut("s", modifiers: [.control, .command])
@@ -353,7 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ]
         let repository = "https://github.com/groundgrounder/Hortus"
         let credits = NSMutableAttributedString(
-            string: "\(L10n.string("A native Markdown knowledge base for people and agents."))\n\n\(L10n.string("GPL-3.0-only application; MIT OR Apache-2.0 core."))\n",
+            string: "\(L10n.string("GPL-3.0-only application; MIT OR Apache-2.0 core."))\n",
             attributes: attributes)
         var link = attributes
         link[.link] = URL(string: repository)

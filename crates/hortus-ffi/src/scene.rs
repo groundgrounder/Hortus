@@ -230,6 +230,7 @@ pub struct SceneData {
     pub wire_bytes: u64,
     pub layout_ms: f64,
     pub semantic_json: Option<String>,
+    pub diagram_kind: String,
 }
 impl From<Point> for ScenePoint {
     fn from(p: Point) -> Self {
@@ -429,6 +430,7 @@ impl From<Scene> for SceneData {
                 h.into()
             })
             .collect();
+        bytes += 4 + scene.metrics.diagram_kind.len();
         Self {
             schema_version: 2,
             identity: DiagramIdentity::default(),
@@ -441,8 +443,230 @@ impl From<Scene> for SceneData {
             wire_bytes: bytes as u64,
             layout_ms: scene.metrics.layout_ms,
             semantic_json: None,
+            diagram_kind: scene.metrics.diagram_kind,
         }
     }
+}
+
+fn parse_edge_line(value: &str) -> Result<hortus_diagram::EdgeLine, crate::DiagramFailure> {
+    match value {
+        "Solid" => Ok(hortus_diagram::EdgeLine::Solid),
+        "Dotted" => Ok(hortus_diagram::EdgeLine::Dotted),
+        "Thick" => Ok(hortus_diagram::EdgeLine::Thick),
+        _ => Err(crate::DiagramFailure::Engine {
+            kind: format!("invalid_edge_line:{value}"),
+        }),
+    }
+}
+
+fn parse_marker(value: &str) -> Result<hortus_diagram::Marker, crate::DiagramFailure> {
+    match value {
+        "None" => Ok(hortus_diagram::Marker::None),
+        "Arrow" => Ok(hortus_diagram::Marker::Arrow),
+        "Circle" => Ok(hortus_diagram::Marker::Circle),
+        "Cross" => Ok(hortus_diagram::Marker::Cross),
+        _ => Err(crate::DiagramFailure::Engine {
+            kind: format!("invalid_marker:{value}"),
+        }),
+    }
+}
+
+fn parse_shape(value: &str) -> Result<hortus_diagram::Shape, crate::DiagramFailure> {
+    match value {
+        "Rectangle" => Ok(hortus_diagram::Shape::Rectangle),
+        "Container" => Ok(hortus_diagram::Shape::Container),
+        "Rounded" => Ok(hortus_diagram::Shape::Rounded),
+        "Circle" => Ok(hortus_diagram::Shape::Circle),
+        "DoubleCircle" => Ok(hortus_diagram::Shape::DoubleCircle),
+        "Stadium" => Ok(hortus_diagram::Shape::Stadium),
+        "Subroutine" => Ok(hortus_diagram::Shape::Subroutine),
+        "Cylinder" => Ok(hortus_diagram::Shape::Cylinder),
+        "Diamond" => Ok(hortus_diagram::Shape::Diamond),
+        "Hexagon" => Ok(hortus_diagram::Shape::Hexagon),
+        "Asymmetric" => Ok(hortus_diagram::Shape::Asymmetric),
+        "Parallelogram" => Ok(hortus_diagram::Shape::Parallelogram),
+        "ParallelogramReverse" => Ok(hortus_diagram::Shape::ParallelogramReverse),
+        _ => Err(crate::DiagramFailure::Engine {
+            kind: format!("invalid_shape:{value}"),
+        }),
+    }
+}
+
+impl From<ScenePoint> for Point {
+    fn from(p: ScenePoint) -> Self {
+        Self { x: p.x, y: p.y }
+    }
+}
+
+impl From<SceneRect> for Rect {
+    fn from(r: SceneRect) -> Self {
+        Self {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        }
+    }
+}
+
+impl From<SceneColor> for Color {
+    fn from(c: SceneColor) -> Self {
+        Self {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            a: c.a,
+        }
+    }
+}
+
+impl From<SceneText> for TextSpan {
+    fn from(s: SceneText) -> Self {
+        Self {
+            text: s.text,
+            baseline: s.baseline.into(),
+            width: s.width,
+            font_size: s.font_size,
+            font_weight: s.font_weight,
+            font_family: s.font_family,
+            color: s.color.into(),
+        }
+    }
+}
+
+impl TryFrom<SceneData> for Scene {
+    type Error = crate::DiagramFailure;
+
+    fn try_from(scene: SceneData) -> Result<Self, Self::Error> {
+        if scene.schema_version != 2 {
+            return Err(crate::DiagramFailure::Engine {
+                kind: format!("unsupported_schema:{}", scene.schema_version),
+            });
+        }
+        let mut primitives = Vec::with_capacity(scene.primitives.len());
+        for primitive in scene.primitives {
+            let converted = match primitive {
+                ScenePrimitive::RoundedRect {
+                    rect,
+                    radius,
+                    color,
+                } => Primitive::RoundedRect {
+                    rect: rect.into(),
+                    radius,
+                    color: color.into(),
+                },
+                ScenePrimitive::Line {
+                    from,
+                    to,
+                    width,
+                    color,
+                } => Primitive::Line {
+                    from: from.into(),
+                    to: to.into(),
+                    width,
+                    color: color.into(),
+                },
+                ScenePrimitive::GraphPath {
+                    edge_id,
+                    corner_radius,
+                    points,
+                    source_start,
+                    source_end,
+                    label_start,
+                    label_end,
+                    line,
+                    start,
+                    end,
+                    color,
+                    width,
+                } => Primitive::GraphPath {
+                    edge_id: edge_id as usize,
+                    corner_radius,
+                    points: points.into_iter().map(Into::into).collect(),
+                    source_range: (source_start as usize)..(source_end as usize),
+                    label_range: label_start
+                        .zip(label_end)
+                        .map(|(s, e)| (s as usize)..(e as usize)),
+                    line: parse_edge_line(&line)?,
+                    start: parse_marker(&start)?,
+                    end: parse_marker(&end)?,
+                    color: color.into(),
+                    width,
+                },
+                ScenePrimitive::GraphShape {
+                    rect,
+                    shape,
+                    outline,
+                    details,
+                    fill,
+                    stroke,
+                    stroke_width,
+                } => {
+                    let rect: Rect = rect.into();
+                    let shape = parse_shape(&shape)?;
+                    let outline = if outline.is_empty()
+                        && matches!(
+                            shape,
+                            hortus_diagram::Shape::Rectangle
+                                | hortus_diagram::Shape::Rounded
+                                | hortus_diagram::Shape::Stadium
+                        ) {
+                        hortus_diagram::shape_outline(shape, rect)
+                    } else {
+                        outline.into_iter().map(Into::into).collect()
+                    };
+                    Primitive::GraphShape {
+                        rect,
+                        shape,
+                        outline,
+                        details: details
+                            .into_iter()
+                            .map(|segment| segment.into_iter().map(Into::into).collect())
+                            .collect(),
+                        fill: fill.into(),
+                        stroke: stroke.into(),
+                        stroke_width,
+                    }
+                }
+                ScenePrimitive::LabelBackground {
+                    edge_id,
+                    rect,
+                    color,
+                } => Primitive::LabelBackground {
+                    edge_id: edge_id as usize,
+                    rect: rect.into(),
+                    color: color.into(),
+                },
+                ScenePrimitive::Text { span } => Primitive::Text(span.into()),
+            };
+            primitives.push(converted);
+        }
+        Ok(Scene {
+            width: scene.width,
+            height: scene.height,
+            primitives,
+            hit_regions: Vec::new(),
+            metrics: hortus_diagram::Metrics {
+                columns: 0,
+                diagram_height: scene.height,
+                min_font_px: 0.0,
+                horizontal_overflow: false,
+                node_overlaps: 0,
+                fonts: Vec::new(),
+                layout_ms: scene.layout_ms,
+                root_hue: None,
+                branch_hues: Vec::new(),
+                diagram_kind: scene.diagram_kind,
+            },
+        })
+    }
+}
+
+/// 直接从屏幕已排好的 `SceneData` 序列化自包含 SVG，不重新解析或重排。
+#[uniffi::export]
+pub fn scene_svg(scene: SceneData) -> Result<String, crate::DiagramFailure> {
+    let scene = Scene::try_from(scene)?;
+    Ok(scene.to_svg())
 }
 
 impl SceneData {

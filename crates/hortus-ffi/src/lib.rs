@@ -5,7 +5,7 @@ use hortus_links::KnowledgeIndex;
 use hortus_search::SearchIndex;
 use hortus_vault::Vault;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 mod diagram;
 mod document;
@@ -144,6 +144,22 @@ pub struct AgentSpec {
     pub args: Vec<String>,
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AgentProfileInfo {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct CustomAgentLaunchInfo {
+    pub executable: String,
+    pub args: Vec<String>,
+    pub guide_file: String,
+    pub path: String,
+}
+
 #[derive(Debug, uniffi::Record)]
 pub struct EditableConfigInfo {
     pub config_path: String,
@@ -154,6 +170,8 @@ pub struct EditableConfigInfo {
     pub agent_configured: bool,
     pub agent_command: Option<String>,
     pub agent_args: Vec<String>,
+    pub agent_profiles: Vec<AgentProfileInfo>,
+    pub agent_default_profile: Option<String>,
     pub diagnostics: Vec<String>,
 }
 
@@ -555,6 +573,17 @@ fn editable_config_info(config: hortus_config::EditableConfig) -> EditableConfig
         agent_configured: config.agent_configured,
         agent_command: config.agent_command,
         agent_args: config.agent_args,
+        agent_profiles: config
+            .agent_profiles
+            .into_iter()
+            .map(|profile| AgentProfileInfo {
+                id: profile.id,
+                name: profile.name,
+                command: profile.command,
+                args: profile.args,
+            })
+            .collect(),
+        agent_default_profile: config.agent_default_profile,
         diagnostics: config.diagnostics,
     }
 }
@@ -723,6 +752,49 @@ impl WorkspaceCore {
                     agent_command: input.agent_command,
                     agent_args: input.agent_args,
                 },
+                expected_digest.as_deref(),
+            )?;
+        Ok(editable_config_info(saved))
+    }
+
+    /// 原地保存已知键与多配置档；指纹不一致时返回 `config.externally_modified`。
+    pub fn save_editable_config_with_profiles(
+        &self,
+        input: EditableConfigInputInfo,
+        agent_profiles: Vec<AgentProfileInfo>,
+        agent_default_profile: Option<String>,
+        expected_digest: Option<String>,
+    ) -> Result<EditableConfigInfo, CoreError> {
+        let default_view = match input.default_view.as_str() {
+            "reading" => hortus_config::ViewMode::Reading,
+            "editing" => hortus_config::ViewMode::Editing,
+            _ => return Err(CoreError::failure("config.default_view_invalid")),
+        };
+        let profiles: Vec<hortus_config::AgentProfile> = agent_profiles
+            .into_iter()
+            .map(|profile| hortus_config::AgentProfile {
+                id: profile.id,
+                name: profile.name,
+                command: profile.command,
+                args: profile.args,
+            })
+            .collect();
+        let saved = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_config_with_profiles(
+                &hortus_config::EditableConfigInput {
+                    settings: hortus_config::Settings {
+                        font_size: input.font_size,
+                        default_view,
+                        terminal_font: input.terminal_font,
+                    },
+                    agent_command: input.agent_command,
+                    agent_args: input.agent_args,
+                },
+                &profiles,
+                agent_default_profile.as_deref(),
                 expected_digest.as_deref(),
             )?;
         Ok(editable_config_info(saved))
@@ -987,8 +1059,8 @@ impl WorkspaceCore {
             .validate_vault(std::path::Path::new(&path))?;
         Ok(Arc::new(VaultHandle {
             vault: Vault::open(path)?,
-            search: Mutex::new(SearchIndex::new()),
-            links: Mutex::new(KnowledgeIndex::new()),
+            search: RwLock::new(SearchIndex::new()),
+            links: RwLock::new(KnowledgeIndex::new()),
             index_update: Mutex::new(()),
             rename_plans: Mutex::new(Default::default()),
         }))
@@ -1002,15 +1074,67 @@ impl WorkspaceCore {
 
     /// 启动解析追加后台登录 shell 得到的 PATH；不执行模板里的命令。
     pub fn agent_spec_with_path(&self, login_path: Option<String>) -> Result<AgentSpec, CoreError> {
+        self.agent_spec_for_profile(None, login_path)
+    }
+
+    /// 按配置档解析 Agent 启动规格；`profile_id` 为空时使用默认配置档或旧 `[agent]`。
+    pub fn agent_spec_for_profile(
+        &self,
+        profile_id: Option<String>,
+        login_path: Option<String>,
+    ) -> Result<AgentSpec, CoreError> {
         let launch = self
             .store
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .agent_launch_with_paths(login_path.as_deref().map(std::ffi::OsStr::new))?;
+            .agent_launch_for_profile_with_paths(
+                profile_id.as_deref(),
+                login_path.as_deref().map(std::ffi::OsStr::new),
+            )?;
         Ok(AgentSpec {
             executable: launch.executable,
             args: launch.args,
         })
+    }
+
+    /// 准备自定义命令启动 Agent：将有效指南写入缓存目录只读文件，返回 `$SHELL -lc <command>` 规格。
+    pub fn prepare_custom_agent_launch(
+        &self,
+        command: String,
+        login_path: Option<String>,
+    ) -> Result<CustomAgentLaunchInfo, CoreError> {
+        let launch = self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .prepare_custom_agent_launch(
+                &command,
+                login_path.as_deref().map(std::ffi::OsStr::new),
+            )?;
+        Ok(CustomAgentLaunchInfo {
+            executable: launch.executable,
+            args: launch.args,
+            guide_file: launch.guide_file,
+            path: launch.path,
+        })
+    }
+
+    /// 读取系统缓存中的最近自定义命令历史。
+    pub fn custom_agent_history(&self) -> Result<Vec<String>, CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .custom_agent_history()?)
+    }
+
+    /// 记录一条自定义命令到系统缓存历史（去重、上限 12 条）。
+    pub fn record_custom_agent_command(&self, command: String) -> Result<Vec<String>, CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .record_custom_agent_command(&command)?)
     }
 
     pub fn data_directory(&self) -> String {
@@ -1240,8 +1364,8 @@ fn tree_entry(entry: hortus_vault::Entry) -> TreeEntry {
 #[derive(uniffi::Object)]
 pub struct VaultHandle {
     vault: Vault,
-    search: Mutex<SearchIndex>,
-    links: Mutex<KnowledgeIndex>,
+    search: RwLock<SearchIndex>,
+    links: RwLock<KnowledgeIndex>,
     index_update: Mutex<()>,
     rename_plans: Mutex<links::RenamePlans>,
 }
@@ -1323,7 +1447,7 @@ impl VaultHandle {
 
     pub fn quick_open(&self, query: String, limit: u32) -> Vec<QuickOpenHit> {
         self.search
-            .lock()
+            .read()
             .unwrap_or_else(|error| error.into_inner())
             .quick_open(&query, limit as usize)
             .into_iter()
@@ -1357,7 +1481,7 @@ impl VaultHandle {
         cancellation: Arc<SearchCancellation>,
     ) -> Vec<SearchResult> {
         self.search
-            .lock()
+            .read()
             .unwrap_or_else(|error| error.into_inner())
             .search_cancelled(
                 &query,

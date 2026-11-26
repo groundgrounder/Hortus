@@ -1,50 +1,54 @@
-import AppKit
+import CoreGraphics
 import CoreText
+import Foundation
 import HortusCore
+#if canImport(AppKit)
+import AppKit
+#endif
 
-enum MathTypography {
-    static let scale = mathTypographyScale()
-    // 为常驻滚动条预留空间；overlay 样式无需增加公式盒子高度。
-    @MainActor static func scrollbarHeight(style: NSScroller.Style = NSScroller.preferredScrollerStyle) -> Double {
+public enum MathTypography {
+    public static let scale = mathTypographyScale()
+    #if canImport(AppKit)
+    @MainActor public static func scrollbarHeight(style: NSScroller.Style = NSScroller.preferredScrollerStyle) -> Double {
         style == .legacy ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: style) : 0
     }
-    static let padding = 8.0
-    static func bodySize(_ size: Double, mask: UInt32) -> Double {
+    #else
+    @MainActor public static func scrollbarHeight() -> Double { 0 }
+    #endif
+    public static let padding = 8.0
+    public static func bodySize(_ size: Double, mask: UInt32) -> Double {
         size * ([1: 1.6, 2: 1.35, 3: 1.15][Int(mask >> 24)] ?? 1)
     }
 
-    static func prefixWidth(in text: NSString, range: NSRange, size: Double) -> Double {
-        guard range.location <= text.length, range.length <= text.length - range.location else { return 0 }
-        let paragraph = text.paragraphRange(for: range)
-        let prefix = text.substring(with: NSRange(location: paragraph.location, length: range.location - paragraph.location))
-        return Double((prefix as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: size)]).width)
+    public static func prefixWidth(in text: NSString, range: NSRange, size: Double) -> Double {
+        PlatformGraphics.measurePrefixWidth(in: text, range: range, size: size)
     }
 }
 
-struct MathScene: Decodable, Sendable {
-    struct Color: Decodable, Sendable {
-        let foreground: Bool
-        let rgba: [Double]
+public struct MathScene: Decodable, Sendable {
+    public struct Color: Decodable, Sendable {
+        public let foreground: Bool
+        public let rgba: [Double]
     }
-    struct Command: Decodable, Sendable {
-        let kind: String
-        let x, y, x1, y1, x2, y2: Double?
+    public struct Command: Decodable, Sendable {
+        public let kind: String
+        public let x, y, x1, y1, x2, y2: Double?
     }
-    struct Item: Decodable, Sendable {
-        let kind: String
-        let x, y: Double
-        let scale, width, height, thickness: Double?
-        let font: String?
-        let codepoint: UInt32?
-        let fallback, dashed, fill: Bool?
-        let commands: [Command]?
-        let color: Color
+    public struct Item: Decodable, Sendable {
+        public let kind: String
+        public let x, y: Double
+        public let scale, width, height, thickness: Double?
+        public let font: String?
+        public let codepoint: UInt32?
+        public let fallback, dashed, fill: Bool?
+        public let commands: [Command]?
+        public let color: Color
     }
-    let width, height, depth: Double
-    let items: [Item]
-    let missingMetrics: [UInt32]
+    public let width, height, depth: Double
+    public let items: [Item]
+    public let missingMetrics: [UInt32]
 
-    init(_ bytes: Data) throws {
+    public init(_ bytes: Data) throws {
         guard bytes.count >= 8, bytes.count <= 32 * 1024 * 1024 else { throw CocoaError(.fileReadCorruptFile) }
         let header = bytes.withUnsafeBytes { raw in
             (UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self)),
@@ -89,28 +93,70 @@ struct MathScene: Decodable, Sendable {
     }
 }
 
-struct PreparedMath: @unchecked Sendable {
-    enum Drawing {
+public struct PreparedMath: @unchecked Sendable {
+    public enum Drawing {
         case glyph(CTFont, CGGlyph, CGPoint, Double, MathScene.Color)
         case line(CGPoint, Double, Double, Bool, MathScene.Color)
         case rect(CGRect, MathScene.Color)
         case path(CGPath, Bool, MathScene.Color)
     }
-    let size: CGSize
-    let ascent: Double
-    let descent: Double
-    let drawing: [Drawing]
-    let glyphCount: Int
-    let fallbackGlyphCount: Int
-    let unresolvedGlyphCount: Int
-    let unresolvedMetricCount: Int
-    let maximumMetricError: Double
-    let estimatedBytes: Int
+    public let size: CGSize
+    public let ascent: Double
+    public let descent: Double
+    public let drawing: [Drawing]
+    public let glyphCount: Int
+    public let fallbackGlyphCount: Int
+    public let unresolvedGlyphCount: Int
+    public let unresolvedMetricCount: Int
+    public let maximumMetricError: Double
+    public let estimatedBytes: Int
+}
+
+public struct PreparedMathBlock: @unchecked Sendable {
+    public let block: MathBlock
+    public let source: String
+    public let math: PreparedMath?
+    public let reason: String?
+    public let reasonLines: [CTLine]
+    public let fallbackLines: [CTLine]
+    public let fallbackHeight: Double
+
+    public init(block: MathBlock, source: String, math: PreparedMath?, reason: String?,
+                reasonLines: [CTLine], fallbackLines: [CTLine], fallbackHeight: Double) {
+        self.block = block
+        self.source = source
+        self.math = math
+        self.reason = reason
+        self.reasonLines = reasonLines
+        self.fallbackLines = fallbackLines
+        self.fallbackHeight = fallbackHeight
+    }
+}
+
+public struct MathIdentity: Hashable, Sendable {
+    public let block: UInt64
+    public let offset: Int
+    public init(block: UInt64, offset: Int) {
+        self.block = block
+        self.offset = offset
+    }
+}
+
+public struct NoteMath: @unchecked Sendable {
+    public let range: NSRange
+    public let prepared: PreparedMathBlock
+    public let offset: Int
+    public var identity: MathIdentity { MathIdentity(block: prepared.block.blockId, offset: offset) }
+    public init(range: NSRange, prepared: PreparedMathBlock, offset: Int) {
+        self.range = range
+        self.prepared = prepared
+        self.offset = offset
+    }
 }
 
 /// 场景已在后台解析、选字体和建路径；这里只绘制，不分配字体或进行排版。
-enum MathRenderer {
-    static func draw(_ math: PreparedMath, in context: CGContext, origin: CGPoint, foreground: CGColor, deviceScale: Double) {
+public enum MathRenderer {
+    public static func draw(_ math: PreparedMath, in context: CGContext, origin: CGPoint, foreground: CGColor, deviceScale: Double) {
         let space = CGColorSpace(name: CGColorSpace.sRGB)!
         func color(_ value: MathScene.Color) -> CGColor {
             value.foreground ? foreground : CGColor(colorSpace: space, components: value.rgba.map { CGFloat($0) })!
@@ -156,8 +202,8 @@ enum MathRenderer {
 }
 
 /// 按需初始化。字体注册、宿主测量、首次排版和绘制准备都在 actor 执行器上。
-actor MathService {
-    static let shared = MathService()
+public actor MathService {
+    public static let shared = MathService()
     private let engine = MathEngine()
     private let resourceDirectory: URL?
     private var faces: [String: String] = [:]
@@ -170,11 +216,11 @@ actor MathService {
     private var order: [String] = []
     private var cachedBytes = 0
     private let cacheLimit = 16 * 1024 * 1024
-    private(set) var mainThreadPreparations = 0
-    private(set) var layoutCount = 0
-    private(set) var registrationCount = 0
-    private(set) var measurementCount = 0
-    var measuredFallbackCodepoints: [UInt32] { metrics.keys.sorted() }
+    public private(set) var mainThreadPreparations = 0
+    public private(set) var layoutCount = 0
+    public private(set) var registrationCount = 0
+    public private(set) var measurementCount = 0
+    public var measuredFallbackCodepoints: [UInt32] { metrics.keys.sorted() }
 
     private static let fontFiles: Set<String> = [
         "KaTeX_AMS-Regular.ttf", "KaTeX_Caligraphic-Bold.ttf", "KaTeX_Caligraphic-Regular.ttf",
@@ -186,12 +232,18 @@ actor MathService {
         "KaTeX_Size4-Regular.ttf", "KaTeX_Typewriter-Regular.ttf"
     ]
 
-    struct FontLoadError: Error, CustomStringConvertible {
-        let cause: Error
-        var description: String { String(describing: cause) }
+    public struct FontLoadError: Error, CustomStringConvertible {
+        public let cause: Error
+        public var description: String { String(describing: cause) }
     }
 
-    init(resourceDirectory: URL? = nil) { self.resourceDirectory = resourceDirectory }
+    public init(resourceDirectory: URL? = nil) { self.resourceDirectory = resourceDirectory }
+
+    public func clearCache() {
+        cached.removeAll(keepingCapacity: false)
+        order.removeAll(keepingCapacity: false)
+        cachedBytes = 0
+    }
 
     private func register() throws {
         guard !registered else { return }
@@ -203,7 +255,16 @@ actor MathService {
         }
     }
     private func registerFonts() throws {
-        guard let directory = resourceDirectory ?? Bundle.main.resourceURL?.appendingPathComponent("Fonts/KaTeX") else {
+        let candidateDirectory: URL?
+        if let resourceDirectory {
+            candidateDirectory = resourceDirectory
+        } else if let bundled = Bundle.main.resourceURL?.appendingPathComponent("Fonts/KaTeX"),
+                  FileManager.default.fileExists(atPath: bundled.path) {
+            candidateDirectory = bundled
+        } else {
+            candidateDirectory = Bundle.main.resourceURL
+        }
+        guard let directory = candidateDirectory else {
             throw CocoaError(.fileNoSuchFile)
         }
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
@@ -273,7 +334,7 @@ actor MathService {
         fonts[cacheKey] = font
         return font
     }
-    func render(_ latex: String, style: MathStyle, bodySize: Double) throws -> PreparedMath {
+    public func render(_ latex: String, style: MathStyle, bodySize: Double) throws -> PreparedMath {
         if Thread.isMainThread { mainThreadPreparations += 1 }
         try register()
         let key = "\(style):\(bodySize):\(latex)"
@@ -368,5 +429,79 @@ actor MathService {
             cached[key] = value; order.append(key); cachedBytes += value.estimatedBytes
         }
         return value
+    }
+
+    public func prepare(_ blocks: [MathBlock], source: String, size: Double, width: Double, displayText: String,
+                        previous: [PreparedMathBlock] = [], cell: Bool = false) -> [PreparedMathBlock] {
+        let source = source as NSString
+        let display = displayText as NSString
+        var retained: [String: PreparedMathBlock] = [:]
+        for item in previous {
+            retained["\(item.block.style):\(item.block.mask):\(item.block.latex)"] = item
+        }
+        return blocks.filter { !$0.latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.compactMap { block in
+            let range = NSRange(location: Int(block.sourceStart), length: Int(block.sourceLength))
+            guard range.location <= source.length, range.length <= source.length - range.location else { return nil }
+            let raw = source.substring(with: range)
+            let size = cell ? size : MathTypography.bodySize(size, mask: block.mask)
+            do {
+                let key = "\(block.style):\(block.mask):\(block.latex)"
+                if let old = retained[key], old.math == nil, !block.block {
+                    return PreparedMathBlock(block: block, source: raw, math: nil,
+                        reason: old.reason, reasonLines: old.reasonLines, fallbackLines: old.fallbackLines,
+                        fallbackHeight: old.fallbackHeight)
+                }
+                let math = try retained[key]?.math ?? render(block.latex, style: block.style, bodySize: size)
+                return PreparedMathBlock(block: block, source: raw, math: math,
+                                         reason: nil, reasonLines: [], fallbackLines: [], fallbackHeight: 0)
+            } catch {
+                let detail: String
+                let message: String
+                if let failure = error as? MathFailure {
+                    switch failure {
+                    case let .ResourceLimit(value):
+                        detail = value
+                        message = L10n.string("Formula resource limit exceeded: %@; showing source", value)
+                    case let .Parse(value), let .Panic(value), let .InvalidLayout(value):
+                        detail = value
+                        message = L10n.string("Formula error: %@; showing source", value)
+                    }
+                } else if let failure = error as? MathService.FontLoadError {
+                    detail = failure.description
+                    message = L10n.string("Formula fonts could not be loaded: %@; showing source", detail)
+                } else {
+                    detail = String(describing: error)
+                    message = L10n.string("Formula error: %@; showing source", detail)
+                }
+                let prefixWidth = MathTypography.prefixWidth(in: display,
+                    range: NSRange(location: Int(block.displayStart), length: Int(block.displayLength)), size: size)
+                let lineWidth = max(80, width - prefixWidth) - 16
+                func wrap(_ text: String, attributes: [NSAttributedString.Key: Any]) -> [CTLine] {
+                    guard !text.isEmpty else { return [] }
+                    let typesetter = CTTypesetterCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+                    let length = (text as NSString).length
+                    var offset = 0, lines: [CTLine] = []
+                    while offset < length {
+                        let count = max(1, CTTypesetterSuggestClusterBreak(typesetter, offset, lineWidth))
+                        lines.append(CTTypesetterCreateLine(typesetter, CFRange(location: offset, length: min(count, length - offset))))
+                        offset += count
+                    }
+                    return lines
+                }
+                // Rust 与原生错误源码共用系统随附的 Menlo，避免私有系统等宽字体的可变字宽不一致。
+                let sourceFont = PlatformGraphics.namedFont("Menlo-Regular", size: size)
+                    ?? PlatformGraphics.monospacedFont(ofSize: size, weight: .regular)
+                let reasonFont = PlatformGraphics.systemFont(ofSize: 12)
+                let contextColor = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
+                let reasonLines = wrap(message, attributes: [.font: reasonFont, contextColor: true])
+                let lines = block.block ? wrap(block.displaySource, attributes: [.font: sourceFont, contextColor: true])
+                    : [CTLineCreateWithAttributedString(NSAttributedString(string: block.displaySource,
+                        attributes: [.font: sourceFont, contextColor: true]))]
+                let textHeight = Double(reasonLines.count) * 16 + Double(lines.count) * (size + 5) + 16
+                return PreparedMathBlock(block: block, source: raw, math: nil,
+                    reason: message, reasonLines: reasonLines, fallbackLines: lines,
+                    fallbackHeight: textHeight)
+            }
+        }
     }
 }

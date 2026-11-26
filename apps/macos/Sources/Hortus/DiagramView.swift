@@ -208,7 +208,7 @@ final class DiagramView: NSView {
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
-        let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) })
+        let hit = prepared.topHit(at: point)
         let menu = NSMenu()
         menu.autoenablesItems = false
         if let hit, let target = hit.linkTarget {
@@ -257,24 +257,10 @@ final class DiagramView: NSView {
     }
     func sourceRange(at point: CGPoint) -> NSRange? {
         guard prepared.acceptsInteraction else { return nil }
-        let containerRects = prepared.scene.primitives.compactMap { primitive -> CGRect? in
-            guard case let .graphShape(rect, shape, _, _, _, _, _) = primitive, shape == "Container" else { return nil }
-            return rect.cgRect
-        }
-        let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) })
-        if let hit, !containerRects.contains(hit.rect.cgRect) { return prepared.sourceRanges[hit.nodeId] }
-        for primitive in prepared.scene.primitives.reversed() {
-            if case let .labelBackground(id, rect, _) = primitive, rect.cgRect.contains(point) { return prepared.edgeRanges[id] }
-            if case let .graphPath(id, _, points, _, _, _, _, _, _, _, _, _) = primitive {
-                for (a, b) in zip(points, points.dropFirst()) {
-                    let dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy
-                    guard length > 0 else { continue }
-                    let t = min(1, max(0, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length))
-                    if hypot(point.x - a.x - t * dx, point.y - a.y - t * dy) <= 5 { return prepared.edgeRanges[id] }
-                }
-            }
-        }
-        return hit.flatMap { prepared.sourceRanges[$0.nodeId] }
+        if let hit = prepared.topHit(at: point, includeContainer: false),
+           let range = prepared.sourceRanges[hit.nodeId] { return range }
+        if let edge = prepared.edgeRange(at: point, tolerance: 5) { return edge }
+        return prepared.topHit(at: point).flatMap { prepared.sourceRanges[$0.nodeId] }
     }
     override func mouseDown(with event: NSEvent) {
         guard prepared.acceptsInteraction else { return }
@@ -284,7 +270,7 @@ final class DiagramView: NSView {
             onSourceRange?(range)
             return
         }
-        let hit = prepared.scene.hitRegions.first(where: { $0.rect.cgRect.contains(point) })
+        let hit = prepared.topHit(at: point)
         if let hit, hit.canCollapse {
             // 可折叠节点保持单击折叠；⌥-点击才打开节点内双链。
             if event.modifierFlags.contains(.option), let target = hit.linkTarget {

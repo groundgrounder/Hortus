@@ -6,6 +6,13 @@ enum TerminalTabKind: Equatable {
     case agent
 }
 
+/// Agent 启动方式：默认配置档、指定配置档或自由 Shell 自定义命令。
+enum AgentLaunchMode: Equatable, Sendable {
+    case defaultProfile
+    case profile(id: String, name: String)
+    case customCommand(String)
+}
+
 /// Agent 标签的启动阶段；进程本身仍由 `TerminalSession` 管理。
 enum AgentPhase: Equatable {
     case idle
@@ -24,13 +31,15 @@ final class TerminalTab: Identifiable {
     var title: String
     var agentPhase: AgentPhase = .idle
     var agentSessionID: String?
+    var agentLaunchMode: AgentLaunchMode = .defaultProfile
     /// 每次启动递增；迟到的快照回调据此失效。
     var generation = 0
 
-    init(id: UUID = UUID(), kind: TerminalTabKind, title: String) {
+    init(id: UUID = UUID(), kind: TerminalTabKind, title: String, launchMode: AgentLaunchMode = .defaultProfile) {
         self.id = id
         self.kind = kind
         self.title = title
+        self.agentLaunchMode = launchMode
         session = TerminalSession(kind: kind == .agent ? .agent : .shell)
     }
 }
@@ -142,9 +151,19 @@ final class TerminalController {
     }
 
     @discardableResult
-    func createAgent() -> TerminalTab? {
+    func createAgent(launchMode: AgentLaunchMode = .defaultProfile) -> TerminalTab? {
         guard let root else { return nil }
-        let tab = makeTab(kind: .agent, title: nextTitle(for: .agent))
+        let title: String
+        switch launchMode {
+        case .defaultProfile, .customCommand:
+            title = nextTitle(for: .agent)
+        case let .profile(_, name):
+            agentCount += 1
+            title = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? (agentCount == 1 ? L10n.string("Agent") : "\(L10n.string("Agent")) \(agentCount)")
+                : name
+        }
+        let tab = makeTab(kind: .agent, title: title, launchMode: launchMode)
         tab.session.setInitialRoot(root)
         return tab
     }
@@ -162,8 +181,8 @@ final class TerminalController {
         return tab
     }
 
-    private func makeTab(kind: TerminalTabKind, title: String) -> TerminalTab {
-        let tab = TerminalTab(kind: kind, title: title)
+    private func makeTab(kind: TerminalTabKind, title: String, launchMode: AgentLaunchMode = .defaultProfile) -> TerminalTab {
+        let tab = TerminalTab(kind: kind, title: title, launchMode: launchMode)
         configure(tab)
         tabs[tab.id] = tab
         creationOrder.append(tab.id)
@@ -274,7 +293,7 @@ final class TerminalController {
     /// 固定顺序：模板与可执行文件 → 后台完整快照并发布元数据 → 复核标签/库根/代次 → exec。
     private func launchAgent(_ tab: TerminalTab) {
         guard let workspace, let core = workspace.core, let root = workspace.root else {
-            tab.agentPhase = .failed(L10n.string("Open a knowledge base to use the terminal"))
+            tab.agentPhase = .failed(L10n.string("Open a folder to use the terminal"))
             return
         }
         tab.generation += 1
@@ -282,15 +301,47 @@ final class TerminalController {
         tab.agentPhase = .preparing
         tab.agentSessionID = nil
         let session = tab.session
+        let launchMode = tab.agentLaunchMode
         Task { [weak self, weak tab] in
             do {
                 let loginPath = await LoginShellEnvironment.resolvedPath()
-                let spec = try await Task.detached {
-                    try core.agentSpecWithPath(loginPath: loginPath)
-                }.value
-                let environmentPath = await Task.detached {
-                    core.effectiveAgentPath(loginPath: loginPath)
-                }.value
+                let executable: String
+                let args: [String]
+                let environmentPath: String
+                let guideFile: String?
+                switch launchMode {
+                case .defaultProfile:
+                    let spec = try await Task.detached {
+                        try core.agentSpecForProfile(profileId: nil, loginPath: loginPath)
+                    }.value
+                    executable = spec.executable
+                    args = spec.args
+                    environmentPath = await Task.detached {
+                        core.effectiveAgentPath(loginPath: loginPath)
+                    }.value
+                    guideFile = nil
+                case let .profile(id, _):
+                    let spec = try await Task.detached {
+                        try core.agentSpecForProfile(profileId: id, loginPath: loginPath)
+                    }.value
+                    executable = spec.executable
+                    args = spec.args
+                    environmentPath = await Task.detached {
+                        core.effectiveAgentPath(loginPath: loginPath)
+                    }.value
+                    guideFile = nil
+                case let .customCommand(command):
+                    let launch = try await Task.detached {
+                        try core.prepareCustomAgentLaunch(command: command, loginPath: loginPath)
+                    }.value
+                    _ = try? await Task.detached {
+                        try core.recordCustomAgentCommand(command: command)
+                    }.value
+                    executable = launch.executable
+                    args = launch.args
+                    environmentPath = launch.path
+                    guideFile = launch.guideFile
+                }
                 guard let self, let tab, self.valid(tab, generation, root: root) else { return }
                 let record = try await Task.detached {
                     try core.beginAgentSession(vault: root)
@@ -310,8 +361,9 @@ final class TerminalController {
                     self.mark(record.id, "cancelled", nil)
                     return
                 }
-                guard session.startAgent(executable: spec.executable, args: spec.args,
-                                         session: record.id, path: environmentPath) else {
+                guard session.startAgent(executable: executable, args: args,
+                                         session: record.id, path: environmentPath,
+                                         guideFile: guideFile) else {
                     tab.agentPhase = .failed(L10n.string("Unable to start the shell"))
                     self.mark(record.id, "failed", nil)
                     return

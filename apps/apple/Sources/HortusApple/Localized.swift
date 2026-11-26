@@ -1,14 +1,16 @@
 import Foundation
 import HortusCore
 
-enum L10n {
-    static func string(_ key: String, _ arguments: CVarArg...) -> String {
-        let format = NSLocalizedString(key, bundle: .main, comment: "")
+public enum L10n {
+    nonisolated(unsafe) public static var bundle: Bundle = .main
+
+    public static func string(_ key: String, _ arguments: CVarArg...) -> String {
+        let format = NSLocalizedString(key, bundle: bundle, comment: "")
         guard !arguments.isEmpty else { return format }
         return String(format: format, locale: Locale.current, arguments: arguments)
     }
 
-    static func error(_ error: Error) -> String {
+    public static func error(_ error: Error) -> String {
         if let error = error as? CoreError {
             switch error {
             case let .Failure(kind): return errorKey(kind)
@@ -17,7 +19,7 @@ enum L10n {
         return string("Operation failed")
     }
 
-    static func errorKey(_ key: String) -> String {
+    public static func errorKey(_ key: String) -> String {
         switch key {
         case "document.missing", "io.not_found":
             return string("The file was deleted or moved")
@@ -110,6 +112,10 @@ enum L10n {
             return string("The agent arguments are invalid")
         case "agent.config_invalid":
             return string("The agent configuration is invalid")
+        case "agent.profile_invalid":
+            return string("The agent profile is invalid")
+        case "agent.profile_not_found":
+            return string("The selected agent profile was not found")
         case "guide.invalid_utf8":
             return string("agent-guide.md is not valid UTF-8")
         case "guide.empty":
@@ -129,11 +135,11 @@ enum L10n {
         case "history.review_stale":
             return string("The disk changed since this review. Refresh before rolling back.")
         case "history.hunk_invalid":
-            return string("This change no longer matches the reviewed diff")
+            return string("This change no longer matches the reviewed change")
         case "history.hunk_stale":
             return string("The file changed while rolling back this change")
         case "history.hunk_unsupported":
-            return string("Only text file changes support hunk rollback")
+            return string("Only text file changes support per-change rollback")
         case "history.directory_not_empty":
             return string("The folder is not empty; roll back its added contents first")
         case "history.target_exists":
@@ -156,7 +162,7 @@ enum L10n {
         }
     }
 
-    static func documentMessage(issue: DocumentIssue, readOnlyReason: String?, raw: String) -> String {
+    public static func documentMessage(issue: DocumentIssue, readOnlyReason: String?, raw: String) -> String {
         if issue == .none, let readOnlyReason {
             switch readOnlyReason {
             case "readonly.invalid_utf8": return string("This file is not UTF-8 and is read-only")

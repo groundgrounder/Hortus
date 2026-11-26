@@ -198,6 +198,8 @@ pub fn atomic_replace(
     if path.exists() && !writable(path) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "note.not_writable").into());
     }
+    #[cfg(target_os = "android")]
+    let shared_staging_allowed = android_cache_to_shared_vault(&temporary, &vault);
     let mut staged = tempfile::NamedTempFile::new_in(temporary)?;
     staged.write_all(bytes)?;
     #[cfg(target_os = "macos")]
@@ -238,6 +240,23 @@ pub fn atomic_replace(
         });
     }
     if baseline.is_some() {
+        #[cfg(target_os = "android")]
+        if let Err(error) = fs::rename(staged.path(), path) {
+            // Android 的应用外部缓存和共享目录即使 st_dev 相同，也可能禁止跨区重命名。
+            if error.kind() != io::ErrorKind::CrossesDevices || !shared_staging_allowed {
+                return Err(error.into());
+            }
+            drop(staged);
+            let replacement = tempfile::Builder::new()
+                .prefix(".hortus-save-")
+                .tempdir_in(
+                    vault
+                        .parent()
+                        .ok_or_else(|| io::Error::other("note.missing_parent"))?,
+                )?;
+            return atomic_replace(path, bytes, baseline, replacement.path(), &vault, None);
+        }
+        #[cfg(not(target_os = "android"))]
         fs::rename(staged.path(), path)?;
     } else {
         publish_new(staged.path(), path)?;
@@ -251,14 +270,77 @@ pub fn atomic_replace(
     Ok(DiskVersion::new(bytes.to_vec()))
 }
 
+#[cfg(target_os = "android")]
+fn android_cache_to_shared_vault(temporary: &Path, vault: &Path) -> bool {
+    let Some(data) = temporary.parent().and_then(Path::parent) else {
+        return false;
+    };
+    let Some(android) = data.parent() else {
+        return false;
+    };
+    let Some(volume) = android.parent() else {
+        return false;
+    };
+    temporary.file_name().is_some_and(|name| name == "cache")
+        && data.file_name().is_some_and(|name| name == "data")
+        && android.file_name().is_some_and(|name| name == "Android")
+        && volume.parent() == Some(Path::new("/storage/emulated"))
+        && vault.starts_with(volume)
+        && vault != volume
+        && !vault.starts_with(android)
+}
+
 fn publish_new(staged: &Path, path: &Path) -> Result<(), WriteFailure> {
-    fs::hard_link(staged, path).map_err(|e| {
-        if e.kind() == io::ErrorKind::AlreadyExists {
-            WriteFailure::Changed
-        } else {
-            e.into()
+    match fs::hard_link(staged, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Android 共享存储的 FUSE 拒绝硬链接（EACCES）；独占创建保持不覆盖既有文件的契约。
+            #[cfg(target_os = "android")]
+            if matches!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied
+                    | io::ErrorKind::Unsupported
+                    | io::ErrorKind::CrossesDevices
+            ) {
+                return publish_new_exclusive(staged, path);
+            }
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                Err(WriteFailure::Changed)
+            } else {
+                Err(error.into())
+            }
         }
-    })
+    }
+}
+
+/// 不带硬链接的独占发布：目标必须不存在，失败时删除刚创建的目标文件。
+#[cfg(any(target_os = "android", test))]
+fn publish_new_exclusive(staged: &Path, path: &Path) -> Result<(), WriteFailure> {
+    let mut target = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(WriteFailure::Changed);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let written = (|| -> io::Result<()> {
+        let mut source = fs::File::open(staged)?;
+        io::copy(&mut source, &mut target)?;
+        if let Ok(metadata) = fs::metadata(staged) {
+            target.set_permissions(metadata.permissions())?;
+        }
+        target.sync_all()
+    })();
+    if let Err(error) = written {
+        drop(target);
+        let _ = fs::remove_file(path);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 fn volume_root_replacement(temporary: &Path, vault: &Path) -> bool {
@@ -396,6 +478,33 @@ mod tests {
         fs::write(&path, "theirs").unwrap();
         assert!(matches!(
             publish_new(&staged, &path),
+            Err(WriteFailure::Changed)
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
+    }
+
+    #[test]
+    fn exclusive_publish_writes_the_staged_bytes() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("note.md");
+        let staged = base.path().join("staged");
+        fs::write(&staged, b"# new\n\xe4\xb8\xad\xe6\x96\x87\n").unwrap();
+        publish_new_exclusive(&staged, &path).unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"# new\n\xe4\xb8\xad\xe6\x96\x87\n"
+        );
+    }
+
+    #[test]
+    fn exclusive_publish_keeps_an_existing_target() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("note.md");
+        let staged = base.path().join("staged");
+        fs::write(&staged, "mine").unwrap();
+        fs::write(&path, "theirs").unwrap();
+        assert!(matches!(
+            publish_new_exclusive(&staged, &path),
             Err(WriteFailure::Changed)
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
