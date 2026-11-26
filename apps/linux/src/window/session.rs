@@ -266,7 +266,7 @@ pub fn launch_initial_windows(app: &adw::Application, opts: CliOptions) {
 
     if opts.color_scheme.is_none() {
         crate::window::actions::apply_color_scheme(
-            crate::services::ui_prefs::load_saved_color_scheme(),
+            crate::services::ui_prefs::load_color_scheme_with_core(&services.core),
         );
     }
 

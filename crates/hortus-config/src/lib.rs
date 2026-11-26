@@ -460,6 +460,28 @@ fn normalized_terminal_font(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn normalize_color_scheme(value: &str) -> io::Result<&'static str> {
+    match value.trim() {
+        "" | "system" => Ok("system"),
+        "light" => Ok("light"),
+        "dark" => Ok("dark"),
+        _ => Err(io::Error::other("config.color_scheme_invalid")),
+    }
+}
+
+fn resolve_custom_agent_shell(env_shell: Option<&str>) -> String {
+    #[cfg(target_os = "macos")]
+    const FALLBACK_SHELL: &str = "/bin/zsh";
+    #[cfg(not(target_os = "macos"))]
+    const FALLBACK_SHELL: &str = "/bin/sh";
+
+    env_shell
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && Path::new(value).exists())
+        .map(str::to_string)
+        .unwrap_or_else(|| FALLBACK_SHELL.to_string())
+}
+
 fn set_value(table: &mut toml_edit::Table, key: &str, value: toml_edit::Value) {
     let mut value = value;
     // 沿用旧值的空白与行尾注释；只替换值本身。索引赋值保留键前缀里的独立注释。
@@ -726,6 +748,38 @@ impl Store {
             ViewMode::Reading => "reading",
             ViewMode::Editing => "editing",
         });
+        atomic_write(&self.config_path(), document.to_string().as_bytes())
+    }
+
+    /// 读取顶层可选 `color_scheme`（`"system"` / `"light"` / `"dark"`，缺省或空白视为 `"system"`）。
+    pub fn color_scheme(&self) -> io::Result<String> {
+        let bytes = fs::read(self.config_path())?;
+        let text = String::from_utf8(bytes).map_err(|_| io::Error::other("config.invalid_utf8"))?;
+        let document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| io::Error::other("config.invalid_toml"))?;
+        match document.get("color_scheme") {
+            None => Ok("system".to_string()),
+            Some(item) => match item.as_str() {
+                Some(raw) => normalize_color_scheme(raw).map(str::to_string),
+                None => Err(io::Error::other("config.color_scheme_invalid")),
+            },
+        }
+    }
+
+    /// 原地更新顶层 `color_scheme`，完整保留用户注释、未知键与既有配置段。
+    pub fn save_color_scheme(&self, scheme: &str) -> io::Result<()> {
+        let normalized = normalize_color_scheme(scheme)?;
+        let bytes = fs::read(self.config_path())?;
+        let text = String::from_utf8(bytes).map_err(|_| io::Error::other("config.invalid_utf8"))?;
+        let mut document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| io::Error::other("config.invalid_toml"))?;
+        set_value(
+            &mut document,
+            "color_scheme",
+            toml_edit::Value::from(normalized),
+        );
         atomic_write(&self.config_path(), document.to_string().as_bytes())
     }
 
@@ -1526,11 +1580,7 @@ impl Store {
         fs::create_dir_all(&self.directories.cache)?;
         let guide_path = self.directories.cache.join("agent-guide-active.md");
         atomic_write_readonly(&guide_path, guide.as_bytes())?;
-        let shell = std::env::var("SHELL")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "/bin/zsh".to_string());
+        let shell = resolve_custom_agent_shell(std::env::var("SHELL").ok().as_deref());
         let path = self
             .effective_agent_path(login_path)
             .to_string_lossy()
@@ -2266,5 +2316,72 @@ mod tests {
                 .join("agent-custom-history.json")
                 .exists()
         );
+    }
+
+    #[test]
+    fn color_scheme_roundtrip_preserves_comments_and_rejects_invalid() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+        let original = "\
+# 顶部外观注释
+font_size = 15.0
+default_view = \"reading\"
+unknown_flag = \"keep\"
+
+[agent]
+default_profile = \"codex\"
+command = \"codex\"
+args = [\"{guide}\"]
+
+[[agent.profiles]]
+id = \"codex\"
+name = \"Codex\"
+command = \"codex\"
+args = [\"{guide}\"]
+
+[[vault]]
+path = \"/tmp/example\"
+font_size = 17.0
+";
+        fs::write(store.config_path(), original).unwrap();
+        assert_eq!(store.color_scheme().unwrap(), "system");
+
+        store.save_color_scheme("dark").unwrap();
+        assert_eq!(store.color_scheme().unwrap(), "dark");
+
+        store.save_color_scheme("light").unwrap();
+        assert_eq!(store.color_scheme().unwrap(), "light");
+
+        store.save_color_scheme("   ").unwrap();
+        assert_eq!(store.color_scheme().unwrap(), "system");
+
+        let err = store.save_color_scheme("neon").unwrap_err();
+        assert_eq!(err.to_string(), "config.color_scheme_invalid");
+
+        let raw = fs::read_to_string(store.config_path()).unwrap();
+        assert!(raw.contains("# 顶部外观注释"));
+        assert!(raw.contains("unknown_flag = \"keep\""));
+        assert!(raw.contains("[[agent.profiles]]"));
+        assert!(raw.contains("[[vault]]"));
+        assert!(raw.contains("color_scheme = \"system\""));
+    }
+
+    #[test]
+    fn custom_agent_shell_fallback_handles_missing_and_nonexistent() {
+        #[cfg(target_os = "macos")]
+        let expected = "/bin/zsh";
+        #[cfg(not(target_os = "macos"))]
+        let expected = "/bin/sh";
+
+        assert_eq!(resolve_custom_agent_shell(None), expected);
+        assert_eq!(resolve_custom_agent_shell(Some("")), expected);
+        assert_eq!(resolve_custom_agent_shell(Some("   ")), expected);
+        assert_eq!(
+            resolve_custom_agent_shell(Some("/nonexistent/hortus-missing-shell")),
+            expected
+        );
+        if Path::new("/bin/sh").exists() {
+            assert_eq!(resolve_custom_agent_shell(Some("/bin/sh")), "/bin/sh");
+        }
     }
 }

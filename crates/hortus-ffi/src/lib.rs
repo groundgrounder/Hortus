@@ -1137,6 +1137,24 @@ impl WorkspaceCore {
             .record_custom_agent_command(&command)?)
     }
 
+    /// 读取顶层可选外观配色（`"system"` / `"light"` / `"dark"`）。
+    pub fn color_scheme(&self) -> Result<String, CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .color_scheme()?)
+    }
+
+    /// 原地更新顶层外观配色至 `config.toml`，保留注释与未知字段。
+    pub fn save_color_scheme(&self, scheme: String) -> Result<(), CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_color_scheme(&scheme)?)
+    }
+
     pub fn data_directory(&self) -> String {
         self.store
             .lock()

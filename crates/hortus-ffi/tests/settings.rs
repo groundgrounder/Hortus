@@ -146,4 +146,14 @@ fn editable_config_round_trip_and_guide_management() {
     assert_eq!(reset.text, reset.default_text);
     assert!(!config.join("agent-guide.md").exists());
     assert!(!core.reset_agent_guide().unwrap().overridden);
+
+    assert_eq!(core.color_scheme().unwrap(), "system");
+    core.save_color_scheme("dark".into()).unwrap();
+    assert_eq!(core.color_scheme().unwrap(), "dark");
+    core.save_color_scheme("light".into()).unwrap();
+    assert_eq!(core.color_scheme().unwrap(), "light");
+    assert_eq!(
+        error_kind(core.save_color_scheme("invalid".into())),
+        "config.color_scheme_invalid"
+    );
 }

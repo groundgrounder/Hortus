@@ -2,16 +2,13 @@
 // Copyright (C) 2026  groundgrounder
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Linux 界面偏好持久化（`$XDG_CONFIG_HOME/hortus/linux-ui.toml` / `HORTUS_CONFIG_DIR`）。
+//! 外观配色持久化：统一读写 `config.toml` 的 `color_scheme`，并保留一次性从旧 `linux-ui.toml` 迁移的能力。
 
 use crate::core::ColorSchemeChoice;
-use std::ffi::OsStr;
-use std::io::Write;
+use hortus_ffi::WorkspaceCore;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-const UI_PREFS_FILE: &str = "linux-ui.toml";
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
+const LEGACY_UI_PREFS_FILE: &str = "linux-ui.toml";
 
 fn env_path(key: &str) -> Option<PathBuf> {
     if key == "HOME" {
@@ -33,17 +30,93 @@ pub fn ui_prefs_path_with(lookup: impl Fn(&str) -> Option<PathBuf>) -> Option<Pa
     } else {
         return None;
     };
-    Some(config_dir.join(UI_PREFS_FILE))
+    Some(config_dir.join(LEGACY_UI_PREFS_FILE))
 }
 
 pub fn ui_prefs_path() -> Option<PathBuf> {
     ui_prefs_path_with(env_path)
 }
 
+/// 经 `WorkspaceCore` 读取外观配色；若 `config.toml` 尚未显式设置 `color_scheme` 且旧 `linux-ui.toml`
+/// 存在有效非 `system` 值，则一次性迁移写回 `config.toml`。
+pub fn load_color_scheme_with_core(core: &WorkspaceCore) -> ColorSchemeChoice {
+    let current = core
+        .color_scheme()
+        .ok()
+        .and_then(|s| ColorSchemeChoice::parse(s.trim()).ok())
+        .unwrap_or(ColorSchemeChoice::System);
+
+    if current != ColorSchemeChoice::System {
+        return current;
+    }
+
+    let config_path = core
+        .editable_config()
+        .ok()
+        .map(|info| PathBuf::from(info.config_path));
+    let Some(config_path) = config_path else {
+        return current;
+    };
+    if config_has_explicit_color_scheme(&config_path) {
+        return current;
+    }
+
+    let Some(legacy_path) = config_path
+        .parent()
+        .map(|dir| dir.join(LEGACY_UI_PREFS_FILE))
+    else {
+        return current;
+    };
+    let legacy = load_color_scheme_from(&legacy_path);
+    if legacy != ColorSchemeChoice::System {
+        let _ = core.save_color_scheme(legacy.as_str().to_string());
+        return legacy;
+    }
+    current
+}
+
+/// 在尚无共享 `WorkspaceCore` 实例时读取（并按需迁移）外观配色。
 pub fn load_saved_color_scheme() -> ColorSchemeChoice {
+    if let Ok(core) = WorkspaceCore::new() {
+        return load_color_scheme_with_core(&core);
+    }
     ui_prefs_path()
         .map(|path| load_color_scheme_from(&path))
         .unwrap_or(ColorSchemeChoice::System)
+}
+
+/// 经 `WorkspaceCore` 持久化外观配色至 `config.toml`，不再写 `linux-ui.toml`。
+pub fn save_color_scheme_with_core(
+    core: &WorkspaceCore,
+    choice: ColorSchemeChoice,
+) -> Result<(), String> {
+    core.save_color_scheme(choice.as_str().to_string())
+        .map_err(|e| e.to_string())
+}
+
+/// 在无现成 `WorkspaceCore` 时打开默认配置并保存外观配色至 `config.toml`。
+pub fn save_color_scheme(choice: ColorSchemeChoice) -> Result<(), String> {
+    let core = WorkspaceCore::new().map_err(|e| e.to_string())?;
+    save_color_scheme_with_core(&core, choice)
+}
+
+fn config_has_explicit_color_scheme(path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    for line in raw.lines() {
+        let trimmed = strip_unquoted_comment(line).trim();
+        if trimmed.starts_with('[') {
+            // 顶层键必须在首个表头之前
+            break;
+        }
+        if let Some((key, _)) = trimmed.split_once('=')
+            && key.trim() == "color_scheme"
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn load_color_scheme_from(path: &Path) -> ColorSchemeChoice {
@@ -117,88 +190,12 @@ fn unquote_toml_string(val: &str) -> Option<&str> {
     }
 }
 
-pub fn save_color_scheme(choice: ColorSchemeChoice) -> std::io::Result<()> {
-    let Some(path) = ui_prefs_path() else {
-        return Ok(());
-    };
-    save_color_scheme_to(&path, choice)
-}
-
-pub fn save_color_scheme_to(path: &Path, choice: ColorSchemeChoice) -> std::io::Result<()> {
-    let Some(parent) = path.parent() else {
-        return Err(std::io::Error::other("ui_prefs.no_parent"));
-    };
-    std::fs::create_dir_all(parent)?;
-
-    let existing = std::fs::read_to_string(path).ok();
-    let updated = render_updated_toml(existing.as_deref(), choice);
-    atomic_write(path, updated.as_bytes())
-}
-
-fn render_updated_toml(existing: Option<&str>, choice: ColorSchemeChoice) -> String {
-    let entry = format!("color_scheme = \"{}\"", choice.as_str());
-    let Some(raw) = existing else {
-        return format!("# Hortus Linux UI preferences\n{entry}\n");
-    };
-    let mut lines = Vec::new();
-    let mut replaced = false;
-    for line in raw.lines() {
-        let trimmed = strip_unquoted_comment(line).trim();
-        let is_key = trimmed
-            .split_once('=')
-            .is_some_and(|(k, _)| k.trim() == "color_scheme");
-        if is_key {
-            if !replaced {
-                lines.push(entry.clone());
-                replaced = true;
-            }
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-    if !replaced {
-        lines.push(entry);
-    }
-    let mut out = lines.join("\n");
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("ui_prefs.no_parent"))?;
-    let name = path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or(UI_PREFS_FILE);
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(".{name}.tmp.{}.{seq}", std::process::id()));
-    let write_res = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
-        file.write_all(bytes)?;
-        file.flush()?;
-        drop(file);
-        std::fs::rename(&tmp, path)?;
-        Ok(())
-    })();
-    if write_res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write_res
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn resolves_config_dir_priority_and_roundtrips_color_scheme() {
+    fn resolves_config_dir_priority() {
         let dir = tempfile::tempdir().expect("tempdir");
         let h_dir = dir.path().join("custom-hortus");
         let xdg_dir = dir.path().join("xdg");
@@ -218,15 +215,40 @@ mod tests {
             _ => None,
         });
         assert_eq!(from_xdg, Some(xdg_dir.join("hortus/linux-ui.toml")));
+    }
 
-        let file = from_xdg.expect("xdg path");
-        assert_eq!(load_color_scheme_from(&file), ColorSchemeChoice::System);
+    #[test]
+    fn migrates_legacy_linux_ui_toml_once_and_persists_to_config_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = tmp.path().join("cfg");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&cfg).expect("mkdir cfg");
+        let legacy_path = cfg.join("linux-ui.toml");
+        std::fs::write(&legacy_path, "color_scheme = \"dark\"\n").expect("write legacy");
 
-        save_color_scheme_to(&file, ColorSchemeChoice::Dark).expect("save dark");
-        assert_eq!(load_color_scheme_from(&file), ColorSchemeChoice::Dark);
+        let core = WorkspaceCore::in_directories(
+            cfg.to_string_lossy().into_owned(),
+            cache.to_string_lossy().into_owned(),
+        )
+        .expect("core");
 
-        save_color_scheme_to(&file, ColorSchemeChoice::Light).expect("save light");
-        assert_eq!(load_color_scheme_from(&file), ColorSchemeChoice::Light);
+        // 首次加载触发一次性迁移并写回 config.toml
+        assert_eq!(load_color_scheme_with_core(&core), ColorSchemeChoice::Dark);
+        assert_eq!(core.color_scheme().expect("color_scheme"), "dark");
+
+        // 显式切回 system 后，即使旧 linux-ui.toml 仍是 dark 也不再重复覆盖
+        save_color_scheme_with_core(&core, ColorSchemeChoice::System).expect("save system");
+        assert_eq!(
+            load_color_scheme_with_core(&core),
+            ColorSchemeChoice::System
+        );
+        // 后续保存不改写 linux-ui.toml
+        save_color_scheme_with_core(&core, ColorSchemeChoice::Light).expect("save light");
+        assert_eq!(core.color_scheme().expect("color_scheme"), "light");
+        assert_eq!(
+            std::fs::read_to_string(&legacy_path).expect("read legacy"),
+            "color_scheme = \"dark\"\n"
+        );
     }
 
     #[test]
@@ -247,12 +269,5 @@ mod tests {
             parse_color_scheme_toml("other_key = 'keep'\ncolor_scheme = 'dark' # valid"),
             ColorSchemeChoice::Dark
         );
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file = dir.path().join("linux-ui.toml");
-        std::fs::write(&file, "color_scheme = invalid_value\n").expect("write");
-        assert_eq!(load_color_scheme_from(&file), ColorSchemeChoice::System);
-        save_color_scheme_to(&file, ColorSchemeChoice::Dark).expect("overwrite");
-        assert_eq!(load_color_scheme_from(&file), ColorSchemeChoice::Dark);
     }
 }
