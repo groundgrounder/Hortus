@@ -112,6 +112,10 @@ public enum L10n {
             return string("The agent arguments are invalid")
         case "agent.config_invalid":
             return string("The agent configuration is invalid")
+        case "agent.profile_invalid":
+            return string("The agent profile is invalid")
+        case "agent.profile_not_found":
+            return string("The selected agent profile was not found")
         case "guide.invalid_utf8":
             return string("agent-guide.md is not valid UTF-8")
         case "guide.empty":

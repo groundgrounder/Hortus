@@ -77,6 +77,11 @@ final class Workspace {
     var tabs: [NoteTab] = []
     var selected: String?
     var recent: [VaultState] { application?.recent ?? [] }
+    var agentProfiles: [AgentProfileInfo] { application?.agentProfiles ?? [] }
+    var agentDefaultProfile: String? { application?.agentDefaultProfile }
+    var customAgentSheetPresented = false
+    var customAgentTargetGroupID: UUID?
+    var customAgentHistory: [String] = []
     var scanning: Bool { context?.scanning ?? false }
     var opening = false
     var error: String?
@@ -209,13 +214,57 @@ final class Workspace {
     }
 
     @discardableResult
-    func addAgent(to groupID: UUID? = nil) -> TerminalTab? {
-        guard root != nil, let layout, let tab = terminals.createAgent() else { return nil }
+    func addAgent(to groupID: UUID? = nil, launchMode: AgentLaunchMode = .defaultProfile) -> TerminalTab? {
+        guard root != nil, let layout, let tab = terminals.createAgent(launchMode: launchMode) else { return nil }
         layout.add(.terminal(tab.id), to: groupID ?? layout.defaultTerminalGroupID)
         layout.reveal(.terminal(tab.id))
         terminals.start(tab)
         terminals.focusSoon()
         return tab
+    }
+
+    func presentCustomAgentSheet(for groupID: UUID? = nil) {
+        guard root != nil else { return }
+        customAgentTargetGroupID = groupID ?? layout?.defaultTerminalGroupID
+        customAgentSheetPresented = true
+        guard let core else { return }
+        Task { [weak self] in
+            let history = (try? await Task.detached { try core.customAgentHistory() }.value) ?? []
+            self?.customAgentHistory = history
+        }
+    }
+
+    @discardableResult
+    func launchCustomAgent(_ command: String) -> TerminalTab? {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let targetGroup = customAgentTargetGroupID
+        customAgentSheetPresented = false
+        customAgentTargetGroupID = nil
+        return addAgent(to: targetGroup, launchMode: .customCommand(trimmed))
+    }
+
+    func installCLISymlinkFromMenu() {
+        do {
+            let destination = try CLIHelper.installSymlink()
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = L10n.string("Command Line Tool Linked")
+            alert.informativeText = destination.path
+            alert.addButton(withTitle: L10n.string("OK"))
+            alert.runModal()
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = L10n.string("Unable to Link Command Line Tool")
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: L10n.string("OK"))
+            alert.runModal()
+        }
+    }
+
+    func copyMCPConfigurationFromMenu() {
+        _ = CLIHelper.copyMCPConfiguration(vaultPath: root)
     }
 
     func addStaticTool(_ tool: StaticTool, to groupID: UUID?) {

@@ -308,16 +308,38 @@ pub struct AgentLaunch {
     pub args: Vec<String>,
 }
 
+/// 单个命名 Agent 配置档；对应 `config.toml` 中的 `[[agent.profiles]]`。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AgentProfile {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+/// 自定义命令启动 Agent 的内核规格；多行指南写入缓存只读文件并通过环境变量注入。
+#[derive(Clone, Debug, PartialEq)]
+pub struct CustomAgentLaunch {
+    pub executable: String,
+    pub args: Vec<String>,
+    pub guide_file: String,
+    pub path: String,
+}
+
+const CUSTOM_AGENT_HISTORY_LIMIT: usize = 12;
+
 /// 设置界面的完整配置快照；`digest` 是 `config.toml` 原始字节的指纹。
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditableConfig {
     pub config_path: String,
     pub digest: String,
     pub settings: Settings,
-    /// `[agent]` 是否已配置；未配置时 command/args 为空。
+    /// `[agent]` 或 `[[agent.profiles]]` 是否已配置；未配置时 command/args 为空。
     pub agent_configured: bool,
     pub agent_command: Option<String>,
     pub agent_args: Vec<String>,
+    pub agent_profiles: Vec<AgentProfile>,
+    pub agent_default_profile: Option<String>,
     /// 稳定错误键；界面据此提示，不阻止读取其余可用字段。
     pub diagnostics: Vec<String>,
 }
@@ -471,6 +493,20 @@ struct RawConfig {
 
 #[derive(serde::Deserialize, Default)]
 struct RawAgent {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    default_profile: Option<String>,
+    #[serde(default)]
+    profiles: Option<Vec<RawAgentProfile>>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RawAgentProfile {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     command: Option<String>,
     #[serde(default)]
@@ -750,6 +786,8 @@ impl Store {
         let mut agent_configured = false;
         let mut agent_command = None;
         let mut agent_args = Vec::new();
+        let mut agent_profiles = Vec::new();
+        let mut agent_default_profile = None;
         if let Some(item) = document.get("agent") {
             match item.as_table() {
                 Some(table) => {
@@ -772,13 +810,96 @@ impl Store {
                             None => diagnostics.push("agent.config_invalid".into()),
                         }
                     }
-                    // 只有 command/args 组成启动模板；其它 [agent] 子键不算已配置。
-                    agent_configured = agent_command.is_some() || !agent_args.is_empty();
-                    if let Err(key) = validate_agent_template(
-                        agent_command.as_deref().unwrap_or_default(),
-                        &agent_args,
-                    ) {
-                        diagnostics.push(key.into());
+                    if let Some(default_item) = table.get("default_profile") {
+                        match default_item.as_str() {
+                            Some(value) if !value.trim().is_empty() => {
+                                agent_default_profile = Some(value.trim().to_string());
+                            }
+                            _ => diagnostics.push("agent.config_invalid".into()),
+                        }
+                    }
+                    if let Some(profiles_item) = table.get("profiles") {
+                        match profiles_item.as_array_of_tables() {
+                            Some(tables) => {
+                                let mut seen_ids = BTreeSet::new();
+                                for profile_table in tables.iter() {
+                                    let id = profile_table
+                                        .get("id")
+                                        .and_then(toml_edit::Item::as_str)
+                                        .unwrap_or_default()
+                                        .trim()
+                                        .to_string();
+                                    let name = profile_table
+                                        .get("name")
+                                        .and_then(toml_edit::Item::as_str)
+                                        .unwrap_or_default()
+                                        .trim()
+                                        .to_string();
+                                    let command = profile_table
+                                        .get("command")
+                                        .and_then(toml_edit::Item::as_str)
+                                        .unwrap_or_default()
+                                        .trim()
+                                        .to_string();
+                                    let mut args = Vec::new();
+                                    if let Some(args_item) = profile_table.get("args") {
+                                        match args_item.as_array() {
+                                            Some(values) => {
+                                                for value in values.iter() {
+                                                    match value.as_str() {
+                                                        Some(arg) => args.push(arg.to_string()),
+                                                        None => diagnostics
+                                                            .push("agent.config_invalid".into()),
+                                                    }
+                                                }
+                                            }
+                                            None => diagnostics.push("agent.config_invalid".into()),
+                                        }
+                                    }
+                                    if id.is_empty()
+                                        || name.is_empty()
+                                        || !seen_ids.insert(id.clone())
+                                    {
+                                        diagnostics.push("agent.profile_invalid".into());
+                                    }
+                                    if let Err(key) = validate_agent_template(&command, &args) {
+                                        diagnostics.push(key.into());
+                                    }
+                                    agent_profiles.push(AgentProfile {
+                                        id,
+                                        name,
+                                        command,
+                                        args,
+                                    });
+                                }
+                            }
+                            None => diagnostics.push("agent.config_invalid".into()),
+                        }
+                    }
+                    if !agent_profiles.is_empty() {
+                        agent_configured = true;
+                        let active = agent_default_profile
+                            .as_deref()
+                            .and_then(|id| agent_profiles.iter().find(|p| p.id == id))
+                            .or_else(|| agent_profiles.first());
+                        if let Some(active) = active {
+                            if agent_command.is_none() && agent_args.is_empty() {
+                                agent_command = Some(active.command.clone());
+                                agent_args = active.args.clone();
+                            }
+                            if agent_default_profile.is_none() {
+                                agent_default_profile = Some(active.id.clone());
+                            }
+                        }
+                    } else {
+                        // 只有 command/args 组成启动模板；其它 [agent] 子键不算已配置。
+                        agent_configured = agent_command.is_some() || !agent_args.is_empty();
+                        if let Err(key) = validate_agent_template(
+                            agent_command.as_deref().unwrap_or_default(),
+                            &agent_args,
+                        ) {
+                            diagnostics.push(key.into());
+                        }
                     }
                 }
                 None => diagnostics.push("agent.config_invalid".into()),
@@ -797,6 +918,8 @@ impl Store {
             agent_configured,
             agent_command,
             agent_args,
+            agent_profiles,
+            agent_default_profile,
             diagnostics,
         })
     }
@@ -805,6 +928,17 @@ impl Store {
     pub fn save_config(
         &self,
         input: &EditableConfigInput,
+        expected_digest: Option<&str>,
+    ) -> io::Result<EditableConfig> {
+        self.save_config_with_profiles(input, &[], None, expected_digest)
+    }
+
+    /// 原地保存基础设置与 `[[agent.profiles]]` 多配置档，完整保留注释、未知键与 `[[vault]]`。
+    pub fn save_config_with_profiles(
+        &self,
+        input: &EditableConfigInput,
+        profiles: &[AgentProfile],
+        default_profile: Option<&str>,
         expected_digest: Option<&str>,
     ) -> io::Result<EditableConfig> {
         let path = self.config_path();
@@ -824,6 +958,30 @@ impl Store {
         {
             return Err(io::Error::other("config.terminal_font_invalid"));
         }
+
+        let mut normalized_profiles = Vec::with_capacity(profiles.len());
+        let mut seen_ids = BTreeSet::new();
+        for profile in profiles {
+            let id = profile.id.trim().to_string();
+            let name = profile.name.trim().to_string();
+            let command = profile.command.trim().to_string();
+            if id.is_empty()
+                || name.is_empty()
+                || id.contains('\0')
+                || name.contains('\0')
+                || !seen_ids.insert(id.clone())
+            {
+                return Err(io::Error::other("agent.profile_invalid"));
+            }
+            validate_agent_template(&command, &profile.args).map_err(io::Error::other)?;
+            normalized_profiles.push(AgentProfile {
+                id,
+                name,
+                command,
+                args: profile.args.clone(),
+            });
+        }
+
         let command = input
             .agent_command
             .as_deref()
@@ -831,10 +989,12 @@ impl Store {
             .trim()
             .to_string();
         let args = &input.agent_args;
-        let cleared = command.is_empty() && args.iter().all(|argument| argument.trim().is_empty());
-        if !cleared {
+        let legacy_cleared =
+            command.is_empty() && args.iter().all(|argument| argument.trim().is_empty());
+        if normalized_profiles.is_empty() && !legacy_cleared {
             validate_agent_template(&command, args).map_err(io::Error::other)?;
         }
+
         let text = String::from_utf8(bytes).map_err(|_| io::Error::other("config.invalid_utf8"))?;
         let mut document = text
             .parse::<toml_edit::DocumentMut>()
@@ -858,13 +1018,51 @@ impl Store {
                 document.remove("terminal_font");
             }
         };
-        if cleared {
+
+        if !normalized_profiles.is_empty() {
+            if document.get("agent").is_none() {
+                document.insert("agent", toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            let table = document
+                .get_mut("agent")
+                .and_then(toml_edit::Item::as_table_mut)
+                .ok_or_else(|| io::Error::other("agent.config_invalid"))?;
+            let active = default_profile
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .and_then(|id| normalized_profiles.iter().find(|p| p.id == id))
+                .unwrap_or(&normalized_profiles[0]);
+            set_value(
+                table,
+                "default_profile",
+                toml_edit::Value::from(active.id.as_str()),
+            );
+            // 同步更新 `[agent]` 的 command/args 到默认配置档，保持旧客户端向后兼容。
+            set_value(
+                table,
+                "command",
+                toml_edit::Value::from(active.command.as_str()),
+            );
+            set_array(table, "args", &active.args);
+            let mut array_of_tables = toml_edit::ArrayOfTables::new();
+            for profile in &normalized_profiles {
+                let mut entry = toml_edit::Table::new();
+                entry["id"] = toml_edit::value(profile.id.as_str());
+                entry["name"] = toml_edit::value(profile.name.as_str());
+                entry["command"] = toml_edit::value(profile.command.as_str());
+                set_array(&mut entry, "args", &profile.args);
+                array_of_tables.push(entry);
+            }
+            table.insert("profiles", toml_edit::Item::ArrayOfTables(array_of_tables));
+        } else if legacy_cleared {
             if let Some(item) = document.get_mut("agent") {
                 let table = item
                     .as_table_mut()
                     .ok_or_else(|| io::Error::other("agent.config_invalid"))?;
                 table.remove("command");
                 table.remove("args");
+                table.remove("default_profile");
+                table.remove("profiles");
             }
             let empty = document
                 .get("agent")
@@ -881,6 +1079,8 @@ impl Store {
                 .get_mut("agent")
                 .and_then(toml_edit::Item::as_table_mut)
                 .ok_or_else(|| io::Error::other("agent.config_invalid"))?;
+            table.remove("default_profile");
+            table.remove("profiles");
             set_value(table, "command", toml_edit::Value::from(command));
             set_array(table, "args", args);
         }
@@ -1228,12 +1428,22 @@ impl Store {
 
     /// 只读取并校验模板，不创建目录、不启动进程。
     pub fn agent_launch(&self) -> io::Result<AgentLaunch> {
-        self.agent_launch_with_paths(None)
+        self.agent_launch_for_profile_with_paths(None, None)
     }
 
     /// 启动解析追加后台登录 shell 得到的 PATH；仍不执行模板里的命令。
     pub fn agent_launch_with_paths(
         &self,
+        login_path: Option<&std::ffi::OsStr>,
+    ) -> io::Result<AgentLaunch> {
+        self.agent_launch_for_profile_with_paths(None, login_path)
+    }
+
+    /// 按配置档解析 Agent 启动规格：`profile_id` 为 `None` 时优先使用默认配置档，
+    /// 无 `[[agent.profiles]]` 时无缝回退至 `[agent]`。
+    pub fn agent_launch_for_profile_with_paths(
+        &self,
+        profile_id: Option<&str>,
         login_path: Option<&std::ffi::OsStr>,
     ) -> io::Result<AgentLaunch> {
         let text = fs::read_to_string(self.config_path())?;
@@ -1242,11 +1452,45 @@ impl Store {
         let agent = raw
             .agent
             .ok_or_else(|| io::Error::other("agent.not_configured"))?;
-        let command = agent.command.unwrap_or_default();
+        let (command, args) = if let Some(profiles) = agent.profiles.filter(|p| !p.is_empty()) {
+            let selected = if let Some(requested_id) = profile_id {
+                profiles
+                    .into_iter()
+                    .find(|p| p.id.as_deref().map(str::trim) == Some(requested_id))
+                    .ok_or_else(|| io::Error::other("agent.profile_not_found"))?
+            } else if let Some(default_id) = agent
+                .default_profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                let mut iter = profiles.into_iter();
+                let first = iter.next().unwrap();
+                if first.id.as_deref().map(str::trim) == Some(default_id) {
+                    first
+                } else {
+                    iter.find(|p| p.id.as_deref().map(str::trim) == Some(default_id))
+                        .unwrap_or(first)
+                }
+            } else {
+                profiles.into_iter().next().unwrap()
+            };
+            (
+                selected.command.unwrap_or_default(),
+                selected.args.unwrap_or_default(),
+            )
+        } else {
+            if profile_id.is_some() {
+                return Err(io::Error::other("agent.profile_not_found"));
+            }
+            (
+                agent.command.unwrap_or_default(),
+                agent.args.unwrap_or_default(),
+            )
+        };
         if command.trim().is_empty() {
             return Err(io::Error::other("agent.command_missing"));
         }
-        let args = agent.args.unwrap_or_default();
         if args.is_empty() || !args.iter().any(|argument| argument.contains("{guide}")) {
             return Err(io::Error::other("agent.guide_missing"));
         }
@@ -1262,6 +1506,89 @@ impl Store {
             .map(|argument| argument.replace("{guide}", &guide))
             .collect();
         Ok(AgentLaunch { executable, args })
+    }
+
+    /// 准备自定义命令启动 Agent：将当前有效指南写入缓存目录只读文件，
+    /// 返回 `$SHELL -lc <command>` 启动规格与只读指南路径，绝不将指南拼入命令行。
+    pub fn prepare_custom_agent_launch(
+        &self,
+        command: &str,
+        login_path: Option<&std::ffi::OsStr>,
+    ) -> io::Result<CustomAgentLaunch> {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return Err(io::Error::other("agent.command_missing"));
+        }
+        if trimmed.contains('\0') {
+            return Err(io::Error::other("agent.invalid_argument"));
+        }
+        let guide = effective_guide(&self.directories.config)?;
+        fs::create_dir_all(&self.directories.cache)?;
+        let guide_path = self.directories.cache.join("agent-guide-active.md");
+        atomic_write_readonly(&guide_path, guide.as_bytes())?;
+        let shell = std::env::var("SHELL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "/bin/zsh".to_string());
+        let path = self
+            .effective_agent_path(login_path)
+            .to_string_lossy()
+            .into_owned();
+        Ok(CustomAgentLaunch {
+            executable: shell,
+            args: vec!["-lc".to_string(), trimmed.to_string()],
+            guide_file: guide_path.to_string_lossy().into_owned(),
+            path,
+        })
+    }
+
+    /// 读取系统缓存目录中的最近自定义 Agent 命令历史（最多 12 条）。
+    pub fn custom_agent_history(&self) -> io::Result<Vec<String>> {
+        let path = self.directories.cache.join("agent-custom-history.json");
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let items: Vec<String> = serde_json::from_slice(&bytes).unwrap_or_default();
+                let mut deduped = Vec::with_capacity(items.len().min(CUSTOM_AGENT_HISTORY_LIMIT));
+                for item in items {
+                    let trimmed = item.trim();
+                    if trimmed.is_empty() || trimmed.contains('\0') {
+                        continue;
+                    }
+                    if !deduped.iter().any(|existing| existing == trimmed) {
+                        deduped.push(trimmed.to_string());
+                    }
+                    if deduped.len() >= CUSTOM_AGENT_HISTORY_LIMIT {
+                        break;
+                    }
+                }
+                Ok(deduped)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// 记录一条自定义 Agent 命令至系统缓存目录（最近优先去重，上限 12 条）。
+    pub fn record_custom_agent_command(&self, command: &str) -> io::Result<Vec<String>> {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return Err(io::Error::other("agent.command_missing"));
+        }
+        if trimmed.contains('\0') {
+            return Err(io::Error::other("agent.invalid_argument"));
+        }
+        fs::create_dir_all(&self.directories.cache)?;
+        let mut history = self.custom_agent_history().unwrap_or_default();
+        history.retain(|item| item != trimmed);
+        history.insert(0, trimmed.to_string());
+        history.truncate(CUSTOM_AGENT_HISTORY_LIMIT);
+        let bytes = serde_json::to_vec_pretty(&history).map_err(io::Error::other)?;
+        atomic_write(
+            &self.directories.cache.join("agent-custom-history.json"),
+            &bytes,
+        )?;
+        Ok(history)
     }
 
     pub fn data_root(&self) -> &Path {
@@ -1349,6 +1676,30 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(io::Error::other)?;
+    fs::File::open(parent)?.sync_all()
+}
+
+fn atomic_write_readonly(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("config.path_invalid"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o444))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut perms = temporary.as_file().metadata()?.permissions();
+        perms.set_readonly(true);
+        temporary.as_file().set_permissions(perms)?;
+    }
     temporary.persist(path).map_err(io::Error::other)?;
     fs::File::open(parent)?.sync_all()
 }
@@ -1763,5 +2114,157 @@ mod tests {
             })
             .unwrap();
         assert!(diagram_entry(&store, "/v", "n.md", 1).is_none());
+    }
+
+    #[test]
+    fn agent_profiles_round_trip_preserves_comments_and_legacy_fallback() {
+        let root = tempfile::TempDir::new().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let codex = bin.join("codex");
+        let claude = bin.join("claude");
+        make_executable(&codex);
+        make_executable(&claude);
+
+        let store = diagram_store(&root);
+        let initial = format!(
+            "# 顶部自定义注释\nfont_size = 16.0\ndefault_view = \"reading\"\nunknown_flag = true\n\n[agent]\ncommand = \"{}\"\nargs = [\"{{guide}}\"]\n\n[[vault]]\npath = \"/tmp/example\"\nfont_size = 18.0\n",
+            codex.display()
+        );
+        fs::write(store.config_path(), &initial).unwrap();
+
+        // 1. Legacy [agent] without [[agent.profiles]] works seamlessly.
+        let cfg = store.editable_config().unwrap();
+        assert!(cfg.agent_configured);
+        assert!(cfg.agent_profiles.is_empty());
+        let launch = store.agent_launch().unwrap();
+        assert_eq!(launch.executable, resolved(&codex));
+        assert!(launch.args[0].contains("Hortus"));
+        assert_eq!(
+            store
+                .agent_launch_for_profile_with_paths(Some("missing"), None)
+                .unwrap_err()
+                .to_string(),
+            "agent.profile_not_found"
+        );
+
+        // 2. Save multiple [[agent.profiles]] and switch default_profile.
+        let profiles = vec![
+            AgentProfile {
+                id: "codex".into(),
+                name: "Codex".into(),
+                command: codex.to_string_lossy().into_owned(),
+                args: vec!["{guide}".into()],
+            },
+            AgentProfile {
+                id: "claude".into(),
+                name: "Claude Code".into(),
+                command: claude.to_string_lossy().into_owned(),
+                args: vec!["--append-system-prompt".into(), "{guide}".into()],
+            },
+        ];
+        let saved = store
+            .save_config_with_profiles(
+                &EditableConfigInput {
+                    settings: cfg.settings.clone(),
+                    agent_command: None,
+                    agent_args: vec![],
+                },
+                &profiles,
+                Some("claude"),
+                Some(&cfg.digest),
+            )
+            .unwrap();
+        assert_eq!(saved.agent_profiles.len(), 2);
+        assert_eq!(saved.agent_default_profile.as_deref(), Some("claude"));
+        assert_eq!(
+            saved.agent_command.as_deref(),
+            Some(claude.to_string_lossy().as_ref())
+        );
+
+        // Comments, unknown keys, and [[vault]] must remain intact.
+        let raw = fs::read_to_string(store.config_path()).unwrap();
+        assert!(raw.contains("# 顶部自定义注释"));
+        assert!(raw.contains("unknown_flag = true"));
+        assert!(raw.contains("[[vault]]"));
+        assert!(raw.contains("path = \"/tmp/example\""));
+
+        // Default launch resolves "claude"; explicit profile_id resolves "codex".
+        let default_launch = store.agent_launch().unwrap();
+        assert_eq!(default_launch.executable, resolved(&claude));
+        let codex_launch = store
+            .agent_launch_for_profile_with_paths(Some("codex"), None)
+            .unwrap();
+        assert_eq!(codex_launch.executable, resolved(&codex));
+    }
+
+    #[test]
+    fn custom_agent_launch_writes_readonly_guide_in_cache_and_tracks_history() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = diagram_store(&root);
+
+        // Rejects empty and NUL commands.
+        assert_eq!(
+            store
+                .prepare_custom_agent_launch("   ", None)
+                .unwrap_err()
+                .to_string(),
+            "agent.command_missing"
+        );
+        assert_eq!(
+            store
+                .prepare_custom_agent_launch("echo \0 bad", None)
+                .unwrap_err()
+                .to_string(),
+            "agent.invalid_argument"
+        );
+
+        let launch = store
+            .prepare_custom_agent_launch("codex --model o3", None)
+            .unwrap();
+        assert!(!launch.executable.is_empty());
+        assert_eq!(launch.args, vec!["-lc", "codex --model o3"]);
+        // Guide text is NEVER concatenated into the shell command line.
+        assert!(!launch.args[1].contains('\n'));
+        let guide_path = PathBuf::from(&launch.guide_file);
+        assert!(guide_path.starts_with(&store.directories.cache));
+        assert!(guide_path.exists());
+        let guide_content = fs::read_to_string(&guide_path).unwrap();
+        assert_eq!(guide_content, AGENT_GUIDE);
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&guide_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o444, "guide file must be read-only");
+        }
+        // Calling a second time can still atomically replace the read-only guide file.
+        let second = store
+            .prepare_custom_agent_launch("claude --print", None)
+            .unwrap();
+        assert_eq!(second.guide_file, launch.guide_file);
+
+        // History deduplicates and caps at 12 entries (most recent first).
+        for i in 1..=15 {
+            store
+                .record_custom_agent_command(&format!("cmd-{i}"))
+                .unwrap();
+        }
+        let history = store.record_custom_agent_command("cmd-10").unwrap();
+        assert_eq!(history.len(), 12);
+        assert_eq!(history[0], "cmd-10");
+        assert_eq!(history[1], "cmd-15");
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| item.as_str() == "cmd-10")
+                .count(),
+            1
+        );
+        assert!(
+            store
+                .directories
+                .cache
+                .join("agent-custom-history.json")
+                .exists()
+        );
     }
 }

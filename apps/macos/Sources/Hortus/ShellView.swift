@@ -24,6 +24,10 @@ struct ShellView: View {
         .windowToolbarFullScreenVisibility(.onHover)
         .navigationTitle(workspace.title)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { toolbarWidth = $0 }
+        .sheet(isPresented: Bindable(workspace).customAgentSheetPresented) {
+            CustomAgentSheet()
+                .environment(workspace)
+        }
     }
 
     /// 正文让开浮在上面的面板；背景仍然铺满。顶部只留一点呼吸空间，正文可以滚到顶栏那一行下面

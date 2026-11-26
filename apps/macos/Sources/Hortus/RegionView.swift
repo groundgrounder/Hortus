@@ -183,6 +183,18 @@ struct TabStrip: View {
                 .disabled(workspace.root == nil)
             Button(L10n.string("New Agent")) { workspace.addAgent(to: group.id) }
                 .disabled(workspace.root == nil)
+            if workspace.agentProfiles.count > 1 {
+                Menu(L10n.string("New Agent Profile")) {
+                    ForEach(workspace.agentProfiles, id: \.id) { profile in
+                        Button(profile.name) {
+                            workspace.addAgent(to: group.id, launchMode: .profile(id: profile.id, name: profile.name))
+                        }
+                    }
+                }
+                .disabled(workspace.root == nil)
+            }
+            Button(L10n.string("Custom Agent Command…")) { workspace.presentCustomAgentSheet(for: group.id) }
+                .disabled(workspace.root == nil)
         } label: {
             Image(systemName: "plus")
                 .font(.callout)

@@ -154,7 +154,63 @@ private struct AgentSettingsView: View {
             Section(L10n.string("Detected Agents")) {
                 detectedAgents
             }
+            Section(L10n.string("Profiles")) {
+                if !model.agentProfiles.isEmpty {
+                    ForEach(model.agentProfiles) { profile in
+                        let isSelected = model.selectedProfileID == profile.id
+                        let isDefault = (model.agentDefaultProfile ?? model.agentProfiles.first?.id) == profile.id
+                        HStack(spacing: 8) {
+                            Button {
+                                model.selectProfile(profile.id)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                                    Text(profile.name)
+                                        .font(.body.weight(isSelected ? .medium : .regular))
+                                    if isDefault {
+                                        Text(L10n.string("Default"))
+                                            .font(.caption2)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                                    }
+                                    Spacer(minLength: 4)
+                                }
+                                .contentShape(.rect)
+                            }
+                            .buttonStyle(.plain)
+
+                            if !isDefault {
+                                Button(L10n.string("Set Default")) {
+                                    model.setDefaultProfile(profile.id)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            Button(role: .destructive) {
+                                model.deleteProfile(profile.id)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel(L10n.string("Delete %@", profile.name))
+                        }
+                    }
+                }
+                Button {
+                    model.addProfile()
+                } label: {
+                    Label(L10n.string("Add Profile"), systemImage: "plus")
+                }
+                .accessibilityLabel(L10n.string("Add Profile"))
+            }
             Section(L10n.string("Agent Launch")) {
+                if model.selectedProfileID != nil {
+                    LabeledContent(L10n.string("Profile Name")) {
+                        TextField("", text: $model.selectedProfileName, prompt: Text("Codex"))
+                            .accessibilityLabel(L10n.string("Profile Name"))
+                    }
+                }
                 LabeledContent(L10n.string("Command")) {
                     HStack(spacing: 8) {
                         TextField("", text: $model.agentCommand, prompt: Text("codex"))
@@ -206,8 +262,14 @@ private struct AgentSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onChange(of: model.agentArgs) { model.scheduleProbe() }
-        .onChange(of: model.agentCommand) { model.scheduleProbe() }
+        .onChange(of: model.agentArgs) {
+            model.syncCurrentProfileFromFields()
+            model.scheduleProbe()
+        }
+        .onChange(of: model.agentCommand) {
+            model.syncCurrentProfileFromFields()
+            model.scheduleProbe()
+        }
         .alert(L10n.string("Restore the built-in guide?"), isPresented: $confirmResetGuide) {
             Button(L10n.string("Restore"), role: .destructive) { Task { await model.resetGuide() } }
             Button(L10n.string("Cancel"), role: .cancel) {}
@@ -347,6 +409,22 @@ private struct ConfigurationSettingsView: View {
                         .accessibilityLabel(L10n.string("Reload configuration from disk"))
                 }
             }
+            Section(L10n.string("Command Line & MCP")) {
+                LabeledContent(L10n.string("Command Line Tool")) {
+                    cliStatusView
+                }
+                HStack(spacing: 10) {
+                    Button(L10n.string("Link Command Line Tool")) { model.installCLISymlink() }
+                        .accessibilityLabel(L10n.string("Link Command Line Tool"))
+                    Button(L10n.string("Copy MCP Configuration")) { model.copyMCPConfiguration() }
+                        .accessibilityLabel(L10n.string("Copy MCP Configuration"))
+                }
+                if let message = model.cliMessage {
+                    Label(message, systemImage: model.cliMessageIsError ? "exclamationmark.triangle" : "checkmark.circle")
+                        .foregroundStyle(model.cliMessageIsError ? Color.red : Color.secondary)
+                        .lineLimit(2)
+                }
+            }
             if !model.diagnostics.isEmpty {
                 Section(L10n.string("Diagnostics")) {
                     ForEach(model.diagnostics, id: \.self) { key in
@@ -357,5 +435,24 @@ private struct ConfigurationSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { model.refreshCLIStatus() }
+    }
+
+    @ViewBuilder private var cliStatusView: some View {
+        switch model.cliStatus {
+        case .notInstalled:
+            Text(L10n.string("Not linked")).foregroundStyle(.secondary)
+        case .linked:
+            Label(L10n.string("Linked"), systemImage: "checkmark.circle").foregroundStyle(.green)
+        case let .linkedElsewhere(target):
+            Text(L10n.string("Linked elsewhere: %@", target))
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        case .conflictFile:
+            Label(L10n.string("Existing file blocks ~/.local/bin/hortus"), systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+        }
     }
 }

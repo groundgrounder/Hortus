@@ -11,6 +11,14 @@ struct DetectedAgent: Identifiable, Hashable {
     let suggestedArgs: [String]
 }
 
+/// 设置界面编辑中的命名 Agent 配置档。
+struct EditableAgentProfile: Identifiable, Hashable {
+    let id: String
+    var name: String
+    var command: String
+    var args: [String]
+}
+
 /// 设置窗口的唯一状态：读取 `config.toml` 快照、校验并保存，再把结果广播给所有窗口。
 @Observable @MainActor
 final class SettingsModel {
@@ -28,6 +36,12 @@ final class SettingsModel {
     var terminalFont: String?
     var agentCommand = ""
     var agentArgs: [String] = []
+    var agentProfiles: [EditableAgentProfile] = []
+    var selectedProfileID: String?
+    var agentDefaultProfile: String?
+    var cliStatus: CLIHelper.SymlinkStatus = .notInstalled
+    var cliMessage: String?
+    var cliMessageIsError = false
     var probe: AgentProbeInfo?
     var detectedAgents: [DetectedAgent] = []
     var agentScanning = false
@@ -96,8 +110,127 @@ final class SettingsModel {
             return
         }
         await loadGuide(core)
+        refreshCLIStatus()
         refreshDetectedAgents()
         scheduleProbe()
+    }
+
+    var selectedProfileName: String {
+        get {
+            guard let id = selectedProfileID,
+                  let profile = agentProfiles.first(where: { $0.id == id }) else { return "" }
+            return profile.name
+        }
+        set {
+            guard let id = selectedProfileID,
+                  let index = agentProfiles.firstIndex(where: { $0.id == id }) else { return }
+            agentProfiles[index].name = newValue
+        }
+    }
+
+    func syncCurrentProfileFromFields() {
+        guard let id = selectedProfileID,
+              let index = agentProfiles.firstIndex(where: { $0.id == id }) else { return }
+        agentProfiles[index].command = agentCommand
+        agentProfiles[index].args = agentArgs
+    }
+
+    func selectProfile(_ id: String) {
+        syncCurrentProfileFromFields()
+        guard let profile = agentProfiles.first(where: { $0.id == id }) else { return }
+        selectedProfileID = id
+        agentCommand = profile.command
+        agentArgs = profile.args
+        scheduleProbe()
+    }
+
+    func addProfile(name: String? = nil, command: String = "", args: [String] = ["{guide}"]) {
+        syncCurrentProfileFromFields()
+        // 首次从单配置升级为多配置档时，自动保留当前已填配置为首个配置档。
+        if agentProfiles.isEmpty {
+            let trimmed = agentCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let firstID = makeProfileID(base: "default")
+                let firstName = URL(fileURLWithPath: trimmed).lastPathComponent
+                agentProfiles.append(EditableAgentProfile(
+                    id: firstID,
+                    name: firstName.isEmpty ? "Default" : firstName,
+                    command: agentCommand,
+                    args: agentArgs
+                ))
+                agentDefaultProfile = firstID
+            }
+        }
+        let nextIndex = agentProfiles.count + 1
+        let resolvedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? name!
+            : L10n.string("Profile %d", nextIndex)
+        let newID = makeProfileID(base: "profile-\(nextIndex)")
+        let profile = EditableAgentProfile(id: newID, name: resolvedName, command: command, args: args)
+        agentProfiles.append(profile)
+        if agentDefaultProfile == nil {
+            agentDefaultProfile = newID
+        }
+        selectedProfileID = newID
+        agentCommand = profile.command
+        agentArgs = profile.args
+        scheduleProbe()
+    }
+
+    func deleteProfile(_ id: String) {
+        syncCurrentProfileFromFields()
+        agentProfiles.removeAll { $0.id == id }
+        if agentDefaultProfile == id {
+            agentDefaultProfile = agentProfiles.first?.id
+        }
+        if selectedProfileID == id {
+            if let next = agentProfiles.first {
+                selectedProfileID = next.id
+                agentCommand = next.command
+                agentArgs = next.args
+            } else {
+                selectedProfileID = nil
+                agentCommand = ""
+                agentArgs = []
+            }
+        }
+        scheduleProbe()
+    }
+
+    func setDefaultProfile(_ id: String) {
+        guard agentProfiles.contains(where: { $0.id == id }) else { return }
+        agentDefaultProfile = id
+    }
+
+    private func makeProfileID(base: String) -> String {
+        let existing = Set(agentProfiles.map(\.id))
+        if !existing.contains(base) { return base }
+        var suffix = 2
+        while existing.contains("\(base)-\(suffix)") { suffix += 1 }
+        return "\(base)-\(suffix)"
+    }
+
+    func refreshCLIStatus() {
+        cliStatus = CLIHelper.symlinkStatus()
+    }
+
+    func installCLISymlink() {
+        do {
+            let destination = try CLIHelper.installSymlink()
+            refreshCLIStatus()
+            cliMessage = destination.path
+            cliMessageIsError = false
+        } catch {
+            refreshCLIStatus()
+            cliMessage = error.localizedDescription
+            cliMessageIsError = true
+        }
+    }
+
+    func copyMCPConfiguration() {
+        _ = CLIHelper.copyMCPConfiguration(vaultPath: application.active?.workspace.root)
+        cliMessage = L10n.string("MCP configuration copied")
+        cliMessageIsError = false
     }
 
     /// 后台只读扫描内置预设；扫描完成前不阻塞表单。
@@ -131,6 +264,7 @@ final class SettingsModel {
     func useAgent(_ agent: DetectedAgent) {
         agentCommand = agent.executable
         agentArgs = agent.suggestedArgs
+        syncCurrentProfileFromFields()
         scheduleProbe()
     }
 
@@ -164,8 +298,24 @@ final class SettingsModel {
         fontSize = info.fontSize
         defaultView = info.defaultView
         terminalFont = info.terminalFont
-        agentCommand = info.agentCommand ?? ""
-        agentArgs = info.agentArgs
+        agentProfiles = info.agentProfiles.map {
+            EditableAgentProfile(id: $0.id, name: $0.name, command: $0.command, args: $0.args)
+        }
+        agentDefaultProfile = info.agentDefaultProfile
+        if !agentProfiles.isEmpty {
+            let preferredID = selectedProfileID.flatMap { id in
+                agentProfiles.contains(where: { $0.id == id }) ? id : nil
+            } ?? agentDefaultProfile ?? agentProfiles[0].id
+            selectedProfileID = preferredID
+            if let current = agentProfiles.first(where: { $0.id == preferredID }) {
+                agentCommand = current.command
+                agentArgs = current.args
+            }
+        } else {
+            selectedProfileID = nil
+            agentCommand = info.agentCommand ?? ""
+            agentArgs = info.agentArgs
+        }
         diagnostics = info.diagnostics
     }
 
@@ -183,6 +333,7 @@ final class SettingsModel {
         guard let core = application.core, fontSizeIsValid else { return }
         saving = true
         defer { saving = false }
+        syncCurrentProfileFromFields()
         let input = EditableConfigInputInfo(
             fontSize: fontSize,
             defaultView: defaultView == "editing" ? "editing" : "reading",
@@ -190,15 +341,25 @@ final class SettingsModel {
             agentCommand: agentCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : agentCommand,
             agentArgs: agentArgs
         )
+        let profilesToSave = agentProfiles.map {
+            AgentProfileInfo(id: $0.id, name: $0.name, command: $0.command, args: $0.args)
+        }
+        let defaultProfileToSave = agentDefaultProfile
         do {
             let expected = force ? nil : digest
             let info = try await Task.detached {
-                try core.saveEditableConfig(input: input, expectedDigest: expected)
+                try core.saveEditableConfigWithProfiles(
+                    input: input,
+                    agentProfiles: profilesToSave,
+                    agentDefaultProfile: defaultProfileToSave,
+                    expectedDigest: expected
+                )
             }.value
             apply(info)
             application.applySettings(fontSize: info.fontSize,
                                       defaultView: info.defaultView,
                                       terminalFont: info.terminalFont)
+            application.applyAgentProfiles(info.agentProfiles, defaultProfile: info.agentDefaultProfile)
             statusMessage = L10n.string("Settings saved")
             statusIsError = false
             conflict = false
