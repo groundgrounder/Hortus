@@ -75,6 +75,7 @@ pub struct WindowInner {
     pub backlinks_panel: BacklinksPanel,
     pub quick_open: QuickOpen,
     pub state: Rc<RefCell<WindowState>>,
+    pub outline_sync_pending: std::cell::Cell<bool>,
     pub commands: CommandQueue<WindowCommand>,
     pub options: CliOptions,
 }
@@ -394,6 +395,8 @@ impl HortusWindow {
             scan_micros: 0,
             pending_open_notes,
             tabs: HashMap::new(),
+            outline_items: Vec::new(),
+            active_outline_index: None,
             desired_left_width: DEFAULT_SIDEBAR_WIDTH,
             desired_right_width: DEFAULT_SIDEBAR_WIDTH,
             left_sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -462,6 +465,7 @@ impl HortusWindow {
             backlinks_panel,
             quick_open: QuickOpen::new(),
             state,
+            outline_sync_pending: std::cell::Cell::new(false),
             commands: CommandQueue::new(),
             options,
         });
@@ -518,7 +522,7 @@ impl WindowInner {
                 heading,
             } => self.open_note_or_resolve(&source_note, &raw_target, heading),
             WindowCommand::RelayoutActiveTab(width) => self.apply_relayout_width(width),
-            WindowCommand::SwitchActiveEditMode { announce } => self.switch_edit_mode(announce),
+            WindowCommand::SwitchActiveEditMode => self.switch_edit_mode(),
             WindowCommand::SwitchToSourceAtByte {
                 note_path,
                 byte_start,
@@ -669,6 +673,8 @@ impl WindowInner {
             }
             st.disposing = true;
             st.cancel_global_timers();
+            st.outline_items.clear();
+            st.active_outline_index = None;
             st.last_alert_dialog.set(None);
             self.commands.clear();
             (

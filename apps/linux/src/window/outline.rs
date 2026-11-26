@@ -21,8 +21,50 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// 计算当前视口 UTF-16 偏移对应的大纲高亮索引：取最后一个 `start <= current_utf16` 的标题；
+/// 若位于首个标题之前（如 frontmatter 顶部）则默认高亮第 `0` 项。
+pub fn active_heading_index(headings: &[HeadingItem], current_utf16: u64) -> Option<usize> {
+    if headings.is_empty() {
+        return None;
+    }
+    headings
+        .iter()
+        .rposition(|h| h.start <= current_utf16)
+        .or(Some(0))
+}
+
+fn tab_current_utf16(tab: &crate::window::state::OpenNoteTab) -> u64 {
+    if !tab.editing {
+        tab.reading
+            .as_ref()
+            .map(crate::reading::ReadingSurfaceHandle::current_source_utf16)
+            .unwrap_or(0)
+    } else {
+        let scroll_val = tab.edit_scrolled.vadjustment().value();
+        if scroll_val <= 1.0 {
+            return 0;
+        }
+        let Ok(edit) = tab.edit_state.try_borrow() else {
+            return 0;
+        };
+        let by = (scroll_val - f64::from(tab.edit_view.top_margin()) + 4.0).max(0.0) as i32;
+        let (iter, _) = tab.edit_view.line_at_y(by);
+        let char_off = iter.offset().max(0) as usize;
+        edit.text
+            .chars()
+            .take(char_off)
+            .map(|c| c.len_utf16() as u64)
+            .sum()
+    }
+}
+
 impl WindowInner {
     pub fn render_outline_empty(&self, message: &str) {
+        {
+            let mut st = self.state.borrow_mut();
+            st.outline_items.clear();
+            st.active_outline_index = None;
+        }
         clear_box(&self.outline_box);
         let lbl = gtk4::Label::new(Some(message));
         lbl.add_css_class("dim-label");
@@ -32,11 +74,17 @@ impl WindowInner {
     }
 
     pub fn render_outline(self: &Rc<Self>, note_path: &str, headings: &[HeadingItem]) {
+        {
+            let mut st = self.state.borrow_mut();
+            st.outline_items.clear();
+            st.active_outline_index = None;
+        }
         clear_box(&self.outline_box);
         if headings.is_empty() {
             self.render_outline_empty(crate::i18n::tr(crate::i18n::Key::OutlineEmpty));
             return;
         }
+        let mut items = Vec::with_capacity(headings.len());
         for heading in headings {
             let indent = (heading.level.saturating_sub(1) as i32) * 12;
             let lbl = gtk4::Label::new(Some(&heading.title));
@@ -55,10 +103,91 @@ impl WindowInner {
             btn.connect_clicked(move |_| {
                 if let Some(win) = weak.upgrade() {
                     win.scroll_to_utf16_offset(&path, start);
+                    win.sync_outline_highlight_for_offset(&path, start);
                 }
             });
             self.outline_box.append(&btn);
+            items.push((heading.start, btn));
         }
+        self.state.borrow_mut().outline_items = items;
+        self.sync_active_outline_highlight();
+    }
+
+    fn apply_active_outline_index(&self, target: Option<usize>) {
+        let (prev_btn, next_btn) = {
+            let Ok(mut st) = self.state.try_borrow_mut() else {
+                return;
+            };
+            let clamped = target.filter(|&i| i < st.outline_items.len());
+            if st.active_outline_index == clamped {
+                return;
+            }
+            let prev = st
+                .active_outline_index
+                .and_then(|i| st.outline_items.get(i).map(|(_, b)| b.clone()));
+            let next = clamped.and_then(|i| st.outline_items.get(i).map(|(_, b)| b.clone()));
+            st.active_outline_index = clamped;
+            (prev, next)
+        };
+        if let Some(btn) = prev_btn {
+            btn.remove_css_class("hortus-outline-active");
+        }
+        if let Some(btn) = next_btn {
+            btn.add_css_class("hortus-outline-active");
+        }
+    }
+
+    pub fn schedule_outline_highlight_sync(self: &Rc<Self>) {
+        if self.outline_sync_pending.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            win.outline_sync_pending.set(false);
+            win.sync_active_outline_highlight();
+        });
+    }
+
+    pub fn sync_active_outline_highlight(&self) {
+        let Some(path) = self.active_tab_path() else {
+            return;
+        };
+        let target = {
+            let Ok(st) = self.state.try_borrow() else {
+                return;
+            };
+            if st.disposing || st.outline_items.is_empty() {
+                return;
+            }
+            let Some(tab) = st.tabs.get(&path) else {
+                return;
+            };
+            let current_utf16 = tab_current_utf16(tab);
+            active_heading_index(&tab.headings, current_utf16)
+        };
+        self.apply_active_outline_index(target);
+    }
+
+    pub fn sync_outline_highlight_for_offset(&self, note_path: &str, current_utf16: u64) {
+        if self.active_tab_path().as_deref() != Some(note_path) {
+            return;
+        }
+        let target = {
+            let Ok(st) = self.state.try_borrow() else {
+                return;
+            };
+            if st.disposing || st.outline_items.is_empty() {
+                return;
+            }
+            let Some(tab) = st.tabs.get(note_path) else {
+                return;
+            };
+            active_heading_index(&tab.headings, current_utf16)
+        };
+        self.apply_active_outline_index(target);
     }
 
     pub fn scroll_to_heading_title(&self, note_path: &str, heading_title: &str) {
@@ -421,4 +550,46 @@ pub(crate) fn schedule_reading_scroll_restore(
             ReadingScrollTarget::SourceUtf16(u16_off) => reading.scroll_to_source_utf16(u16_off),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn heading(level: u8, title: &str, start: u64) -> HeadingItem {
+        HeadingItem {
+            level,
+            title: title.to_string(),
+            start,
+        }
+    }
+
+    #[test]
+    fn active_heading_index_handles_empty_frontmatter_middle_and_end() {
+        assert_eq!(active_heading_index(&[], 0), None);
+        assert_eq!(active_heading_index(&[], 500), None);
+
+        let headings = vec![
+            heading(1, "Title", 42),
+            heading(2, "Overview", 120),
+            heading(2, "Details", 360),
+            heading(3, "Notes", 600),
+        ];
+
+        // 位于 frontmatter 顶部（首个标题之前）时默认高亮第 0 项。
+        assert_eq!(active_heading_index(&headings, 0), Some(0));
+        assert_eq!(active_heading_index(&headings, 41), Some(0));
+
+        // 恰好落在标题起点及跨多标题区间。
+        assert_eq!(active_heading_index(&headings, 42), Some(0));
+        assert_eq!(active_heading_index(&headings, 119), Some(0));
+        assert_eq!(active_heading_index(&headings, 120), Some(1));
+        assert_eq!(active_heading_index(&headings, 359), Some(1));
+        assert_eq!(active_heading_index(&headings, 360), Some(2));
+        assert_eq!(active_heading_index(&headings, 599), Some(2));
+        assert_eq!(active_heading_index(&headings, 600), Some(3));
+
+        // 滚至文末时高亮最后一项。
+        assert_eq!(active_heading_index(&headings, 9999), Some(3));
+    }
 }

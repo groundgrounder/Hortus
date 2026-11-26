@@ -45,7 +45,7 @@ pub fn setup_l2_scene(win: &Rc<WindowInner>, scene: &str) {
                 .get(&win.active_tab_path().unwrap_or_default())
                 .is_some_and(|tab| tab.editing);
             if !editing {
-                win.switch_edit_mode(false);
+                win.switch_edit_mode();
             }
             win.find_open(false);
             let Some(path) = win.active_tab_path() else {

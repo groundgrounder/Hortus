@@ -72,7 +72,7 @@ impl WindowInner {
         let toggle_edit = gio::SimpleAction::new("toggle-edit-mode", None);
         toggle_edit.connect_activate(move |_, _| {
             if let Some(win) = weak.upgrade() {
-                win.send_command(WindowCommand::SwitchActiveEditMode { announce: true });
+                win.send_command(WindowCommand::SwitchActiveEditMode);
             }
         });
         self.window.add_action(&toggle_edit);

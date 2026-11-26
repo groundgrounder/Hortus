@@ -192,7 +192,6 @@ impl SettingsDialog {
 
         let agent_cfg_group = adw::PreferencesGroup::builder()
             .title(tr(Key::SettingsGroupAgentLaunch))
-            .description(tr(Key::SettingsAgentLaunchDesc))
             .build();
 
         let command_entry = adw::EntryRow::builder()

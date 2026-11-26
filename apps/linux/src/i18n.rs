@@ -220,7 +220,7 @@ pub enum Key {
     MenuLaunchAgent,
     MenuSendPathToTerminal,
     MenuSendSelectionToTerminal,
-    MenuPreferences,
+    MenuSettings,
     MenuTabOverview,
     MenuFocusDiagram,
     MenuToggleLeftSidebar,
@@ -378,8 +378,6 @@ pub enum Key {
     ToastAmbiguousLink,
     ToastMissingLink,
     ToastCopiedPlainText,
-    ToastSwitchedToEdit,
-    ToastSwitchedToReading,
 
     // 终端与 Agent
     ToastSendPathNoNote,
@@ -493,7 +491,6 @@ pub enum Key {
     SettingsGroupDetectedAgents,
     SettingsRescanAgentsTooltip,
     SettingsGroupAgentLaunch,
-    SettingsAgentLaunchDesc,
     SettingsAgentCmdTitle,
     SettingsAgentArgsLabel,
     SettingsProbeNotChecked,
@@ -643,7 +640,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         #[cfg(feature = "automation")]
         Key::CliUsageAutoSuffix => (
             "\n  --overview                 Open tab overview on startup\n  --hide-top-bar             Hide top bar on startup\n  --edit                     Switch first opened note to editing view\n  --focus-diagram <n>        Open focus mode for diagram n\n  --scroll-fraction <f>      Scroll to fraction (0..1) before capture\n  --smoke-json <path>        Run smoke checks and write JSON\n  --reading-json <path>      Run reading checks and write JSON\n  --edit-knowledge-json <path>\n                             Run editing & navigation checks and write JSON\n  --wikilink-json <path>     Run link navigation checks and write JSON\n  --layout-width-json <path> Run layout width checks and write JSON\n  --layout-hide-sidebars     Collapse sidebars before measuring layout\n  --live-resize-json <path>  Run live resize checks and write JSON\n  --edit-knowledge-scene <name>\n                             Capture scene screenshot\n  --terminal-agent-json <path>\n                             Run terminal & Agent checks and write JSON\n  --terminal-agent-media <dir>\n                             Output directory for terminal & Agent screenshots\n  --terminal-agent-vault2 <dir>\n                             Second isolated folder for multi-window checks\n  --restore-session-json <path>\n                             Run session restore checks and write JSON\n  --matrix-audit-json <path> Run folder-wide layout/scroll/style audit and write JSON\n  --fuzz-json <path>         Run seeded GUI state-machine fuzzer and write JSON\n  --fuzz-seed <u64>          Seed for GUI fuzzer (default 20261126)\n  --fuzz-steps <n>           Steps for GUI fuzzer (default 200)\n  --fuzz-media <dir>         Directory for fuzzer failure screenshots\n  --screenshot <path>        Save window screenshot PNG and exit\n  --quit-after-ms <ms>       Quit after delay",
-            "\n  --overview                 初始打开标签全景网格\n  --hide-top-bar             初始隐藏顶栏\n  --edit                     打开首篇笔记后切入编辑模式\n  --focus-diagram <序号>     打开首篇笔记后进入指定图表专注模式\n  --scroll-fraction <比例>   截图或导出前滚动到指定纵向比例 (0..1)\n  --smoke-json <路径>        运行 L0 行为自检并导出 JSON 后退出\n  --reading-json <路径>      运行 L1 阅读态与场景自检并导出 JSON 后退出\n  --edit-knowledge-json <路径>\n                             运行 L2 编辑与文件管理自检并导出 JSON 后退出\n  --wikilink-json <路径>     运行阅读视图双链回归并导出 JSON 后退出\n  --layout-width-json <路径> 运行宽度适配回归并导出 JSON 后退出\n  --layout-hide-sidebars     测量前收起左右侧栏\n  --live-resize-json <路径>  运行动态缩放自检并导出 JSON 后退出\n  --edit-knowledge-scene <场景>\n                             采集界面场景截图\n  --terminal-agent-json <路径>\n                             运行终端与 Agent 自检并导出 JSON 后退出\n  --terminal-agent-media <目录>\n                             终端与 Agent 截图输出目录\n  --terminal-agent-vault2 <目录>\n                             多窗口隔离对比文件夹\n  --restore-session-json <路径>\n                             运行会话恢复自检并导出 JSON 后退出\n  --matrix-audit-json <路径> 运行全库矩阵布局/滚动/样式巡检并导出 JSON 后退出\n  --fuzz-json <路径>         运行有种子 GUI 状态机随机交互测试并导出 JSON\n  --fuzz-seed <整数>         GUI 随机交互测试种子（默认 20261126）\n  --fuzz-steps <步数>        GUI 随机交互测试步数（默认 200）\n  --fuzz-media <目录>        GUI 随机交互失败截图目录\n  --screenshot <路径>        渲染完成后导出窗口 PNG 截图后退出\n  --quit-after-ms <毫秒>     到达延迟后退出",
+            "\n  --overview                 初始打开标签总览\n  --hide-top-bar             初始隐藏顶栏\n  --edit                     打开首篇笔记后切入编辑模式\n  --focus-diagram <序号>     打开首篇笔记后进入指定图表专注模式\n  --scroll-fraction <比例>   截图或导出前滚动到指定纵向比例 (0..1)\n  --smoke-json <路径>        运行 L0 行为自检并导出 JSON 后退出\n  --reading-json <路径>      运行 L1 阅读态与场景自检并导出 JSON 后退出\n  --edit-knowledge-json <路径>\n                             运行 L2 编辑与文件管理自检并导出 JSON 后退出\n  --wikilink-json <路径>     运行阅读视图双链回归并导出 JSON 后退出\n  --layout-width-json <路径> 运行宽度适配回归并导出 JSON 后退出\n  --layout-hide-sidebars     测量前收起左右侧栏\n  --live-resize-json <路径>  运行动态缩放自检并导出 JSON 后退出\n  --edit-knowledge-scene <场景>\n                             采集界面场景截图\n  --terminal-agent-json <路径>\n                             运行终端与 Agent 自检并导出 JSON 后退出\n  --terminal-agent-media <目录>\n                             终端与 Agent 截图输出目录\n  --terminal-agent-vault2 <目录>\n                             多窗口隔离对比文件夹\n  --restore-session-json <路径>\n                             运行会话恢复自检并导出 JSON 后退出\n  --matrix-audit-json <路径> 运行全库矩阵布局/滚动/样式巡检并导出 JSON 后退出\n  --fuzz-json <路径>         运行有种子 GUI 状态机随机交互测试并导出 JSON\n  --fuzz-seed <整数>         GUI 随机交互测试种子（默认 20261126）\n  --fuzz-steps <步数>        GUI 随机交互测试步数（默认 200）\n  --fuzz-media <目录>        GUI 随机交互失败截图目录\n  --screenshot <路径>        渲染完成后导出窗口 PNG 截图后退出\n  --quit-after-ms <毫秒>     到达延迟后退出",
         ),
 
         Key::TooltipToggleLeftSidebar => (
@@ -664,7 +661,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "Toggle Right Sidebar (Ctrl+Shift+I)",
             "切换右侧栏 (Ctrl+Shift+I)",
         ),
-        Key::TooltipTabOverview => ("Tab Overview (Ctrl+Shift+O)", "标签全景网格 (Ctrl+Shift+O)"),
+        Key::TooltipTabOverview => ("Tab Overview (Ctrl+Shift+O)", "标签总览 (Ctrl+Shift+O)"),
         Key::TooltipNewNote => ("New Note (Ctrl+N)", "新建笔记 (Ctrl+N)"),
         Key::TooltipNewFolder => ("New Folder", "新建文件夹"),
         Key::EmptyStateDescription => ("Open a folder to start reading.", "打开文件夹，开始阅读。"),
@@ -691,57 +688,36 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         ),
 
         Key::MenuOpenFolder => ("Open Folder…", "打开文件夹…"),
-        Key::MenuNewWindow => ("New Window (Ctrl+Shift+N)", "新建窗口 (Ctrl+Shift+N)"),
-        Key::MenuQuickOpen => ("Quick Open (Ctrl+P)", "快速打开 (Ctrl+P)"),
-        Key::MenuNewNote => ("New Note (Ctrl+N)", "新建笔记 (Ctrl+N)"),
+        Key::MenuNewWindow => ("New Window", "新建窗口"),
+        Key::MenuQuickOpen => ("Quick Open", "快速打开"),
+        Key::MenuNewNote => ("New Note", "新建笔记"),
         Key::MenuNewFolder => ("New Folder", "新建文件夹"),
         Key::MenuRenameNote => ("Rename Note…", "重命名笔记…"),
-        Key::MenuSaveNote => ("Save Note (Ctrl+S)", "保存笔记 (Ctrl+S)"),
-        Key::MenuCopyNoteText => ("Copy Plain Text", "复制整篇笔记纯文本"),
-        Key::MenuFindInNote => ("Find in Note (Ctrl+F)", "文内查找 (Ctrl+F)"),
-        Key::MenuReplaceInNote => ("Replace in Note (Ctrl+H)", "文内替换 (Ctrl+H)"),
-        Key::MenuSearchFolder => ("Search Folder (Ctrl+Shift+F)", "全文搜索 (Ctrl+Shift+F)"),
-        Key::MenuToggleReadingEditing => (
-            "Switch Reading / Editing (Ctrl+E)",
-            "切换阅读 / 编辑 (Ctrl+E)",
-        ),
-        Key::MenuCloseTab => ("Close Tab (Ctrl+W)", "关闭当前标签 (Ctrl+W)"),
+        Key::MenuSaveNote => ("Save Note", "保存笔记"),
+        Key::MenuCopyNoteText => ("Copy Plain Text", "复制纯文本"),
+        Key::MenuFindInNote => ("Find in Note", "文内查找"),
+        Key::MenuReplaceInNote => ("Replace in Note", "文内替换"),
+        Key::MenuSearchFolder => ("Search Folder", "全文搜索"),
+        Key::MenuToggleReadingEditing => ("Switch Reading / Editing", "切换阅读 / 编辑"),
+        Key::MenuCloseTab => ("Close Tab", "关闭当前标签"),
         Key::MenuNewTerminalBottom => ("New Terminal (Bottom)", "新建终端（底部）"),
         Key::MenuLaunchAgent => ("Launch Agent", "启动 Agent"),
-        Key::MenuSendPathToTerminal => (
-            "Send Note Path to Terminal (Ctrl+Shift+L)",
-            "发送笔记路径到终端 (Ctrl+Shift+L)",
-        ),
-        Key::MenuSendSelectionToTerminal => (
-            "Send Selection to Terminal (Ctrl+Shift+K)",
-            "发送选区到终端 (Ctrl+Shift+K)",
-        ),
-        Key::MenuPreferences => ("Preferences… (Ctrl+,)", "偏好设置… (Ctrl+,)"),
-        Key::MenuTabOverview => ("Tab Overview (Ctrl+Shift+O)", "标签全景网格 (Ctrl+Shift+O)"),
-        Key::MenuFocusDiagram => (
-            "Focus Diagram (Ctrl+Shift+D)",
-            "专注查看图表 (Ctrl+Shift+D)",
-        ),
-        Key::MenuToggleLeftSidebar => (
-            "Toggle Left Sidebar (Ctrl+Shift+S)",
-            "切换左侧栏 (Ctrl+Shift+S)",
-        ),
-        Key::MenuToggleRightSidebar => (
-            "Toggle Right Sidebar (Ctrl+Shift+I)",
-            "切换右侧栏 (Ctrl+Shift+I)",
-        ),
-        Key::MenuToggleBottomPanel => ("Toggle Bottom Panel (Ctrl+J)", "切换底部面板 (Ctrl+J)"),
-        Key::MenuToggleTopBar => (
-            "Show / Hide Top Bar (Ctrl+Shift+H)",
-            "显示 / 隐藏顶栏 (Ctrl+Shift+H)",
-        ),
-        Key::MenuToggleFullscreen => ("Toggle Fullscreen (F11)", "切换全屏 (F11)"),
+        Key::MenuSendPathToTerminal => ("Send Note Path to Terminal", "发送笔记路径到终端"),
+        Key::MenuSendSelectionToTerminal => ("Send Selection to Terminal", "发送选区到终端"),
+        Key::MenuSettings => ("Settings…", "设置…"),
+        Key::MenuTabOverview => ("Tab Overview", "标签总览"),
+        Key::MenuFocusDiagram => ("Focus Diagram", "专注查看图表"),
+        Key::MenuToggleLeftSidebar => ("Toggle Left Sidebar", "切换左侧栏"),
+        Key::MenuToggleRightSidebar => ("Toggle Right Sidebar", "切换右侧栏"),
+        Key::MenuToggleBottomPanel => ("Toggle Bottom Panel", "切换底部面板"),
+        Key::MenuToggleTopBar => ("Show / Hide Top Bar", "显示 / 隐藏顶栏"),
+        Key::MenuToggleFullscreen => ("Toggle Fullscreen", "切换全屏"),
         Key::MenuPanelPosition => ("Panel Position", "面板位置"),
         Key::MenuMoveToRegion => ("Move to {0}", "移至{0}"),
-        Key::MenuAppearance => ("Appearance", "主题外观"),
+        Key::MenuAppearance => ("Appearance", "外观"),
         Key::ThemeSystem => ("Follow System", "跟随系统"),
-        Key::ThemeLight => ("Light", "浅色模式"),
-        Key::ThemeDark => ("Dark", "深色模式"),
+        Key::ThemeLight => ("Light", "浅色"),
+        Key::ThemeDark => ("Dark", "深色"),
         Key::MenuAbout => ("About Hortus", "关于 Hortus"),
 
         Key::DockAddTooltip => ("Add tool or terminal", "添加工具或新建终端"),
@@ -765,7 +741,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::ReplaceOne => ("Replace", "替换"),
         Key::ReplaceAll => ("Replace All", "全部替换"),
         Key::FindNoMatches => ("No matches", "无匹配"),
-        Key::ToastReadingNotReady => ("Reading view is still loading", "当前阅读页面尚未完成装载"),
+        Key::ToastReadingNotReady => ("Reading view is still loading", "阅读视图正在加载"),
         Key::ToastAlignTableRequiresEdit => (
             "Switch to Editing mode (Ctrl+E) before aligning tables",
             "请先按 Ctrl+E 切换到编辑视图后再对齐表格",
@@ -777,7 +753,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "Notes linking to “{0}” ({1})",
             "引用「{0}」的笔记（{1} 条）",
         ),
-        Key::BacklinksEmpty => ("No backlinks yet", "还没有笔记引用这篇笔记"),
+        Key::BacklinksEmpty => ("No backlinks yet", "暂无反链"),
         Key::BacklinkKindEmbed => ("Embed", "嵌入"),
         Key::BacklinkKindLink => ("Link", "双链"),
         Key::QuickOpenTitle => ("Quick Open", "快速打开"),
@@ -785,7 +761,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "Type a note title or path, Enter to open",
             "输入标题或路径，Enter 打开",
         ),
-        Key::SearchPlaceholder => ("Search folder (Ctrl+Shift+F)", "全文搜索（Ctrl+Shift+F）"),
+        Key::SearchPlaceholder => ("Search folder", "搜索文件夹"),
         Key::SearchPrompt => ("Type to search", "输入关键字开始搜索"),
         Key::SearchInProgress => ("Searching…", "正在搜索…"),
         Key::SearchResultsSummary => (
@@ -881,8 +857,8 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         ),
         Key::ErrTrashFailed => ("Move to Trash failed", "移到回收站失败"),
         Key::NoticeConflict => (
-            "“{0}” changed on disk. Your edits are still in memory.",
-            "外部已修改「{0}」。未保存的修改仍保留在内存中。",
+            "“{0}” changed on disk. Your unsaved edits are still open.",
+            "外部已修改「{0}」。当前修改仍保留在编辑页中。",
         ),
         Key::BtnKeepMine => ("Keep Mine", "保留我的修改"),
         Key::BtnUseDisk => ("Load Disk Version", "载入磁盘版本"),
@@ -895,21 +871,21 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::BtnCloseTab => ("Close Tab", "关闭标签页"),
         Key::NoticeRecovery => (
             "Unsaved draft found for “{0}”.",
-            "发现上次未保存的恢复稿：「{0}」。",
+            "发现「{0}」的未保存草稿。",
         ),
         Key::BtnRestoreDraft => ("Restore Draft", "恢复草稿"),
-        Key::BtnDiscardDraft => ("Discard Draft", "丢弃恢复稿"),
+        Key::BtnDiscardDraft => ("Discard Draft", "丢弃草稿"),
         Key::SaveErrWrite => ("disk write failed", "磁盘写入失败"),
         Key::SaveErrPermission => ("no write permission", "没有写权限"),
         Key::SaveErrUtf8 => ("invalid UTF-8 text", "不是有效的 UTF-8 文本"),
         Key::SaveErrMountRoot => (
-            "cannot save directly at a disk mount root; open a subfolder on that disk instead",
-            "不支持直接把独立磁盘挂载根作为文件夹保存，请在盘内建一个子文件夹后打开",
+            "cannot save directly in a drive root; open a subfolder instead",
+            "无法直接保存到磁盘根目录，请在该磁盘下新建子文件夹后打开",
         ),
         Key::SaveErrUnknown => ("unknown error", "未知原因"),
         Key::NoticeSaveFailed => (
-            "Couldn’t save “{0}” ({1}). Your edits are still in memory.",
-            "保存失败：「{0}」（{1}）。修改仍保留在内存中。",
+            "Couldn’t save “{0}” ({1}). Your unsaved edits are still open.",
+            "保存失败：「{0}」（{1}）。当前修改仍保留在编辑页中。",
         ),
         Key::BtnRetry => ("Retry", "重试"),
         Key::ToastConflictCopySaved => ("Saved conflict copy: {0}", "已另存为冲突副本：{0}"),
@@ -928,9 +904,9 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::BtnDiscardAndQuit => ("Discard and Quit", "放弃修改并退出"),
         Key::ToastLoadedDisk => ("Loaded disk version", "已载入磁盘版本"),
         Key::ToastLoadDiskFailed => ("Couldn’t load disk version: {0}", "载入磁盘版本失败：{0}"),
-        Key::ToastDraftRestored => ("Draft restored", "已恢复未保存草稿"),
-        Key::ToastDraftDiscarded => ("Draft discarded", "已丢弃恢复草稿"),
-        Key::ToastDraftFailed => ("Draft action failed", "处理恢复稿失败"),
+        Key::ToastDraftRestored => ("Draft restored", "已恢复草稿"),
+        Key::ToastDraftDiscarded => ("Draft discarded", "已丢弃草稿"),
+        Key::ToastDraftFailed => ("Draft action failed", "处理草稿失败"),
         Key::ToastExternalRefreshed => ("Reloaded external changes", "检测到外部修改并已刷新"),
         Key::ToastRefreshFailed => ("Couldn’t reload note: {0}", "刷新笔记失败：{0}"),
         Key::ToastCoreNotReady => (
@@ -947,14 +923,14 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::ReadNoteFailed => ("Couldn’t read note: {0}", "读取笔记失败：{0}"),
         Key::OpenNoteFailed => ("Couldn’t open note: {0}", "打开笔记失败：{0}"),
         Key::ParsingOutline => ("Loading outline…", "正在解析大纲…"),
-        Key::OutlineEmpty => ("No headings", "本笔记暂无标题大纲"),
+        Key::OutlineEmpty => ("No headings", "暂无标题"),
         Key::ToastNoMermaidDiagram => (
             "No Mermaid diagrams in this note",
             "当前笔记没有可用的 Mermaid 图表",
         ),
-        Key::ExportTitleSvg => ("Export SVG", "导出 SVG 矢量图"),
-        Key::ExportTitlePng => ("Export PNG (2x)", "导出高分 PNG 图片"),
-        Key::ExportTitlePdf => ("Export PDF", "导出 PDF 文档"),
+        Key::ExportTitleSvg => ("Export SVG", "导出 SVG"),
+        Key::ExportTitlePng => ("Export PNG (2x)", "导出 PNG (2x)"),
+        Key::ExportTitlePdf => ("Export PDF", "导出 PDF"),
         Key::ToastExported => ("Exported {0}", "已导出 {0}"),
         Key::ErrExportFailed => ("Export failed", "导出失败"),
         Key::ToastAmbiguousLink => (
@@ -962,12 +938,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "有多个笔记匹配「{0}」（{1} 篇），请在文件面板选择",
         ),
         Key::ToastMissingLink => ("Note not found: {0}", "未找到链接目标：{0}"),
-        Key::ToastCopiedPlainText => ("Copied note text", "已复制整篇笔记纯文本"),
-        Key::ToastSwitchedToEdit => (
-            "Editing (Ctrl+S to save)",
-            "已切换到编辑视图（Ctrl+S 保存）",
-        ),
-        Key::ToastSwitchedToReading => ("Reading view", "已切回阅读视图"),
+        Key::ToastCopiedPlainText => ("Copied plain text", "已复制纯文本"),
 
         Key::ToastSendPathNoNote => (
             "Open a note before sending its path",
@@ -978,7 +949,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "Select text before sending to terminal",
             "请先选中文本后再发送到终端",
         ),
-        Key::ToastSentSelection => ("Sent selection to terminal", "已安全发送选中文本到终端"),
+        Key::ToastSentSelection => ("Sent selection to terminal", "已发送选区到终端"),
         Key::ToastSelControlOnly => (
             "Selection contains only control characters",
             "当前选区仅含控制字符，已忽略发送",
@@ -1000,8 +971,8 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::TermAgentTabClosed => ("Agent tab was closed", "Agent 终端标签已关闭"),
         Key::TermAgentCancelled => ("Agent launch cancelled", "Agent 启动已取消"),
         Key::AgentNotConfigured => (
-            "No Agent command configured. Set one in Preferences → Agent.",
-            "尚未配置 Agent 命令。请在设置中配置 Agent 命令与参数。",
+            "No Agent command configured. Set one in Settings → Agent.",
+            "尚未配置 Agent 命令，请在「设置 → Agent」中配置。",
         ),
         Key::AgentCmdMissing => ("Agent command is empty.", "Agent 配置缺少命令。"),
         Key::AgentGuideMissing => (
@@ -1048,7 +1019,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::ChangesNoFolder => ("No folder open", "未打开文件夹"),
         Key::ChangesNoSnapshots => ("No Agent snapshots yet", "暂无 Agent 会话快照"),
         Key::ChangesSessionOption => ("{0} · {1} ({2})", "{0} · {1} ({2} 项)"),
-        Key::ChangesSessionMeta => ("Status: {0} · {1} items", "状态：{0} · {1} 个改动条目"),
+        Key::ChangesSessionMeta => ("{0} · {1} items", "{0} · {1} 项改动"),
         Key::ChangesSessionUnusable => ("Session unavailable ({0})", "会话不可用（{0}）"),
         Key::ChangesLoadingSummary => ("Comparing changes…", "正在对比本次会话改动…"),
         Key::ChangesReviewFailed => ("Couldn’t load changes: {0}", "加载改动失败：{0}"),
@@ -1056,10 +1027,7 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "Status: {0} · +{1} / ~{2} / -{3} / renamed {4}",
             "状态：{0} · +{1} / ~{2} / -{3} / 重命名 {4}",
         ),
-        Key::ChangesNoneInSession => (
-            "No file changes in this session.",
-            "本次会话尚未产生文件改动。",
-        ),
+        Key::ChangesNoneInSession => ("No changes in this session.", "本次会话暂无改动。"),
         Key::ChangesNoDetails => ("No changes", "无更改详情"),
         Key::ChangesOpenNoteTooltip => ("Open note", "打开笔记"),
         Key::ChangesRestoreFileTooltip => ("Restore file", "恢复此文件"),
@@ -1132,16 +1100,16 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::DiffNoTextChanges => ("No line changes.", "无文本行差异。"),
         Key::DiffRestoreSectionBtn => ("Restore section", "恢复此段"),
 
-        Key::SettingsTitle => ("Preferences", "偏好设置"),
+        Key::SettingsTitle => ("Settings", "设置"),
         Key::SettingsPageAppearance => ("Appearance", "外观与阅读"),
         Key::SettingsGroupReading => ("Reading & Typography", "阅读与排版"),
         Key::SettingsFontSize => ("Font Size", "正文字号"),
         Key::SettingsDefaultView => ("Default View", "默认打开视图"),
         Key::SettingsViewReading => ("Reading", "阅读视图"),
         Key::SettingsViewEditing => ("Editing", "编辑视图"),
-        Key::SettingsColorScheme => ("Appearance", "界面配色"),
+        Key::SettingsColorScheme => ("Appearance", "外观"),
         Key::SettingsGroupConfig => ("Configuration", "配置文件"),
-        Key::SettingsConfigPathTitle => ("config.toml", "config.toml 路径"),
+        Key::SettingsConfigPathTitle => ("config.toml", "config.toml"),
         Key::SettingsLoading => ("Loading…", "正在读取…"),
         Key::SettingsPageTerminal => ("Terminal", "终端"),
         Key::SettingsGroupTerminal => ("Terminal", "终端"),
@@ -1149,13 +1117,12 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::SettingsPageAgent => ("Agent", "Agent"),
         Key::SettingsGroupDetectedAgents => ("Detected Agents", "已检测到的 Agent"),
         Key::SettingsRescanAgentsTooltip => ("Rescan installed Agents", "重新扫描"),
-        Key::SettingsGroupAgentLaunch => ("Launch Command", "Agent 启动配置"),
-        Key::SettingsAgentLaunchDesc => (
+        Key::SettingsGroupAgentLaunch => ("Launch Command", "启动命令"),
+        Key::SettingsAgentCmdTitle => ("Command", "命令"),
+        Key::SettingsAgentArgsLabel => (
             "Arguments (one per line, include {guide})",
             "参数（每行一项，含 {guide}）",
         ),
-        Key::SettingsAgentCmdTitle => ("Command", "命令"),
-        Key::SettingsAgentArgsLabel => ("Arguments (one per line)", "参数（每行一项）"),
         Key::SettingsProbeNotChecked => ("Not checked", "未检查"),
         Key::SettingsProbePrompt => (
             "Enter a command and arguments with {guide}",
@@ -1248,12 +1215,12 @@ fn pair(key: Key) -> (&'static str, &'static str) {
             "第 {0} 行使用了暂不支持的语法（{1}）",
         ),
         Key::DiagramNotTree => (
-            "Cannot fold into a tree (multiple parents)",
-            "包含多父节点关系，无法折叠为树结构",
+            "Cannot lay out as a tree (multiple parents)",
+            "存在多个上级节点，无法按树形排列",
         ),
         Key::DiagramNotTreeNodes => (
             "Multiple parents prevent tree layout: {0}",
-            "存在多父级关系，无法转为树结构：{0}",
+            "存在多个上级节点，无法按树形排列：{0}",
         ),
         Key::DiagramSyntaxErr => (
             "Mermaid syntax error (line {0}: {1})",
@@ -1265,8 +1232,11 @@ fn pair(key: Key) -> (&'static str, &'static str) {
         Key::EmbedCycle => ("Circular embed: {0}", "循环嵌入：{0}"),
         Key::EmbedDepthExceeded => ("Embedding is too deep: {0}", "嵌入层级过深：{0}"),
         Key::EmbedHeadingMissing => ("Heading not found: {0}", "未找到标题：{0}"),
-        Key::EmbedAmbiguous => ("Multiple notes match “{0}”: {1}", "多个笔记匹配“{0}”：{1}"),
-        Key::EmbedBroken => ("Embedded note not found: “{0}”", "未找到嵌入目标：“{0}”"),
+        Key::EmbedAmbiguous => (
+            "Multiple notes match “{0}”: {1}",
+            "多个笔记匹配「{0}」：{1}",
+        ),
+        Key::EmbedBroken => ("Embedded note not found: “{0}”", "未找到嵌入目标：「{0}」"),
         Key::EmbedUnavailable => ("Embed unavailable ({0})", "暂无法嵌入内容（{0}）"),
         Key::EmbedResolveFailed => ("Couldn’t resolve embed: {0}", "嵌入解析失败：{0}"),
         Key::MathParseErr => ("Formula syntax error: {0}", "公式语法错误：{0}"),
@@ -1381,7 +1351,7 @@ mod tests {
         Key::MenuLaunchAgent,
         Key::MenuSendPathToTerminal,
         Key::MenuSendSelectionToTerminal,
-        Key::MenuPreferences,
+        Key::MenuSettings,
         Key::MenuTabOverview,
         Key::MenuFocusDiagram,
         Key::MenuToggleLeftSidebar,
@@ -1531,8 +1501,6 @@ mod tests {
         Key::ToastAmbiguousLink,
         Key::ToastMissingLink,
         Key::ToastCopiedPlainText,
-        Key::ToastSwitchedToEdit,
-        Key::ToastSwitchedToReading,
         Key::ToastSendPathNoNote,
         Key::ToastSentPath,
         Key::ToastSendSelEmpty,
@@ -1640,7 +1608,6 @@ mod tests {
         Key::SettingsGroupDetectedAgents,
         Key::SettingsRescanAgentsTooltip,
         Key::SettingsGroupAgentLaunch,
-        Key::SettingsAgentLaunchDesc,
         Key::SettingsAgentCmdTitle,
         Key::SettingsAgentArgsLabel,
         Key::SettingsProbeNotChecked,
@@ -1792,12 +1759,33 @@ mod tests {
             "知识导航",
             "Vault",
             "vault",
+            "偏好设置",
+            "Preferences",
+            "已安全发送",
+            "装载",
+            "内存中",
+            "独立磁盘挂载根",
+            "全景网格",
+            "多父节点关系",
         ];
         for &key in ALL_KEYS {
             let en = tr_for(Lang::En, key);
             let zh = tr_for(Lang::ZhHans, key);
             assert!(!en.trim().is_empty(), "empty en for {key:?}");
             assert!(!zh.trim().is_empty(), "empty zh for {key:?}");
+            assert!(
+                !zh.contains('“') && !zh.contains('”'),
+                "curly quote in zh {key:?}: {zh}"
+            );
+            if format!("{key:?}").starts_with("Menu") {
+                assert!(
+                    !en.contains("(Ctrl+")
+                        && !en.contains("(F11)")
+                        && !zh.contains("(Ctrl+")
+                        && !zh.contains("(F11)"),
+                    "handwritten shortcut in menu item {key:?}: en={en:?}, zh={zh:?}"
+                );
+            }
 
             for idx in 0..5 {
                 let ph = format!("{{{idx}}}");
@@ -1849,6 +1837,9 @@ mod tests {
                 assert!(!zh.contains(word), "forbidden {word:?} in zh {key:?}: {zh}");
             }
             for extra in ["线程", "根目录", "THIRD_PARTY_NOTICES"] {
+                if extra == "根目录" && matches!(key, Key::SaveErrMountRoot) {
+                    continue;
+                }
                 assert!(
                     !en.contains(extra),
                     "forbidden {extra:?} in en {key:?}: {en}"

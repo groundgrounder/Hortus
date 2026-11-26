@@ -286,7 +286,7 @@ async fn run_suite(
         .send_note_path("folder/sub note.md", PanelRegion::Bottom);
 
     // 切编辑态构造含 \n + \x1b[201~ bracketed-paste spoof 的选区，验证不执行且仅作安全文本发送
-    win.switch_edit_mode(false);
+    win.switch_edit_mode();
     let spoof_marker = temp_dir.join("l3_spoof_ran.txt");
     let _ = std::fs::remove_file(&spoof_marker);
     let dangerous_sel = format!(
@@ -323,7 +323,7 @@ async fn run_suite(
         let on_disk = std::fs::read_to_string(vault_path.join("alpha.md")).unwrap_or_default();
         buf.set_text(&on_disk);
     }
-    win.switch_edit_mode(false);
+    win.switch_edit_mode();
     glib::timeout_future(Duration::from_millis(300)).await;
 
     // L3c D3-2: 标准 1280x800 窗口下量化断言左右边栏 3 个默认标签 100% 落在可视栏内、动态宽 < 120px，底栏标签不拉伸
@@ -1074,7 +1074,7 @@ async fn run_suite(
             .await;
 
             win.open_note_at("alpha.md", None);
-            win.switch_edit_mode(false);
+            win.switch_edit_mode();
             if let Some(buf) = win
                 .state
                 .borrow()
@@ -1101,7 +1101,7 @@ async fn run_suite(
                     .is_some_and(|t| t.text.contains("MULTI_WINDOW_SYNC_OK"))
             })
             .await;
-            win.switch_edit_mode(false);
+            win.switch_edit_mode();
             glib::timeout_future(Duration::from_millis(300)).await;
 
             // 截图 4: Agent 退出后「本次会话改动」红绿 diff + 双窗口同库同步

@@ -22,9 +22,7 @@ pub enum WindowCommand {
         heading: Option<String>,
     },
     RelayoutActiveTab(i32),
-    SwitchActiveEditMode {
-        announce: bool,
-    },
+    SwitchActiveEditMode,
     SwitchToSourceAtByte {
         note_path: String,
         byte_start: u64,

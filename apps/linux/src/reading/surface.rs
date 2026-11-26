@@ -367,11 +367,7 @@ impl ReadingSurfaceHandle {
         if scroll_val <= 1.0 {
             return 0;
         }
-        let top_y = self
-            .scrolled
-            .compute_point(&self.content_box, &graphene::Point::new(0.0, 4.0))
-            .map(|pt| f64::from(pt.y()).max(0.0))
-            .unwrap_or_else(|| (scroll_val - f64::from(self.content_box.margin_top())).max(0.0));
+        let top_y = (scroll_val - f64::from(self.content_box.margin_top()) + 4.0).max(0.0);
         for seg in &self.segments {
             let w = seg.widget();
             if let Some(bounds) = w.compute_bounds(&self.content_box) {
@@ -379,11 +375,7 @@ impl ReadingSurfaceHandle {
                 if bottom >= top_y {
                     return match seg {
                         ReadingSegment::Text(t) => {
-                            let local_y = self
-                                .content_box
-                                .compute_point(&t.view, &graphene::Point::new(0.0, top_y as f32))
-                                .map(|pt| f64::from(pt.y()).max(0.0))
-                                .unwrap_or_else(|| (top_y - f64::from(bounds.y())).max(0.0));
+                            let local_y = (top_y - f64::from(bounds.y())).max(0.0);
                             let (_, by) = t.view.window_to_buffer_coords(
                                 gtk4::TextWindowType::Widget,
                                 0,

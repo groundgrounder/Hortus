@@ -624,10 +624,10 @@ impl WindowInner {
 
     #[cfg(feature = "automation")]
     pub fn toggle_active_tab_edit_mode(self: &Rc<Self>) {
-        self.switch_edit_mode(true);
+        self.switch_edit_mode();
     }
 
-    pub fn switch_edit_mode(self: &Rc<Self>, announce: bool) {
+    pub fn switch_edit_mode(self: &Rc<Self>) {
         let Some(path) = self.active_tab_path() else {
             self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastNoNoteOpen));
             return;
@@ -738,12 +738,6 @@ impl WindowInner {
             );
             edit_view.grab_focus();
         }
-        if announce {
-            if new_editing {
-                self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSwitchedToEdit));
-            } else {
-                self.show_toast(crate::i18n::tr(crate::i18n::Key::ToastSwitchedToReading));
-            }
-        }
+        self.sync_active_outline_highlight();
     }
 }

@@ -435,7 +435,7 @@ async fn audit_single_matrix_case(
     // 确保起点为阅读态顶位
     let initially_editing = win.state.borrow().tabs.get(note).is_some_and(|t| t.editing);
     if initially_editing {
-        win.switch_edit_mode(false);
+        win.switch_edit_mode();
         let _ = wait_for(3000, || {
             win.state
                 .borrow()
@@ -461,7 +461,7 @@ async fn audit_single_matrix_case(
     }
 
     // 阅读顶位 -> 切编辑态
-    win.switch_edit_mode(false);
+    win.switch_edit_mode();
     let edit_ready = wait_for(4000, || {
         win.state.borrow().tabs.get(note).is_some_and(|t| {
             t.editing
@@ -625,6 +625,23 @@ async fn audit_single_matrix_case(
     let mut edit_scroll_tested = false;
     let mut edit_scrolled_mid = 0.0;
     let mut edit_scrolled_back = 0.0;
+    let mut edit_outline_top = None;
+    let mut edit_outline_mid = None;
+    let mut edit_outline_back = None;
+    let check_outline = note == "Markdown field guide.md";
+    if check_outline {
+        let st = win.state.borrow();
+        edit_outline_top = st.active_outline_index;
+        if edit_outline_top != Some(0) {
+            err_msgs.push(format!(
+                "编辑态顶位大纲高亮应为 Some(0)，实测 {edit_outline_top:?}"
+            ));
+        } else if let Some((_, btn)) = st.outline_items.first()
+            && !btn.has_css_class("hortus-outline-active")
+        {
+            err_msgs.push("编辑态顶位大纲第 0 项缺少 hortus-outline-active 样式类".into());
+        }
+    }
     if edit_upper > edit_page + 24.0 {
         edit_scroll_tested = true;
         let max_y = (edit_upper - edit_page).max(0.0);
@@ -638,6 +655,15 @@ async fn audit_single_matrix_case(
             adj.set_value(max_y * 0.5);
         }
         glib::timeout_future(Duration::from_millis(60)).await;
+        if check_outline {
+            let st = win.state.borrow();
+            edit_outline_mid = st.active_outline_index;
+            if edit_outline_mid.is_none_or(|i| i == 0) {
+                err_msgs.push(format!(
+                    "编辑态滚动中段后大纲高亮未前移：mid={edit_outline_mid:?}"
+                ));
+            }
+        }
         if let Some(adj) = win
             .state
             .borrow()
@@ -668,6 +694,15 @@ async fn audit_single_matrix_case(
             adj.set_value(0.0);
         }
         glib::timeout_future(Duration::from_millis(60)).await;
+        if check_outline {
+            let st = win.state.borrow();
+            edit_outline_back = st.active_outline_index;
+            if edit_outline_back != Some(0) {
+                err_msgs.push(format!(
+                    "编辑态滚回顶部后大纲高亮未恢复 Some(0)：back={edit_outline_back:?}"
+                ));
+            }
+        }
         if let Some(adj) = win
             .state
             .borrow()
@@ -683,7 +718,7 @@ async fn audit_single_matrix_case(
     }
 
     // 切回阅读态并等待 reading_scrolled 高度稳定（避免 TextView 刚 re-map 时行高树未验证导致虚高 upper）
-    win.switch_edit_mode(false);
+    win.switch_edit_mode();
     let back_reading_ok = wait_for(4000, || {
         win.state.borrow().tabs.get(note).is_some_and(|t| {
             !t.editing
@@ -731,6 +766,18 @@ async fn audit_single_matrix_case(
 
     // 校检阅读态字体/H1标签与滚动健康度
     let mut read_scroll_tested = false;
+    let mut read_outline_top = None;
+    let mut read_outline_mid = None;
+    let mut read_outline_back = None;
+    if check_outline {
+        let st = win.state.borrow();
+        read_outline_top = st.active_outline_index;
+        if read_outline_top != Some(0) {
+            err_msgs.push(format!(
+                "阅读态顶位大纲高亮应为 Some(0)，实测 {read_outline_top:?}"
+            ));
+        }
+    }
     if let Some(surface) = win.reading_surface(note) {
         let adj = surface.scrolled.vadjustment();
         match check_vadjustment_finite(&adj, "reading") {
@@ -748,10 +795,28 @@ async fn audit_single_matrix_case(
                                 adj.value()
                             ));
                         }
+                        if check_outline {
+                            let st = win.state.borrow();
+                            read_outline_mid = st.active_outline_index;
+                            if read_outline_mid.is_none_or(|i| i == 0) {
+                                err_msgs.push(format!(
+                                    "阅读态滚动中段后大纲高亮未前移：mid={read_outline_mid:?}"
+                                ));
+                            }
+                        }
                         adj.set_value(0.0);
                         glib::timeout_future(Duration::from_millis(50)).await;
                         if adj.value() > 1.0 {
                             err_msgs.push(format!("阅读态滚回顶部失败：val={:.2}", adj.value()));
+                        }
+                        if check_outline {
+                            let st = win.state.borrow();
+                            read_outline_back = st.active_outline_index;
+                            if read_outline_back != Some(0) {
+                                err_msgs.push(format!(
+                                    "阅读态滚回顶部后大纲高亮未恢复 Some(0)：back={read_outline_back:?}"
+                                ));
+                            }
                         }
                     } else {
                         adj.set_value(0.0);
@@ -806,6 +871,8 @@ async fn audit_single_matrix_case(
         "edit_scrolled_back": edit_scrolled_back,
         "read_top_after": read_top_after,
         "read_scroll_tested": read_scroll_tested,
+        "edit_outline_indices": [edit_outline_top, edit_outline_mid, edit_outline_back],
+        "read_outline_indices": [read_outline_top, read_outline_mid, read_outline_back],
     });
     if !err_msgs.is_empty()
         && let Some(obj) = out.as_object_mut()
@@ -886,10 +953,10 @@ async fn run_fuzz(
             action_name = "toggle_edit";
             let active = win.active_tab_path().unwrap_or_default();
             let double_toggle = rng.next_usize(4) == 0;
-            win.switch_edit_mode(false);
+            win.switch_edit_mode();
             if double_toggle {
                 glib::timeout_future(Duration::from_millis(20)).await;
-                win.switch_edit_mode(false);
+                win.switch_edit_mode();
                 detail = format!("{active} (double)");
             } else {
                 detail = active.clone();
@@ -973,7 +1040,7 @@ async fn run_fuzz(
                     .get(target)
                     .is_some_and(|t| t.editing);
                 if !is_ed {
-                    win.switch_edit_mode(false);
+                    win.switch_edit_mode();
                     glib::timeout_future(Duration::from_millis(50)).await;
                 }
                 let op = rng.next_usize(3);

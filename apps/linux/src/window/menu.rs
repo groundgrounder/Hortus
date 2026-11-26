@@ -128,7 +128,7 @@ pub fn build_primary_menu() -> gio::Menu {
         Some(tr(Key::MenuSendSelectionToTerminal)),
         Some("win.send-selection-to-terminal"),
     );
-    agent_sec.append(Some(tr(Key::MenuPreferences)), Some("win.open-settings"));
+    agent_sec.append(Some(tr(Key::MenuSettings)), Some("win.open-settings"));
     menu.append_section(None, &agent_sec);
 
     let view_sec = gio::Menu::new();

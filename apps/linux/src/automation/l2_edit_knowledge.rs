@@ -388,13 +388,13 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
 
     // L2d-2：验证未保存与已保存编辑内容切回阅读视图后立即刷新预览及大纲。
     if !win.tab_facts(note).is_some_and(|f| f.editing) {
-        win.switch_edit_mode(false);
+        win.switch_edit_mode();
         let _ = wait_for(2000, || win.tab_facts(note).is_some_and(|f| f.editing)).await;
     }
     let unsaved_marker = "L2d2-即时预览校验-未保存";
     win.insert_into_edit(note, &format!("\n\n{unsaved_marker}\n"));
     let rev_unsaved = win.tab_facts(note).map(|f| f.revision).unwrap_or(0);
-    win.switch_edit_mode(false);
+    win.switch_edit_mode();
     let unsaved_synced = wait_for(4000, || {
         win.state.borrow().tabs.get(note).is_some_and(|tab| {
             !tab.editing
@@ -407,7 +407,7 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     })
     .await;
 
-    win.switch_edit_mode(false);
+    win.switch_edit_mode();
     let _ = wait_for(2000, || win.tab_facts(note).is_some_and(|f| f.editing)).await;
     let saved_heading = "L2d2-已保存大纲标题";
     let saved_marker = "L2d2-即时预览校验-已保存";
@@ -420,7 +420,7 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     })
     .await;
     let rev_saved = win.tab_facts(note).map(|f| f.revision).unwrap_or(0);
-    win.switch_edit_mode(false);
+    win.switch_edit_mode();
     let saved_synced = wait_for(4000, || {
         win.state.borrow().tabs.get(note).is_some_and(|tab| {
             !tab.editing
@@ -533,7 +533,7 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
 
     // L5-28: 编辑态外部干净重载保留纵向滚动比例与光标字符偏移
     if !win.tab_facts(note).is_some_and(|f| f.editing) {
-        win.switch_edit_mode(false);
+        win.switch_edit_mode();
         let _ = wait_for(2000, || win.tab_facts(note).is_some_and(|f| f.editing)).await;
     }
     let (edit_cursor_target, edit_scroll_before) = {
@@ -1064,7 +1064,7 @@ async fn run_edit_knowledge_checks(win: &Rc<WindowInner>) -> serde_json::Value {
     let mut find = serde_json::Map::new();
     let _ = win.select_tab(note);
     if !win.tab_facts(note).is_some_and(|f| f.editing) {
-        win.switch_edit_mode(false);
+        win.switch_edit_mode();
         let _ = wait_for(2000, || win.tab_facts(note).is_some_and(|f| f.editing)).await;
     }
     let _ = gtk4::prelude::WidgetExt::activate_action(&win.window, "win.find-in-note", None);

@@ -67,6 +67,14 @@ FORBIDDEN_UI_TOKENS = (
     "shell 拆分",
     "review_stale",
     "VTE4",
+    "偏好设置",
+    "Preferences",
+    "已安全发送",
+    "装载",
+    "内存中",
+    "独立磁盘挂载根",
+    "全景网格",
+    "多父节点关系",
 )
 
 
@@ -196,6 +204,9 @@ def audit_elf_and_prefix(gui_bin: Path, cli_bin: Path) -> dict[str, object]:
         summaries = root_xml.findall("summary")
         langs = {s.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "en") for s in summaries}
         check("en" in langs and "zh-Hans" in langs, f"metainfo.xml 缺少 en/zh-Hans summary: {langs}")
+        for s in summaries:
+            summary_txt = s.text or ""
+            check("GTK4" not in summary_txt, f"metainfo.xml summary 不应暴露底层框架名: {summary_txt!r}")
         rel_el = root_xml.find("./releases/release")
         check(rel_el is not None and rel_el.attrib.get("version") == "0.5.0", "metainfo.xml 缺少 0.5.0 release")
 
@@ -296,6 +307,8 @@ def audit_i18n_and_copy() -> dict[str, object]:
     # 校验 i18n.rs 中不允许出现的术语（允许注释与 #[cfg(test)] 中的校验测试本身）
     i18n_text = (src_root / "i18n.rs").read_text(encoding="utf-8")
     i18n_forbidden = []
+    i18n_curly_quotes = []
+    i18n_menu_shortcuts = []
     for line_no, code in strip_comments_rust(i18n_text):
         for lit in re.findall(r'"(?:\\.|[^"\\])*"', code):
             for tok in FORBIDDEN_UI_TOKENS:
@@ -303,7 +316,15 @@ def audit_i18n_and_copy() -> dict[str, object]:
                     i18n_forbidden.append(f"i18n.rs:{line_no}: {tok} in {lit}")
             if re.search(r"\bVault\b", lit) and "--vault" not in lit:
                 i18n_forbidden.append(f"i18n.rs:{line_no}: Vault in {lit}")
+            if re.search(r"[\u4e00-\u9fff]", lit) and ("“" in lit or "”" in lit):
+                i18n_curly_quotes.append(f"i18n.rs:{line_no}: {lit}")
+        if "Key::Menu" in code:
+            for lit in re.findall(r'"(?:\\.|[^"\\])*"', code):
+                if "(Ctrl+" in lit or "(F11)" in lit:
+                    i18n_menu_shortcuts.append(f"i18n.rs:{line_no}: {lit}")
     check(not i18n_forbidden, "i18n.rs 翻译词条含禁用文案:\n" + "\n".join(i18n_forbidden[:20]))
+    check(not i18n_curly_quotes, "i18n.rs 中文词条混用弯引号:\n" + "\n".join(i18n_curly_quotes[:20]))
+    check(not i18n_menu_shortcuts, "i18n.rs Key::Menu* 手写了快捷键:\n" + "\n".join(i18n_menu_shortcuts[:20]))
 
     prev_bytecode = sys.dont_write_bytecode
     sys.dont_write_bytecode = True

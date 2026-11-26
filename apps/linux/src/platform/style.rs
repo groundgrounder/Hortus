@@ -57,6 +57,16 @@ const BASE_CSS: &str = r#"
     opacity: 0.82;
 }
 
+.hortus-outline-btn {
+    border-radius: 6px;
+}
+
+.hortus-outline-btn.hortus-outline-active {
+    background-color: alpha(@accent_bg_color, 0.14);
+    color: @accent_color;
+    font-weight: 600;
+}
+
 .hortus-panel-header {
     padding: 6px 10px 4px 10px;
 }

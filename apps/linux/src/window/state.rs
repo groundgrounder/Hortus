@@ -88,6 +88,8 @@ pub struct WindowState {
     pub scan_micros: u64,
     pub pending_open_notes: Vec<String>,
     pub tabs: HashMap<String, OpenNoteTab>,
+    pub outline_items: Vec<(u64, gtk4::Button)>,
+    pub active_outline_index: Option<usize>,
     pub desired_left_width: f64,
     pub desired_right_width: f64,
     pub left_sidebar_width: f64,

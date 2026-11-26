@@ -98,6 +98,20 @@ impl WindowInner {
             .hexpand(true)
             .child(&reading_viewport)
             .build();
+        {
+            let weak = Rc::downgrade(self);
+            let shared_scroll = Rc::clone(&shared_path);
+            reading_scrolled
+                .vadjustment()
+                .connect_value_changed(move |_| {
+                    if let Some(win) = weak.upgrade()
+                        && win.state.try_borrow().is_ok_and(|st| !st.disposing)
+                        && win.active_tab_path().as_deref() == Some(shared_scroll.borrow().as_str())
+                    {
+                        win.schedule_outline_highlight_sync();
+                    }
+                });
+        }
         content_stack.add_named(&reading_scrolled, Some("reading"));
 
         let tag_table = create_edit_tag_table();
@@ -130,6 +144,18 @@ impl WindowInner {
             .hexpand(true)
             .child(&edit_view)
             .build();
+        {
+            let weak = Rc::downgrade(self);
+            let shared_scroll = Rc::clone(&shared_path);
+            edit_scrolled.vadjustment().connect_value_changed(move |_| {
+                if let Some(win) = weak.upgrade()
+                    && win.state.try_borrow().is_ok_and(|st| !st.disposing)
+                    && win.active_tab_path().as_deref() == Some(shared_scroll.borrow().as_str())
+                {
+                    win.schedule_outline_highlight_sync();
+                }
+            });
+        }
         let edit_host = HortusEditHost::new();
         edit_host.set_child(Some(&edit_scrolled));
         edit_host.set_edit_view(Some(&edit_view));
