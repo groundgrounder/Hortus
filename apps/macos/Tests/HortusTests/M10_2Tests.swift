@@ -164,10 +164,11 @@ struct M10_2Tests {
         let helper = fakeApp.appendingPathComponent("Contents/Helpers/hortus")
         try makeExecutable(at: helper)
         let linkURL = root.appendingPathComponent("home/.local/bin/hortus")
+        let sampleVault = root.appendingPathComponent("Notes").path
 
         // 未软链时回退内置绝对路径
         let fallbackJSON = CLIHelper.mcpConfigurationJSON(
-            vaultPath: "/Users/example/Notes",
+            vaultPath: sampleVault,
             bundleURL: fakeApp,
             linkURL: linkURL
         )
@@ -177,12 +178,12 @@ struct M10_2Tests {
         let fallbackServers = try #require(fallbackObj["mcpServers"] as? [String: Any])
         let fallbackHortus = try #require(fallbackServers["hortus"] as? [String: Any])
         #expect(fallbackHortus["command"] as? String == helper.standardizedFileURL.path)
-        #expect(fallbackHortus["args"] as? [String] == ["mcp", "--vault", "/Users/example/Notes"])
+        #expect(fallbackHortus["args"] as? [String] == ["mcp", "--vault", sampleVault])
 
         // 软链后优先使用 ~/.local/bin/hortus
         _ = try CLIHelper.installSymlink(bundleURL: fakeApp, linkURL: linkURL)
         let linkedJSON = CLIHelper.mcpConfigurationJSON(
-            vaultPath: "/Users/example/Notes",
+            vaultPath: sampleVault,
             bundleURL: fakeApp,
             linkURL: linkURL
         )
