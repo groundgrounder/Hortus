@@ -141,10 +141,11 @@ jobs:
           test "$version" = "hortus ${expected_version}"
           build/Hortus.app/Contents/Helpers/hortus guide >/dev/null
           build/Hortus.app/Contents/Helpers/hortus search --vault fixtures/demo-vault learning >/dev/null
-          tmp_svg="$(mktemp -t hortus-mermaid.XXXXXX.svg)"
-          build/Hortus.app/Contents/Helpers/hortus mermaid render "fixtures/demo-vault/Learning map.md" --block 1 --out "$tmp_svg" >/dev/null
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          tmp_svg="$tmp_dir/learning-map.svg"
+          build/Hortus.app/Contents/Helpers/hortus mermaid render "fixtures/demo-vault/Learning/Learning map.md" --block 1 --out "$tmp_svg" >/dev/null
           test -s "$tmp_svg"
-          rm -f "$tmp_svg"
           python3 -B tools/check-public-tree.py
 
       - name: Smoke-launch macOS app on macOS 26
@@ -158,13 +159,13 @@ jobs:
             HORTUS_CACHE_DIR="$tmp_dir/cache" \
             build/Hortus.app/Contents/MacOS/Hortus \
             --vault="$PWD/fixtures/demo-vault" \
-            --note="Learning map.md" \
+            --note="Learning/Learning map.md" \
             --metrics="$metrics_path"
           cat "$metrics_path"
           python3 -B - "$metrics_path" <<'PY'
           import json, sys
           data = json.loads(open(sys.argv[1], encoding="utf-8").read())
-          assert data["selected"] == "Learning map.md", data
+          assert data["selected"] == "Learning/Learning map.md", data
           assert data["notes"] >= 7, data
           assert data["current_characters"] > 0, data
           assert data["peak_rss_bytes"] > 0, data
