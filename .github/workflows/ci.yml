@@ -79,10 +79,25 @@ jobs:
       - name: Check public tree and app bundle
         run: python3 -B tools/check-public-tree.py
 
+      - name: Archive macOS app bundle for macOS 26 runtime check
+        shell: bash
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent build/Hortus.app build/Hortus-macos.zip
+
+      - name: Upload macOS app bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hortus-macos-app
+          path: build/Hortus-macos.zip
+          retention-days: 1
+          if-no-files-found: error
+
   macos-26-compatibility:
-    name: macOS 26 app, CLI, and test suite
+    name: macOS 26 runtime and CLI compatibility
+    needs: macos-and-public-tree
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -94,26 +109,64 @@ jobs:
         run: |
           set -euo pipefail
           sw_vers
-          xcodebuild -version
-          swift --version
-          rustc --version
-          cargo --version
           test "$(sw_vers -productVersion | cut -d. -f1)" = "26"
 
-      - name: Run macOS 26 system-font diagram test
-        run: cargo test -p hortus-diagram research_ports_and_labels_use_centered_generic_rules
+      - name: Download macOS app bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: hortus-macos-app
+          path: /tmp/hortus-macos-artifact
 
-      - name: Build and test macOS app on macOS 26
-        run: ./tools/test-macos.sh
+      - name: Extract macOS app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          ditto -x -k /tmp/hortus-macos-artifact/Hortus-macos.zip build
+          test -d build/Hortus.app
 
-      - name: Verify bundled CLI, signing, and public tree on macOS 26
+      - name: Verify signing, deployment target, bundled CLI, and public tree on macOS 26
         shell: bash
         run: |
           set -euo pipefail
           codesign --verify --deep --strict build/Hortus.app
-          vtool -show-build build/Hortus.app/Contents/MacOS/Hortus
+          app_build="$(vtool -show-build build/Hortus.app/Contents/MacOS/Hortus)"
+          echo "$app_build"
+          echo "$app_build" | grep -Eq 'minos[[:space:]]+26\.0'
+          cli_build="$(vtool -show-build build/Hortus.app/Contents/Helpers/hortus)"
+          echo "$cli_build"
+          echo "$cli_build" | grep -Eq 'minos[[:space:]]+26\.0'
+          expected_version="$(python3 -B -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"])')"
           version="$(build/Hortus.app/Contents/Helpers/hortus --version)"
-          test "$version" = "hortus 1.0.0"
+          test "$version" = "hortus ${expected_version}"
           build/Hortus.app/Contents/Helpers/hortus guide >/dev/null
           build/Hortus.app/Contents/Helpers/hortus search --vault fixtures/demo-vault learning >/dev/null
+          tmp_svg="$(mktemp -t hortus-mermaid.XXXXXX.svg)"
+          build/Hortus.app/Contents/Helpers/hortus mermaid render "fixtures/demo-vault/Learning map.md" --block 1 --out "$tmp_svg" >/dev/null
+          test -s "$tmp_svg"
+          rm -f "$tmp_svg"
           python3 -B tools/check-public-tree.py
+
+      - name: Smoke-launch macOS app on macOS 26
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          metrics_path="$tmp_dir/demo-metrics.json"
+          HORTUS_CONFIG_DIR="$tmp_dir/config" \
+            HORTUS_CACHE_DIR="$tmp_dir/cache" \
+            build/Hortus.app/Contents/MacOS/Hortus \
+            --vault="$PWD/fixtures/demo-vault" \
+            --note="Learning map.md" \
+            --metrics="$metrics_path"
+          cat "$metrics_path"
+          python3 -B - "$metrics_path" <<'PY'
+          import json, sys
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          assert data["selected"] == "Learning map.md", data
+          assert data["notes"] >= 7, data
+          assert data["current_characters"] > 0, data
+          assert data["peak_rss_bytes"] > 0, data
+          print("PASS: Hortus.app launched and rendered demo-vault on macOS 26")
+          PY
