@@ -1,0 +1,249 @@
+name: Linux packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths:
+      - 'apps/linux/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tools/build-linux.sh'
+      - 'tools/package-linux.sh'
+      - 'tools/linux-third-party-notices.py'
+      - '.github/workflows/linux-packages.yml'
+  pull_request:
+    paths:
+      - 'apps/linux/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tools/build-linux.sh'
+      - 'tools/package-linux.sh'
+      - 'tools/linux-third-party-notices.py'
+      - '.github/workflows/linux-packages.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  linux-deb-and-tarball:
+    name: Linux .deb and .tar.gz (Debian 13)
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie
+    timeout-minutes: 45
+    steps:
+      - name: Install system build and runtime dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            curl \
+            ca-certificates \
+            git \
+            python3 \
+            dpkg-dev \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libvte-2.91-gtk4-dev \
+            libpango1.0-dev \
+            libcairo2-dev \
+            libfontconfig-dev \
+            libglib2.0-dev \
+            librsvg2-common \
+            webp-pixbuf-loader \
+            gsettings-desktop-schemas \
+            adwaita-icon-theme \
+            hicolor-icon-theme
+
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable toolchain
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable --component rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Check Linux notices, formatting, and Clippy
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          python3 -B tools/linux-third-party-notices.py --check
+          (
+            cd apps/linux
+            cargo fmt --check
+            cargo clippy --locked --no-default-features --all-targets -- -D warnings
+          )
+
+      - name: Build .tar.gz and .deb packages
+        run: bash tools/package-linux.sh --tarball --deb
+
+      - name: Verify checksums, package metadata, installation, and smoke tests
+        run: |
+          set -euo pipefail
+          expected_version="$(python3 -B -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("apps/linux/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
+          (
+            cd build/linux/dist
+            sha256sum -c ./*.sha256
+          )
+          deb_path="$(ls -1 build/linux/dist/hortus-linux_*_amd64.deb | head -n 1)"
+          dpkg-deb -I "$deb_path"
+          dpkg-deb -c "$deb_path"
+
+          DEBIAN_FRONTEND=noninteractive apt-get install -y "./${deb_path}"
+
+          for bin in /usr/bin/hortus-gtk /usr/bin/hortus; do
+            ldd_out="$(ldd "$bin")"
+            echo "=== ldd ${bin} ==="
+            echo "$ldd_out"
+            if echo "$ldd_out" | grep -qiE 'not found|/nix/store|webkit|javascriptcore'; then
+              echo "ERROR: forbidden dynamic link in ${bin}" >&2
+              exit 1
+            fi
+          done
+
+          ldd_gui="$(ldd /usr/bin/hortus-gtk)"
+          echo "$ldd_gui" | grep -q 'libgtk-4'
+          echo "$ldd_gui" | grep -q 'libadwaita-1'
+          echo "$ldd_gui" | grep -q 'libvte-2.91-gtk4'
+
+          test "$(/usr/bin/hortus --version)" = "hortus ${expected_version}"
+          test -n "$(/usr/bin/hortus guide)"
+          /usr/bin/hortus-gtk --help >/dev/null
+          if /usr/bin/hortus-gtk --smoke-json /tmp/x.json >/dev/null 2>&1; then
+            echo "ERROR: production hortus-gtk accepted --smoke-json" >&2
+            exit 1
+          fi
+
+          cli_tgz="$(ls -1 build/linux/dist/hortus-cli-*-x86_64-linux.tar.gz | head -n 1)"
+          tmp_cli="$(mktemp -d)"
+          tar -xzf "$cli_tgz" -C "$tmp_cli"
+          cli_bin="$(find "$tmp_cli" -maxdepth 3 -type f -name hortus | head -n 1)"
+          test "$("$cli_bin" --version)" = "hortus ${expected_version}"
+          rm -rf "$tmp_cli"
+
+      - name: Upload .deb and .tar.gz artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hortus-linux-deb-and-tarball
+          path: |
+            build/linux/dist/*.deb
+            build/linux/dist/*.tar.gz
+            build/linux/dist/*.sha256
+          if-no-files-found: error
+
+  linux-rpm:
+    name: Linux .rpm (Fedora 43)
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:43
+    timeout-minutes: 45
+    steps:
+      - name: Install system build and runtime dependencies
+        run: |
+          set -euo pipefail
+          dnf install -y \
+            gcc \
+            pkgconf-pkg-config \
+            curl \
+            ca-certificates \
+            git \
+            python3 \
+            rpm-build \
+            gtk4-devel \
+            libadwaita-devel \
+            vte291-gtk4-devel \
+            pango-devel \
+            cairo-devel \
+            fontconfig-devel \
+            glib2-devel \
+            librsvg2 \
+            webp-pixbuf-loader \
+            gsettings-desktop-schemas \
+            adwaita-icon-theme \
+            hicolor-icon-theme
+
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable toolchain
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Check Linux notices and build .rpm package
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          python3 -B tools/linux-third-party-notices.py --check
+          bash tools/package-linux.sh --rpm
+
+      - name: Verify checksums, package metadata, installation, and smoke tests
+        run: |
+          set -euo pipefail
+          expected_version="$(python3 -B -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("apps/linux/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
+          (
+            cd build/linux/dist
+            sha256sum -c ./*.rpm.sha256
+          )
+          rpm_path="$(ls -1 build/linux/dist/hortus-linux-*.x86_64.rpm | head -n 1)"
+          rpm -qpi "$rpm_path"
+          rpm -qpl "$rpm_path"
+          rpm -qpR "$rpm_path"
+
+          dnf install -y "./${rpm_path}"
+
+          for bin in /usr/bin/hortus-gtk /usr/bin/hortus; do
+            ldd_out="$(ldd "$bin")"
+            echo "=== ldd ${bin} ==="
+            echo "$ldd_out"
+            if echo "$ldd_out" | grep -qiE 'not found|/nix/store|webkit|javascriptcore'; then
+              echo "ERROR: forbidden dynamic link in ${bin}" >&2
+              exit 1
+            fi
+          done
+
+          ldd_gui="$(ldd /usr/bin/hortus-gtk)"
+          echo "$ldd_gui" | grep -q 'libgtk-4'
+          echo "$ldd_gui" | grep -q 'libadwaita-1'
+          echo "$ldd_gui" | grep -q 'libvte-2.91-gtk4'
+
+          test "$(/usr/bin/hortus --version)" = "hortus ${expected_version}"
+          test -n "$(/usr/bin/hortus guide)"
+          /usr/bin/hortus-gtk --help >/dev/null
+          if /usr/bin/hortus-gtk --smoke-json /tmp/x.json >/dev/null 2>&1; then
+            echo "ERROR: production hortus-gtk accepted --smoke-json" >&2
+            exit 1
+          fi
+
+      - name: Upload .rpm artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hortus-linux-rpm
+          path: |
+            build/linux/dist/*.rpm
+            build/linux/dist/*.rpm.sha256
+          if-no-files-found: error
