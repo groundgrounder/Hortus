@@ -5,11 +5,12 @@
 覆盖范围：
 1. `apps/linux`（默认生产特性，无 `automation`，非 build/dev 依赖）；
 2. `crates/hortus-cli`（独立分发 CLI，非 build/dev 依赖）；
-3. Rust 标准库（`rustc --print sysroot`）；
+3. Rust 标准库（按当前 `rustc` 版本与仓库内规范 `LICENSE-MIT` 模板，保证 NixOS 与 rustup 一致）；
 4. 内置 KaTeX 数学字体（OFL-1.1 + `FONT_NOTICE.txt`）；
 5. GNU GPL-3.0-only 主程序许可（`apps/LICENSE`）及内部 Core 许可说明。
 """
 import argparse
+import difflib
 import json
 from pathlib import Path
 import re
@@ -215,18 +216,12 @@ def katex_fonts() -> dict:
 
 
 def rust_std() -> dict:
-    sysroot = Path(
-        subprocess.run(
-            ["rustc", "--print", "sysroot"], check=True, capture_output=True, text=True
-        ).stdout.strip()
+    # 统一使用仓库内规范折行的 LICENSE-MIT 模板，避免 NixOS（无 sysroot 文档）与 rustup（单行版）换行差异。
+    template = (ROOT / "LICENSE-MIT").read_text(encoding="utf-8")
+    text = template.replace(
+        "Copyright (c) 2026 groundgrounder",
+        "Copyright (c) The Rust Project Developers",
     )
-    sysroot_mit = sysroot / "share/doc/rust/licenses/MIT.txt"
-    if sysroot_mit.is_file():
-        template = sysroot_mit.read_text(encoding="utf-8")
-        text = template.replace("<year> <copyright holders>", "The Rust Project Developers")
-    else:
-        template = (ROOT / "LICENSE-MIT").read_text(encoding="utf-8")
-        text = template.replace("Copyright (c) 2026 groundgrounder", "Copyright (c) The Rust Project Developers")
     version = subprocess.run(
         ["rustc", "--version"], check=True, capture_output=True, text=True
     ).stdout.split()[1]
@@ -311,6 +306,17 @@ def main() -> int:
             raise SystemExit(f"缺少第三方许可声明文件：{args.output}")
         existing = args.output.read_text(encoding="utf-8")
         if existing != content:
+            diff_lines = list(
+                difflib.unified_diff(
+                    existing.splitlines(),
+                    content.splitlines(),
+                    fromfile=str(args.output),
+                    tofile="generated",
+                    lineterm="",
+                )
+            )
+            for line in diff_lines[:60]:
+                print(line, file=sys.stderr)
             raise SystemExit(
                 f"{args.output} 与当前依赖图不一致；请运行 tools/linux-third-party-notices.py 重新生成。"
             )
