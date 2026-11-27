@@ -377,7 +377,7 @@ enum DiagramInspection {
              "edge_crossings": Int($0.edgeCrossings), "horizontal_overflow": $0.horizontalOverflow ? 1 : 0]
         }
         let graphGeometry = diagrams.compactMap { diagram in
-            diagram.prepared.scene.graphMetrics == nil ? nil : graphGeometry(diagram)
+            diagram.prepared.scene.graphMetrics == nil ? nil : Self.graphGeometry(diagram)
         }
         let fillCount = Set(diagrams.flatMap { diagram in
             diagram.prepared.scene.primitives.compactMap { primitive -> SceneColor? in
