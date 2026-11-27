@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! RaTeX 公式排版场景、缺字度量回测与 Cairo/PangoCairo 原生绘制。
 

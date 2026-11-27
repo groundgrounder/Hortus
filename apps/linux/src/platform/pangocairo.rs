@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! Fontconfig 私有字体注册与 `libpangocairo-1.0` 原生绑定。
 

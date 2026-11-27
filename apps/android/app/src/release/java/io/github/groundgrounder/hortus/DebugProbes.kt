@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 @file:Suppress("NOTHING_TO_INLINE")
 package io.github.groundgrounder.hortus
 

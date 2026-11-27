@@ -371,7 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ]
         let repository = "https://github.com/groundgrounder/Hortus"
         let credits = NSMutableAttributedString(
-            string: "\(L10n.string("GPL-3.0-only application; MIT OR Apache-2.0 core."))\n",
+            string: "\(L10n.string("Licensed under AGPL-3.0-only."))\n",
             attributes: attributes)
         var link = attributes
         link[.link] = URL(string: repository)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """Android APK 静态安全合规审计与 arm64 模拟器端到端烟测脚本。"""
 import argparse
 import hashlib

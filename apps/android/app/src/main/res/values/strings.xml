@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
     <string name="app_name">Hortus</string>
     <string name="permission_title">Allow access to your notes</string>
@@ -149,7 +149,7 @@
     <string name="settings_about">About</string>
     <string name="settings_version">Version</string>
     <string name="settings_license">License</string>
-    <string name="settings_license_value">GPL-3.0-only</string>
+    <string name="settings_license_value">AGPL-3.0-only</string>
     <string name="settings_repository">Repository</string>
     <string name="settings_repository_url">https://github.com/groundgrounder/Hortus</string>
     <string name="settings_copy_link">Copy</string>

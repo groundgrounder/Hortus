@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 左右边栏内侧平滑拖拽调宽手柄、窗口坐标系防抖换算与双击复位。
 

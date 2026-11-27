@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 底栏开关专属 GTK4 原生 `SymbolicPaintable` 符号（与左右侧栏 symbolic 图标同族）。
 

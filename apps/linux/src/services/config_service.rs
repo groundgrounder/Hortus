@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 配置快照管理、`config.toml` 目录监听防抖与跨窗口热重载广播。
 

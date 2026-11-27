@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-only
 # JNA 在运行时查找 native 方法、结构字段和回调。
 -dontwarn java.awt.**
 -keep class com.sun.jna.** { *; }

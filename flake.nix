@@ -92,7 +92,7 @@
 
             meta = with pkgs.lib; {
               description = "Hortus read-only CLI and MCP server";
-              license = with licenses; [ mit asl20 ];
+              license = licenses.agpl3Only;
               platforms = [ "x86_64-linux" ];
               mainProgram = "hortus";
             };
@@ -156,7 +156,7 @@
                 "$out/share/metainfo/io.github.groundgrounder.Hortus.metainfo.xml"
               install -Dm644 apps/linux/data/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg \
                 "$out/share/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg"
-              install -Dm644 apps/LICENSE \
+              install -Dm644 LICENSE \
                 "$out/share/licenses/hortus-linux/LICENSE"
               install -Dm644 apps/linux/data/THIRD_PARTY_NOTICES.txt \
                 "$out/share/licenses/hortus-linux/THIRD_PARTY_NOTICES.txt"
@@ -169,7 +169,7 @@
 
             meta = with pkgs.lib; {
               description = "Hortus native GTK4 + libadwaita Markdown knowledge viewer";
-              license = licenses.gpl3Only;
+              license = licenses.agpl3Only;
               platforms = [ "x86_64-linux" ];
               mainProgram = "hortus-gtk";
             };

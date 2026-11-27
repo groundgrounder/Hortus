@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -113,7 +113,7 @@ run_tarball() {
     "${gui_stage}/share/metainfo/io.github.groundgrounder.Hortus.metainfo.xml"
   cp -f "${ROOT}/apps/linux/data/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg" \
     "${gui_stage}/share/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg"
-  cp -f "${ROOT}/apps/LICENSE" "${gui_stage}/share/licenses/hortus-linux/LICENSE"
+  cp -f "${ROOT}/LICENSE" "${gui_stage}/share/licenses/hortus-linux/LICENSE"
   cp -f "${ROOT}/apps/linux/data/THIRD_PARTY_NOTICES.txt" \
     "${gui_stage}/share/licenses/hortus-linux/THIRD_PARTY_NOTICES.txt"
   cp -f "${ROOT}/apps/macos/Resources/Fonts/KaTeX/"KaTeX_*.ttf \
@@ -128,8 +128,7 @@ run_tarball() {
   mkdir -p "${cli_stage}/bin" "${cli_stage}/share/licenses/hortus-cli"
   cp -f "${ROOT}/build/linux/bin/hortus" "${cli_stage}/bin/hortus"
   chmod 755 "${cli_stage}/bin/hortus"
-  cp -f "${ROOT}/LICENSE-APACHE" "${cli_stage}/share/licenses/hortus-cli/LICENSE-APACHE"
-  cp -f "${ROOT}/LICENSE-MIT" "${cli_stage}/share/licenses/hortus-cli/LICENSE-MIT"
+  cp -f "${ROOT}/LICENSE" "${cli_stage}/share/licenses/hortus-cli/LICENSE"
 
   local cli_tgz="${DIST_DIR}/hortus-cli-${VERSION}-${ARCH}.tar.gz"
   tar -C "${ROOT}/build/linux/stage-cli" -czf "$cli_tgz" "hortus-cli-${VERSION}-${ARCH}"
@@ -175,7 +174,7 @@ run_deb() {
     "${stage}/usr/share/metainfo/io.github.groundgrounder.Hortus.metainfo.xml"
   cp -f "${ROOT}/apps/linux/data/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg" \
     "${stage}/usr/share/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg"
-  cp -f "${ROOT}/apps/LICENSE" "${stage}/usr/share/licenses/hortus-linux/LICENSE"
+  cp -f "${ROOT}/LICENSE" "${stage}/usr/share/licenses/hortus-linux/LICENSE"
   cp -f "${ROOT}/apps/linux/data/THIRD_PARTY_NOTICES.txt" \
     "${stage}/usr/share/licenses/hortus-linux/THIRD_PARTY_NOTICES.txt"
   cp -f "${ROOT}/apps/macos/Resources/Fonts/KaTeX/"KaTeX_*.ttf \
@@ -256,7 +255,7 @@ Name:           hortus-linux
 Version:        ${VERSION}
 Release:        1
 Summary:        Native GTK4 and libadwaita Markdown reader and editor
-License:        GPL-3.0-only
+License:        AGPL-3.0-only
 URL:            https://github.com/groundgrounder/Hortus
 BuildArch:      x86_64
 Requires:       gtk4 >= 4.16, libadwaita >= 1.6, vte291-gtk4 >= 0.76, librsvg2, webp-pixbuf-loader, gsettings-desktop-schemas, adwaita-icon-theme, hicolor-icon-theme
@@ -296,7 +295,7 @@ EOF
   cp -f "${ROOT}/apps/linux/data/io.github.groundgrounder.Hortus.desktop" "${rpm_top}/SOURCES/"
   cp -f "${ROOT}/apps/linux/data/io.github.groundgrounder.Hortus.metainfo.xml" "${rpm_top}/SOURCES/"
   cp -f "${ROOT}/apps/linux/data/icons/hicolor/scalable/apps/io.github.groundgrounder.Hortus.svg" "${rpm_top}/SOURCES/"
-  cp -f "${ROOT}/apps/LICENSE" "${rpm_top}/SOURCES/LICENSE"
+  cp -f "${ROOT}/LICENSE" "${rpm_top}/SOURCES/LICENSE"
   cp -f "${ROOT}/apps/linux/data/THIRD_PARTY_NOTICES.txt" "${rpm_top}/SOURCES/THIRD_PARTY_NOTICES.txt"
   mkdir -p "${rpm_top}/SOURCES/katex"
   cp -f "${ROOT}/apps/macos/Resources/Fonts/KaTeX/"KaTeX_*.ttf \

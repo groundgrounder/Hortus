@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """M1 Android 阅读视图验收：拼装验收库、驱动 Debug 入口、执行 A2–A8 场景。"""
 from __future__ import annotations
 

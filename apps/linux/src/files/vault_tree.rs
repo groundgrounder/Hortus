@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 目录树视图与 `VaultNode`：彻底消除非安全 GObject quark 存储（G-09 修复），改由 `expander.list_row()` 取节点。
 

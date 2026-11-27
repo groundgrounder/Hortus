@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 分段块级 Reading View 表面组装：合并连续文本段（随 `HortusReadingViewport` 统一居中列宽）+ 原生块级控件，
 //! 支持原地宽度重排（零销毁重建）、精准跨段滚动锚点与双链坐标命中。

@@ -252,7 +252,7 @@ struct IOSSettingsView: View {
 
                 Section(L10n.string("About")) {
                     LabeledContent(L10n.string("Hortus"), value: appVersion)
-                    LabeledContent(L10n.string("License"), value: L10n.string("GPL-3.0-only"))
+                    LabeledContent(L10n.string("License"), value: L10n.string("AGPL-3.0-only"))
                     if let url = URL(string: "https://github.com/groundgrounder/Hortus") {
                         Link(destination: url) {
                             HStack {

@@ -218,11 +218,10 @@ CI does not publish releases, notarize, or replace local release, real-window, T
 
 ## License
 
-- `crates/` and `tools/` are licensed under either the MIT license ([LICENSE-MIT](LICENSE-MIT)) or the Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at your option.
-- `apps/` is licensed under GPL-3.0-only ([apps/LICENSE](apps/LICENSE)).
+- The entire repository (`crates/`, `apps/`, and `tools/`) is licensed under GNU AGPL-3.0-only ([LICENSE](LICENSE)).
 - The CC0 notices in `fixtures/vault-sample/` continue to apply to those sample notes. The original [demo vault](fixtures/demo-vault/LICENSE.txt) is also CC0.
 - Licenses for bundled open-source software and KaTeX fonts (SIL OFL 1.1) are listed in each app's **Third-Party Notices** (`ThirdPartyNotices.txt`).
 
-Contributions are accepted under the license of the directory they modify. No CLA is required.
+Contributions are accepted under AGPL-3.0-only. No CLA is required.
 
 If Hortus is useful to you, please give it a [star](https://github.com/groundgrounder/Hortus).

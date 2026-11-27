@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 use crate::core::{NotifyQueue, is_note_file_name};
 use hortus_ffi::{TreeBatch, TreeEntry, VaultHandle, WorkspaceCore};

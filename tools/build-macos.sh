@@ -55,7 +55,7 @@ mkdir -p build/Hortus.app/Contents/Resources/Fonts
 rm -rf build/Hortus.app/Contents/Resources/Fonts/KaTeX
 cp -R apps/macos/Resources/Fonts/KaTeX build/Hortus.app/Contents/Resources/Fonts/
 # 应用自身的许可证和第三方许可证声明随包分发，关于窗口里有入口
-cp apps/LICENSE build/Hortus.app/Contents/Resources/LICENSE.txt
+cp LICENSE build/Hortus.app/Contents/Resources/LICENSE.txt
 python3 -B tools/third-party-notices.py --output build/Hortus.app/Contents/Resources/ThirdPartyNotices.txt
 # 用当前提交的历史提交数生成纯数字构建号。
 build_number="$(git rev-list --count HEAD)"

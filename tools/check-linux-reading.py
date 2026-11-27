@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """L1 Linux Reading View、Mermaid 原生渲染、RaTeX 公式、嵌入/表格/图片、专注模式与零写盘零联网综合自检。"""
 
 import argparse

@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 文内查找与替换：支持单编辑器缓冲区与阅读视图跨分段扫描（弱引用解环，零整篇 `Vec<char>` 分配）。
 

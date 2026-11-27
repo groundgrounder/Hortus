@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 窗口主菜单、主题切换、关于对话框与关闭确认弹窗。
 
@@ -20,7 +20,7 @@ impl WindowInner {
             .version(APP_VERSION)
             .developer_name("groundgrounder")
             .copyright("© 2026 groundgrounder")
-            .license_type(gtk4::License::Gpl30Only)
+            .license_type(gtk4::License::Agpl30Only)
             .website("https://github.com/groundgrounder/Hortus")
             .build();
         dialog.add_legal_section(

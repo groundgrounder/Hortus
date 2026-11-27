@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! GTK4 真宽度感知阅读容器与编辑宿主：`WidgetImpl::size_allocate` + 统一 920px 列宽 + 空闲首对齐 + 90ms 防抖重排。
 

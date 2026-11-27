@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 package io.github.groundgrounder.hortus
 
 import androidx.test.ext.junit.runners.AndroidJUnit4

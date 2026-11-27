@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """L2 Linux 样式化编辑、安全保存、外部刷新、知识导航与文件管理端到端自检。"""
 
 import argparse

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """Hortus Linux L4 生产发布态验收脚本（仅测无 automation 特性的真实发行包）。
 
 覆盖 D5 全量验收项：

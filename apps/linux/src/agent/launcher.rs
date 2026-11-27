@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! Agent 安全启动闭环：校验配置档或自定义命令 → 后台全库快照（可取消，失败硬阻断）→ 启动 VTE4 标签。
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """检查发布脚本参数和公开演示库，不接触签名证书或私人笔记。"""
 import argparse
 import hashlib

@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! L2 全流程自检前半段（A 编辑与原子保存、B 外部冲突与关闭保护、C 查找替换、D 1MiB 大文档）。
 

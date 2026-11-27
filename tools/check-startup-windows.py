@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """Check production LaunchServices windows, including every AX standard window.
 Requires Accessibility and Screen Recording permission. --app accepts a copied
 .app from a read-only release DMG; this tool does not use inspection switches.

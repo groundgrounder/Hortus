@@ -218,11 +218,10 @@ CI 不自动发布版本、不公证，也不替代本机发布、真实窗口�
 
 ## 许可证
 
-- `crates/` 和 `tools/` 可任选 MIT（[LICENSE-MIT](LICENSE-MIT)）或 Apache License 2.0（[LICENSE-APACHE](LICENSE-APACHE)）。
-- `apps/` 使用 GPL-3.0-only（[apps/LICENSE](apps/LICENSE)）。
+- 本仓库（`crates/`、`apps/` 与 `tools/`）统一采用 GNU AGPL-3.0-only 许可证（[LICENSE](LICENSE)）。
 - `fixtures/vault-sample/` 中示例笔记原有的 CC0 声明继续有效。原创[演示库](fixtures/demo-vault/LICENSE.txt)同样采用 CC0。
 - 应用内包含的开源软件及 KaTeX 字体（SIL OFL 1.1）许可证列于各端的第三方许可证声明（`ThirdPartyNotices.txt`）。
 
-贡献按所修改目录的许可证接收，无需签署 CLA。
+贡献按 AGPL-3.0-only 许可证接收，无需签署 CLA。
 
 觉得 Hortus 有用，请点个 [star](https://github.com/groundgrounder/Hortus)。

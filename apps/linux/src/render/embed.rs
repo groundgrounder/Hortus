@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 嵌入笔记、标题切片与 `.mmd` 图表解析（通过 `EmbedBodyBuilder` 回调解耦，彻底消除 `reading ↔ embed` 循环依赖）。
 

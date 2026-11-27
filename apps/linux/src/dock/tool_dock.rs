@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 统一单层工具标签容器：左/右/底三区共用一套原生 GTK4 动态宽度标签条（`ToolTabStrip`）
 //! 与底层 `adw::TabView` 内容宿主；静态工具与终端/Agent 实例平级同层、支持 `+` 添加、

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """生成应用包里的第三方许可证声明：链接进 Hortus.app 的 Rust crate、Rust 标准库和 Swift 包。
 
 Rust 部分从 hortus-ffi 出发，只沿普通依赖走（不含 build/dev 依赖），平台为 aarch64-apple-darwin。
@@ -214,8 +214,7 @@ def android_dependencies(catalog_path=ROOT / 'apps/android/gradle/libs.versions.
 
 def render(groups):
     lines = ['Hortus third-party licenses', '=' * 27, '',
-             'Hortus.app includes the following open source software. The Hortus application is licensed',
-             'under GPL-3.0-only and its Rust core under MIT OR Apache-2.0; see the Hortus repository.',
+             'Hortus includes the following open source software. Hortus is licensed under AGPL-3.0-only; see LICENSE.',
              'Where a package offers a choice of licenses, the license used is the one shown below.', '']
     # 原文相同的放在一起，只印一次
     blocks = {}

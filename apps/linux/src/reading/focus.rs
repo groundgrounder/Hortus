@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! Mermaid 图表专注查看模式：Weak 解环（C-07 修复）与后台持久化（`gio::spawn_blocking`）。
 

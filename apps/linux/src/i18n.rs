@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 零外部依赖中英双语本地化模块：按 `LC_ALL` → `LC_MESSAGES` → `LANG` → `LANGUAGE`
 //! 自动匹配 `zh-Hans` 与源语言 `en`，统一落实 `D-2026-11-24-10` 克制文案规范。

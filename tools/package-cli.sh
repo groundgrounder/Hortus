@@ -1,5 +1,5 @@
 #!/bin/zsh
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 set -euo pipefail
 cd "${0:A:h:h}"
 
@@ -118,12 +118,7 @@ chmod 755 "$stage/hortus"
 codesign --force --sign - "$stage/hortus"
 codesign --verify --strict "$stage/hortus"
 
-{
-  printf 'Hortus CLI is dual-licensed under MIT OR Apache-2.0.\n\n'
-  cat LICENSE-MIT
-  printf '\n---\n\n'
-  cat LICENSE-APACHE
-} > "$stage/LICENSE"
+cp LICENSE "$stage/LICENSE"
 
 python3 -B tools/third-party-notices.py --output "$stage/ThirdPartyNotices.txt"
 

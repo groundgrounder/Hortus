@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """Linux 端自动化合规、静态二进制审计、CLI/GUI 冒烟与原型截图检查。"""
 import argparse
 import atexit
@@ -242,7 +242,7 @@ def audit_binary_and_manifest(gui_bin: Path, cli_bin: Path):
     manifest_path = linux_dir / "Cargo.toml"
     manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     license_val = manifest.get("package", {}).get("license")
-    check(license_val == "GPL-3.0-only", f"apps/linux/Cargo.toml license 应为 GPL-3.0-only，实际为 {license_val!r}")
+    check(license_val == "AGPL-3.0-only", f"apps/linux/Cargo.toml license 应为 AGPL-3.0-only，实际为 {license_val!r}")
 
     deps_checked = []
     for section in ("dependencies", "dev-dependencies"):

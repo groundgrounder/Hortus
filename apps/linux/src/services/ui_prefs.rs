@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 外观配色持久化：统一读写 `config.toml` 的 `color_scheme`，并保留一次性从旧 `linux-ui.toml` 迁移的能力。
 

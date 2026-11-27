@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """M2a Android 知识导航、搜索、平板双栏、轻编辑与系统入口验收（A2–A7）。
 
 在宿主机临时目录拼装验收库（公开 demo-vault + 合成笔记），分别在手机与平板模拟器上

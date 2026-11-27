@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """生成并校验 Hortus Linux 发行包第三方开源许可证声明。
 
 覆盖范围：
 1. `apps/linux`（默认生产特性，无 `automation`，非 build/dev 依赖）；
 2. `crates/hortus-cli`（独立分发 CLI，非 build/dev 依赖）；
-3. Rust 标准库（按当前 `rustc` 版本与仓库内规范 `LICENSE-MIT` 模板，保证 NixOS 与 rustup 一致）；
+3. Rust 标准库（按当前 `rustc` 版本与仓库内规范 `tools/licenses/MIT.txt` 模板，保证 NixOS 与 rustup 一致）；
 4. 内置 KaTeX 数学字体（OFL-1.1 + `FONT_NOTICE.txt`）；
-5. GNU GPL-3.0-only 主程序许可（`apps/LICENSE`）及内部 Core 许可说明。
+5. GNU AGPL-3.0-only 主程序许可（`LICENSE`）。
 """
 import argparse
 import difflib
@@ -33,7 +33,7 @@ PREFERENCE = [
     "MPL-2.0",
     "LGPL-2.1-only",
     "LGPL-2.1-or-later",
-    "GPL-3.0-only",
+    "AGPL-3.0-only",
     "Apache-2.0 WITH LLVM-exception",
 ]
 SIGNATURES = {
@@ -47,7 +47,7 @@ SIGNATURES = {
     "MIT": r"Permission is hereby granted, free of charge",
     "BSD-3-Clause": r"Neither the name of",
     "BSD-2-Clause": r"Redistributions in binary form must reproduce",
-    "GPL-3.0-only": r"GNU GENERAL PUBLIC LICENSE\s+Version 3",
+    "AGPL-3.0-only": r"GNU AFFERO GENERAL PUBLIC LICENSE\s+Version 3",
     "LGPL-2.1": r"GNU LESSER GENERAL PUBLIC LICENSE\s+Version 2\.1",
 }
 SEPARATOR = "=" * 78
@@ -55,7 +55,7 @@ LICENSE_FILE = re.compile(r"(?i)^(licen[cs]e|copying|copyright|unlicense)")
 NOTICE_FILE = re.compile(r"(?i)^notice")
 BUNDLED = {
     "MPL-2.0": ROOT / "tools/licenses/MPL-2.0.txt",
-    "GPL-3.0-only": ROOT / "apps/LICENSE",
+    "AGPL-3.0-only": ROOT / "LICENSE",
 }
 
 
@@ -101,7 +101,7 @@ def license_text(directory: Path, spdx: str, name: str) -> str:
         "Unicode-3.0": "unicode",
         "CC0-1.0": "cc0",
         "Unlicense": "unlicense",
-        "GPL-3.0-only": "gpl",
+        "AGPL-3.0-only": "agpl",
         "LGPL-2.1-only": "lgpl",
         "LGPL-2.1-or-later": "lgpl",
     }.get(base, base.lower())
@@ -216,8 +216,8 @@ def katex_fonts() -> dict:
 
 
 def rust_std() -> dict:
-    # 统一使用仓库内规范折行的 LICENSE-MIT 模板，避免 NixOS（无 sysroot 文档）与 rustup（单行版）换行差异。
-    template = (ROOT / "LICENSE-MIT").read_text(encoding="utf-8")
+    # 统一使用仓库内规范折行的 MIT 模板，避免 NixOS（无 sysroot 文档）与 rustup（单行版）换行差异。
+    template = (ROOT / "tools/licenses/MIT.txt").read_text(encoding="utf-8")
     text = template.replace(
         "Copyright (c) 2026 groundgrounder",
         "Copyright (c) The Rust Project Developers",
@@ -236,14 +236,14 @@ def rust_std() -> dict:
     }
 
 
-def gpl_application_license() -> dict:
+def agpl_application_license() -> dict:
     return {
         "name": "Hortus Linux application (hortus-gtk)",
         "version": "1.0.0",
-        "license": "GPL-3.0-only",
-        "expression": "GPL-3.0-only",
+        "license": "AGPL-3.0-only",
+        "expression": "AGPL-3.0-only",
         "source": "https://github.com/groundgrounder/Hortus",
-        "text": (ROOT / "apps/LICENSE").read_text(encoding="utf-8"),
+        "text": (ROOT / "LICENSE").read_text(encoding="utf-8"),
         "notices": [],
     }
 
@@ -253,8 +253,7 @@ def render(groups: list[dict]) -> str:
         "Hortus Linux third-party notices",
         "=" * 33,
         "",
-        "Hortus Linux (hortus-gtk) is licensed under GNU GPL-3.0-only.",
-        "Hortus shared crates and hortus-cli are dual-licensed under MIT OR Apache-2.0.",
+        "Hortus (hortus-gtk, shared crates, and hortus-cli) is licensed under GNU AGPL-3.0-only.",
         "Third-party Rust crates (apps/linux + hortus-cli, non-dev/non-build),",
         "the Rust standard library, and bundled KaTeX fonts follow below.",
         "",
@@ -287,7 +286,7 @@ def render(groups: list[dict]) -> str:
 
 
 def generate_content() -> tuple[str, int]:
-    items = rust_crates() + [rust_std(), katex_fonts(), gpl_application_license()]
+    items = rust_crates() + [rust_std(), katex_fonts(), agpl_application_license()]
     return render(items), len(items)
 
 

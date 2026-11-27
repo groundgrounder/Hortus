@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // 编辑器命令检查的外部驱动：只发真实 HID 键盘/鼠标事件，并通过 Accessibility
 // 读取焦点、文本区与菜单，不向被测应用注入调用。结果以 JSON 写到标准输出或文件。
 import AppKit

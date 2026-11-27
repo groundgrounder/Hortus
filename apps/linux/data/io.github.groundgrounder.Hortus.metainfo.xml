@@ -5,7 +5,7 @@
   <summary>Native Markdown notes with Mermaid diagrams and terminal Agents</summary>
   <summary xml:lang="zh-Hans">原生 Markdown 笔记，支持 Mermaid 图表与终端 Agent</summary>
   <metadata_license>FSFAP</metadata_license>
-  <project_license>GPL-3.0-only</project_license>
+  <project_license>AGPL-3.0-only</project_license>
   <developer id="io.github.groundgrounder">
     <name>groundgrounder</name>
   </developer>

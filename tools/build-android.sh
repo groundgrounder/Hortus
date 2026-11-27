@@ -1,5 +1,5 @@
 #!/bin/zsh
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 set -euo pipefail
 cd "${0:A:h:h}"
 
@@ -177,7 +177,7 @@ cp apps/macos/Resources/Fonts/KaTeX/OFL.txt "$assets_out/Fonts/KaTeX/"
 if [[ -f apps/macos/Resources/Fonts/KaTeX/FONT_NOTICE.txt ]]; then
   cp apps/macos/Resources/Fonts/KaTeX/FONT_NOTICE.txt "$assets_out/Fonts/KaTeX/"
 fi
-cp apps/LICENSE "$assets_out/LICENSE.txt"
+cp LICENSE "$assets_out/LICENSE.txt"
 python3 -B tools/third-party-notices.py --rust-only --target aarch64-linux-android --android-deps --output "$assets_out/ThirdPartyNotices.txt"
 
 # 6. 通过 Gradle Wrapper 组装 APK

@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 反向链接面板：`handle.backlinks()` 移至 `gio::spawn_blocking` 异步执行，弱引用解环（C-06）。
 

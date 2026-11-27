@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """P1-46 editor command routing regression.
 
 Keyboard and mouse input goes through physical keycodes at the HID event tap.

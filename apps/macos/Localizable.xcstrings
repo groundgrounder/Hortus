@@ -1057,18 +1057,18 @@
         }
       }
     },
-    "GPL-3.0-only application; MIT OR Apache-2.0 core.": {
+    "Licensed under AGPL-3.0-only.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "GPL-3.0-only application; MIT OR Apache-2.0 core."
+            "value": "Licensed under AGPL-3.0-only."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "应用采用 GPL-3.0-only 许可证；内核采用 MIT 或 Apache-2.0 许可证。"
+            "value": "采用 AGPL-3.0-only 许可证。"
           }
         }
       }
@@ -6369,18 +6369,18 @@
         }
       }
     },
-    "GPL-3.0-only": {
+    "AGPL-3.0-only": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "GPL-3.0-only"
+            "value": "AGPL-3.0-only"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "GPL-3.0-only"
+            "value": "AGPL-3.0-only"
           }
         }
       }

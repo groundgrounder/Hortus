@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // 浏览器仅用于离线宣传素材，不进入应用包。
 import {spawn, spawnSync} from 'node:child_process';
 import {mkdir, readFile, writeFile, mkdtemp, rm, copyFile} from 'node:fs/promises';

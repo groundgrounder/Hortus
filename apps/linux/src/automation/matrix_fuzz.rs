@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! Layer 1 全库矩阵不变量巡检 (`--matrix-audit-json`) 与 Layer 2 确定性有种子 GUI Fuzzer (`--fuzz-json`)。
 

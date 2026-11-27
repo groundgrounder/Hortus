@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 右侧栏「改动（Changes）」面板：文案严格称「本次会话改动」，支持会话选择、后台审阅摘要、
 //! 按需逐行 diff、三级安全回滚（单 hunk / 单文件 / 整会话）、`review_stale` 保护与删除会话快照。

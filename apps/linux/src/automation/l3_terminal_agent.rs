@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! L3 端到端自动化验证：统一单层三区工具标签栏、`+` 与右键/中键关闭及无损跨区迁移、
 //! VTE4 终端安全发送、Agent 快照闸门与三级回滚、设置热重载、多窗口实时同步与会话恢复。

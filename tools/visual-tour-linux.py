@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """面向生产二进制的 Linux 一键并排视觉巡检图集脚本（纯标准库实现，零外部 Python 依赖）。"""
 from __future__ import annotations
 

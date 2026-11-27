@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 轻量原生「自定义命令启动 Agent…」弹窗：自由 Shell 命令输入与最近 12 条缓存历史。
 

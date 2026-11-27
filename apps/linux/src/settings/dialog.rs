@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! 原生设置对话框（`adw::PreferencesDialog`）：外观阅读、终端、Agent 多配置档、MCP 配置复制与指南及冲突保护。
 

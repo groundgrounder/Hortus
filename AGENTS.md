@@ -22,7 +22,7 @@ The macOS app requires Apple Silicon, macOS 27.0, Xcode 27.1 and Swift 6.4. Buil
 - Keep changes focused and follow the surrounding code style. Existing comments are in Chinese and will be translated to English together later; until then, match the language of the file being edited.
 - Pin external dependencies to exact versions (`=x.y.z` for Cargo).
 - Dependencies in `crates/` must use permissive licenses such as MIT, Apache-2.0 or BSD; MPL-2.0 is also allowed. Dependencies in `apps/` may use GPL-compatible licenses.
-- `crates/` and `tools/` use MIT OR Apache-2.0; `apps/` uses GPL-3.0-only. Preserve the CC0 notices on sample notes. Contributions use the license of the directory they change; no CLA is required.
+- The entire repository (`crates/`, `apps/`, and `tools/`) is licensed under AGPL-3.0-only. Preserve the CC0 notices on sample notes. Contributions are accepted under AGPL-3.0-only; no CLA is required.
 
 ## Product principles
 

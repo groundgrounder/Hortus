@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 package io.github.groundgrounder.hortus.reader.ui
 

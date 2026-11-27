@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """L5c 三层巡检门禁驱动：全库矩阵不变量 + 确定性有种子 GUI Fuzzer + 0 GTK 告警断言。"""
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 // Hortus - Linux GTK4 + libadwaita 原生界面
 // Copyright (C) 2026  groundgrounder
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! VTE4 原生终端管理器：直接托管于 `ToolDock` 单层工具标签栏（无内嵌双层 TabBar），
 //! 支持普通 Shell 与独立 Agent 实例、最近聚焦终端追踪、主题/字体自适应、

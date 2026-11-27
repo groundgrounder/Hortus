@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only
 """M2b Android 设置页、字号原子刷新、缓存清理、公式源码复制与私有存储边界验收（A2/A3）。"""
 from __future__ import annotations
 
@@ -347,7 +347,7 @@ def main() -> int:
         device.night(False)
         device.shell(f'cmd locale set-app-locales {PACKAGE} --locales en-US', check=False)
 
-        # 1. 首页进入设置并检查 About 字段（仅名称/版本/GPL-3.0-only/仓库链接），以及存储根目录拦截（M4-17）
+        # 1. 首页进入设置并检查 About 字段（仅名称/版本/AGPL-3.0-only/仓库链接），以及存储根目录拦截（M4-17）
         device.start(cold=True)
         time.sleep(1.5)
         home_nodes = device.ui_dump('home-ui.xml')
@@ -375,7 +375,7 @@ def main() -> int:
         has_about = (
             'Hortus' in texts
             and any('1.0.0 (' in t for t in texts)
-            and 'GPL-3.0-only' in texts
+            and 'AGPL-3.0-only' in texts
             and 'https://github.com/groundgrounder/Hortus' in texts
         )
         results.check('A2', 'home settings entry and minimal about metadata', has_about, texts)
