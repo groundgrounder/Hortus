@@ -78,3 +78,42 @@ jobs:
 
       - name: Check public tree and app bundle
         run: python3 -B tools/check-public-tree.py
+
+  macos-26-compatibility:
+    name: macOS 26 app, CLI, and test suite
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Verify macOS 26 environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          swift --version
+          rustc --version
+          cargo --version
+          test "$(sw_vers -productVersion | cut -d. -f1)" = "26"
+
+      - name: Run macOS 26 system-font diagram test
+        run: cargo test -p hortus-diagram research_ports_and_labels_use_centered_generic_rules
+
+      - name: Build and test macOS app on macOS 26
+        run: ./tools/test-macos.sh
+
+      - name: Verify bundled CLI, signing, and public tree on macOS 26
+        shell: bash
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict build/Hortus.app
+          vtool -show-build build/Hortus.app/Contents/MacOS/Hortus
+          version="$(build/Hortus.app/Contents/Helpers/hortus --version)"
+          test "$version" = "hortus 1.0.0"
+          build/Hortus.app/Contents/Helpers/hortus guide >/dev/null
+          build/Hortus.app/Contents/Helpers/hortus search --vault fixtures/demo-vault learning >/dev/null
+          python3 -B tools/check-public-tree.py
