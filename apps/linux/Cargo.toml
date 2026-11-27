@@ -2,7 +2,7 @@
 
 [package]
 name = "hortus-linux"
-version = "0.5.0"
+version = "1.0.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Native GTK4 and libadwaita Markdown reader and editor with local diagrams, math, and Agent review"

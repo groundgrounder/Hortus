@@ -244,7 +244,7 @@ def rust_std() -> dict:
 def gpl_application_license() -> dict:
     return {
         "name": "Hortus Linux application (hortus-gtk)",
-        "version": "0.5.0",
+        "version": "1.0.0",
         "license": "GPL-3.0-only",
         "expression": "GPL-3.0-only",
         "source": "https://github.com/groundgrounder/Hortus",

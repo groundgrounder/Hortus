@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="0.5.0"
+VERSION="1.0.0"
 ARCH="x86_64-linux"
 DIST_DIR="${ROOT}/build/linux/dist"
 mkdir -p "$DIST_DIR"

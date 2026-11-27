@@ -374,7 +374,7 @@ def main() -> int:
         texts = [n['text'] for n in settings_light_nodes if n['text']]
         has_about = (
             'Hortus' in texts
-            and any('0.5.0 (' in t for t in texts)
+            and any('1.0.0 (' in t for t in texts)
             and 'GPL-3.0-only' in texts
             and 'https://github.com/groundgrounder/Hortus' in texts
         )

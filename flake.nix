@@ -74,7 +74,7 @@
         {
           hortus-cli = pkgs.rustPlatform.buildRustPackage {
             pname = "hortus-cli";
-            version = "0.5.0";
+            version = "1.0.0";
             src = self;
 
             cargoLock = {
@@ -100,7 +100,7 @@
 
           hortus-linux = pkgs.rustPlatform.buildRustPackage {
             pname = "hortus-linux";
-            version = "0.5.0";
+            version = "1.0.0";
             src = self;
             cargoRoot = "apps/linux";
             buildAndTestSubdir = "apps/linux";
@@ -190,7 +190,7 @@
 
           workspace-checks = pkgs.rustPlatform.buildRustPackage {
             pname = "hortus-workspace-checks";
-            version = "0.5.0";
+            version = "1.0.0";
             src = self;
             buildType = "debug";
 
@@ -224,7 +224,7 @@
 
           linux-app-checks = pkgs.rustPlatform.buildRustPackage {
             pname = "hortus-linux-checks";
-            version = "0.5.0";
+            version = "1.0.0";
             src = self;
             cargoRoot = "apps/linux";
             buildAndTestSubdir = "apps/linux";

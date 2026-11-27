@@ -208,7 +208,7 @@ def audit_elf_and_prefix(gui_bin: Path, cli_bin: Path) -> dict[str, object]:
             summary_txt = s.text or ""
             check("GTK4" not in summary_txt, f"metainfo.xml summary 不应暴露底层框架名: {summary_txt!r}")
         rel_el = root_xml.find("./releases/release")
-        check(rel_el is not None and rel_el.attrib.get("version") == "0.5.0", "metainfo.xml 缺少 0.5.0 release")
+        check(rel_el is not None and rel_el.attrib.get("version") == "1.0.0", "metainfo.xml 缺少 1.0.0 release")
 
         web_in_prefix = [
             str(p) for p in prefix_root.rglob("*") if p.is_file() and p.suffix.casefold() in (".html", ".js")

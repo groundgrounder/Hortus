@@ -2319,7 +2319,7 @@ font licensing follows OFL as described in KaTeX's documentation and
 upstream repository.
 
 ==============================================================================
-Hortus Linux application (hortus-gtk) 0.5.0 — GPL-3.0-only
+Hortus Linux application (hortus-gtk) 1.0.0 — GPL-3.0-only
   Source: https://github.com/groundgrounder/Hortus
 
 GNU GENERAL PUBLIC LICENSE

@@ -11,7 +11,7 @@ plugins {
 }
 
 val hortusVersionCode: Int =
-    (project.findProperty("hortusVersionCode") as String?)?.toIntOrNull() ?: 1
+    (project.findProperty("hortusVersionCode") as String?)?.toIntOrNull() ?: 2
 
 val releaseKeystorePath = System.getenv("HORTUS_ANDROID_KEYSTORE")?.takeIf { it.isNotBlank() }
 val releaseKeystorePassword = System.getenv("HORTUS_ANDROID_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
@@ -38,7 +38,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = hortusVersionCode
-        versionName = "0.5.0"
+        versionName = "1.0.0"
 
         ndk {
             abiFilters += "arm64-v8a"
