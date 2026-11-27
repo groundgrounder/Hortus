@@ -74,12 +74,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust stable toolchain
+      - name: Install Rust 1.95.0 toolchain
         run: |
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable --component rustfmt,clippy
+            | sh -s -- -y --profile minimal --default-toolchain 1.95.0 --component rustfmt,clippy
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch Cargo dependencies
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          cargo fetch --locked --manifest-path Cargo.toml
+          cargo fetch --locked --manifest-path apps/linux/Cargo.toml
 
       - name: Check Linux notices, formatting, and Clippy
         run: |
@@ -186,12 +194,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust stable toolchain
+      - name: Install Rust 1.95.0 toolchain
         run: |
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable
+            | sh -s -- -y --profile minimal --default-toolchain 1.95.0
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch Cargo dependencies
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          cargo fetch --locked --manifest-path Cargo.toml
+          cargo fetch --locked --manifest-path apps/linux/Cargo.toml
 
       - name: Check Linux notices and build .rpm package
         run: |

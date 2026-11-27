@@ -264,6 +264,12 @@ Requires:       gtk4 >= 4.16, libadwaita >= 1.6, vte291-gtk4 >= 0.76, librsvg2, 
 %description
 Hortus Linux GUI with local Mermaid diagrams, math rendering, terminal, and Agent change review.
 
+%prep
+# Prebuilt binaries and assets are staged directly in %{_sourcedir}.
+
+%build
+# Binaries are already compiled by tools/build-linux.sh.
+
 %install
 mkdir -p %{buildroot}/usr/bin %{buildroot}/usr/share/applications %{buildroot}/usr/share/metainfo %{buildroot}/usr/share/icons/hicolor/scalable/apps %{buildroot}/usr/share/licenses/hortus-linux %{buildroot}/usr/share/hortus/fonts/KaTeX
 install -m 755 %{_sourcedir}/hortus-gtk %{buildroot}/usr/bin/hortus-gtk
