@@ -11,7 +11,8 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 
-const USAGE: &str = "Usage: hortus guide
+const USAGE: &str = "Usage: hortus --version
+       hortus guide
        hortus mcp [--vault DIR]
        hortus mermaid render <note.md|diagram.mmd> [--block N] [--width 700] [--theme light|dark] [--collapse id,id] --out diagram.svg [--metrics metrics.json] [--scene scene.json]
        hortus mermaid check <note.md|diagram.mmd> [--block N]
@@ -25,6 +26,7 @@ const USAGE: &str = "Usage: hortus guide
 
 enum Command {
     Usage,
+    Version,
     Guide,
     Mcp {
         vault: Option<PathBuf>,
@@ -79,6 +81,12 @@ fn arguments() -> Result<Command, String> {
     };
     match first.as_str() {
         "--help" | "-h" => return Ok(Command::Usage),
+        "--version" | "-V" => {
+            if let Some(extra) = args.next() {
+                return Err(format!("unknown argument {extra}"));
+            }
+            return Ok(Command::Version);
+        }
         "guide" => {
             if let Some(extra) = args.next() {
                 return Err(format!("unknown argument {extra}"));
@@ -421,6 +429,10 @@ fn main() -> std::process::ExitCode {
     match arguments() {
         Ok(Command::Usage) => {
             println!("{USAGE}");
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Command::Version) => {
+            println!("hortus {}", env!("CARGO_PKG_VERSION"));
             std::process::ExitCode::SUCCESS
         }
         Ok(Command::Guide) => match run_guide() {

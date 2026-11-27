@@ -91,4 +91,13 @@ fn unknown_arguments_exit_non_zero_and_help_stays_english() {
             .unwrap()
             .contains("hortus guide")
     );
+
+    for flag in ["--version", "-V"] {
+        let ver = Command::new(binary()).arg(flag).output().unwrap();
+        assert!(ver.status.success(), "{flag}");
+        assert_eq!(
+            String::from_utf8(ver.stdout).unwrap().trim(),
+            format!("hortus {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
 }
