@@ -5,14 +5,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="1.0.0"
+DEFAULT_VERSION="$(python3 -B -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("apps/linux/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"])')"
+VERSION="$DEFAULT_VERSION"
 ARCH="x86_64-linux"
 DIST_DIR="${ROOT}/build/linux/dist"
 mkdir -p "$DIST_DIR"
 
 usage() {
   cat <<'EOF'
-Usage: tools/package-linux.sh [--nix] [--tarball] [--deb] [--rpm] [--all]
+Usage: tools/package-linux.sh [--version X.Y.Z] [--nix] [--tarball] [--deb] [--rpm] [--all]
 EOF
 }
 
@@ -26,17 +27,41 @@ DO_TARBALL=0
 DO_DEB=0
 DO_RPM=0
 
-for arg in "$@"; do
+while [[ "$#" -gt 0 ]]; do
+  arg="$1"
   case "$arg" in
-    --nix) DO_NIX=1 ;;
-    --tarball) DO_TARBALL=1 ;;
-    --deb) DO_DEB=1 ;;
-    --rpm) DO_RPM=1 ;;
-    --all) DO_NIX=1; DO_TARBALL=1; DO_DEB=1; DO_RPM=1 ;;
+    --version)
+      if [[ "$#" -lt 2 ]]; then
+        echo "Missing value for --version" >&2
+        usage >&2
+        exit 2
+      fi
+      VERSION="$2"
+      shift 2
+      ;;
+    --version=*)
+      VERSION="${arg#--version=}"
+      shift
+      ;;
+    --nix) DO_NIX=1; shift ;;
+    --tarball) DO_TARBALL=1; shift ;;
+    --deb) DO_DEB=1; shift ;;
+    --rpm) DO_RPM=1; shift ;;
+    --all) DO_NIX=1; DO_TARBALL=1; DO_DEB=1; DO_RPM=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -z "$VERSION" ]]; then
+  echo "ERROR: resolved package version is empty" >&2
+  exit 2
+fi
+
+if [[ "$DO_NIX" == "0" && "$DO_TARBALL" == "0" && "$DO_DEB" == "0" && "$DO_RPM" == "0" ]]; then
+  usage >&2
+  exit 2
+fi
 
 BINS_READY=0
 ensure_release_bins() {
@@ -224,6 +249,9 @@ run_rpm() {
   rm -rf "$rpm_top"
   mkdir -p "${rpm_top}"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
   cat > "${rpm_top}/SPECS/hortus-linux.spec" <<EOF
+%global debug_package %{nil}
+%define _build_id_links none
+
 Name:           hortus-linux
 Version:        ${VERSION}
 Release:        1

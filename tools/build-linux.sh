@@ -92,7 +92,7 @@ sanitize_rpath() {
   fi
 }
 
-cargo build --release -p hortus-cli
+cargo build --release --locked -p hortus-cli
 sanitize_rpath "${ROOT}/target/release/hortus"
 cp -f "${ROOT}/target/release/hortus" "${OUT_DIR}/bin/hortus"
 sanitize_rpath "${OUT_DIR}/bin/hortus"
