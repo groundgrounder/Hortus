@@ -83,7 +83,9 @@ Most note apps are built around typing. As agents draft, organize, and update mo
 
 ## Performance
 
-Measured on an Apple M3 MacBook Air (macOS 27.2.1) using the original [CC0 demo vault](fixtures/demo-vault/README.md); each figure is the median of five runs. See `tools/compare-obsidian.py` for the measurement setup.
+Measured on the original [CC0 demo vault](fixtures/demo-vault/README.md); each figure is the median of five runs.
+
+**macOS 1.0.0** — Apple M3 MacBook Air (macOS 27.2.1); see `tools/compare-obsidian.py`:
 
 | Metric | Hortus 1.0.0 (macOS) |
 |---|---|
@@ -91,6 +93,16 @@ Measured on an Apple M3 MacBook Air (macOS 27.2.1) using the original [CC0 demo 
 | Warm launch to note title | ~0.9 s (888 ms) |
 | Memory with 81-node demo diagram open | ~137 MiB |
 | Processes | 1 native process |
+
+**Linux 1.0.0** — `x86_64` Linux (NixOS) production binaries; see `tools/check-linux-release.py`:
+
+| Metric | Hortus 1.0.0 (Linux `x86_64`) |
+|---|---|
+| Binary footprint (ELF) | 20.0 MiB (`hortus-gtk` 15.4 MiB + `hortus` CLI 4.5 MiB) |
+| Cold launch (5-run median) | 223.7 ms |
+| Memory RSS with demo vault open | 278.5 MiB |
+| 15 s idle CPU delta | 0.0% |
+| Processes / network sockets | 1 native process / 0 sockets |
 
 ## Install
 
@@ -114,10 +126,14 @@ open /Applications/Hortus.app
 
 ### Linux (x86_64)
 
-Native GTK4 + libadwaita + VTE4 desktop app and `hortus` CLI:
+Native GTK4 + libadwaita + VTE4 desktop app (`hortus-gtk`) and `hortus` CLI. Requires **GTK4 ≥ 4.16**, **libadwaita ≥ 1.6**, and **VTE4 ≥ 0.76** (for example Debian 13+, Ubuntu 25.04+, Fedora 42+, or NixOS):
 
 - **Nix flake:** `nix run github:groundgrounder/Hortus` (or `nix profile install github:groundgrounder/Hortus`)
-- **Packages:** Download the `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL), or `.tar.gz` bundle from [Releases](https://github.com/groundgrounder/Hortus/releases).
+- **Packages from [Releases](https://github.com/groundgrounder/Hortus/releases):**
+  - Debian / Ubuntu: `hortus-linux_1.0.0_amd64.deb`
+  - Fedora / RHEL: `hortus-linux-1.0.0-1.x86_64.rpm`
+  - Portable desktop tarball: `hortus-linux-1.0.0-x86_64-linux.tar.gz`
+  - Standalone CLI tarball: `hortus-cli-1.0.0-x86_64-linux.tar.gz`
 
 ### Android (arm64-v8a)
 
@@ -194,7 +210,9 @@ flowchart TD
 
 CI runs on pull requests, pushes to `main`, and manual dispatches. Ubuntu checks Rust formatting, Clippy, workspace tests, and math-check tests. macOS CI builds the macOS app with warnings treated as errors, runs the Swift tests, and checks the public tree and app bundle.
 
-CI does not create release packages, notarize, publish, or replace local release, real-window, TCC, or performance validation. Job logs remain available in each Actions run.
+A dedicated Linux packaging workflow (`.github/workflows/linux-packages.yml`) also builds `.deb`, `.rpm`, and `.tar.gz` archives inside `debian:trixie` (Debian 13) and `fedora:43` containers, runs real package installation and smoke checks, and uploads the results as Actions Artifacts for manual review.
+
+CI does not publish releases, notarize, or replace local release, real-window, TCC, or performance validation. Job logs remain available in each Actions run.
 
 </details>
 

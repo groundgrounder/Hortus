@@ -83,7 +83,9 @@ Hortus 是一款面向阅读与 AI Agent 协作的跨平台原生 Markdown 知�
 
 ## 实测数据
 
-在 Apple M3 MacBook Air（macOS 27.2.1）上使用原创 [CC0 演示库](fixtures/demo-vault/README.md) 测量，每项取五次测量的中位数，测法见 `tools/compare-obsidian.py`。
+均使用原创 [CC0 演示库](fixtures/demo-vault/README.md) 测量，每项取五次测量的中位数。
+
+**macOS 1.0.0** — Apple M3 MacBook Air（macOS 27.2.1），测法见 `tools/compare-obsidian.py`：
 
 | 指标 | Hortus 1.0.0（macOS） |
 |---|---|
@@ -91,6 +93,16 @@ Hortus 是一款面向阅读与 AI Agent 协作的跨平台原生 Markdown 知�
 | 热启动到显示笔记 | 约 0.9 s（888 ms） |
 | 打开 81 节点演示大图内存 | 约 137 MiB |
 | 进程数 | 1 个原生进程 |
+
+**Linux 1.0.0** — `x86_64` Linux（NixOS）生产二进制，测法见 `tools/check-linux-release.py`：
+
+| 指标 | Hortus 1.0.0（Linux `x86_64`） |
+|---|---|
+| 二进制体积（ELF） | 20.0 MiB（`hortus-gtk` 15.4 MiB + `hortus` CLI 4.5 MiB） |
+| 冷启动（五次中位数） | 223.7 ms |
+| 打开演示库内存 RSS | 278.5 MiB |
+| 15 s 静息 CPU 增量 | 0.0% |
+| 进程数 / 网络套接字 | 1 个原生进程 / 0 个套接字 |
 
 ## 安装
 
@@ -114,10 +126,14 @@ open /Applications/Hortus.app
 
 ### Linux（x86_64）
 
-原生 GTK4 + libadwaita + VTE4 桌面应用与 `hortus` CLI：
+原生 GTK4 + libadwaita + VTE4 桌面应用（`hortus-gtk`）与 `hortus` CLI。桌面环境需满足 **GTK4 ≥ 4.16**、**libadwaita ≥ 1.6** 与 **VTE4 ≥ 0.76**（如 Debian 13+、Ubuntu 25.04+、Fedora 42+ 或 NixOS）：
 
 - **Nix flake：** `nix run github:groundgrounder/Hortus`（或 `nix profile install github:groundgrounder/Hortus`）
-- **安装包：** 从 [Releases](https://github.com/groundgrounder/Hortus/releases) 下载 `.deb`（Debian/Ubuntu）、`.rpm`（Fedora/RHEL）或 `.tar.gz` 压缩包。
+- **从 [Releases](https://github.com/groundgrounder/Hortus/releases) 下载安装包：**
+  - Debian / Ubuntu：`hortus-linux_1.0.0_amd64.deb`
+  - Fedora / RHEL：`hortus-linux-1.0.0-1.x86_64.rpm`
+  - 桌面端便携压缩包：`hortus-linux-1.0.0-x86_64-linux.tar.gz`
+  - 独立 CLI 压缩包：`hortus-cli-1.0.0-x86_64-linux.tar.gz`
 
 ### Android（arm64-v8a）
 
@@ -194,7 +210,9 @@ flowchart TD
 
 CI 在拉取请求、推送 `main` 和手动触发时运行。Ubuntu 检查 Rust 格式、Clippy、工作区测试和公式检查器测试。macOS CI 以警告即错误构建 macOS 应用、运行 Swift 测试，并检查公开树和应用包。
 
-CI 不生成发布包、不公证或发布，也不替代本机发布、真实窗口、TCC 或性能验收。任务日志保留在每次 Actions 运行中。
+独立的 Linux 打包工作流（`.github/workflows/linux-packages.yml`）会在 `debian:trixie`（Debian 13）与 `fedora:43` 容器中构建 `.deb`、`.rpm` 与 `.tar.gz` 包，执行真实安装包烟测，并将产物作为 Actions Artifacts 上传供人工核验。
+
+CI 不自动发布版本、不公证，也不替代本机发布、真实窗口、TCC 或性能验证。任务日志保留在每次 Actions 运行中。
 
 </details>
 
